@@ -1,0 +1,49 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 27, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "hip-gfx942-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "QUASAR_ENABLE_HIP": "ON",
+        "CMAKE_HIP_ARCHITECTURES": "gfx942",
+        "QUASAR_BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "hip-gfx942-release",
+      "displayName": "HIP gfx942 Release",
+      "inherits": "hip-gfx942-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "hip-gfx942-debug",
+      "displayName": "HIP gfx942 Debug",
+      "inherits": "hip-gfx942-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "hip-gfx942-release", "configurePreset": "hip-gfx942-release" },
+    { "name": "hip-gfx942-debug",   "configurePreset": "hip-gfx942-debug"   }
+  ],
+  "testPresets": [
+    {
+      "name": "hip-gfx942-release",
+      "configurePreset": "hip-gfx942-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "hip-gfx942-debug",
+      "configurePreset": "hip-gfx942-debug",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
