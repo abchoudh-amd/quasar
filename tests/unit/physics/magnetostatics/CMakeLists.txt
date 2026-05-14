@@ -34,6 +34,7 @@ set(_quasar_magnetostatics_hip_tests
   test_helmholtz_pair
   test_solenoid_inside
   test_polyline_convergence
+  test_fp32_vs_fp64
 )
 
 foreach(_test_name IN LISTS _quasar_magnetostatics_hip_tests)

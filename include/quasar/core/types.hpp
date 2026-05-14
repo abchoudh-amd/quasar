@@ -11,72 +11,131 @@
 
 namespace quasar {
 
+// `Real` is the default precision for host-side code that does not need
+// fp32 / fp64 distinction. The Biot-Savart kernels are now templated on a
+// precision parameter T (see Vec3T<T> below); Real is preserved here so the
+// existing test/example code keeps compiling unchanged.
 using Real = double;
 using Size = std::size_t;
 
-inline constexpr Real pi           = static_cast<Real>(3.141592653589793238462643383279502884L);
-inline constexpr Real mu0          = static_cast<Real>(4) * pi * static_cast<Real>(1e-7);
-inline constexpr Real mu0_over_4pi = static_cast<Real>(1e-7);
-inline constexpr Real kEps         = static_cast<Real>(1e-30);
+// -- Variable-template constants ------------------------------------------
+//
+// All physical constants are available both as a precision-specific
+// variable template (e.g. `mu0_v<float>`) and as a plain `double` alias
+// (e.g. `mu0`). The aliases preserve every call site that existed before
+// Phase 5 verbatim.
 
-struct Vec3 {
-  Real x{};
-  Real y{};
-  Real z{};
+template <class T>
+inline constexpr T pi_v = static_cast<T>(3.141592653589793238462643383279502884L);
 
-  QUASAR_HOST_DEVICE constexpr Vec3() = default;
-  QUASAR_HOST_DEVICE constexpr Vec3(Real X, Real Y, Real Z) : x{X}, y{Y}, z{Z} {}
+template <class T>
+inline constexpr T mu0_v = static_cast<T>(4) * pi_v<T> * static_cast<T>(1e-7);
+
+template <class T>
+inline constexpr T mu0_over_4pi_v = static_cast<T>(1e-7);
+
+template <class T>
+inline constexpr T kEps_v = static_cast<T>(1e-30);
+
+inline constexpr Real pi           = pi_v<Real>;
+inline constexpr Real mu0          = mu0_v<Real>;
+inline constexpr Real mu0_over_4pi = mu0_over_4pi_v<Real>;
+inline constexpr Real kEps         = kEps_v<Real>;
+
+// -- Vec3T -----------------------------------------------------------------
+
+template <class T>
+struct Vec3T {
+  T x{};
+  T y{};
+  T z{};
+
+  QUASAR_HOST_DEVICE constexpr Vec3T() = default;
+  QUASAR_HOST_DEVICE constexpr Vec3T(T X, T Y, T Z) : x{X}, y{Y}, z{Z} {}
 };
 
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator+(Vec3 a, Vec3 b) noexcept {
-  return Vec3{a.x + b.x, a.y + b.y, a.z + b.z};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+operator+(Vec3T<T> a, Vec3T<T> b) noexcept {
+  return Vec3T<T>{a.x + b.x, a.y + b.y, a.z + b.z};
 }
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator-(Vec3 a, Vec3 b) noexcept {
-  return Vec3{a.x - b.x, a.y - b.y, a.z - b.z};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+operator-(Vec3T<T> a, Vec3T<T> b) noexcept {
+  return Vec3T<T>{a.x - b.x, a.y - b.y, a.z - b.z};
 }
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator-(Vec3 a) noexcept {
-  return Vec3{-a.x, -a.y, -a.z};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T> operator-(Vec3T<T> a) noexcept {
+  return Vec3T<T>{-a.x, -a.y, -a.z};
 }
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator*(Real s, Vec3 a) noexcept {
-  return Vec3{s * a.x, s * a.y, s * a.z};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+operator*(T s, Vec3T<T> a) noexcept {
+  return Vec3T<T>{s * a.x, s * a.y, s * a.z};
 }
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator*(Vec3 a, Real s) noexcept {
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+operator*(Vec3T<T> a, T s) noexcept {
   return s * a;
 }
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator/(Vec3 a, Real s) noexcept {
-  return Vec3{a.x / s, a.y / s, a.z / s};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+operator/(Vec3T<T> a, T s) noexcept {
+  return Vec3T<T>{a.x / s, a.y / s, a.z / s};
 }
 
-QUASAR_HOST_DEVICE constexpr inline Real dot(Vec3 a, Vec3 b) noexcept {
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline T dot(Vec3T<T> a, Vec3T<T> b) noexcept {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
-QUASAR_HOST_DEVICE constexpr inline Vec3 cross(Vec3 a, Vec3 b) noexcept {
-  return Vec3{a.y * b.z - a.z * b.y,
-              a.z * b.x - a.x * b.z,
-              a.x * b.y - a.y * b.x};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+cross(Vec3T<T> a, Vec3T<T> b) noexcept {
+  return Vec3T<T>{a.y * b.z - a.z * b.y,
+                  a.z * b.x - a.x * b.z,
+                  a.x * b.y - a.y * b.x};
 }
-QUASAR_HOST_DEVICE constexpr inline Real length_squared(Vec3 a) noexcept {
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline T length_squared(Vec3T<T> a) noexcept {
   return dot(a, a);
 }
-QUASAR_HOST_DEVICE inline Real length(Vec3 a) noexcept {
+template <class T>
+QUASAR_HOST_DEVICE inline T length(Vec3T<T> a) noexcept {
   return std::sqrt(length_squared(a));
 }
-QUASAR_HOST_DEVICE inline Vec3 normalized(Vec3 a) noexcept {
+template <class T>
+QUASAR_HOST_DEVICE inline Vec3T<T> normalized(Vec3T<T> a) noexcept {
   return a / length(a);
 }
 
-struct Mat3x3 {
-  Vec3 r0{};
-  Vec3 r1{};
-  Vec3 r2{};
+// -- Mat3x3T ---------------------------------------------------------------
 
-  QUASAR_HOST_DEVICE constexpr Mat3x3() = default;
-  QUASAR_HOST_DEVICE constexpr Mat3x3(Vec3 row0, Vec3 row1, Vec3 row2)
+template <class T>
+struct Mat3x3T {
+  Vec3T<T> r0{};
+  Vec3T<T> r1{};
+  Vec3T<T> r2{};
+
+  QUASAR_HOST_DEVICE constexpr Mat3x3T() = default;
+  QUASAR_HOST_DEVICE constexpr Mat3x3T(Vec3T<T> row0, Vec3T<T> row1, Vec3T<T> row2)
     : r0{row0}, r1{row1}, r2{row2} {}
 };
 
-QUASAR_HOST_DEVICE constexpr inline Vec3 operator*(const Mat3x3& m, Vec3 v) noexcept {
-  return Vec3{dot(m.r0, v), dot(m.r1, v), dot(m.r2, v)};
+template <class T>
+QUASAR_HOST_DEVICE constexpr inline Vec3T<T>
+operator*(const Mat3x3T<T>& m, Vec3T<T> v) noexcept {
+  return Vec3T<T>{dot(m.r0, v), dot(m.r1, v), dot(m.r2, v)};
 }
+
+// -- Backward-compat aliases -----------------------------------------------
+//
+// Existing call sites use `Vec3` and `Mat3x3` and expect them to be the
+// double-precision instantiation. `Vec3f` / `Mat3x3f` are the fp32 siblings
+// introduced in Phase 5.
+
+using Vec3    = Vec3T<Real>;
+using Vec3f   = Vec3T<float>;
+using Mat3x3  = Mat3x3T<Real>;
+using Mat3x3f = Mat3x3T<float>;
 
 }  // namespace quasar

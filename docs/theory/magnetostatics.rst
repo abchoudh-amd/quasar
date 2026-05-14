@@ -170,13 +170,34 @@ complete elliptic integrals.
 Floating-point precision
 ------------------------
 
-All Phase 1 - 4 kernels use ``double`` for both segments-of-arrays and
-accumulators. The analytical-reference test tolerances are accordingly
-:math:`10^{-10}` relative for the finite-segment closed form and
-:math:`10^{-4}` for the :math:`N = 256` circular-loop polygon-vs-exact
-comparison. A single-precision instantiation - mirroring the existing
-``Real`` typedef in ``include/quasar/core/types.hpp`` - is tracked as
-Phase 3.G in the implementation plan and not yet built.
+The kernels are templated on a precision parameter ``T`` (Phase 5) and
+instantiated for both ``float`` and ``double``. ``Vec3T<T>``,
+``Mat3x3T<T>`` and the variable-template constants ``pi_v<T>``,
+``mu0_v<T>``, ``mu0_over_4pi_v<T>``, ``kEps_v<T>`` live in
+``include/quasar/core/types.hpp``; ``Vec3``, ``Mat3x3``, ``pi`` etc. are
+aliases for the ``<double>`` instantiation so the rest of the codebase
+compiles unchanged.
+
+Two sibling host classes expose the two precisions:
+
+* :class:`BiotSavartEvaluator` uses ``double`` throughout and returns
+  :class:`Field<Vec3>` / :class:`Field<Mat3x3>`. It implements
+  :class:`IFieldEvaluator` and is what the registry serves.
+* :class:`BiotSavartEvaluatorF` uses ``float`` throughout and returns
+  :class:`Field<Vec3f>` / :class:`Field<Mat3x3f>`. Host-side
+  conductors / observations stay in ``double``; the evaluator casts to
+  ``float`` on upload and the result type makes the precision difference
+  visible to callers.
+
+The analytical-reference tolerances are accordingly:
+
+* :math:`10^{-10}` relative for the finite-segment closed form (fp64).
+* :math:`10^{-4}` for the :math:`N = 256` circular-loop polygon-vs-exact
+  comparison (fp64).
+* :math:`5 \times 10^{-6}` relative for fp32-vs-fp64 agreement of
+  :math:`\mathbf{B}` on a mixed-system stress test.
+* :math:`5 \times 10^{-5}` relative for fp32-vs-fp64 agreement of
+  :math:`\nabla\mathbf{B}` on the same test.
 
 References
 ----------

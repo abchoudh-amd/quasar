@@ -11,7 +11,8 @@
 namespace quasar::magnetostatics::detail {
 
 // Closed-form B-field contribution from one straight filamentary segment a->b
-// carrying current I, evaluated at observation point p.
+// carrying current I, evaluated at observation point p, templated on the
+// precision T (`float` or `double`).
 //
 // Derivation (Biot-Savart along a straight segment, then in closed form):
 //   B(p) = (mu0 I / 4 pi) * (L x ra) * integral_0^1 dt / |ra - t L|^3
@@ -20,24 +21,27 @@ namespace quasar::magnetostatics::detail {
 // with ra = p - a, rb = p - b, L = b - a, Ra = |ra|, Rb = |rb|.
 //
 // The (Ra*Rb + ra.rb) denominator vanishes only when p lies on the segment
-// itself (singular); we guard with kEps and return zero in that case.
-__device__ __forceinline__ Vec3 segment_B(Vec3 a, Vec3 b, Vec3 p, Real I) {
-  const Vec3 ra   = p - a;
-  const Vec3 rb   = p - b;
-  const Real Ra   = length(ra);
-  const Real Rb   = length(rb);
-  const Vec3 L    = b - a;
-  const Real RaRb = Ra * Rb;
-  const Real denom = RaRb * (RaRb + dot(ra, rb));
-  if (denom < kEps) {
-    return Vec3{Real{0}, Real{0}, Real{0}};
+// itself (singular); we guard with kEps_v<T> and return zero in that case.
+template <class T>
+__device__ __forceinline__
+Vec3T<T> segment_B(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
+  const Vec3T<T> ra   = p - a;
+  const Vec3T<T> rb   = p - b;
+  const T        Ra   = length(ra);
+  const T        Rb   = length(rb);
+  const Vec3T<T> L    = b - a;
+  const T        RaRb = Ra * Rb;
+  const T denom = RaRb * (RaRb + dot(ra, rb));
+  if (denom < kEps_v<T>) {
+    return Vec3T<T>{T{0}, T{0}, T{0}};
   }
-  const Real coeff = mu0_over_4pi * I * (Ra + Rb) / denom;
+  const T coeff = mu0_over_4pi_v<T> * I * (Ra + Rb) / denom;
   return coeff * cross(L, ra);
 }
 
-// Closed-form Jacobian of segment_B with respect to the observation point p.
-// Returns the 3x3 matrix grad B with (grad B)_{ij} = d B_i / d p_j.
+// Closed-form Jacobian of segment_B with respect to the observation point p,
+// templated on precision T. Returns the 3x3 matrix grad B with
+// (grad B)_{ij} = d B_i / d p_j.
 //
 // Let u(p) = L x ra and  f(p) = (Ra + Rb) / ( Ra * Rb * (Ra*Rb + ra.rb) ).
 // Then  B = (mu0 I / 4 pi) * u * f  and
@@ -53,43 +57,44 @@ __device__ __forceinline__ Vec3 segment_B(Vec3 a, Vec3 b, Vec3 p, Real I) {
 //   grad beta  = ra + rb
 //   grad D     = (2 alpha + beta) * grad alpha + alpha * grad beta
 //   grad f     = ( grad s * D - s * grad D ) / D^2.
-__device__ __forceinline__ Mat3x3 segment_gradB(Vec3 a, Vec3 b, Vec3 p, Real I) {
-  const Vec3 ra    = p - a;
-  const Vec3 rb    = p - b;
-  const Real Ra    = length(ra);
-  const Real Rb    = length(rb);
-  const Vec3 L     = b - a;
-  const Real RaRb  = Ra * Rb;
-  const Real rarb  = dot(ra, rb);
-  const Real D     = RaRb * (RaRb + rarb);
-  if (D < kEps) {
-    return Mat3x3{};
+template <class T>
+__device__ __forceinline__
+Mat3x3T<T> segment_gradB(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
+  const Vec3T<T> ra    = p - a;
+  const Vec3T<T> rb    = p - b;
+  const T        Ra    = length(ra);
+  const T        Rb    = length(rb);
+  const Vec3T<T> L     = b - a;
+  const T        RaRb  = Ra * Rb;
+  const T        rarb  = dot(ra, rb);
+  const T        D     = RaRb * (RaRb + rarb);
+  if (D < kEps_v<T>) {
+    return Mat3x3T<T>{};
   }
 
-  const Real s    = Ra + Rb;
-  const Real f    = s / D;
-  const Vec3 u    = cross(L, ra);
+  const T        s      = Ra + Rb;
+  const T        f      = s / D;
+  const Vec3T<T> u      = cross(L, ra);
 
-  const Real inv_Ra = Real{1} / Ra;
-  const Real inv_Rb = Real{1} / Rb;
+  const T inv_Ra = T{1} / Ra;
+  const T inv_Rb = T{1} / Rb;
 
-  const Vec3 grad_s     = ra * inv_Ra + rb * inv_Rb;
-  const Vec3 grad_alpha = (Rb * inv_Ra) * ra + (Ra * inv_Rb) * rb;
-  const Vec3 grad_beta  = ra + rb;
-  const Real two_alpha_plus_beta = Real{2} * RaRb + rarb;
-  const Vec3 grad_D     = grad_alpha * two_alpha_plus_beta + grad_beta * RaRb;
+  const Vec3T<T> grad_s     = ra * inv_Ra + rb * inv_Rb;
+  const Vec3T<T> grad_alpha = (Rb * inv_Ra) * ra + (Ra * inv_Rb) * rb;
+  const Vec3T<T> grad_beta  = ra + rb;
+  const T        two_alpha_plus_beta = T{2} * RaRb + rarb;
+  const Vec3T<T> grad_D     = grad_alpha * two_alpha_plus_beta + grad_beta * RaRb;
 
-  const Real D2     = D * D;
-  const Vec3 grad_f = (grad_s * D - grad_D * s) / D2;
+  const T        D2     = D * D;
+  const Vec3T<T> grad_f = (grad_s * D - grad_D * s) / D2;
 
-  // Rows of [L]_x: ( L x e_x ) gives column 0; the matrix is antisymmetric.
-  const Vec3 Lx_row0{Real{0}, -L.z,    L.y};
-  const Vec3 Lx_row1{L.z,    Real{0}, -L.x};
-  const Vec3 Lx_row2{-L.y,   L.x,    Real{0}};
+  const Vec3T<T> Lx_row0{T{0}, -L.z,  L.y};
+  const Vec3T<T> Lx_row1{L.z,   T{0}, -L.x};
+  const Vec3T<T> Lx_row2{-L.y,  L.x,  T{0}};
 
-  const Real coeff = mu0_over_4pi * I;
+  const T coeff = mu0_over_4pi_v<T> * I;
 
-  return Mat3x3{
+  return Mat3x3T<T>{
       coeff * (Lx_row0 * f + grad_f * u.x),
       coeff * (Lx_row1 * f + grad_f * u.y),
       coeff * (Lx_row2 * f + grad_f * u.z),

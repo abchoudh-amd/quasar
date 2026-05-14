@@ -7,9 +7,6 @@
 
 namespace {
 
-using ::quasar::Mat3x3;
-using ::quasar::Real;
-using ::quasar::Vec3;
 using ::quasar::magnetostatics::detail::kBlockSize;
 using ::quasar::magnetostatics::detail::kTileSegments;
 using ::quasar::magnetostatics::detail::segment_gradB;
@@ -17,32 +14,32 @@ using ::quasar::magnetostatics::detail::segment_gradB;
 // Output layout: G is (9, M) row-major. Component index c = 3*i + j encodes
 // (grad B)_{ij} = dB_i / dp_j, and within each row threads write coalesced
 // G[c * M + m].
+template <class T>
 __global__ void biot_savart_gradB_kernel(
-    const Real* __restrict__ ax,   const Real* __restrict__ ay,   const Real* __restrict__ az,
-    const Real* __restrict__ bx,   const Real* __restrict__ by,   const Real* __restrict__ bz,
-    const Real* __restrict__ I_,   int N,
-    const Real* __restrict__ px,   const Real* __restrict__ py,   const Real* __restrict__ pz,
+    const T* __restrict__ ax,   const T* __restrict__ ay,   const T* __restrict__ az,
+    const T* __restrict__ bx,   const T* __restrict__ by,   const T* __restrict__ bz,
+    const T* __restrict__ I_,   int N,
+    const T* __restrict__ px,   const T* __restrict__ py,   const T* __restrict__ pz,
     int M,
-    Real* __restrict__ G) {
-  __shared__ Real s_ax[kTileSegments];
-  __shared__ Real s_ay[kTileSegments];
-  __shared__ Real s_az[kTileSegments];
-  __shared__ Real s_bx[kTileSegments];
-  __shared__ Real s_by[kTileSegments];
-  __shared__ Real s_bz[kTileSegments];
-  __shared__ Real s_I [kTileSegments];
+    T* __restrict__ G) {
+  __shared__ T s_ax[kTileSegments];
+  __shared__ T s_ay[kTileSegments];
+  __shared__ T s_az[kTileSegments];
+  __shared__ T s_bx[kTileSegments];
+  __shared__ T s_by[kTileSegments];
+  __shared__ T s_bz[kTileSegments];
+  __shared__ T s_I [kTileSegments];
 
   const int m      = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x)
                      + static_cast<int>(threadIdx.x);
   const bool active = (m < M);
 
-  Vec3 p{Real{0}, Real{0}, Real{0}};
+  ::quasar::Vec3T<T> p{T{0}, T{0}, T{0}};
   if (active) {
-    p = Vec3{px[m], py[m], pz[m]};
+    p = ::quasar::Vec3T<T>{px[m], py[m], pz[m]};
   }
 
-  Real g[9] = {Real{0}, Real{0}, Real{0}, Real{0}, Real{0},
-               Real{0}, Real{0}, Real{0}, Real{0}};
+  T g[9] = {T{0}, T{0}, T{0}, T{0}, T{0}, T{0}, T{0}, T{0}, T{0}};
 
   for (int base = 0; base < N; base += kTileSegments) {
     const int lim = (N - base < kTileSegments) ? (N - base) : kTileSegments;
@@ -62,9 +59,9 @@ __global__ void biot_savart_gradB_kernel(
 
     if (active) {
       for (int s = 0; s < lim; ++s) {
-        const Vec3 a_seg{s_ax[s], s_ay[s], s_az[s]};
-        const Vec3 b_seg{s_bx[s], s_by[s], s_bz[s]};
-        const Mat3x3 dG = segment_gradB(a_seg, b_seg, p, s_I[s]);
+        const ::quasar::Vec3T<T> a_seg{s_ax[s], s_ay[s], s_az[s]};
+        const ::quasar::Vec3T<T> b_seg{s_bx[s], s_by[s], s_bz[s]};
+        const ::quasar::Mat3x3T<T> dG = segment_gradB<T>(a_seg, b_seg, p, s_I[s]);
         g[0] += dG.r0.x;  g[1] += dG.r0.y;  g[2] += dG.r0.z;
         g[3] += dG.r1.x;  g[4] += dG.r1.y;  g[5] += dG.r1.z;
         g[6] += dG.r2.x;  g[7] += dG.r2.y;  g[8] += dG.r2.z;
@@ -82,20 +79,39 @@ __global__ void biot_savart_gradB_kernel(
   }
 }
 
-}  // namespace
-
-extern "C" void launch_biot_savart_gradB(
-    const Real* ax, const Real* ay, const Real* az,
-    const Real* bx, const Real* by, const Real* bz,
-    const Real* I_, int N,
-    const Real* px, const Real* py, const Real* pz, int M,
-    Real* G,
+template <class T>
+void launch_impl(
+    const T* ax, const T* ay, const T* az,
+    const T* bx, const T* by, const T* bz,
+    const T* I_, int N,
+    const T* px, const T* py, const T* pz, int M,
+    T* G,
     hipStream_t stream) {
-  if (N <= 0 || M <= 0) {
-    return;
-  }
+  if (N <= 0 || M <= 0) return;
   const int block = kBlockSize;
   const int grid  = (M + block - 1) / block;
-  biot_savart_gradB_kernel<<<dim3(grid), dim3(block), 0, stream>>>(
+  biot_savart_gradB_kernel<T><<<dim3(grid), dim3(block), 0, stream>>>(
       ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G);
+}
+
+}  // namespace
+
+extern "C" void launch_biot_savart_gradB_f64(
+    const double* ax, const double* ay, const double* az,
+    const double* bx, const double* by, const double* bz,
+    const double* I_, int N,
+    const double* px, const double* py, const double* pz, int M,
+    double* G,
+    hipStream_t stream) {
+  launch_impl<double>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G, stream);
+}
+
+extern "C" void launch_biot_savart_gradB_f32(
+    const float* ax, const float* ay, const float* az,
+    const float* bx, const float* by, const float* bz,
+    const float* I_, int N,
+    const float* px, const float* py, const float* pz, int M,
+    float* G,
+    hipStream_t stream) {
+  launch_impl<float>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G, stream);
 }
