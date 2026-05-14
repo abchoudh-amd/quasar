@@ -1,0 +1,33 @@
+# Single circular loop in the xy-plane, observed along its axis.
+#
+# Analytical reference for a circular current loop of radius R, current I,
+# in the z = 0 plane: along the axis at height z,
+#
+#   B_z(z) = mu0 * I * R^2 / (2 * (R^2 + z^2)^(3/2))
+#
+# At z = 0 (loop center): B_z = mu0 * I / (2 R).
+
+units: SI
+
+conductors:
+  - name: single_loop
+    current_A: 1.0
+    geometry:
+      type: circular_loop
+      center_xyz: [0.0, 0.0, 0.0]
+      axis_xyz:   [0.0, 0.0, 1.0]
+      radius_m: 0.1
+      n_segments: 256
+
+observation:
+  type: line
+  start_xyz: [0.0, 0.0, 0.00]
+  end_xyz:   [0.0, 0.0, 0.20]
+  n_points: 5
+
+output:
+  format: npz
+  path: out.npz
+  fields:
+    - B_xyz
+    - B_magnitude

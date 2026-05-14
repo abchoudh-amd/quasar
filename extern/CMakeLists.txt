@@ -18,3 +18,16 @@ if(QUASAR_BUILD_TESTING)
   )
   FetchContent_MakeAvailable(googletest)
 endif()
+
+if(QUASAR_BUILD_PYTHON)
+  set(_pybind11_tag "v2.13.6")
+  message(STATUS "extern: fetching pybind11 ${_pybind11_tag}")
+
+  FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG        ${_pybind11_tag}
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(pybind11)
+endif()

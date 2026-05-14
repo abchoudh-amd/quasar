@@ -14,8 +14,7 @@ target_include_directories(quasar_core
 target_compile_features(quasar_core INTERFACE cxx_std_20)
 
 add_subdirectory(backend)
+add_subdirectory(physics)
 
-# Notes:
-#  - `core/` has no .cpp files in Phase 1.B (header-only types/Field/Registry),
-#    so it does not need its own subdirectory yet.
-#  - `physics/magnetostatics/` is added by sub-phases 1.C and 1.E.
+# Note: `core/` has no .cpp files (header-only types/Field/Registry), so it
+# does not need its own subdirectory.

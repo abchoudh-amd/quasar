@@ -1,0 +1,157 @@
+"""Smoke test for the ``quasar coil`` YAML-driven CLI.
+
+The test materializes a one-loop YAML deck in a temporary directory,
+invokes ``python -m quasar.coil.cli run <input>`` as a subprocess, and
+verifies the produced ``.npz`` archive contains the expected fields with
+the right shape. The CLI test is skipped when no HIP runtime is visible
+since the evaluation step launches a HIP kernel.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+from quasar.coil import io as coil_io
+
+
+def has_hip_runtime() -> bool:
+    return os.environ.get("QUASAR_HAS_HIP_RUNTIME", "0") == "1"
+
+
+class CoilIoDeckParseTest(unittest.TestCase):
+
+    def _write(self, body: str) -> Path:
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False)
+        tmp.write(textwrap.dedent(body))
+        tmp.flush()
+        tmp.close()
+        return Path(tmp.name)
+
+    def test_parses_grid_observation_and_circular_loop(self):
+        path = self._write("""
+            units: SI
+            conductors:
+              - name: loop_A
+                current_A: 1.0
+                geometry:
+                  type: circular_loop
+                  radius_m: 0.05
+                  center_xyz: [0, 0, 0]
+                  axis_xyz:   [0, 0, 1]
+                  n_segments: 64
+            observation:
+              type: grid
+              bounds_m: [[-0.1, 0.1], [-0.1, 0.1], [-0.05, 0.05]]
+              resolution: [4, 4, 2]
+            output:
+              format: npz
+              path: out.npz
+              fields: [B_xyz, B_magnitude]
+            """)
+        try:
+            deck = coil_io.load(path)
+        finally:
+            path.unlink()
+
+        self.assertEqual(deck.units, "SI")
+        self.assertEqual(len(deck.conductors), 1)
+        self.assertEqual(deck.observation.kind, "grid")
+        self.assertEqual(deck.observation.dims, [4, 4, 2])
+        self.assertEqual(len(deck.observation.points), 32)
+        self.assertEqual(deck.output.format, "npz")
+        self.assertEqual(set(deck.output.fields), {"B_xyz", "B_magnitude"})
+
+    def test_rejects_unknown_units(self):
+        path = self._write("""
+            units: CGS
+            conductors: []
+            observation: {type: points, points_xyz_m: [[0,0,0]]}
+            output: {format: npz, path: x.npz}
+            """)
+        try:
+            with self.assertRaises(ValueError):
+                coil_io.load(path)
+        finally:
+            path.unlink()
+
+    def test_rejects_unknown_geometry_type(self):
+        path = self._write("""
+            units: SI
+            conductors:
+              - name: bad
+                current_A: 1.0
+                geometry: {type: triangle_loop, radius_m: 1.0}
+            observation: {type: points, points_xyz_m: [[0,0,0]]}
+            output: {format: npz, path: x.npz}
+            """)
+        try:
+            with self.assertRaises(ValueError):
+                coil_io.load(path)
+        finally:
+            path.unlink()
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class CoilCliEndToEndTest(unittest.TestCase):
+
+    def test_cli_run_writes_npz_with_expected_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            yaml_path = tmp / "deck.yaml"
+            yaml_path.write_text(textwrap.dedent("""
+                units: SI
+                conductors:
+                  - name: loop
+                    current_A: 1.0
+                    geometry:
+                      type: circular_loop
+                      radius_m: 0.1
+                      center_xyz: [0, 0, 0]
+                      axis_xyz:   [0, 0, 1]
+                      n_segments: 256
+                observation:
+                  type: line
+                  start_xyz: [0, 0, 0]
+                  end_xyz:   [0, 0, 0.2]
+                  n_points: 5
+                output:
+                  format: npz
+                  path: out.npz
+                  fields: [B_xyz, B_magnitude]
+                """).strip())
+
+            # Run as a subprocess to validate the CLI surface end-to-end.
+            res = subprocess.run(
+                [sys.executable, "-m", "quasar.coil.cli", "run",
+                 str(yaml_path), "--quiet"],
+                capture_output=True, text=True,
+                env={**os.environ},
+            )
+            self.assertEqual(res.returncode, 0,
+                             msg=f"stdout={res.stdout!r} stderr={res.stderr!r}")
+
+            archive = np.load(tmp / "out.npz", allow_pickle=False)
+            self.assertIn("B_xyz", archive.files)
+            self.assertIn("B_magnitude", archive.files)
+            self.assertEqual(archive["B_xyz"].shape, (5, 3))
+            self.assertEqual(archive["B_magnitude"].shape, (5,))
+
+            # At the loop center (z=0), B_z should be mu0*I / (2 R) =
+            # 4pi*1e-7 * 1 / (2 * 0.1) = 2*pi*1e-6 ~ 6.283185e-6 T.
+            ref_center = 4 * math.pi * 1e-7 * 1.0 / (2 * 0.1)
+            self.assertAlmostEqual(archive["B_xyz"][0, 2], ref_center,
+                                   delta=1e-4 * ref_center)
+
+
+if __name__ == "__main__":
+    unittest.main()

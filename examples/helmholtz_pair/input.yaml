@@ -1,0 +1,40 @@
+# Helmholtz pair: two coaxial circular loops separated by exactly one radius.
+# The B-field at the midpoint (z = 0) is famously uniform - both the first
+# and second axial derivatives of B_z vanish at that point.
+#
+# At the midpoint:
+#   B_z(0) = (4/5)^(3/2) * mu0 * I / R   ~= 8.992e-6 T for R = 0.1 m, I = 1 A.
+
+units: SI
+
+conductors:
+  - name: lower_loop
+    current_A: 1.0
+    geometry:
+      type: circular_loop
+      center_xyz: [0.0, 0.0, -0.05]    # z = -R/2
+      axis_xyz:   [0.0, 0.0, 1.0]
+      radius_m: 0.1
+      n_segments: 256
+
+  - name: upper_loop
+    current_A: 1.0
+    geometry:
+      type: circular_loop
+      center_xyz: [0.0, 0.0, +0.05]    # z = +R/2
+      axis_xyz:   [0.0, 0.0, 1.0]
+      radius_m: 0.1
+      n_segments: 256
+
+observation:
+  type: line
+  start_xyz: [0.0, 0.0, -0.02]
+  end_xyz:   [0.0, 0.0, +0.02]
+  n_points: 9
+
+output:
+  format: npz
+  path: out.npz
+  fields:
+    - B_xyz
+    - B_magnitude
