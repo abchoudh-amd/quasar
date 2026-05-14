@@ -4,6 +4,7 @@ endif()
 
 set(_quasar_magnetostatics_hip_sources
   biot_savart_hip.hip
+  biot_savart_grad_hip.hip
 )
 
 quasar_add_hip_module(magnetostatics_hip

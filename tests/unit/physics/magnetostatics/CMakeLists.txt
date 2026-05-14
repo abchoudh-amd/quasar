@@ -29,6 +29,11 @@ endforeach()
 set(_quasar_magnetostatics_hip_tests
   test_finite_segment
   test_circular_loop_on_axis
+  test_segment_gradient
+  test_infinite_wire_limit
+  test_helmholtz_pair
+  test_solenoid_inside
+  test_polyline_convergence
 )
 
 foreach(_test_name IN LISTS _quasar_magnetostatics_hip_tests)

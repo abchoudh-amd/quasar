@@ -55,6 +55,22 @@ py::array_t<Real> field_to_numpy(const ::quasar::Field<Vec3>& field) {
   return arr;
 }
 
+// Pack a Field<Mat3x3> Jacobian into a NumPy (N, 3, 3) array. The (i, j)
+// entry is dB_i/dp_j at observation point i.
+py::array_t<Real> grad_field_to_numpy(
+    const ::quasar::Field<::quasar::Mat3x3>& field) {
+  const py::ssize_t n = static_cast<py::ssize_t>(field.size());
+  py::array_t<Real> arr({n, py::ssize_t{3}, py::ssize_t{3}});
+  auto view = arr.mutable_unchecked<3>();
+  for (py::ssize_t i = 0; i < n; ++i) {
+    const auto& g = field[static_cast<std::size_t>(i)];
+    view(i, 0, 0) = g.r0.x;  view(i, 0, 1) = g.r0.y;  view(i, 0, 2) = g.r0.z;
+    view(i, 1, 0) = g.r1.x;  view(i, 1, 1) = g.r1.y;  view(i, 1, 2) = g.r1.z;
+    view(i, 2, 0) = g.r2.x;  view(i, 2, 1) = g.r2.y;  view(i, 2, 2) = g.r2.z;
+  }
+  return arr;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_core, m) {
@@ -173,6 +189,12 @@ PYBIND11_MODULE(_core, m) {
            [](const BiotSavartEvaluator& self,
               const ConductorSystem& cs, const PointCloud& obs) {
              return field_to_numpy(self.evaluate_B(cs, obs));
+           },
+           py::arg("conductors"), py::arg("observations"))
+      .def("evaluate_grad_B",
+           [](const BiotSavartEvaluator& self,
+              const ConductorSystem& cs, const PointCloud& obs) {
+             return grad_field_to_numpy(self.evaluate_grad_B(cs, obs));
            },
            py::arg("conductors"), py::arg("observations"));
 

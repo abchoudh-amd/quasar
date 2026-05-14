@@ -119,6 +119,29 @@ class BiotSavartBindingsTest(unittest.TestCase):
                 self.assertAlmostEqual(B[0, 1], ref_By,
                                        delta=1e-10 * abs(ref_By))
 
+    def test_evaluate_grad_B_returns_n_3_3_array_satisfying_div_b_zero(self):
+        """grad_B[i, :, :] should be a 3x3 Jacobian whose trace ~ 0 (div B = 0)."""
+        cs = ConductorSystem()
+        cs.add(circular_loop(
+            center=Vec3(0, 0, 0), axis=Vec3(0, 0, 1),
+            radius_m=0.07, n_segments=128, current_A=1.0,
+        ))
+        pc = PointCloud()
+        pc.add(Vec3(0.02, -0.01, 0.03))
+        pc.add(Vec3(0.05, 0.02, -0.04))
+        pc.add(Vec3(0.0, 0.0, 0.05))
+
+        eval_ = BiotSavartEvaluator()
+        gradB = eval_.evaluate_grad_B(cs, pc)
+        self.assertEqual(gradB.shape, (3, 3, 3))
+
+        for k in range(gradB.shape[0]):
+            jac = gradB[k]
+            trace = jac[0, 0] + jac[1, 1] + jac[2, 2]
+            scale = float((jac * jac).sum()) ** 0.5
+            self.assertLess(abs(trace), 1e-6 * scale,
+                            msg=f"div B at point {k} was {trace}")
+
     def test_circular_loop_on_axis_matches_closed_form(self):
         """Mirror of C++ test_circular_loop_on_axis at N=256, z=0.05."""
         R = 0.1

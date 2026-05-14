@@ -25,8 +25,11 @@ class BiotSavartEvaluator final : public IFieldEvaluator {
   BiotSavartEvaluator();
   explicit BiotSavartEvaluator(BiotSavartConfig cfg);
 
-  Field<Vec3> evaluate_B(const ConductorSystem& conductors,
-                         const PointCloud&      observations) const override;
+  Field<Vec3>   evaluate_B     (const ConductorSystem& conductors,
+                                const PointCloud&      observations) const override;
+
+  Field<Mat3x3> evaluate_grad_B(const ConductorSystem& conductors,
+                                const PointCloud&      observations) const override;
 
   const BiotSavartConfig& config() const noexcept { return cfg_; }
 
