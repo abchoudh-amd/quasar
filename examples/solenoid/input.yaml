@@ -1,0 +1,42 @@
+# Finite-length solenoid: 200 helical turns over an axial length L = 0.5 m,
+# radius R = 0.02 m. Observation: a line probe from one end of the solenoid
+# through the midpoint to the other end, sampling the axial transition.
+#
+# For an idealized surface-current solenoid of length L and radius R
+# carrying current K = n I (with n = N / L turns per metre), the on-axis
+# field at axial position z (measured from the midpoint) is
+#
+#   B_z(z) = (mu0 n I / 2) * [
+#              (L/2 + z) / sqrt(R^2 + (L/2 + z)^2)
+#            + (L/2 - z) / sqrt(R^2 + (L/2 - z)^2)
+#            ]
+#
+# which is approximately mu0 n I deep inside (R << L), drops to about
+# half its peak at z = ±L/2, and decays to zero at large |z|.
+
+units: SI
+
+conductors:
+  - name: solenoid
+    current_A: 1.0
+    geometry:
+      type: solenoid
+      center_xyz:           [0.0, 0.0, 0.0]
+      axis_xyz:             [0.0, 0.0, 1.0]
+      radius_m:             0.02
+      length_m:             0.5
+      n_turns:              200
+      n_segments_per_turn:  24
+
+observation:
+  type: line
+  start_xyz: [0.0, 0.0, -0.35]
+  end_xyz:   [0.0, 0.0, +0.35]
+  n_points:  29
+
+output:
+  format: npz
+  path: out.npz
+  fields:
+    - B_xyz
+    - B_magnitude

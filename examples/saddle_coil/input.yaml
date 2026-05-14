@@ -1,0 +1,72 @@
+# Saddle ring: a non-planar closed loop parameterized by
+#
+#   x(phi) = R cos(phi),  y(phi) = R sin(phi),  z(phi) = a cos(2 phi),
+#   phi in [0, 2 pi],  R = 0.10 m,  a = 0.02 m.
+#
+# The loop rises above the xy-plane near phi = 0, pi (the "saddle peaks")
+# and dips below near phi = pi/2, 3 pi/2 (the "saddle valleys").
+# C2 symmetric: rotating by pi about the z-axis leaves the geometry
+# invariant. Consequently, the magnetic field at the origin must be
+# directed purely along z (B_x = B_y = 0 there).
+#
+# The polyline below is the 32-segment discretization of the parametric
+# curve; if you regenerate it at higher N, keep the first and last
+# vertex identical so to_segments_soa() picks up a clean closure.
+
+units: SI
+
+conductors:
+  - name: saddle_ring
+    current_A: 1.0
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.10000000, +0.00000000, +0.02000000]
+        - [+0.09807853, +0.01950903, +0.01847759]
+        - [+0.09238795, +0.03826834, +0.01414214]
+        - [+0.08314696, +0.05555702, +0.00765367]
+        - [+0.07071068, +0.07071068, +0.00000000]
+        - [+0.05555702, +0.08314696, -0.00765367]
+        - [+0.03826834, +0.09238795, -0.01414214]
+        - [+0.01950903, +0.09807853, -0.01847759]
+        - [+0.00000000, +0.10000000, -0.02000000]
+        - [-0.01950903, +0.09807853, -0.01847759]
+        - [-0.03826834, +0.09238795, -0.01414214]
+        - [-0.05555702, +0.08314696, -0.00765367]
+        - [-0.07071068, +0.07071068, -0.00000000]
+        - [-0.08314696, +0.05555702, +0.00765367]
+        - [-0.09238795, +0.03826834, +0.01414214]
+        - [-0.09807853, +0.01950903, +0.01847759]
+        - [-0.10000000, +0.00000000, +0.02000000]
+        - [-0.09807853, -0.01950903, +0.01847759]
+        - [-0.09238795, -0.03826834, +0.01414214]
+        - [-0.08314696, -0.05555702, +0.00765367]
+        - [-0.07071068, -0.07071068, +0.00000000]
+        - [-0.05555702, -0.08314696, -0.00765367]
+        - [-0.03826834, -0.09238795, -0.01414214]
+        - [-0.01950903, -0.09807853, -0.01847759]
+        - [+0.00000000, -0.10000000, -0.02000000]
+        - [+0.01950903, -0.09807853, -0.01847759]
+        - [+0.03826834, -0.09238795, -0.01414214]
+        - [+0.05555702, -0.08314696, -0.00765367]
+        - [+0.07071068, -0.07071068, +0.00000000]
+        - [+0.08314696, -0.05555702, +0.00765367]
+        - [+0.09238795, -0.03826834, +0.01414214]
+        - [+0.09807853, -0.01950903, +0.01847759]
+        - [+0.10000000, +0.00000000, +0.02000000]
+
+observation:
+  type: points
+  points_xyz_m:
+    - [+0.00, +0.00, +0.00]      # centre - by C2 symmetry, B has only B_z
+    - [+0.04, +0.00, +0.00]      # off-centre +x
+    - [+0.00, +0.04, +0.00]      # off-centre +y
+    - [+0.00, +0.00, +0.05]      # above the centre
+    - [+0.00, +0.00, -0.05]      # below the centre
+
+output:
+  format: npz
+  path: out.npz
+  fields:
+    - B_xyz
+    - B_magnitude

@@ -6,9 +6,11 @@ project(quasar
   LANGUAGES CXX
 )
 
-option(QUASAR_ENABLE_HIP "Build with HIP (ROCm) support" ON)
-option(QUASAR_BUILD_TESTING "Build Quasar unit tests" ${BUILD_TESTING})
-option(QUASAR_BUILD_PYTHON  "Build Python bindings (pybind11)" ON)
+option(QUASAR_ENABLE_HIP      "Build with HIP (ROCm) support" ON)
+option(QUASAR_BUILD_TESTING   "Build Quasar unit tests" ${BUILD_TESTING})
+option(QUASAR_BUILD_PYTHON    "Build Python bindings (pybind11)" ON)
+option(QUASAR_BUILD_BENCHMARKS
+       "Build Quasar micro-benchmarks (Google Benchmark)" OFF)
 
 if(NOT QUASAR_ENABLE_HIP)
   message(FATAL_ERROR
@@ -60,6 +62,10 @@ if(QUASAR_BUILD_PYTHON)
   add_subdirectory(bindings)
 endif()
 
+if(QUASAR_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
+endif()
+
 if(QUASAR_BUILD_TESTING)
   add_subdirectory(tests)
 endif()
@@ -71,3 +77,4 @@ message(STATUS "  C++ standard          : ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build type            : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Build tests           : ${QUASAR_BUILD_TESTING}")
 message(STATUS "  Build Python bindings : ${QUASAR_BUILD_PYTHON}")
+message(STATUS "  Build benchmarks      : ${QUASAR_BUILD_BENCHMARKS}")

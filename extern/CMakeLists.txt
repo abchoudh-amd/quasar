@@ -31,3 +31,21 @@ if(QUASAR_BUILD_PYTHON)
   )
   FetchContent_MakeAvailable(pybind11)
 endif()
+
+if(QUASAR_BUILD_BENCHMARKS)
+  set(_benchmark_tag "v1.9.0")
+  message(STATUS "extern: fetching google benchmark ${_benchmark_tag}")
+
+  set(BENCHMARK_ENABLE_TESTING       OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_GTEST_TESTS   OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_ENABLE_INSTALL       OFF CACHE BOOL "" FORCE)
+  set(BENCHMARK_USE_BUNDLED_GTEST    OFF CACHE BOOL "" FORCE)
+
+  FetchContent_Declare(
+    googlebenchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG        ${_benchmark_tag}
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable(googlebenchmark)
+endif()

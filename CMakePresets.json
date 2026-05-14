@@ -10,7 +10,8 @@
       "cacheVariables": {
         "QUASAR_ENABLE_HIP": "ON",
         "CMAKE_HIP_ARCHITECTURES": "gfx942",
-        "QUASAR_BUILD_TESTING": "ON"
+        "QUASAR_BUILD_TESTING": "ON",
+        "QUASAR_BUILD_BENCHMARKS": "ON"
       }
     },
     {
