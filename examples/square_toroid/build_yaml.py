@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Generate the square-cross-section toroidal current-sheet example deck."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+R0_M = 0.10
+SIDE_M = 0.04
+N_SHEET_FILAMENTS = 16
+SHEET_CURRENT_A = 1.0
+N_SEGMENTS = 256
+
+OBS_X_MIN_M = -0.18
+OBS_X_MAX_M = 0.18
+OBS_Z_MIN_M = -0.06
+OBS_Z_MAX_M = 0.06
+OBS_NX = 181
+OBS_NZ = 61
+
+
+def _fmt(x: float) -> str:
+    return f"{x:+.8f}"
+
+
+def _loop_block(
+    *,
+    name: str,
+    current_A: float,
+    center_z_m: float,
+    radius_m: float,
+) -> list[str]:
+    return [
+        f"  - name: {name}",
+        f"    current_A: {_fmt(current_A)}",
+        "    geometry:",
+        "      type: circular_loop",
+        f"      center_xyz: [0.0, 0.0, {_fmt(center_z_m)}]",
+        "      axis_xyz:   [0.0, 0.0, 1.0]",
+        f"      radius_m: {_fmt(radius_m)}",
+        f"      n_segments: {N_SEGMENTS}",
+        "",
+    ]
+
+
+def build_yaml() -> str:
+    half_side = SIDE_M / 2.0
+    inner_radius = R0_M - half_side
+    outer_radius = R0_M + half_side
+    delta = SIDE_M / N_SHEET_FILAMENTS
+    filament_current = SHEET_CURRENT_A / N_SHEET_FILAMENTS
+
+    lines = [
+        "# Square-cross-section toroidal magnet modeled as four toroidal current sheets.",
+        "#",
+        "# Geometry:",
+        f"#   R0 = {R0_M:.6f} m, square side a = {SIDE_M:.6f} m",
+        f"#   inner radius = {inner_radius:.6f} m, outer radius = {outer_radius:.6f} m",
+        f"#   top/bottom z = +/-{half_side:.6f} m",
+        "#",
+        "# Currents:",
+        "#   top and bottom faces carry +phi current",
+        "#   inner and outer cylindrical faces carry -phi current",
+        f"#   each sheet has total current {SHEET_CURRENT_A:.6f} A",
+        f"#   each sheet is represented by {N_SHEET_FILAMENTS} circular-loop filaments",
+        "#",
+        "# Regenerate with:",
+        "#   python examples/square_toroid/build_yaml.py",
+        "",
+        "units: SI",
+        "",
+        "conductors:",
+        "  # Top sheet (+phi), z = +a/2",
+    ]
+
+    radii = [
+        inner_radius + (k + 0.5) * delta
+        for k in range(N_SHEET_FILAMENTS)
+    ]
+    heights = [
+        -half_side + (k + 0.5) * delta
+        for k in range(N_SHEET_FILAMENTS)
+    ]
+
+    for k, radius_m in enumerate(radii):
+        lines.extend(
+            _loop_block(
+                name=f"top_sheet_{k:02d}",
+                current_A=+filament_current,
+                center_z_m=+half_side,
+                radius_m=radius_m,
+            )
+        )
+
+    lines.append("  # Bottom sheet (+phi), z = -a/2")
+    for k, radius_m in enumerate(radii):
+        lines.extend(
+            _loop_block(
+                name=f"bottom_sheet_{k:02d}",
+                current_A=+filament_current,
+                center_z_m=-half_side,
+                radius_m=radius_m,
+            )
+        )
+
+    lines.append("  # Inner cylinder (-phi), R = R0 - a/2")
+    for k, z_m in enumerate(heights):
+        lines.extend(
+            _loop_block(
+                name=f"inner_cylinder_{k:02d}",
+                current_A=-filament_current,
+                center_z_m=z_m,
+                radius_m=inner_radius,
+            )
+        )
+
+    lines.append("  # Outer cylinder (-phi), R = R0 + a/2")
+    for k, z_m in enumerate(heights):
+        lines.extend(
+            _loop_block(
+                name=f"outer_cylinder_{k:02d}",
+                current_A=-filament_current,
+                center_z_m=z_m,
+                radius_m=outer_radius,
+            )
+        )
+
+    lines.extend(
+        [
+            "observation:",
+            "  type: plane",
+            f"  origin_xyz:   [{_fmt(OBS_X_MIN_M)}, 0.0, {_fmt(OBS_Z_MIN_M)}]",
+            "  u_axis_xyz:   [1.0, 0.0, 0.0]",
+            "  v_axis_xyz:   [0.0, 0.0, 1.0]",
+            f"  u_extent_m:   {OBS_X_MAX_M - OBS_X_MIN_M:.8f}",
+            f"  v_extent_m:   {OBS_Z_MAX_M - OBS_Z_MIN_M:.8f}",
+            f"  nu: {OBS_NX}",
+            f"  nv: {OBS_NZ}",
+            "",
+            "output:",
+            "  format: npz",
+            "  path: out.npz",
+            "  fields:",
+            "    - B_xyz",
+            "    - B_magnitude",
+            "",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def main() -> None:
+    out = Path(__file__).with_name("input.yaml")
+    out.write_text(build_yaml(), encoding="utf-8")
+    print(f"wrote {out}")
+
+
+if __name__ == "__main__":
+    main()
