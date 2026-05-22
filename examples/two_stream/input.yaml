@@ -1,0 +1,7 @@
+units: normalized
+domain: {nx: 128, ny: 16, lx_m: 1.0, ly_m: 0.125}
+numerics: {fdtd_order: 2, shape: cic, current_filter: []}
+species:
+  - {name: electron_beam_left, charge_C: -1, mass_kg: 1, n_particles: 16384}
+  - {name: electron_beam_right, charge_C: -1, mass_kg: 1, n_particles: 16384}
+time: {dt_s: auto, steps: 256}

@@ -1,0 +1,7 @@
+units: normalized
+domain: {nx: 64, ny: 64, lx_m: 1.0, ly_m: 1.0}
+boundary:
+  field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
+  particle: {x_lo: specular, x_hi: specular, y_lo: specular, y_hi: specular}
+numerics: {fdtd_order: 4, shape: cic, current_filter: []}
+time: {dt_s: auto, steps: 128}

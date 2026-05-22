@@ -1,0 +1,5 @@
+units: normalized
+domain: {nx: 64, ny: 64, lx_m: 1.0, ly_m: 1.0}
+numerics: {fdtd_order: 4, shape: cic, current_filter: []}
+fields: {initial: {type: seed_em_wave, mode: [1, 0], component: Ez}}
+time: {dt_s: auto, steps: 128}

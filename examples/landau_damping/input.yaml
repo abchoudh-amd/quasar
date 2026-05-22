@@ -1,0 +1,5 @@
+units: normalized
+domain: {nx: 128, ny: 8, lx_m: 1.0, ly_m: 0.0625}
+numerics: {fdtd_order: 2, shape: tsc, current_filter: []}
+fields: {initial: {type: seed_perturbation, component: Ex, amplitude: 1.0e-4}}
+time: {dt_s: auto, steps: 256}

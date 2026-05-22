@@ -8,6 +8,8 @@ set(_quasar_python_tests
   test_coil_cli
   test_postprocess
   test_examples
+  test_pic_io
+  test_pic_smoke
 )
 
 foreach(_test IN LISTS _quasar_python_tests)

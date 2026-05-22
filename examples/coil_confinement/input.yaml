@@ -1,0 +1,12 @@
+units: SI
+normalization: {reference_density_per_m3: 1.0e18, reference_species: electron}
+domain: {nx: 64, ny: 64, lx_m: 1.0e-2, ly_m: 1.0e-2}
+external_field:
+  evaluator:
+    type: biot_savart
+    conductors:
+      - name: loop
+        current_A: 1000.0
+        geometry: {type: circular_loop, radius_m: 0.05, center_xyz: [0, 0, 0], axis_xyz: [0, 0, 1], n_segments: 128}
+numerics: {fdtd_order: 2, shape: cic, current_filter: []}
+time: {dt_s: auto, steps: 128}

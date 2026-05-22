@@ -23,6 +23,8 @@
 
 namespace py = pybind11;
 
+void bind_pic(py::module_& m);
+
 using ::quasar::Real;
 using ::quasar::Vec3;
 using ::quasar::magnetostatics::BiotSavartConfig;
@@ -98,6 +100,7 @@ PYBIND11_MODULE(_core, m) {
   m.attr("mu0")          = ::quasar::mu0;
   m.attr("mu0_over_4pi") = ::quasar::mu0_over_4pi;
   m.attr("pi")           = ::quasar::pi;
+  bind_pic(m);
 
   // -- magnetostatics submodule -------------------------------------------
 

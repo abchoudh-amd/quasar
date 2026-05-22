@@ -58,6 +58,10 @@ endif()
 add_subdirectory(extern)
 add_subdirectory(src)
 
+if(QUASAR_ENABLE_HIP)
+  add_subdirectory(apps)
+endif()
+
 if(QUASAR_BUILD_PYTHON)
   add_subdirectory(bindings)
 endif()

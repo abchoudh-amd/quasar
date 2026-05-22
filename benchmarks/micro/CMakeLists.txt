@@ -2,6 +2,14 @@ if(NOT QUASAR_BUILD_BENCHMARKS OR NOT QUASAR_ENABLE_HIP)
   return()
 endif()
 
+add_executable(quasar_bench_pic_step pic_step_bench.cpp)
+set_source_files_properties(pic_step_bench.cpp PROPERTIES LANGUAGE HIP)
+target_link_libraries(quasar_bench_pic_step
+  PRIVATE
+    quasar::core
+    benchmark::benchmark
+)
+
 add_executable(quasar_bench_biot_savart biot_savart_bench.cpp)
 
 # Pulls quasar/backend/* (HIP runtime headers) transitively; compile through

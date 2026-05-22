@@ -1,0 +1,7 @@
+units: SI
+normalization: {reference_density_per_m3: 1.0e18, reference_species: electron}
+domain: {nx: 64, ny: 64, lx_m: 1.0e-2, ly_m: 1.0e-2}
+external_field:
+  evaluator: {type: uniform, B_T: [0.0, 0.0, 1.0]}
+numerics: {fdtd_order: 2, shape: tsc, current_filter: []}
+time: {dt_s: auto, steps: 256}

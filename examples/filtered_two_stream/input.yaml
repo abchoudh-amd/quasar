@@ -1,0 +1,9 @@
+units: normalized
+domain: {nx: 128, ny: 16, lx_m: 1.0, ly_m: 0.125}
+numerics:
+  fdtd_order: 2
+  shape: tsc
+  current_filter:
+    - {type: binomial, n_passes: 4}
+    - {type: compensated_binomial, n_passes: 1}
+time: {dt_s: auto, steps: 256}

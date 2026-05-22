@@ -13,8 +13,8 @@ target_include_directories(quasar_core
 
 target_compile_features(quasar_core INTERFACE cxx_std_20)
 
+add_subdirectory(core)
 add_subdirectory(backend)
+add_subdirectory(numerics)
+add_subdirectory(boundary)
 add_subdirectory(physics)
-
-# Note: `core/` has no .cpp files (header-only types/Field/Registry), so it
-# does not need its own subdirectory.

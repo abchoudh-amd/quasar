@@ -1,0 +1,6 @@
+units: normalized
+domain: {nx: 64, ny: 64, lx_m: 1.0, ly_m: 1.0}
+numerics: {fdtd_order: 4, shape: tsc, current_filter: []}
+species:
+  - {name: electron, charge_C: -1, mass_kg: 1, n_particles: 65536}
+time: {dt_s: auto, steps: 512}
