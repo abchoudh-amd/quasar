@@ -1,0 +1,2362 @@
+# H+ / mu- plasma in the equatorial slice of a square-toroid magnet.
+#
+# Toroid axis = z_lab; PIC z=0 plane is the equatorial slice through
+# the donut bore. PIC sees the bore as a ring in (x_pic, y_pic), with
+# external Bz (out-of-plane) driving in-plane cyclotron gyration.
+#
+# Regenerate with:
+#   python examples/square_toroid_pic/build_yaml.py
+
+units: SI
+
+domain:
+  nx: 128
+  ny: 128
+  lx_m: 0.300000
+  ly_m: 0.300000
+  origin_x_m: -0.150000
+  origin_y_m: -0.150000
+
+numerics:
+  fdtd_order: 2
+  shape: cic
+
+external_field:
+  evaluator:
+    type: biot_savart
+    conductors:
+      # Top sheet (+phi), z = +a/2
+      - name: top_sheet_00
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08031250
+          n_segments: 128
+
+      - name: top_sheet_01
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08093750
+          n_segments: 128
+
+      - name: top_sheet_02
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08156250
+          n_segments: 128
+
+      - name: top_sheet_03
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08218750
+          n_segments: 128
+
+      - name: top_sheet_04
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08281250
+          n_segments: 128
+
+      - name: top_sheet_05
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08343750
+          n_segments: 128
+
+      - name: top_sheet_06
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08406250
+          n_segments: 128
+
+      - name: top_sheet_07
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08468750
+          n_segments: 128
+
+      - name: top_sheet_08
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08531250
+          n_segments: 128
+
+      - name: top_sheet_09
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08593750
+          n_segments: 128
+
+      - name: top_sheet_10
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08656250
+          n_segments: 128
+
+      - name: top_sheet_11
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08718750
+          n_segments: 128
+
+      - name: top_sheet_12
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08781250
+          n_segments: 128
+
+      - name: top_sheet_13
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08843750
+          n_segments: 128
+
+      - name: top_sheet_14
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08906250
+          n_segments: 128
+
+      - name: top_sheet_15
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08968750
+          n_segments: 128
+
+      - name: top_sheet_16
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09031250
+          n_segments: 128
+
+      - name: top_sheet_17
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09093750
+          n_segments: 128
+
+      - name: top_sheet_18
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09156250
+          n_segments: 128
+
+      - name: top_sheet_19
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09218750
+          n_segments: 128
+
+      - name: top_sheet_20
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09281250
+          n_segments: 128
+
+      - name: top_sheet_21
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09343750
+          n_segments: 128
+
+      - name: top_sheet_22
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09406250
+          n_segments: 128
+
+      - name: top_sheet_23
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09468750
+          n_segments: 128
+
+      - name: top_sheet_24
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09531250
+          n_segments: 128
+
+      - name: top_sheet_25
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09593750
+          n_segments: 128
+
+      - name: top_sheet_26
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09656250
+          n_segments: 128
+
+      - name: top_sheet_27
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09718750
+          n_segments: 128
+
+      - name: top_sheet_28
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09781250
+          n_segments: 128
+
+      - name: top_sheet_29
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09843750
+          n_segments: 128
+
+      - name: top_sheet_30
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09906250
+          n_segments: 128
+
+      - name: top_sheet_31
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09968750
+          n_segments: 128
+
+      - name: top_sheet_32
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10031250
+          n_segments: 128
+
+      - name: top_sheet_33
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10093750
+          n_segments: 128
+
+      - name: top_sheet_34
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10156250
+          n_segments: 128
+
+      - name: top_sheet_35
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10218750
+          n_segments: 128
+
+      - name: top_sheet_36
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10281250
+          n_segments: 128
+
+      - name: top_sheet_37
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10343750
+          n_segments: 128
+
+      - name: top_sheet_38
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10406250
+          n_segments: 128
+
+      - name: top_sheet_39
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10468750
+          n_segments: 128
+
+      - name: top_sheet_40
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10531250
+          n_segments: 128
+
+      - name: top_sheet_41
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10593750
+          n_segments: 128
+
+      - name: top_sheet_42
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10656250
+          n_segments: 128
+
+      - name: top_sheet_43
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10718750
+          n_segments: 128
+
+      - name: top_sheet_44
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10781250
+          n_segments: 128
+
+      - name: top_sheet_45
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10843750
+          n_segments: 128
+
+      - name: top_sheet_46
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10906250
+          n_segments: 128
+
+      - name: top_sheet_47
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10968750
+          n_segments: 128
+
+      - name: top_sheet_48
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11031250
+          n_segments: 128
+
+      - name: top_sheet_49
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11093750
+          n_segments: 128
+
+      - name: top_sheet_50
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11156250
+          n_segments: 128
+
+      - name: top_sheet_51
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11218750
+          n_segments: 128
+
+      - name: top_sheet_52
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11281250
+          n_segments: 128
+
+      - name: top_sheet_53
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11343750
+          n_segments: 128
+
+      - name: top_sheet_54
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11406250
+          n_segments: 128
+
+      - name: top_sheet_55
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11468750
+          n_segments: 128
+
+      - name: top_sheet_56
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11531250
+          n_segments: 128
+
+      - name: top_sheet_57
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11593750
+          n_segments: 128
+
+      - name: top_sheet_58
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11656250
+          n_segments: 128
+
+      - name: top_sheet_59
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11718750
+          n_segments: 128
+
+      - name: top_sheet_60
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11781250
+          n_segments: 128
+
+      - name: top_sheet_61
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11843750
+          n_segments: 128
+
+      - name: top_sheet_62
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11906250
+          n_segments: 128
+
+      - name: top_sheet_63
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11968750
+          n_segments: 128
+
+      # Bottom sheet (+phi), z = -a/2
+      - name: bottom_sheet_00
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08031250
+          n_segments: 128
+
+      - name: bottom_sheet_01
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08093750
+          n_segments: 128
+
+      - name: bottom_sheet_02
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08156250
+          n_segments: 128
+
+      - name: bottom_sheet_03
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08218750
+          n_segments: 128
+
+      - name: bottom_sheet_04
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08281250
+          n_segments: 128
+
+      - name: bottom_sheet_05
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08343750
+          n_segments: 128
+
+      - name: bottom_sheet_06
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08406250
+          n_segments: 128
+
+      - name: bottom_sheet_07
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08468750
+          n_segments: 128
+
+      - name: bottom_sheet_08
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08531250
+          n_segments: 128
+
+      - name: bottom_sheet_09
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08593750
+          n_segments: 128
+
+      - name: bottom_sheet_10
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08656250
+          n_segments: 128
+
+      - name: bottom_sheet_11
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08718750
+          n_segments: 128
+
+      - name: bottom_sheet_12
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08781250
+          n_segments: 128
+
+      - name: bottom_sheet_13
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08843750
+          n_segments: 128
+
+      - name: bottom_sheet_14
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08906250
+          n_segments: 128
+
+      - name: bottom_sheet_15
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08968750
+          n_segments: 128
+
+      - name: bottom_sheet_16
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09031250
+          n_segments: 128
+
+      - name: bottom_sheet_17
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09093750
+          n_segments: 128
+
+      - name: bottom_sheet_18
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09156250
+          n_segments: 128
+
+      - name: bottom_sheet_19
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09218750
+          n_segments: 128
+
+      - name: bottom_sheet_20
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09281250
+          n_segments: 128
+
+      - name: bottom_sheet_21
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09343750
+          n_segments: 128
+
+      - name: bottom_sheet_22
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09406250
+          n_segments: 128
+
+      - name: bottom_sheet_23
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09468750
+          n_segments: 128
+
+      - name: bottom_sheet_24
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09531250
+          n_segments: 128
+
+      - name: bottom_sheet_25
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09593750
+          n_segments: 128
+
+      - name: bottom_sheet_26
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09656250
+          n_segments: 128
+
+      - name: bottom_sheet_27
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09718750
+          n_segments: 128
+
+      - name: bottom_sheet_28
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09781250
+          n_segments: 128
+
+      - name: bottom_sheet_29
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09843750
+          n_segments: 128
+
+      - name: bottom_sheet_30
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09906250
+          n_segments: 128
+
+      - name: bottom_sheet_31
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.09968750
+          n_segments: 128
+
+      - name: bottom_sheet_32
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10031250
+          n_segments: 128
+
+      - name: bottom_sheet_33
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10093750
+          n_segments: 128
+
+      - name: bottom_sheet_34
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10156250
+          n_segments: 128
+
+      - name: bottom_sheet_35
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10218750
+          n_segments: 128
+
+      - name: bottom_sheet_36
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10281250
+          n_segments: 128
+
+      - name: bottom_sheet_37
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10343750
+          n_segments: 128
+
+      - name: bottom_sheet_38
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10406250
+          n_segments: 128
+
+      - name: bottom_sheet_39
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10468750
+          n_segments: 128
+
+      - name: bottom_sheet_40
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10531250
+          n_segments: 128
+
+      - name: bottom_sheet_41
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10593750
+          n_segments: 128
+
+      - name: bottom_sheet_42
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10656250
+          n_segments: 128
+
+      - name: bottom_sheet_43
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10718750
+          n_segments: 128
+
+      - name: bottom_sheet_44
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10781250
+          n_segments: 128
+
+      - name: bottom_sheet_45
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10843750
+          n_segments: 128
+
+      - name: bottom_sheet_46
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10906250
+          n_segments: 128
+
+      - name: bottom_sheet_47
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.10968750
+          n_segments: 128
+
+      - name: bottom_sheet_48
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11031250
+          n_segments: 128
+
+      - name: bottom_sheet_49
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11093750
+          n_segments: 128
+
+      - name: bottom_sheet_50
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11156250
+          n_segments: 128
+
+      - name: bottom_sheet_51
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11218750
+          n_segments: 128
+
+      - name: bottom_sheet_52
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11281250
+          n_segments: 128
+
+      - name: bottom_sheet_53
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11343750
+          n_segments: 128
+
+      - name: bottom_sheet_54
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11406250
+          n_segments: 128
+
+      - name: bottom_sheet_55
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11468750
+          n_segments: 128
+
+      - name: bottom_sheet_56
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11531250
+          n_segments: 128
+
+      - name: bottom_sheet_57
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11593750
+          n_segments: 128
+
+      - name: bottom_sheet_58
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11656250
+          n_segments: 128
+
+      - name: bottom_sheet_59
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11718750
+          n_segments: 128
+
+      - name: bottom_sheet_60
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11781250
+          n_segments: 128
+
+      - name: bottom_sheet_61
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11843750
+          n_segments: 128
+
+      - name: bottom_sheet_62
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11906250
+          n_segments: 128
+
+      - name: bottom_sheet_63
+        current_A: +78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.02000000]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.11968750
+          n_segments: 128
+
+      # Inner cylinder (-phi), R = R0 - a/2
+      - name: inner_cylinder_00
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_01
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_02
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_03
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_04
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_05
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_06
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_07
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_08
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_09
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_10
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_11
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_12
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_13
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_14
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_15
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_16
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_17
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_18
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_19
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_20
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_21
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_22
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_23
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_24
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_25
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_26
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_27
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_28
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_29
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_30
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_31
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_32
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_33
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_34
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_35
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_36
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_37
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_38
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_39
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_40
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_41
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_42
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_43
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_44
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_45
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_46
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_47
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_48
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_49
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_50
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_51
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_52
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_53
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_54
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_55
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_56
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_57
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_58
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_59
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_60
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_61
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_62
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      - name: inner_cylinder_63
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.08000000
+          n_segments: 128
+
+      # Outer cylinder (-phi), R = R0 + a/2
+      - name: outer_cylinder_00
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_01
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_02
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_03
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_04
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_05
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_06
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_07
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_08
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_09
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_10
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_11
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_12
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_13
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_14
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_15
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.01031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_16
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_17
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_18
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_19
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_20
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_21
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_22
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_23
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_24
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_25
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_26
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_27
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_28
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_29
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_30
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_31
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, -0.00031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_32
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_33
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_34
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_35
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_36
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_37
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_38
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_39
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_40
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_41
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_42
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_43
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_44
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_45
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_46
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_47
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.00968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_48
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01031250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_49
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01093750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_50
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01156250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_51
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01218750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_52
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01281250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_53
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01343750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_54
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01406250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_55
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01468750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_56
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01531250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_57
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01593750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_58
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01656250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_59
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01718750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_60
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01781250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_61
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01843750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_62
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01906250]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+      - name: outer_cylinder_63
+        current_A: -78.12500000
+        geometry:
+          type: circular_loop
+          center_xyz: [0.0, 0.0, +0.01968750]
+          axis_xyz:   [0.0, 0.0, 1.0]
+          radius_m: +0.12000000
+          n_segments: 128
+
+species:
+  - name: H+
+    charge_C: 1.602176634000e-19
+    mass_kg: 1.672621923690e-27
+    n_particles: 20000
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.000000e+15
+      temperature_eV: 10.000
+  - name: mu-
+    charge_C: -1.602176634000e-19
+    mass_kg: 1.883531627000e-28
+    n_particles: 20000
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.000000e+15
+      temperature_eV: 10.000
+
+time:
+  dt_s: auto
+  steps: 2000
+
+diagnostics:
+  output_path: out.npz
+  cadence: 200
+  fields: [bz, ex, ey]
+  per_species: true

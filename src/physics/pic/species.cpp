@@ -53,4 +53,24 @@ void ParticleSpecies::set_host_particles(const std::vector<Real>& x,
   count_ = n;
 }
 
+ParticleSpecies::HostSnapshot ParticleSpecies::to_host() const {
+  HostSnapshot s;
+  s.x.resize(count_);
+  s.y.resize(count_);
+  s.vx.resize(count_);
+  s.vy.resize(count_);
+  s.vz.resize(count_);
+  s.weight.resize(count_);
+  s.alive.resize(count_);
+  if (count_ == 0) return s;
+  x_.copy_to_host(s.x.data(), count_);
+  y_.copy_to_host(s.y.data(), count_);
+  vx_.copy_to_host(s.vx.data(), count_);
+  vy_.copy_to_host(s.vy.data(), count_);
+  vz_.copy_to_host(s.vz.data(), count_);
+  weight_.copy_to_host(s.weight.data(), count_);
+  alive_.copy_to_host(s.alive.data(), count_);
+  return s;
+}
+
 }  // namespace quasar::pic

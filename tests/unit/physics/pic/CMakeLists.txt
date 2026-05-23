@@ -11,6 +11,7 @@ set(_quasar_pic_tests
   test_mixed_bc
   test_external_uniform_b
   test_external_biot_savart
+  test_multi_species_external
   test_filter_charge_conservation
   test_filter_two_stream
   test_normalization_invariance

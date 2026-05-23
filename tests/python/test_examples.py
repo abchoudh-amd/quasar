@@ -209,5 +209,47 @@ class HelmholtzPairExampleTest(unittest.TestCase):
                                 f"B_z={B_z_vals!r}")
 
 
+def _run_pic_cli(yaml_path: Path, steps: int) -> None:
+    res = subprocess.run(
+        [sys.executable, "-m", "quasar.pic.cli", "run",
+         str(yaml_path), "--steps-override", str(steps)],
+        capture_output=True, text=True, env={**os.environ},
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"quasar.pic.cli failed (exit {res.returncode}):\n"
+            f"stdout: {res.stdout}\nstderr: {res.stderr}")
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class SquareToroidPicExampleTest(unittest.TestCase):
+
+    def test_end_to_end_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("square_toroid_pic", Path(tmp))
+            _run_pic_cli(workdir / "input.yaml", steps=20)
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+
+            for key in data.files:
+                arr = data[key]
+                if np.issubdtype(arr.dtype, np.floating):
+                    self.assertFalse(np.isnan(arr).any(),
+                                     msg=f"NaNs in {key!r}")
+
+            ext_bz = data["external_bz"]
+            self.assertGreater(float(np.max(np.abs(ext_bz))), 1.0e-3,
+                               msg=f"external Bz too small: "
+                                   f"|max|={np.max(np.abs(ext_bz))}")
+
+            for sp in ("H+", "mu-"):
+                vx = data[f"species_{sp}_vx"]
+                alive = data[f"species_{sp}_alive"].astype(bool)
+                self.assertGreater(int(alive.sum()), 0,
+                                   msg=f"no alive particles in {sp!r}")
+                self.assertGreater(float(np.max(np.abs(vx[alive]))), 0.0,
+                                   msg=f"{sp!r}: vx remained zero")
+
+
 if __name__ == "__main__":
     unittest.main()

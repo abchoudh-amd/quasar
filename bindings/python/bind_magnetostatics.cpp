@@ -100,7 +100,6 @@ PYBIND11_MODULE(_core, m) {
   m.attr("mu0")          = ::quasar::mu0;
   m.attr("mu0_over_4pi") = ::quasar::mu0_over_4pi;
   m.attr("pi")           = ::quasar::pi;
-  bind_pic(m);
 
   // -- magnetostatics submodule -------------------------------------------
 
@@ -229,4 +228,8 @@ PYBIND11_MODULE(_core, m) {
   ms.def("generic_polyline", &generic_polyline,
          py::arg("points"), py::arg("current_A"),
          py::arg("name") = std::string{"polyline"});
+
+  // pic submodule binds last so it can accept ConductorSystem /
+  // BiotSavartEvaluator instances bound above.
+  bind_pic(m);
 }

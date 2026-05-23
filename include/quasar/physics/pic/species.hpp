@@ -35,6 +35,12 @@ class ParticleSpecies {
                           const std::vector<Real>& vz,
                           const std::vector<Real>& weight);
 
+  struct HostSnapshot {
+    std::vector<Real> x, y, vx, vy, vz, weight;
+    std::vector<std::uint8_t> alive;
+  };
+  HostSnapshot to_host() const;
+
   Real* x() noexcept { return x_.device_ptr(); }
   Real* y() noexcept { return y_.device_ptr(); }
   Real* vx() noexcept { return vx_.device_ptr(); }
