@@ -4,7 +4,6 @@ endif()
 
 set(_quasar_magnetostatics_sources
   conductor.cpp
-  observation.cpp
   geometry_generators.cpp
   biot_savart_evaluator.cpp
 )

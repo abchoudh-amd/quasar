@@ -2,13 +2,14 @@
 
 #include "quasar/backend/device.hpp"
 #include "quasar/core/field.hpp"
+#include "quasar/core/observations.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/magnetostatics/field_evaluator.hpp"
 
 namespace quasar::magnetostatics {
 
 class ConductorSystem;
-class PointCloud;
+using core::PointCloud;
 
 // Runtime configuration knobs for BiotSavartEvaluator. The tile/block fields
 // are documented hints; Phase 1 uses compile-time defaults in launch_params.hpp

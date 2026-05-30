@@ -1,4 +1,4 @@
-#include "quasar/physics/magnetostatics/observation.hpp"
+#include "quasar/core/observations.hpp"
 
 #include "quasar/core/types.hpp"
 
@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace quasar::magnetostatics {
+namespace quasar::core {
 
 namespace {
 
@@ -16,7 +16,7 @@ bool is_finite(Vec3 v) noexcept {
 }
 
 [[noreturn]] void throw_bad(const std::string& kind, const std::string& why) {
-  throw std::invalid_argument{"quasar::magnetostatics::" + kind + ": " + why};
+  throw std::invalid_argument{"quasar::core::" + kind + ": " + why};
 }
 
 PointSoA points_to_soa(const std::vector<Vec3>& pts) {
@@ -207,4 +207,4 @@ PointSoA LineProbe::to_point_soa() const {
   return soa;
 }
 
-}  // namespace quasar::magnetostatics
+}  // namespace quasar::core

@@ -11,9 +11,9 @@ class GradientEvaluator final : public numerics::IFieldEvaluator {
     : b0_{b0}, grad_{grad}, origin_{origin} {}
 
   Field<Vec3> evaluate_B(const magnetostatics::ConductorSystem&,
-                         const magnetostatics::PointCloud& observations) const override;
+                         const core::PointCloud& observations) const override;
   Field<Mat3x3> evaluate_grad_B(const magnetostatics::ConductorSystem&,
-                                const magnetostatics::PointCloud& observations) const override;
+                                const core::PointCloud& observations) const override;
 
  private:
   Vec3 b0_{0, 0, 0};
