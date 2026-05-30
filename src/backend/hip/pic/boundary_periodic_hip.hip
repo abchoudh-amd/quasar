@@ -9,23 +9,28 @@
 
 namespace {
 
-__global__ void wrap_particles_kernel(quasar::Grid2D g, std::size_t n,
+// Wraps only the requested axis (0 = x, 1 = y) so that a per-side periodic BC
+// does not also wrap an axis whose walls are non-periodic (e.g. absorbing y).
+// The same shift applied to the current position is applied to the previous
+// position so the charge-conserving deposit (which runs after this BC and forms
+// current from prev -> current) still sees a sub-cell displacement; otherwise a
+// seam-crossing particle records a ~whole-domain jump the deposit window cannot
+// span, injecting uncancelled current.
+__global__ void wrap_particles_kernel(quasar::Grid2D g, std::size_t n, int axis,
                                       double* x, double* y,
                                       double* x_prev, double* y_prev,
                                       unsigned char* alive) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
-  // Constant-time wrap. The same shift applied to x must also be applied to
-  // x_prev so the charge-conserving deposit (which runs after this BC and forms
-  // current from x_prev -> x) still sees a sub-cell displacement; otherwise a
-  // seam-crossing particle records a ~whole-domain jump the deposit window
-  // cannot span, injecting uncancelled current.
-  const double sx = g.lx * floor((x[p] - g.origin_x) / g.lx);
-  x[p] -= sx;
-  x_prev[p] -= sx;
-  const double sy = g.ly * floor((y[p] - g.origin_y) / g.ly);
-  y[p] -= sy;
-  y_prev[p] -= sy;
+  if (axis == 0) {
+    const double sx = g.lx * floor((x[p] - g.origin_x) / g.lx);
+    x[p] -= sx;
+    x_prev[p] -= sx;
+  } else {
+    const double sy = g.ly * floor((y[p] - g.origin_y) / g.ly);
+    y[p] -= sy;
+    y_prev[p] -= sy;
+  }
 }
 
 // Copies a single component's ghost layer on `side` from the opposite interior
@@ -69,12 +74,12 @@ __global__ void periodic_fields_kernel(quasar::Grid2D g, int side, int len,
 
 extern "C" void launch_pic_boundary_periodic_particles(const quasar::Grid2D& g,
                                                        quasar::pic::ParticleSpecies& s,
-                                                       quasar_stream_t stream) {
+                                                       int axis, quasar_stream_t stream) {
   if (s.size() == 0) return;
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
   hipLaunchKernelGGL(wrap_particles_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, s.size(), s.x(), s.y(), s.x_prev(), s.y_prev(), s.alive());
+                     g, s.size(), axis, s.x(), s.y(), s.x_prev(), s.y_prev(), s.alive());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 

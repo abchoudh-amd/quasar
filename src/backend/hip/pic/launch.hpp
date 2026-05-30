@@ -63,8 +63,11 @@ void launch_pic_boundary_absorb_particles(const quasar::Grid2D&,
                                           quasar::pic::ParticleSpecies&, int, quasar_stream_t);
 void launch_pic_boundary_specular_particles(const quasar::Grid2D&,
                                             quasar::pic::ParticleSpecies&, int, quasar_stream_t);
+// `axis` selects the wrapped axis: 0 = x, 1 = y. A per-side periodic BC wraps
+// only its own axis so it does not interfere with non-periodic walls.
 void launch_pic_boundary_periodic_particles(const quasar::Grid2D&,
-                                            quasar::pic::ParticleSpecies&, quasar_stream_t);
+                                            quasar::pic::ParticleSpecies&, int axis,
+                                            quasar_stream_t);
 
 // -- Field boundary conditions -----------------------------------------------
 void launch_pic_boundary_pec_fields(const quasar::Grid2D&, quasar::YeeField2D<double>&,

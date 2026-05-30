@@ -273,5 +273,92 @@ class SquareToroidPicExampleTest(unittest.TestCase):
                                    msg=f"{sp!r}: vx remained zero")
 
 
+# A minimal, self-contained SI PIC deck. The PIC example decks under examples/
+# are written in `units: normalized` (and assorted shorthand the loader does not
+# accept), so they are not yet runnable through the CLI; rather than depend on
+# them, these tests drive a known-good inline deck that exercises the same
+# end-to-end run path.
+_MINIMAL_PIC_DECK = """\
+units: SI
+domain: {nx: 16, ny: 16, lx_m: 1.0, ly_m: 1.0}
+numerics: {fdtd_order: 2, shape: cic}
+species:
+  - name: e
+    charge_C: -1.0
+    mass_kg: 1.0
+    n_particles: 256
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.0e+6
+      temperature_eV: 10.0
+time: {dt_s: auto, steps: 8}
+diagnostics: {output_path: out.npz, per_species: true}
+boundary: {particle: [periodic, periodic, periodic, periodic]}
+"""
+
+
+def _write_deck(into: Path, text: str) -> Path:
+    into.mkdir(parents=True, exist_ok=True)
+    deck = into / "input.yaml"
+    deck.write_text(text)
+    return deck
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class PicRunSmokeTest(unittest.TestCase):
+    """End-to-end CLI run on a minimal SI deck: clean exit, finite fields,
+    live moving particles."""
+
+    def test_run_stays_finite_with_moving_particles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = _write_deck(Path(tmp) / "case", _MINIMAL_PIC_DECK)
+            _run_pic_cli(deck, steps=8)
+
+            out = deck.parent / "out.npz"
+            self.assertTrue(out.exists(), msg="no out.npz produced")
+            data = np.load(out, allow_pickle=False)
+
+            for key in data.files:
+                arr = data[key]
+                if np.issubdtype(arr.dtype, np.floating):
+                    self.assertFalse(np.isnan(arr).any(), msg=f"NaNs in {key!r}")
+                    self.assertFalse(np.isinf(arr).any(), msg=f"Infs in {key!r}")
+
+            alive = data["species_e_alive"].astype(bool)
+            self.assertGreater(int(alive.sum()), 0, msg="no live particles")
+            vx = data["species_e_vx"][alive]
+            self.assertGreater(float(np.max(np.abs(vx))), 0.0, msg="vx all zero")
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class PicCliDiagnosticsTest(unittest.TestCase):
+    """Exercise the --log-every / --write-every runtime diagnostic paths."""
+
+    def test_scalar_series_and_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = _write_deck(Path(tmp) / "case", _MINIMAL_PIC_DECK)
+            res = subprocess.run(
+                [sys.executable, "-m", "quasar.pic.cli", "run",
+                 str(deck),
+                 "--steps-override", "8",
+                 "--log-every", "2",
+                 "--write-every", "4"],
+                capture_output=True, text=True, env={**os.environ},
+            )
+            self.assertEqual(res.returncode, 0,
+                             msg=f"cli failed:\n{res.stdout}\n{res.stderr}")
+
+            data = np.load(deck.parent / "out.npz", allow_pickle=False)
+            series_keys = [k for k in data.files if k.startswith("series_")]
+            self.assertIn("series_step", series_keys)
+            # log-every=2 over 8 steps records at 2,4,6,8 -> 4 samples.
+            self.assertEqual(int(data["series_step"].shape[0]), 4,
+                             msg=f"unexpected series length: {data['series_step']}")
+            alive_series = [k for k in series_keys if k.startswith("series_alive_")]
+            self.assertTrue(alive_series, msg="no per-species alive series")
+            for k in alive_series:
+                self.assertTrue((data[k] >= 0).all(), msg=f"negative counts in {k}")
+
+
 if __name__ == "__main__":
     unittest.main()

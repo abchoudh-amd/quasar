@@ -90,3 +90,45 @@ TEST(PicEnergyConservation, EmEnergyMatchesUniformField) {
   EXPECT_NEAR(quasar::pic::total_em_energy(solver.fields(), solver.grid()),
               expected, 1e-9);
 }
+
+TEST(PicGaussResidual, UniformFieldHasZeroDivergence) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  quasar::Grid2D g{8, 8, 1.0, 1.0, 0.0, 0.0, 1};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+
+  // Uniform Ex over the (periodically-wrapped) grid: backward differences cancel
+  // everywhere, so the discrete divergence — and the residual — must be ~0.
+  auto& f = solver.fields();
+  std::vector<quasar::Real> ex(f.ex.size(), 0.0);
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) ex[g.index(i, j)] = 1.7;
+  }
+  f.ex.copy_from_host(ex.data(), ex.size());
+
+  EXPECT_NEAR(quasar::pic::gauss_residual(solver.fields(), solver.current()),
+              0.0, 1e-9);
+}
+
+TEST(PicGaussResidual, NonUniformFieldMatchesHandComputed) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  quasar::Grid2D g{4, 4, 1.0, 1.0, 0.0, 0.0, 1};  // dx = dy = 0.25
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+
+  // Put a single nonzero Ex at one interior cell. The residual is the L2 norm of
+  // the backward-difference divergence (∂Ex/∂x), which is nonzero only at that
+  // cell and its +x periodic neighbour. Compute the expectation directly.
+  auto& f = solver.fields();
+  std::vector<quasar::Real> ex(f.ex.size(), 0.0);
+  const quasar::Real val = 2.0;
+  ex[g.index(1, 1)] = val;
+  f.ex.copy_from_host(ex.data(), ex.size());
+
+  const quasar::Real inv_dx = 1.0 / g.dx();
+  // dExdx at (1,1) = (ex[1,1]-ex[0,1])/dx = +val*inv_dx;
+  // dExdx at (2,1) = (ex[2,1]-ex[1,1])/dx = -val*inv_dx; others zero.
+  const quasar::Real d1 = val * inv_dx;
+  const quasar::Real expected = std::sqrt(d1 * d1 + d1 * d1);
+
+  EXPECT_NEAR(quasar::pic::gauss_residual(solver.fields(), solver.current()),
+              expected, 1e-9);
+}
