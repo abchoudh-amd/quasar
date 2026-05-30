@@ -17,43 +17,37 @@ What IS live and working (Phase 2 delivered):
   switch in `step()` (D2). The `wall.cpp`/`periodic.cpp` classes are the single
   implementation.
 
-## The bug
-Enabling `QUASAR_PIC_FIELD_GHOSTS` (which calls `fill_field_ghosts()` before each
-half-update and switches the stencil to ghost reads) causes an **intermittent
-(~30% of runs)** `HIP error 700 (illegal memory access)` that surfaces in
-`periodic_fields_kernel`. The kernel intermittently receives a **garbage
-`Grid2D` by value** (`ny=0`, `nghost=300495749`, random `nx`).
+## The bug — ROOT-CAUSED AND FIXED (was never a HIP bug)
+The crash was **not** a kernarg/async HIP issue. It was a **registry factory
+collision**: `QUASAR_REGISTRY_REGISTER` registered each concrete BC with a
+stateless `[]{ return std::make_unique<Class>(); }` lambda. Those lambdas are
+structurally identical across types (allocate 8 bytes, store a vptr, return), so
+identical-code folding collapsed them into one — and every
+`Registry<...>::create(name)` returned whichever concrete type the folded body
+kept (a `PecFieldBC`). Calling `IParticleBoundary::apply(species, side)` on a
+`PecFieldBC` dispatched through the field-BC vtable, reinterpreting the species
+as a `YeeField2D` — which is exactly the "garbage `Grid2D` by value" symptom.
 
-## Ruled out (with evidence)
-- **Stencil math**: fault persists with the old wrapping `periodic_index`
-  stencil, so it is not the ghost-read change itself.
-- **ODR / stale build**: persists after a full `rm -rf build` from-scratch
-  rebuild.
-- **Corrupt host `fields_.grid`**: a guard comparing `fields_.grid` to `grid_`
-  at step entry AND after every sub-stage (fill/advance_b/push/bc/deposit/filter)
-  **never fired** — the host struct is valid right up to the launch, yet the
-  launcher reads garbage `g.nx/ny/nghost`.
-- **Zero-work launch**: guards for `total<=0` / `size()==0` added; not the cause.
+Why the earlier evidence pointed elsewhere: the host `fields_.grid` guard never
+fired because the host struct really was fine; the corruption was the *wrong
+object/vtable* on the call, observed only on the device side as a bad grid.
 
-## Leading hypothesis
-A kernarg-marshaling or async-ordering issue specific to
-`periodic_fields_kernel`'s argument list (`Grid2D` by value + 2 ints + 6
-`double*`). The constant `nghost=300495749` smells like a fixed wrong offset /
-uninitialized kernarg slot. Next steps to try:
-- Pass `Grid2D` fields as scalars (nx, ny, nghost, origin, lx, ly) instead of
-  the whole struct by value, or pass a `const Grid2D*` device copy.
-- Run under `rocgdb` with a hardware watchpoint on the kernarg region; or build a
-  minimal repro launching only `periodic_fields_kernel` in a tight loop.
-- Check alignment/padding of `Grid2D` (mixed int/double) against the HIP kernarg
-  ABI; compare with the working `fdtd_*_kernel` which also takes `Grid2D` by
-  value but with fewer trailing pointer args.
+### Fix
+`include/quasar/core/registry.hpp` now offers type-keyed registration
+(`register_type<Derived>()` -> `&make<Derived>`), and the macro uses it. Each
+`make<Derived>` is a distinct address-taken function specialization the compiler
+cannot fold, so the factory builds the correct concrete type. Verified: particle
+BC interface dispatch passes 210/210 stress runs; the field-ghost path no longer
+faults either.
 
-## Re-enable checklist
-1. Root-cause + fix the kernarg issue above.
-2. `-DQUASAR_PIC_FIELD_GHOSTS` (or remove the guard) in the build.
-3. Switch `ddx/ddy_staggered` in `include/quasar/numerics/stencil.hpp` from
-   `periodic_index` back to `index` (ghost-aware).
-4. Restore the `fdtd_order==4 => nghost>=2` constructor check in `pic_solver.cpp`.
-5. Add the real PEC reflection test (`test_pec_plane_wave_reflection.cpp`,
+## Remaining (field ghosts — a feature, not the bug)
+Particle BCs now dispatch through the interface. Field ghosts stay gated behind
+`QUASAR_PIC_FIELD_GHOSTS` because the physics is incomplete, not because of a
+crash:
+1. ~~Root-cause + fix the crash~~ — DONE (registry fix above).
+2. Switch `ddx/ddy_staggered` in `include/quasar/numerics/stencil.hpp` from
+   `periodic_index` to `index` (ghost-aware) so PEC walls are physical.
+3. Restore the `fdtd_order==4 => nghost>=2` constructor check in `pic_solver.cpp`.
+4. Add the real PEC reflection test (`test_pec_plane_wave_reflection.cpp`,
    currently a stub) and a periodic-equivalence test (ghost fill must reproduce
-   the wrap bit-for-bit).
+   the wrap bit-for-bit), then enable the flag by default.

@@ -27,6 +27,18 @@ class Registry {
     return true;
   }
 
+  // Type-keyed registration. Each Derived instantiates a distinct factory
+  // function, so the resulting std::function targets cannot be folded together
+  // by the compiler/linker (identical-code folding would otherwise collapse the
+  // stateless `make_unique<Derived>` lambdas of several types into one, making
+  // every create() build whichever type the folded body kept — a real bug we hit
+  // with the boundary registry). Keying the factory on &make<Derived> defeats
+  // the fold because each address-taken specialization must stay distinct.
+  template <class Derived>
+  bool register_type(std::string name) {
+    return register_factory(std::move(name), &make<Derived>);
+  }
+
   std::unique_ptr<Base> create(std::string_view name) const {
     const auto it = factories_.find(std::string{name});
     if (it == factories_.end()) {
@@ -52,6 +64,11 @@ class Registry {
   std::size_t size() const noexcept { return factories_.size(); }
 
  private:
+  template <class Derived>
+  static std::unique_ptr<Base> make() {
+    return std::make_unique<Derived>();
+  }
+
   Registry()                           = default;
   ~Registry()                          = default;
   Registry(const Registry&)            = delete;
@@ -72,6 +89,5 @@ class Registry {
 #define QUASAR_REGISTRY_REGISTER(Base, Name, Class)                                     \
   namespace {                                                                           \
   const bool QUASAR_REGISTRY_DETAIL_PASTE(_quasar_reg_, __LINE__) =                     \
-      ::quasar::Registry<Base>::instance().register_factory(                            \
-          (Name), []() -> std::unique_ptr<Base> { return std::make_unique<Class>(); }); \
+      ::quasar::Registry<Base>::instance().template register_type<Class>((Name));       \
   }

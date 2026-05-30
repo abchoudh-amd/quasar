@@ -5,7 +5,6 @@
 
 #include "backend/hip/pic/launch.hpp"
 
-
 #include <stdexcept>
 #include <string_view>
 
@@ -140,36 +139,13 @@ void EmPic2D3V::fill_field_ghosts() {
 }
 
 void EmPic2D3V::apply_particle_bcs(ParticleSpecies& s) {
-  // The per-side boundary kind comes from the registry-built BC objects (see the
-  // ctor); we read the configured kind back and invoke the corresponding kernel
-  // with the solver's own grid_.
-  //
-  // TODO(particle-bc-heisenbug): The intended dispatch is
-  //   particle_bcs_[side]->apply(s, static_cast<Side>(side));
-  // i.e. straight through the IParticleBoundary interface. That path triggers an
-  // intermittent (~30%) HIP illegal-memory-access (it bottoms out in the wrap
-  // kernel reading what the BC class passes as species.grid()), whereas calling
-  // the same kernels here with grid_ is stable (verified 10/10 vs ~4/10). The
-  // grid value itself is NOT corrupt (an equality guard on species.grid() vs
-  // grid_ never fired), so the fault is in the interface-object call path, not
-  // the data. Until it is root-caused, dispatch on the configured kind with
-  // grid_. See plans/field_bc_heisenbug.md.
-  bool any_periodic = false;
+  // Dispatch through the registry-built IParticleBoundary objects. The former
+  // "heisenbug" that made this path fault was a registry factory collision
+  // (identical-code folding collapsed the stateless make_unique lambdas, so
+  // create() returned the wrong concrete type); it is fixed in
+  // core/registry.hpp via type-keyed registration.
   for (int side = 0; side < 4; ++side) {
-    switch (cfg_.boundary.particle[side]) {
-      case boundary::ParticleBoundaryKind::periodic:
-        any_periodic = true;  // wrap kernel ignores side; apply once below
-        break;
-      case boundary::ParticleBoundaryKind::specular:
-        ::launch_pic_boundary_specular_particles(grid_, s, side, nullptr);
-        break;
-      case boundary::ParticleBoundaryKind::absorbing:
-        ::launch_pic_boundary_absorb_particles(grid_, s, side, nullptr);
-        break;
-    }
-  }
-  if (any_periodic) {
-    ::launch_pic_boundary_periodic_particles(grid_, s, nullptr);
+    particle_bcs_[side]->apply(s, static_cast<Side>(side));
   }
 }
 
@@ -178,20 +154,15 @@ void EmPic2D3V::step(Real dt) {
   backend::device_memset(current_.jy.device_ptr(), 0, current_.jy.bytes());
   backend::device_memset(current_.jz.device_ptr(), 0, current_.jz.bytes());
 
-  // TODO(field-bc-heisenbug): The boundary-aware stencil + field-ghost fill is
-  // wired (fill_field_ghosts + the periodic/PEC field kernels) but currently
-  // DISABLED behind QUASAR_PIC_FIELD_GHOSTS because enabling it triggers an
-  // intermittent (~30%) HIP "illegal memory access" surfaced in
-  // periodic_fields_kernel: the kernel intermittently receives a garbage
-  // Grid2D-by-value even though the host fields_.grid stays valid right up to
-  // the launch (verified by instrumentation). Ruled out: the stencil math
-  // (fault persists with the old periodic_index stencil), ODR/stale build
-  // (persists after a from-scratch rebuild), and a corrupt fields_.grid host
-  // member (a guard at every sub-stage never fired). Likely a kernarg
-  // marshaling / async-ordering issue specific to that kernel's argument list.
-  // Until it is root-caused, fields use the implicit periodic wrap baked into
-  // Grid2D::periodic_index (the original behavior), so periodic runs are
-  // correct and PEC field walls are inert. See plans/ for the deferred fix.
+  // The field-ghost fill (fill_field_ghosts + the periodic/PEC field kernels) is
+  // wired but gated behind QUASAR_PIC_FIELD_GHOSTS. The crash that originally
+  // blocked it was the registry factory collision (now fixed in
+  // core/registry.hpp), and the gated path no longer faults. It stays OFF by
+  // default only because the FDTD stencil still reads via periodic_index (the
+  // implicit periodic wrap), so PEC field walls are not yet physically correct
+  // — completing them requires switching the stencil to ghost-aware index reads
+  // (nghost>=2 for order 4) and a PEC reflection test. See
+  // plans/field_bc_heisenbug.md for the remaining checklist.
 #ifdef QUASAR_PIC_FIELD_GHOSTS
   fill_field_ghosts();
 #endif
