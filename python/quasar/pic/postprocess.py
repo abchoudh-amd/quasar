@@ -25,14 +25,23 @@ def rms(values) -> float:
     return float(np.sqrt(np.mean(arr * arr)))
 
 
-def _reshape_with_ghost(flat: np.ndarray, nx: int, ny: int) -> np.ndarray:
-    """Yee field buffers include one ghost cell per side
-    (storage = (nx+2)*(ny+2)). Returns the interior ``(ny, nx)`` view."""
-    side_x = nx + 2
-    side_y = ny + 2
-    if flat.size == side_x * side_y:
-        return flat.reshape(side_y, side_x)[1:-1, 1:-1]
+def reshape_with_ghost(flat: np.ndarray, nx: int, ny: int) -> np.ndarray:
+    """Return the interior ``(ny, nx)`` view of a ghost-padded Yee field buffer.
+
+    The buffer storage is ``(nx + 2g) * (ny + 2g)`` for some ghost width ``g``
+    (1 for 2nd-order FDTD, 2 for 4th-order). The ghost width is recovered from the
+    flat size rather than assumed, then ``g`` cells are stripped from each side. A
+    buffer already sized ``nx * ny`` (no ghosts) is reshaped directly."""
+    g = 0
+    while (nx + 2 * (g + 1)) * (ny + 2 * (g + 1)) <= flat.size:
+        g += 1
+    if flat.size == (nx + 2 * g) * (ny + 2 * g) and g > 0:
+        return flat.reshape(ny + 2 * g, nx + 2 * g)[g:-g, g:-g]
     return flat.reshape(ny, nx)
+
+
+# Backwards-compatible alias (older callers used the private name).
+_reshape_with_ghost = reshape_with_ghost
 
 
 def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:

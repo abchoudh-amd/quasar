@@ -39,12 +39,12 @@ Key conventions:
 - **Backend isolation** — all HIP `.hip` / device code lives under `src/backend/hip/`. Code outside that directory must go through abstractions in `include/quasar/backend/` (`device.hpp`, `memory.hpp`).
 - **Plugin registry** — concrete schemes/BCs/physics self-register via `core/registry.hpp` so the YAML/Python input deck selects implementations by string name. Drivers in `apps/` should not contain `if/else` chains over physics types.
 - **Public vs private** — only headers under `include/quasar/` are installed. Anything in `src/` (including `src/**/detail/`) is implementation-private; do not include from `src/` outside its own translation unit.
-- **Apps are thin** — `apps/*/main.cpp` only parses input and calls the library.
+- **Apps are thin** — any future `apps/*/main.cpp` should only parse input and call the library. Today both vertical slices are driven from Python (`quasar.coil.cli`, `quasar.pic.cli`) and `apps/` holds only a placeholder.
 
 Concrete physics modules currently present:
 
 - `physics/magnetostatics` — Biot–Savart field evaluator over conductor geometries with observation point sets. Exposed to Python as `quasar.coil` with a CLI at `python -m quasar.coil.cli run <input.yaml>` that writes `out.npz`.
-- `physics/pic` — minimal EM-PIC vertical slice (`EmPicConfig`, FDTD, particle shapes). Driver is `apps/quasar_pic`; Python deck I/O is under `quasar.pic`.
+- `physics/pic` — minimal EM-PIC vertical slice (`EmPicConfig`, FDTD, particle shapes). Driven from Python at `python -m quasar.pic.cli run <input.yaml>` (no C++ app exists; `apps/` holds only a placeholder `CMakeLists.txt`). Deck I/O is under `quasar.pic`.
 - `physics/analytic_fields` — closed-form reference fields used by tests/examples.
 
 CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target creation), `QuasarHipRuntime.cmake` (HIP runtime detection), `QuasarLaunchParams.cmake` (per-arch kernel launch tuning).

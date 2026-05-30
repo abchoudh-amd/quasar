@@ -182,10 +182,10 @@ PYBIND11_MODULE(_core, m) {
       .def("point_at",       &LineProbe::point_at, py::arg("i"))
       .def("to_point_cloud", &LineProbe::to_point_cloud);
 
+  // Kernel tiling is compile-time (per-gfx, via cmake/QuasarLaunchParams.cmake);
+  // BiotSavartConfig carries only the device stream, which Python does not set.
   py::class_<BiotSavartConfig>(ms, "BiotSavartConfig")
-      .def(py::init<>())
-      .def_readwrite("tile_segments", &BiotSavartConfig::tile_segments)
-      .def_readwrite("block_size",    &BiotSavartConfig::block_size);
+      .def(py::init<>());
 
   // Abstract field-evaluator base so concrete evaluators (Biot-Savart + the
   // analytic fields) can be passed polymorphically to the PIC external-field

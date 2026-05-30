@@ -159,6 +159,19 @@ class _ObservationResult:
     detail: Any  # the source object (ObservationGrid, PlaneSlice, LineProbe, ...)
 
 
+# Upper bound on the number of observation points materialized on the host (and
+# uploaded to the device). Guards against a typo'd resolution requesting an
+# absurd buffer; raise it if a real workload needs more.
+MAX_OBSERVATION_POINTS = 1 << 26  # ~67M points
+
+
+def _check_point_count(kind: str, n: int) -> None:
+    if n < 0 or n > MAX_OBSERVATION_POINTS:
+        raise ValueError(
+            f"observation.{kind}: point count {n} exceeds the limit "
+            f"{MAX_OBSERVATION_POINTS}")
+
+
 def _build_observation(spec: dict) -> _ObservationResult:
     ot = _require(spec, "type", "observation")
 
@@ -170,6 +183,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
         g = ObservationGrid()
         g.origin = Vec3(float(bounds[0][0]), float(bounds[1][0]), float(bounds[2][0]))
         nx, ny, nz = int(res[0]), int(res[1]), int(res[2])
+        _check_point_count("grid", nx * ny * nz)
         g.spacing = Vec3(
             (float(bounds[0][1]) - float(bounds[0][0])) / max(1, nx - 1),
             (float(bounds[1][1]) - float(bounds[1][0])) / max(1, ny - 1),
@@ -187,6 +201,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
         v_extent = float(_require(spec, "v_extent_m", "observation.plane"))
         nu = int(_require(spec, "nu", "observation.plane"))
         nv = int(_require(spec, "nv", "observation.plane"))
+        _check_point_count("plane", nu * nv)
         s = PlaneSlice()
         s.origin = origin
         s.u_step = Vec3(u.x * u_extent / max(1, nu - 1),
@@ -203,6 +218,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
         start = _vec3(_require(spec, "start_xyz", "observation.line"))
         end = _vec3(_require(spec, "end_xyz", "observation.line"))
         n = int(_require(spec, "n_points", "observation.line"))
+        _check_point_count("line", n)
         lp = LineProbe()
         lp.start, lp.end, lp.n_points = start, end, n
         return _ObservationResult(points=lp.to_point_cloud(),

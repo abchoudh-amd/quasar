@@ -11,14 +11,12 @@ namespace quasar::magnetostatics {
 class ConductorSystem;
 using core::PointCloud;
 
-// Runtime configuration knobs for BiotSavartEvaluator. The tile/block fields
-// are documented hints; Phase 1 uses compile-time defaults in launch_params.hpp
-// and only `stream` is consumed by the orchestrator. Per-gfx tuning of these
-// hints arrives in Phase 4.
+// Runtime configuration for BiotSavartEvaluator. Kernel tiling (shared-memory
+// tile width and thread-block size) is a COMPILE-TIME concern: the tile sizes a
+// __shared__ array, and both are tuned per-gfx in cmake/QuasarLaunchParams.cmake
+// (see launch_params.hpp). The only runtime knob is the device stream.
 struct BiotSavartConfig {
-  int                       tile_segments = 128;
-  int                       block_size    = 256;
-  quasar::backend::stream_t stream        = nullptr;
+  quasar::backend::stream_t stream = nullptr;
 };
 
 // Double-precision evaluator. This is the only class that participates in

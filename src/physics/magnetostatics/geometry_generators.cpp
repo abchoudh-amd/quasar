@@ -46,6 +46,22 @@ void check_segment_count(const std::string& gen, int n) {
   }
 }
 
+// Upper bound on generated filament vertices, guarding the reserve()/loop below
+// against signed-int overflow from a hostile or typo'd deck (n_turns *
+// n_segments_per_turn is computed in size_t here, not int).
+constexpr std::size_t kMaxFilamentPoints = std::size_t{1} << 26;  // ~67M vertices
+
+std::size_t checked_total_points(const std::string& gen, int n_turns,
+                                 int n_segments_per_turn) {
+  const std::size_t total = static_cast<std::size_t>(n_turns)
+                          * static_cast<std::size_t>(n_segments_per_turn);
+  if (total > kMaxFilamentPoints) {
+    throw std::invalid_argument{
+        gen + ": n_turns * n_segments_per_turn exceeds the vertex limit"};
+  }
+  return total;
+}
+
 void check_finite(const std::string& gen, const std::string& field, Real x) {
   if (!std::isfinite(x)) {
     throw std::invalid_argument{gen + ": " + field + " must be finite"};
@@ -85,13 +101,14 @@ Filament helix(Vec3 center, Vec3 axis, Real radius_m, Real pitch_m,
   check_finite("helix", "current_A", current_A);
   const Basis b = make_basis(axis, "helix");
 
-  const int  n_total      = n_turns * n_segments_per_turn;
+  const std::size_t n_total = checked_total_points("helix", n_turns,
+                                                   n_segments_per_turn);
   const Real total_length = static_cast<Real>(n_turns) * pitch_m;
   const Vec3 start        = center - (total_length / Real{2}) * b.axis_hat;
 
   Filament f{std::move(name), current_A, {}};
-  f.points.reserve(static_cast<std::size_t>(n_total) + 1u);
-  for (int k = 0; k <= n_total; ++k) {
+  f.points.reserve(n_total + 1u);
+  for (std::size_t k = 0; k <= n_total; ++k) {
     const Real t        = static_cast<Real>(k) / static_cast<Real>(n_segments_per_turn);
     const Real theta    = Real{2} * pi * t;
     const Real z_offset = t * pitch_m;
