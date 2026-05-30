@@ -177,5 +177,66 @@ class MaxwellianBlockRegionTests(unittest.TestCase):
             region_y_min_m=0.0, region_y_max_m=1.0)]).validate()
 
 
+class ResourceCeilingTests(unittest.TestCase):
+
+    def test_oversized_grid_dim_rejected(self):
+        from quasar.pic.io import MAX_GRID_DIM
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=MAX_GRID_DIM + 1, ny=8,
+                                lx_m=1.0, ly_m=1.0)).validate()
+
+    def test_too_many_particles_rejected(self):
+        from quasar.pic.io import MAX_PARTICLES
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0,
+                     n_particles=MAX_PARTICLES + 1, initial=SpeciesInitial())
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_zero_particles_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=0,
+                     initial=SpeciesInitial())
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_nonpositive_mass_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=0.0, n_particles=8,
+                     initial=SpeciesInitial())
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_invalid_fdtd_order_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(numerics=Numerics(fdtd_order=3)).validate()
+
+    def test_negative_temperature_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
+                     initial=SpeciesInitial(temperature_eV=-1.0))
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_nonpositive_steps_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(time=Time(dt_s="auto", steps=0)).validate()
+
+    def test_bad_dt_string_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(time=Time(dt_s="fast", steps=8)).validate()
+
+
+class FieldOnlyDeckTests(unittest.TestCase):
+
+    def test_external_field_only_deck_valid(self):
+        # No species, but an external field drives the run.
+        _deck(species=[], external_field=ExternalField(
+            evaluator_type="uniform")).validate()
+
+    def test_units_normalized_accepted(self):
+        _deck(units="normalized").validate()
+
+    def test_bad_units_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(units="CGS").validate()
+
+
 if __name__ == "__main__":
     unittest.main()

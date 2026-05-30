@@ -101,6 +101,95 @@ class CoilIoDeckParseTest(unittest.TestCase):
             path.unlink()
 
 
+class CoilIoErrorPathTest(unittest.TestCase):
+
+    def _write(self, body: str) -> Path:
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False)
+        tmp.write(textwrap.dedent(body))
+        tmp.flush()
+        tmp.close()
+        return Path(tmp.name)
+
+    def _expect_value_error(self, body: str) -> None:
+        path = self._write(body)
+        try:
+            with self.assertRaises(ValueError):
+                coil_io.load(path)
+        finally:
+            path.unlink()
+
+    def test_rejects_non_mapping_top_level(self):
+        self._expect_value_error("- just\n- a\n- list\n")
+
+    def test_rejects_empty_conductors(self):
+        self._expect_value_error("""
+            units: SI
+            conductors: []
+            observation: {type: points, points_xyz_m: [[0,0,0]]}
+            output: {format: npz, path: out.npz}
+            """)
+
+    def test_rejects_missing_required_key(self):
+        # conductor missing 'geometry'
+        self._expect_value_error("""
+            units: SI
+            conductors:
+              - {name: loop, current_A: 1.0}
+            observation: {type: points, points_xyz_m: [[0,0,0]]}
+            output: {format: npz, path: out.npz}
+            """)
+
+    def test_rejects_non_npz_output_format(self):
+        self._expect_value_error("""
+            units: SI
+            conductors:
+              - name: loop
+                current_A: 1.0
+                geometry: {type: circular_loop, radius_m: 0.1,
+                           center_xyz: [0,0,0], axis_xyz: [0,0,1], n_segments: 16}
+            observation: {type: points, points_xyz_m: [[0,0,0]]}
+            output: {format: vtk, path: out.vtk}
+            """)
+
+    def test_rejects_oversized_observation_grid(self):
+        # resolution product exceeds MAX_OBSERVATION_POINTS
+        self._expect_value_error("""
+            units: SI
+            conductors:
+              - name: loop
+                current_A: 1.0
+                geometry: {type: circular_loop, radius_m: 0.1,
+                           center_xyz: [0,0,0], axis_xyz: [0,0,1], n_segments: 16}
+            observation:
+              type: grid
+              bounds_m: [[-1, 1], [-1, 1], [-1, 1]]
+              resolution: [100000, 100000, 100000]
+            output: {format: npz, path: out.npz}
+            """)
+
+
+class ConfineOutputPathTest(unittest.TestCase):
+
+    def test_rejects_parent_escape(self):
+        from quasar._paths import confine_output_path
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                confine_output_path(tmp, "../escape.npz")
+
+    def test_rejects_absolute_escape(self):
+        from quasar._paths import confine_output_path
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                confine_output_path(tmp, "/etc/passwd")
+
+    def test_allows_in_tree_path(self):
+        from quasar._paths import confine_output_path
+        with tempfile.TemporaryDirectory() as tmp:
+            out = confine_output_path(tmp, "sub/out.npz")
+            self.assertTrue(str(out).startswith(str(Path(tmp).resolve())))
+
+
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class CoilCliEndToEndTest(unittest.TestCase):
 
