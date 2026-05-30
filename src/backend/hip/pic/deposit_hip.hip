@@ -25,6 +25,23 @@ namespace {
 // supports plus a one-cell crossing with margin.
 constexpr int kWindow = 6;
 
+// Per-axis deposit indexing. On a periodic axis (both sides periodic) the node is
+// wrapped exactly as before (bit-identical to the historical behaviour). On a
+// non-periodic (wall) axis the node is NOT wrapped: out-of-domain shape tails land
+// in the ghost layer via Grid2D::index, and are later reflected into the interior
+// by the specular fold-back kernel. The clamp keeps a rare deep overshoot inside
+// allocated ghost storage instead of wrapping it to the far edge.
+__device__ inline int clamp_axis(int i, int lo, int hi) {
+  return i < lo ? lo : (i > hi ? hi : i);
+}
+
+__device__ inline std::size_t deposit_index(const quasar::Grid2D& g, int i, int j,
+                                            bool periodic_x, bool periodic_y) {
+  const int ii = periodic_x ? g.wrap_i(i) : clamp_axis(i, -g.nghost, g.nx - 1 + g.nghost);
+  const int jj = periodic_y ? g.wrap_j(j) : clamp_axis(j, -g.nghost, g.ny - 1 + g.nghost);
+  return g.index(ii, jj);
+}
+
 template <int ShapeOrder>
 __device__ inline double weight_1d(double r) {
   if constexpr (ShapeOrder == 1) {
@@ -37,6 +54,7 @@ __device__ inline double weight_1d(double r) {
 
 template <int ShapeOrder>
 __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
+                               bool periodic_x, bool periodic_y,
                                const double* __restrict__ x, const double* __restrict__ y,
                                const double* __restrict__ x_prev, const double* __restrict__ y_prev,
                                const double* __restrict__ vz, const double* __restrict__ weight,
@@ -88,7 +106,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
       const double dsx = Sx1[a] - Sx0[a];
       run += kx * dsx * sy_mid;
       if (run != 0.0) {
-        atomicAdd(jx + g.periodic_index(bx + a, by + b), run);
+        atomicAdd(jx + deposit_index(g, bx + a, by + b, periodic_x, periodic_y), run);
       }
     }
   }
@@ -102,7 +120,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
       const double dsy = Sy1[b] - Sy0[b];
       run += ky * dsy * sx_mid;
       if (run != 0.0) {
-        atomicAdd(jy + g.periodic_index(bx + a, by + b), run);
+        atomicAdd(jy + deposit_index(g, bx + a, by + b, periodic_x, periodic_y), run);
       }
     }
   }
@@ -113,7 +131,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
     for (int a = 0; a < kWindow; ++a) {
       const double smid = 0.5 * (Sx0[a] * Sy0[b] + Sx1[a] * Sy1[b]);
       if (smid != 0.0) {
-        atomicAdd(jz + g.periodic_index(bx + a, by + b), qwz * smid);
+        atomicAdd(jz + deposit_index(g, bx + a, by + b, periodic_x, periodic_y), qwz * smid);
       }
     }
   }
@@ -121,12 +139,14 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
 
 template <int ShapeOrder>
 void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
-            quasar::JField2D<double>& j, double dt, hipStream_t stream) {
+            quasar::JField2D<double>& j, double dt, bool periodic_x, bool periodic_y,
+            hipStream_t stream) {
   if (s.size() == 0) return;
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
   hipLaunchKernelGGL((deposit_kernel<ShapeOrder>), grid, block, 0, stream,
-                     g, s.size(), s.charge(), dt, s.x(), s.y(), s.x_prev(), s.y_prev(),
+                     g, s.size(), s.charge(), dt, periodic_x, periodic_y,
+                     s.x(), s.y(), s.x_prev(), s.y_prev(),
                      s.vz(), s.weight(), s.alive(), j.jx.device_ptr(), j.jy.device_ptr(),
                      j.jz.device_ptr());
 }
@@ -136,15 +156,19 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
 extern "C" void launch_pic_deposit_shape1(const quasar::Grid2D& g,
                                           const quasar::pic::ParticleSpecies& s,
                                           quasar::JField2D<double>& j,
-                                          double dt, quasar_stream_t stream) {
-  launch<1>(g, s, j, dt, static_cast<hipStream_t>(stream));
+                                          double dt, int periodic_x, int periodic_y,
+                                          quasar_stream_t stream) {
+  launch<1>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
+            static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_deposit_shape2(const quasar::Grid2D& g,
                                           const quasar::pic::ParticleSpecies& s,
                                           quasar::JField2D<double>& j,
-                                          double dt, quasar_stream_t stream) {
-  launch<2>(g, s, j, dt, static_cast<hipStream_t>(stream));
+                                          double dt, int periodic_x, int periodic_y,
+                                          quasar_stream_t stream) {
+  launch<2>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
+            static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 }

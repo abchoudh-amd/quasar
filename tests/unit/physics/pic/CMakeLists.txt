@@ -4,6 +4,7 @@ set(_quasar_pic_tests
   test_single_particle_uniform_B
   test_single_particle_ExB_drift
   test_charge_conservation
+  test_specular_charge_conservation
   test_tsc_noise_reduction
   test_pec_plane_wave_reflection
   test_specular_particle

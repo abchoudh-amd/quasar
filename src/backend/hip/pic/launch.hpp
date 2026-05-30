@@ -45,10 +45,16 @@ void launch_pic_gather_push_shape2(const quasar::Grid2D&, quasar::pic::ParticleS
                                    const quasar::YeeField2D<double>&, double, quasar_stream_t);
 
 // -- Current deposition ------------------------------------------------------
+// `periodic_x`/`periodic_y` (0/1) select per-axis node indexing: a periodic axis
+// wraps (historical behaviour), a non-periodic (wall) axis deposits into ghost
+// cells without wrapping so launch_pic_boundary_specular_foldback can reflect the
+// boundary-crossing current back into the interior.
 void launch_pic_deposit_shape1(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
-                               quasar::JField2D<double>&, double, quasar_stream_t);
+                               quasar::JField2D<double>&, double, int periodic_x,
+                               int periodic_y, quasar_stream_t);
 void launch_pic_deposit_shape2(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
-                               quasar::JField2D<double>&, double, quasar_stream_t);
+                               quasar::JField2D<double>&, double, int periodic_x,
+                               int periodic_y, quasar_stream_t);
 
 // -- Current filtering -------------------------------------------------------
 // `scratch` is caller-owned ping-pong storage of at least grid.storage_size()
@@ -63,6 +69,12 @@ void launch_pic_boundary_absorb_particles(const quasar::Grid2D&,
                                           quasar::pic::ParticleSpecies&, int, quasar_stream_t);
 void launch_pic_boundary_specular_particles(const quasar::Grid2D&,
                                             quasar::pic::ParticleSpecies&, int, quasar_stream_t);
+// Reflects current deposited into one reflecting side's ghost cells back into the
+// interior (image-charge fold) and zeroes those ghosts. Run after the deposit and
+// before the current filter / E-update on every specular side.
+void launch_pic_boundary_specular_foldback(const quasar::Grid2D&,
+                                           quasar::JField2D<double>&, int side,
+                                           quasar_stream_t);
 // `axis` selects the wrapped axis: 0 = x, 1 = y. A per-side periodic BC wraps
 // only its own axis so it does not interfere with non-periodic walls.
 void launch_pic_boundary_periodic_particles(const quasar::Grid2D&,

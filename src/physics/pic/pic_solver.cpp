@@ -50,12 +50,14 @@ void BorisPusher<2>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
 
 template <>
 void Esirkepov2D<1>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, Real dt) const {
-  ::launch_pic_deposit_shape1(j.grid, s, j, dt, nullptr);
+  ::launch_pic_deposit_shape1(j.grid, s, j, dt, periodic_x_ ? 1 : 0,
+                              periodic_y_ ? 1 : 0, nullptr);
 }
 
 template <>
 void Esirkepov2D<2>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, Real dt) const {
-  ::launch_pic_deposit_shape2(j.grid, s, j, dt, nullptr);
+  ::launch_pic_deposit_shape2(j.grid, s, j, dt, periodic_x_ ? 1 : 0,
+                              periodic_y_ ? 1 : 0, nullptr);
 }
 
 }  // namespace quasar::numerics
@@ -116,6 +118,14 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   } else {
     throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
   }
+  // The deposit wraps an axis only when both of its sides are periodic; a wall on
+  // either side switches that axis to ghost-cell deposition + specular fold-back.
+  const auto& pb = cfg_.boundary.particle;
+  const bool periodic_x = pb[0] == boundary::ParticleBoundaryKind::periodic
+                       && pb[1] == boundary::ParticleBoundaryKind::periodic;
+  const bool periodic_y = pb[2] == boundary::ParticleBoundaryKind::periodic
+                       && pb[3] == boundary::ParticleBoundaryKind::periodic;
+  deposit_->set_periodic_axes(periodic_x, periodic_y);
 }
 
 void EmPic2D3V::add_species(ParticleSpecies s) {
@@ -171,6 +181,14 @@ void EmPic2D3V::step(Real dt) {
     pusher_->push(s, fields_, external_fields_, dt);
     apply_particle_bcs(s);
     deposit_->deposit(s, current_, dt);
+  }
+  // On reflecting (specular) sides the deposit left boundary-crossing current in
+  // the ghost cells; fold it back into the interior as image current before the
+  // filter / E-update read the interior J. Periodic/absorbing sides need no fold.
+  for (int side = 0; side < 4; ++side) {
+    if (cfg_.boundary.particle[side] == boundary::ParticleBoundaryKind::specular) {
+      ::launch_pic_boundary_specular_foldback(grid_, current_, side, nullptr);
+    }
   }
   filters_.apply(current_, cfg_.boundary);
 #ifdef QUASAR_PIC_FIELD_GHOSTS
