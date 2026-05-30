@@ -81,6 +81,10 @@ class SpeciesInitial:
     density_per_m3: float = 1.0e18
     temperature_eV: float = 1.0
     drift_v: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    region_x_min_m: float | None = None
+    region_x_max_m: float | None = None
+    region_y_min_m: float | None = None
+    region_y_max_m: float | None = None
 
 
 @dataclass
@@ -96,6 +100,17 @@ class Species:
 class Time:
     dt_s: Union[float, str] = "auto"
     steps: int = 100
+
+
+@dataclass
+class BoundaryConfig:
+    """Per-side particle boundary kinds. Order: [x_min, x_max, y_min, y_max].
+
+    Each entry is one of ``periodic`` (no-op), ``specular`` (reflect), or
+    ``absorbing`` (mark out-of-domain particles as dead).
+    """
+    particle: tuple[str, str, str, str] = (
+        "periodic", "periodic", "periodic", "periodic")
 
 
 @dataclass
@@ -115,6 +130,7 @@ class PicDeck:
     species: list[Species] = field(default_factory=list)
     time: Time = field(default_factory=Time)
     diagnostics: Diagnostics = field(default_factory=Diagnostics)
+    boundary: BoundaryConfig = field(default_factory=BoundaryConfig)
     units: str = "SI"
     raw: dict = field(default_factory=dict)
 
@@ -140,18 +156,38 @@ class PicDeck:
                 raise ValueError(f"species {sp.name!r}: mass_kg must be positive")
             if sp.n_particles <= 0:
                 raise ValueError(f"species {sp.name!r}: n_particles must be positive")
-            if sp.initial.distribution != "maxwellian_uniform":
+            if sp.initial.distribution not in ("maxwellian_uniform",
+                                                 "maxwellian_block"):
                 raise ValueError(
                     f"species {sp.name!r}: initial.distribution "
                     f"{sp.initial.distribution!r} is not supported (only "
-                    "'maxwellian_uniform')"
+                    "'maxwellian_uniform' and 'maxwellian_block')"
                 )
+            if sp.initial.distribution == "maxwellian_block":
+                bounds = (sp.initial.region_x_min_m, sp.initial.region_x_max_m,
+                          sp.initial.region_y_min_m, sp.initial.region_y_max_m)
+                if any(b is None for b in bounds):
+                    raise ValueError(
+                        f"species {sp.name!r}: maxwellian_block requires "
+                        "initial.region.{x_min_m,x_max_m,y_min_m,y_max_m}"
+                    )
+                if sp.initial.region_x_min_m >= sp.initial.region_x_max_m:
+                    raise ValueError(
+                        f"species {sp.name!r}: region x_min_m must be < x_max_m")
+                if sp.initial.region_y_min_m >= sp.initial.region_y_max_m:
+                    raise ValueError(
+                        f"species {sp.name!r}: region y_min_m must be < y_max_m")
             if sp.initial.temperature_eV < 0:
                 raise ValueError(f"species {sp.name!r}: temperature_eV must be >= 0")
         if isinstance(self.time.dt_s, str) and self.time.dt_s != "auto":
             raise ValueError("time.dt_s must be a float or the string 'auto'")
         if self.time.steps <= 0:
             raise ValueError("time.steps must be positive")
+        allowed_bc = {"periodic", "specular", "absorbing"}
+        for i, bc in enumerate(self.boundary.particle):
+            if bc not in allowed_bc:
+                raise ValueError(
+                    f"boundary.particle[{i}] = {bc!r} must be one of {sorted(allowed_bc)}")
 
 
 def _parse_domain(d: dict) -> Domain:
@@ -200,11 +236,19 @@ def _parse_species(items: list[dict] | None) -> list[Species]:
     for raw in items:
         name = str(_require(raw, "name", "species"))
         init_raw = raw.get("initial", {})
+        region_raw = init_raw.get("region", {}) or {}
+        def _opt(key):
+            v = region_raw.get(key)
+            return None if v is None else float(v)
         initial = SpeciesInitial(
             distribution=str(init_raw.get("distribution", "maxwellian_uniform")),
             density_per_m3=float(init_raw.get("density_per_m3", 1.0e18)),
             temperature_eV=float(init_raw.get("temperature_eV", 1.0)),
             drift_v=_vec3(init_raw.get("drift_v")),
+            region_x_min_m=_opt("x_min_m"),
+            region_x_max_m=_opt("x_max_m"),
+            region_y_min_m=_opt("y_min_m"),
+            region_y_max_m=_opt("y_max_m"),
         )
         out.append(Species(
             name=name,
@@ -235,6 +279,19 @@ def _parse_diagnostics(d: dict | None) -> Diagnostics:
     )
 
 
+def _parse_boundary(d: dict | None) -> BoundaryConfig:
+    if d is None:
+        return BoundaryConfig()
+    p = d.get("particle", "periodic")
+    if isinstance(p, str):
+        particle = (p, p, p, p)
+    elif isinstance(p, (list, tuple)) and len(p) == 4:
+        particle = (str(p[0]), str(p[1]), str(p[2]), str(p[3]))
+    else:
+        raise ValueError("boundary.particle must be a string or 4-element list")
+    return BoundaryConfig(particle=particle)
+
+
 def parse(data: dict) -> PicDeck:
     deck = PicDeck(
         domain=_parse_domain(_require(data, "domain", "deck")),
@@ -244,6 +301,7 @@ def parse(data: dict) -> PicDeck:
         species=_parse_species(data.get("species")),
         time=_parse_time(data.get("time")),
         diagnostics=_parse_diagnostics(data.get("diagnostics")),
+        boundary=_parse_boundary(data.get("boundary")),
         units=str(data.get("units", "SI")),
         raw=data,
     )

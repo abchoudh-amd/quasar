@@ -3,14 +3,9 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/boundary/boundary_condition.hpp"
 
-#include <hip/hip_runtime.h>
+#include "backend/hip/pic/launch.hpp"
 
-extern "C" void launch_pic_filter_binomial(const quasar::Grid2D&,
-                                           quasar::JField2D<double>&,
-                                           int, hipStream_t);
-extern "C" void launch_pic_filter_compensated(const quasar::Grid2D&,
-                                              quasar::JField2D<double>&,
-                                              int, hipStream_t);
+#include <hip/hip_runtime.h>
 
 namespace quasar::numerics {
 

@@ -2,6 +2,8 @@
 #include "quasar/numerics/shape.hpp"
 #include "quasar/physics/pic/species.hpp"
 
+#include "backend/hip/pic/launch.hpp"
+
 #include <hip/hip_runtime.h>
 
 namespace {
@@ -39,6 +41,7 @@ __device__ quasar::Vec3 boris(double qm, quasar::Vec3 v, quasar::Vec3 e,
 template <int ShapeOrder>
 __global__ void gather_push_kernel(quasar::Grid2D g, std::size_t n, double qm,
                                    double* x, double* y,
+                                   double* x_prev, double* y_prev,
                                    double* vx, double* vy, double* vz,
                                    const unsigned char* alive,
                                    const double* ex, const double* ey, const double* ez,
@@ -59,6 +62,10 @@ __global__ void gather_push_kernel(quasar::Grid2D g, std::size_t n, double qm,
   vx[p] = v.x;
   vy[p] = v.y;
   vz[p] = v.z;
+  // Record the pre-move position so the charge-conserving deposit can form the
+  // current from the (x_prev -> x) displacement.
+  x_prev[p] = x[p];
+  y_prev[p] = y[p];
   x[p] = x[p] + dt * v.x;
   y[p] = y[p] + dt * v.y;
 }
@@ -68,10 +75,12 @@ void launch(const quasar::Grid2D& g, quasar::pic::ParticleSpecies& s,
             const quasar::YeeField2D<double>& self,
             const quasar::YeeField2D<double>& ext,
             double dt, hipStream_t stream) {
+  if (s.size() == 0) return;
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
   hipLaunchKernelGGL((gather_push_kernel<ShapeOrder>), grid, block, 0, stream,
-                     g, s.size(), s.charge_to_mass(), s.x(), s.y(), s.vx(), s.vy(), s.vz(),
+                     g, s.size(), s.charge_to_mass(), s.x(), s.y(), s.x_prev(), s.y_prev(),
+                     s.vx(), s.vy(), s.vz(),
                      s.alive(), self.ex.device_ptr(), self.ey.device_ptr(), self.ez.device_ptr(),
                      self.bx.device_ptr(), self.by.device_ptr(), self.bz.device_ptr(),
                      ext.ex.device_ptr(), ext.ey.device_ptr(), ext.ez.device_ptr(),

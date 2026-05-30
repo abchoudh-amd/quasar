@@ -12,6 +12,7 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -41,6 +42,13 @@ def _make_solver(deck: pic_io.PicDeck):
     cfg.grid = grid
     cfg.fdtd_order = deck.numerics.fdtd_order
     cfg.shape_order = 2 if deck.numerics.shape == "tsc" else 1
+    kind_map = {
+        "periodic": pic.ParticleBoundaryKind.periodic,
+        "specular": pic.ParticleBoundaryKind.specular,
+        "absorbing": pic.ParticleBoundaryKind.absorbing,
+    }
+    for side, name in enumerate(deck.boundary.particle):
+        cfg.boundary.set_particle_side(side, kind_map[name])
     return pic.EmPic2D3V(cfg)
 
 
@@ -50,18 +58,25 @@ def _seed_species(solver, deck: pic_io.PicDeck,
     indices: list[int] = []
     for sp in deck.species:
         v_thermal = float(np.sqrt(sp.initial.temperature_eV * EV_TO_J / sp.mass_kg))
-        positions = ic.quiet_positions_2d(sp.n_particles, deck.domain.lx_m,
-                                          deck.domain.ly_m)
-        positions = positions + np.array([deck.domain.origin_x_m,
-                                          deck.domain.origin_y_m])
+        if sp.initial.distribution == "maxwellian_block":
+            x_min = sp.initial.region_x_min_m
+            x_max = sp.initial.region_x_max_m
+            y_min = sp.initial.region_y_min_m
+            y_max = sp.initial.region_y_max_m
+            positions = ic.quiet_positions_2d_block(
+                sp.n_particles, x_min, x_max, y_min, y_max)
+            occupied_area = (x_max - x_min) * (y_max - y_min)
+        else:
+            positions = ic.quiet_positions_2d(sp.n_particles, deck.domain.lx_m,
+                                              deck.domain.ly_m)
+            positions = positions + np.array([deck.domain.origin_x_m,
+                                              deck.domain.origin_y_m])
+            occupied_area = deck.domain.lx_m * deck.domain.ly_m
         velocities = ic.maxwellian(sp.n_particles, v_thermal,
                                    drift=sp.initial.drift_v,
                                    seed=int(rng.integers(0, 2**31 - 1)))
 
-        cell_area = (deck.domain.lx_m / deck.domain.nx) * \
-                    (deck.domain.ly_m / deck.domain.ny)
-        total_cells = deck.domain.nx * deck.domain.ny
-        macro_weight = (sp.initial.density_per_m3 * cell_area * total_cells
+        macro_weight = (sp.initial.density_per_m3 * occupied_area
                         / sp.n_particles)
         weights = np.full(sp.n_particles, macro_weight)
 
@@ -113,7 +128,9 @@ def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
     return snap
 
 
-def _flatten_for_npz(snapshots: list[dict], final: dict) -> dict[str, np.ndarray]:
+def _flatten_for_npz(snapshots: list[dict], final: dict,
+                     scalar_series: dict[str, list] | None = None,
+                     ) -> dict[str, np.ndarray]:
     flat: dict[str, np.ndarray] = {
         "final_step": np.array([final["step"]]),
         "final_time_s": np.array([final["time_s"]]),
@@ -135,6 +152,9 @@ def _flatten_for_npz(snapshots: list[dict], final: dict) -> dict[str, np.ndarray
         for fname in final["fields"].keys():
             flat[f"snapshot_field_{fname}"] = np.stack(
                 [s["fields"][fname] for s in snapshots])
+    if scalar_series:
+        for k, v in scalar_series.items():
+            flat[f"series_{k}"] = np.asarray(v)
     return flat
 
 
@@ -160,16 +180,52 @@ def _do_run(args: argparse.Namespace) -> int:
 
     snapshots: list[dict] = []
     sim_time = 0.0
+    out_path = (deck_path.parent / deck.diagnostics.output_path).resolve()
+    series: dict[str, list] = {"step": [], "time_s": []}
+    for sp in deck.species:
+        series[f"alive_{sp.name}"] = []
+    t0 = time.time()
+
+    def _record_scalars(step_done: int, t_now: float) -> None:
+        series["step"].append(step_done)
+        series["time_s"].append(t_now)
+        for idx, sp in zip(species_indices, deck.species):
+            host = solver.species_at(idx).to_host()
+            series[f"alive_{sp.name}"].append(int(np.sum(host["alive"])))
+
+    def _checkpoint(step_done: int, t_now: float) -> None:
+        final = _snapshot(solver, deck, species_indices, step_done, t_now)
+        np.savez(out_path, **_flatten_for_npz(snapshots, final, series))
+
+    log_every = max(0, int(args.log_every))
+    write_every = max(0, int(args.write_every))
+
     for step in range(deck.time.steps):
         solver.step(dt)
         sim_time += dt
-        if deck.diagnostics.cadence > 0 and (step + 1) % deck.diagnostics.cadence == 0:
+        step_done = step + 1
+        if deck.diagnostics.cadence > 0 and step_done % deck.diagnostics.cadence == 0:
             snapshots.append(_snapshot(solver, deck, species_indices,
-                                       step + 1, sim_time))
+                                       step_done, sim_time))
+        if log_every > 0 and step_done % log_every == 0:
+            _record_scalars(step_done, sim_time)
+            elapsed = time.time() - t0
+            rate = step_done / elapsed if elapsed > 0 else 0.0
+            remaining = (deck.time.steps - step_done) / rate if rate > 0 else float("nan")
+            alive_str = " ".join(f"{sp.name}={series[f'alive_{sp.name}'][-1]}"
+                                  for sp in deck.species)
+            print(f"step {step_done}/{deck.time.steps}  "
+                  f"t={sim_time:.6e}s  "
+                  f"rate={rate:.0f} step/s  "
+                  f"eta={remaining:.0f}s  alive: {alive_str}",
+                  flush=True)
+        if write_every > 0 and step_done % write_every == 0:
+            _checkpoint(step_done, sim_time)
 
+    if log_every == 0 or deck.time.steps % log_every != 0:
+        _record_scalars(deck.time.steps, sim_time)
     final = _snapshot(solver, deck, species_indices, deck.time.steps, sim_time)
-    out_path = (deck_path.parent / deck.diagnostics.output_path).resolve()
-    np.savez(out_path, **_flatten_for_npz(snapshots, final))
+    np.savez(out_path, **_flatten_for_npz(snapshots, final, series))
     if args.print_config:
         print(f"wrote  : {out_path}")
     return 0
@@ -187,6 +243,10 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Print resolved deck + dt before running.")
     run.add_argument("--steps-override", type=int, default=None,
                      help="Override deck.time.steps (useful for smoke tests).")
+    run.add_argument("--log-every", type=int, default=0,
+                     help="Print progress + record scalar diagnostics every N steps (0 = off).")
+    run.add_argument("--write-every", type=int, default=0,
+                     help="Flush rolling checkpoint to out.npz every N steps (0 = end-of-run only).")
     run.set_defaults(func=_do_run)
     return p
 

@@ -4,6 +4,13 @@
 
 namespace quasar::numerics {
 
+// Staggered finite differences currently read neighbours through
+// Grid2D::periodic_index (wrapping), which bakes a periodic field BC directly
+// into the operator. The boundary-aware variant (read ghost cells via
+// Grid2D::index after a per-side ghost fill, enabling PEC walls) is implemented
+// behind QUASAR_PIC_FIELD_GHOSTS but disabled pending the field-ghost heisenbug
+// described in pic_solver.cpp::step. When that is fixed, switch these reads to
+// g.index(...) and require nghost >= 2 for Order 4.
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddx_staggered(const Real* f, const Grid2D& g,
                                              int i, int j) noexcept {

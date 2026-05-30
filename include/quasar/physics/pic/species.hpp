@@ -43,6 +43,8 @@ class ParticleSpecies {
 
   Real* x() noexcept { return x_.device_ptr(); }
   Real* y() noexcept { return y_.device_ptr(); }
+  Real* x_prev() noexcept { return x_prev_.device_ptr(); }
+  Real* y_prev() noexcept { return y_prev_.device_ptr(); }
   Real* vx() noexcept { return vx_.device_ptr(); }
   Real* vy() noexcept { return vy_.device_ptr(); }
   Real* vz() noexcept { return vz_.device_ptr(); }
@@ -51,6 +53,8 @@ class ParticleSpecies {
 
   const Real* x() const noexcept { return x_.device_ptr(); }
   const Real* y() const noexcept { return y_.device_ptr(); }
+  const Real* x_prev() const noexcept { return x_prev_.device_ptr(); }
+  const Real* y_prev() const noexcept { return y_prev_.device_ptr(); }
   const Real* vx() const noexcept { return vx_.device_ptr(); }
   const Real* vy() const noexcept { return vy_.device_ptr(); }
   const Real* vz() const noexcept { return vz_.device_ptr(); }
@@ -69,6 +73,8 @@ class ParticleSpecies {
   Grid2D grid_{};
   backend::DeviceBuffer<Real> x_{};
   backend::DeviceBuffer<Real> y_{};
+  backend::DeviceBuffer<Real> x_prev_{};
+  backend::DeviceBuffer<Real> y_prev_{};
   backend::DeviceBuffer<Real> vx_{};
   backend::DeviceBuffer<Real> vy_{};
   backend::DeviceBuffer<Real> vz_{};

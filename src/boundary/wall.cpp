@@ -3,17 +3,9 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/physics/pic/species.hpp"
 
-#include <hip/hip_runtime.h>
+#include "backend/hip/pic/launch.hpp"
 
-extern "C" void launch_pic_boundary_pec_fields(const quasar::Grid2D&,
-                                               quasar::YeeField2D<double>&,
-                                               int, hipStream_t);
-extern "C" void launch_pic_boundary_specular_particles(const quasar::Grid2D&,
-                                                       quasar::pic::ParticleSpecies&,
-                                                       int, hipStream_t);
-extern "C" void launch_pic_boundary_absorb_particles(const quasar::Grid2D&,
-                                                     quasar::pic::ParticleSpecies&,
-                                                     int, hipStream_t);
+#include <hip/hip_runtime.h>
 
 namespace quasar::boundary {
 

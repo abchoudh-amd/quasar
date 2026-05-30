@@ -12,6 +12,8 @@ ParticleSpecies::ParticleSpecies(SpeciesConfig cfg)
     capacity_{cfg.capacity},
     x_{capacity_},
     y_{capacity_},
+    x_prev_{capacity_},
+    y_prev_{capacity_},
     vx_{capacity_},
     vy_{capacity_},
     vz_{capacity_},
@@ -45,6 +47,10 @@ void ParticleSpecies::set_host_particles(const std::vector<Real>& x,
   std::vector<std::uint8_t> alive(n, 1);
   x_.copy_from_host(x.data(), n);
   y_.copy_from_host(y.data(), n);
+  // Seed previous positions to the initial positions so the first deposit sees
+  // zero displacement (no spurious startup current).
+  x_prev_.copy_from_host(x.data(), n);
+  y_prev_.copy_from_host(y.data(), n);
   vx_.copy_from_host(vx.data(), n);
   vy_.copy_from_host(vy.data(), n);
   vz_.copy_from_host(vz.data(), n);

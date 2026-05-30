@@ -34,3 +34,9 @@ Testing/
 *.gcov
 *.gcno
 *.gcda
+
+# Generated example/run outputs
+out.npz
+examples/**/out.npz
+examples/**/*.png
+logs/

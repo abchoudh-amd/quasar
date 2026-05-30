@@ -1,6 +1,8 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/numerics/stencil.hpp"
 
+#include "backend/hip/pic/launch.hpp"
+
 #include <hip/hip_runtime.h>
 
 namespace {

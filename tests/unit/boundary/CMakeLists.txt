@@ -1,4 +1,4 @@
-foreach(_test_name IN ITEMS test_pec_ghosts)
+foreach(_test_name IN ITEMS test_pec_ghosts test_registry_linkage)
   set(_target "quasar_${_test_name}")
   add_executable(${_target} "${_test_name}.cpp")
   set_source_files_properties("${_test_name}.cpp" PROPERTIES LANGUAGE HIP)

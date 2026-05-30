@@ -21,6 +21,9 @@ class DeviceBuffer {
   explicit DeviceBuffer(std::size_t n) : size_{n}, bytes_{n * sizeof(T)} {
     if (n != 0) {
       QUASAR_HIP_CHECK(::hipMalloc(&ptr_, bytes_));
+      // Zero-initialize so freshly constructed fields/particles never observe
+      // recycled device memory from a prior allocation.
+      QUASAR_HIP_CHECK(::hipMemset(ptr_, 0, bytes_));
     }
   }
 

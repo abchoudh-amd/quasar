@@ -10,6 +10,7 @@
 #include "quasar/numerics/particle_pusher.hpp"
 #include "quasar/physics/pic/species.hpp"
 
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -45,6 +46,9 @@ class EmPic2D3V {
   const EmPicConfig& config() const noexcept { return cfg_; }
 
  private:
+  void fill_field_ghosts();
+  void apply_particle_bcs(ParticleSpecies& s);
+
   EmPicConfig cfg_{};
   Grid2D grid_{};
   YeeField2D<Real> fields_{};
@@ -55,6 +59,10 @@ class EmPic2D3V {
   std::unique_ptr<numerics::IParticlePusher> pusher_{};
   std::unique_ptr<numerics::IDepositScheme> deposit_{};
   numerics::FilterPipeline filters_{};
+  // Per-side boundary conditions, indexed by Side (x_lo, x_hi, y_lo, y_hi),
+  // constructed from cfg_.boundary through the plugin registry.
+  std::array<std::unique_ptr<boundary::IParticleBoundary>, 4> particle_bcs_{};
+  std::array<std::unique_ptr<boundary::IFieldBoundary>, 4> field_bcs_{};
 };
 
 void sample_external_field(numerics::IFieldEvaluator& evaluator,

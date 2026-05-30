@@ -19,3 +19,13 @@ def quiet_positions_2d(n_particles: int, lx: float, ly: float):
     xx, yy = np.meshgrid(x, y, indexing="ij")
     pts = np.column_stack([xx.ravel(), yy.ravel()])
     return pts[:n_particles]
+
+
+def quiet_positions_2d_block(n_particles: int, x_min: float, x_max: float,
+                              y_min: float, y_max: float):
+    side = int(np.ceil(np.sqrt(n_particles)))
+    x = x_min + (np.arange(side) + 0.5) * (x_max - x_min) / side
+    y = y_min + (np.arange(side) + 0.5) * (y_max - y_min) / side
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    pts = np.column_stack([xx.ravel(), yy.ravel()])
+    return pts[:n_particles]
