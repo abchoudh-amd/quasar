@@ -1,6 +1,7 @@
 import unittest
 
 from quasar.pic.io import (
+    BoundaryConfig,
     Domain,
     ExternalField,
     Numerics,
@@ -8,6 +9,7 @@ from quasar.pic.io import (
     Species,
     SpeciesInitial,
     Time,
+    _parse_boundary,
     parse,
 )
 
@@ -96,6 +98,83 @@ class PicIoTests(unittest.TestCase):
         self.assertEqual(deck.species[0].name, "H+")
         self.assertEqual(deck.external_field.evaluator_type, "biot_savart")
         self.assertEqual(deck.time.dt_s, "auto")
+
+
+class DomainValidationTests(unittest.TestCase):
+
+    def test_nonpositive_nx_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=0, ny=8, lx_m=1.0, ly_m=1.0)).validate()
+
+    def test_nonpositive_ny_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=8, ny=-4, lx_m=1.0, ly_m=1.0)).validate()
+
+    def test_nonpositive_length_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=8, ny=8, lx_m=0.0, ly_m=1.0)).validate()
+
+
+class ParseBoundaryTests(unittest.TestCase):
+
+    def test_default_is_all_periodic(self):
+        bc = _parse_boundary(None)
+        self.assertEqual(bc.particle, ("periodic", "periodic", "periodic", "periodic"))
+
+    def test_scalar_broadcasts_to_four_sides(self):
+        bc = _parse_boundary({"particle": "specular"})
+        self.assertEqual(bc.particle, ("specular", "specular", "specular", "specular"))
+
+    def test_four_list_maps_per_side(self):
+        bc = _parse_boundary(
+            {"particle": ["periodic", "specular", "absorbing", "periodic"]})
+        self.assertEqual(
+            bc.particle, ("periodic", "specular", "absorbing", "periodic"))
+
+    def test_wrong_length_list_raises(self):
+        with self.assertRaises(ValueError):
+            _parse_boundary({"particle": ["periodic", "specular"]})
+
+    def test_non_string_non_list_raises(self):
+        with self.assertRaises(ValueError):
+            _parse_boundary({"particle": 42})
+
+
+class BoundaryValidationTests(unittest.TestCase):
+
+    def test_unknown_kind_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(boundary=BoundaryConfig(
+                particle=("periodic", "teleporting", "periodic", "periodic"))
+            ).validate()
+
+    def test_valid_mixed_kinds_pass(self):
+        _deck(boundary=BoundaryConfig(
+            particle=("periodic", "specular", "absorbing", "periodic"))).validate()
+
+
+class MaxwellianBlockRegionTests(unittest.TestCase):
+
+    def _block_species(self, **region) -> Species:
+        init = SpeciesInitial(distribution="maxwellian_block", **region)
+        return Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=16,
+                       initial=init)
+
+    def test_missing_bounds_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(species=[self._block_species(
+                region_x_min_m=0.0, region_x_max_m=1.0)]).validate()
+
+    def test_min_ge_max_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(species=[self._block_species(
+                region_x_min_m=1.0, region_x_max_m=1.0,
+                region_y_min_m=0.0, region_y_max_m=1.0)]).validate()
+
+    def test_valid_block_passes(self):
+        _deck(species=[self._block_species(
+            region_x_min_m=0.0, region_x_max_m=1.0,
+            region_y_min_m=0.0, region_y_max_m=1.0)]).validate()
 
 
 if __name__ == "__main__":

@@ -48,8 +48,11 @@ class EmPic2D3V {
  private:
   void fill_field_ghosts();
   void apply_particle_bcs(ParticleSpecies& s);
+  bool has_absorbing_boundary() const noexcept;
 
   EmPicConfig cfg_{};
+  // Steps taken so far; drives the particle-compaction cadence.
+  std::size_t step_count_{0};
   Grid2D grid_{};
   YeeField2D<Real> fields_{};
   YeeField2D<Real> external_fields_{};

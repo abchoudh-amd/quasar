@@ -65,6 +65,14 @@ void launch_pic_boundary_periodic_fields(const quasar::Grid2D&, quasar::YeeField
                                          int, hipStream_t);
 
 // -- Particle array compaction -----------------------------------------------
+// Compacts alive particles to the front of every species array (order is not
+// preserved — irrelevant for PIC) and shrinks the active count. Returns the new
+// alive count via set_count() on the species.
 void launch_pic_particle_compact(quasar::pic::ParticleSpecies&, hipStream_t);
+
+// -- Alive-particle count ----------------------------------------------------
+// Single-pass device reduction of the alive flags; returns the count to the
+// host. Cheaper than a full HostSnapshot when only the scalar is needed.
+std::size_t launch_pic_alive_count(const quasar::pic::ParticleSpecies&, hipStream_t);
 
 }  // extern "C"

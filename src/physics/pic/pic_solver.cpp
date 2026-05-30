@@ -133,6 +133,15 @@ void EmPic2D3V::add_species(ParticleSpecies s) {
   species_.push_back(std::move(s));
 }
 
+bool EmPic2D3V::has_absorbing_boundary() const noexcept {
+  for (int side = 0; side < 4; ++side) {
+    if (cfg_.boundary.particle[side] == boundary::ParticleBoundaryKind::absorbing) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void EmPic2D3V::fill_field_ghosts() {
   for (int side = 0; side < 4; ++side) {
     field_bcs_[side]->fill_ghosts(fields_, static_cast<Side>(side));
@@ -209,6 +218,18 @@ void EmPic2D3V::step(Real dt) {
   fill_field_ghosts();
 #endif
   field_solver_->advance_e(fields_, current_, dt);
+
+  // Reclaim slots vacated by absorbing boundaries on a fixed cadence so the
+  // push/deposit/gather kernels stop iterating over dead particles. Only
+  // meaningful when a boundary can actually kill particles; periodic/specular
+  // runs never shrink, so skip the work entirely.
+  ++step_count_;
+  constexpr std::size_t kCompactEvery = 64;
+  if (has_absorbing_boundary() && step_count_ % kCompactEvery == 0) {
+    for (auto& s : species_) {
+      ::launch_pic_particle_compact(s, nullptr);
+    }
+  }
 }
 
 void EmPic2D3V::advance(Real t_end, Real dt) {

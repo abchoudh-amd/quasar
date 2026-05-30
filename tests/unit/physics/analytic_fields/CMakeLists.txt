@@ -1,4 +1,5 @@
-foreach(_test_name IN ITEMS test_uniform_evaluator test_dipole_evaluator)
+foreach(_test_name IN ITEMS test_uniform_evaluator test_dipole_evaluator
+        test_gradient_evaluator test_file_grid_evaluator)
   set(_target "quasar_${_test_name}")
   add_executable(${_target} "${_test_name}.cpp")
   target_link_libraries(${_target}

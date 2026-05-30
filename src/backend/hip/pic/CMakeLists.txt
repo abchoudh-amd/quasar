@@ -13,7 +13,6 @@ set(_quasar_pic_hip_sources
   boundary_absorb_hip.hip
   particle_compact_hip.hip
   filter_hip.hip
-  diagnostics_hip.hip
 )
 
 quasar_add_hip_module(pic_hip SOURCES ${_quasar_pic_hip_sources})

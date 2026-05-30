@@ -9,6 +9,8 @@ set(_quasar_python_tests
   test_postprocess
   test_examples
   test_pic_io
+  test_pic_initial_conditions
+  test_pic_cli
   test_pic_smoke
 )
 

@@ -36,11 +36,12 @@ __device__ inline double weight_1d(double r) {
 
 template <int ShapeOrder>
 __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
-                               const double* x, const double* y,
-                               const double* x_prev, const double* y_prev,
-                               const double* vz, const double* weight,
-                               const unsigned char* alive,
-                               double* jx, double* jy, double* jz) {
+                               const double* __restrict__ x, const double* __restrict__ y,
+                               const double* __restrict__ x_prev, const double* __restrict__ y_prev,
+                               const double* __restrict__ vz, const double* __restrict__ weight,
+                               const unsigned char* __restrict__ alive,
+                               double* __restrict__ jx, double* __restrict__ jy,
+                               double* __restrict__ jz) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
 

@@ -137,6 +137,10 @@ class PicDeck:
     def validate(self) -> None:
         if self.units != "SI":
             raise ValueError("units must be 'SI'")
+        if self.domain.nx <= 0 or self.domain.ny <= 0:
+            raise ValueError("domain.nx and domain.ny must be positive")
+        if self.domain.lx_m <= 0 or self.domain.ly_m <= 0:
+            raise ValueError("domain.lx_m and domain.ly_m must be positive")
         if self.numerics.fdtd_order not in (2, 4):
             raise ValueError("numerics.fdtd_order must be 2 or 4")
         if self.numerics.shape not in ("cic", "tsc"):

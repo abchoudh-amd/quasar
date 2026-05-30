@@ -10,8 +10,9 @@ namespace {
 
 template <int ShapeOrder>
 __device__ quasar::Vec3 gather_field(const quasar::Grid2D& g,
-                                     const double* x_comp, const double* y_comp,
-                                     const double* z_comp,
+                                     const double* __restrict__ x_comp,
+                                     const double* __restrict__ y_comp,
+                                     const double* __restrict__ z_comp,
                                      double x, double y) {
   const auto w = quasar::numerics::shape_weights_2d<ShapeOrder>(x, y, g);
   quasar::Vec3 out{0, 0, 0};
@@ -40,14 +41,19 @@ __device__ quasar::Vec3 boris(double qm, quasar::Vec3 v, quasar::Vec3 e,
 
 template <int ShapeOrder>
 __global__ void gather_push_kernel(quasar::Grid2D g, std::size_t n, double qm,
-                                   double* x, double* y,
-                                   double* x_prev, double* y_prev,
-                                   double* vx, double* vy, double* vz,
-                                   const unsigned char* alive,
-                                   const double* ex, const double* ey, const double* ez,
-                                   const double* bx, const double* by, const double* bz,
-                                   const double* ext_ex, const double* ext_ey, const double* ext_ez,
-                                   const double* ext_bx, const double* ext_by, const double* ext_bz,
+                                   double* __restrict__ x, double* __restrict__ y,
+                                   double* __restrict__ x_prev, double* __restrict__ y_prev,
+                                   double* __restrict__ vx, double* __restrict__ vy,
+                                   double* __restrict__ vz,
+                                   const unsigned char* __restrict__ alive,
+                                   const double* __restrict__ ex, const double* __restrict__ ey,
+                                   const double* __restrict__ ez,
+                                   const double* __restrict__ bx, const double* __restrict__ by,
+                                   const double* __restrict__ bz,
+                                   const double* __restrict__ ext_ex, const double* __restrict__ ext_ey,
+                                   const double* __restrict__ ext_ez,
+                                   const double* __restrict__ ext_bx, const double* __restrict__ ext_by,
+                                   const double* __restrict__ ext_bz,
                                    double dt) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;

@@ -200,6 +200,14 @@ void bind_pic(py::module_& m) {
            py::arg("config"))
       .def("species_count",
            [](const quasar::pic::EmPic2D3V& self) { return self.species().size(); })
+      .def("species_alive_count",
+           [](quasar::pic::EmPic2D3V& self, std::size_t idx) {
+             if (idx >= self.species().size()) {
+               throw std::out_of_range("species_alive_count: index out of range");
+             }
+             return quasar::pic::alive_count(self.species()[idx]);
+           },
+           py::arg("index"))
       .def("species_at",
            [](quasar::pic::EmPic2D3V& self, std::size_t idx)
                -> quasar::pic::ParticleSpecies& {

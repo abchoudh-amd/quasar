@@ -8,8 +8,11 @@
 namespace {
 
 template <int Order>
-__global__ void fdtd_b_kernel(quasar::Grid2D g, double* bx, double* by, double* bz,
-                              const double* ex, const double* ey, const double* ez,
+__global__ void fdtd_b_kernel(quasar::Grid2D g,
+                              double* __restrict__ bx, double* __restrict__ by,
+                              double* __restrict__ bz,
+                              const double* __restrict__ ex, const double* __restrict__ ey,
+                              const double* __restrict__ ez,
                               double dt) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;

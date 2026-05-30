@@ -190,8 +190,8 @@ def _do_run(args: argparse.Namespace) -> int:
         series["step"].append(step_done)
         series["time_s"].append(t_now)
         for idx, sp in zip(species_indices, deck.species):
-            host = solver.species_at(idx).to_host()
-            series[f"alive_{sp.name}"].append(int(np.sum(host["alive"])))
+            # Device-side reduction; avoids a full 7-array host copy per logged step.
+            series[f"alive_{sp.name}"].append(int(solver.species_alive_count(idx)))
 
     def _checkpoint(step_done: int, t_now: float) -> None:
         final = _snapshot(solver, deck, species_indices, step_done, t_now)

@@ -209,6 +209,28 @@ class HelmholtzPairExampleTest(unittest.TestCase):
                                 f"B_z={B_z_vals!r}")
 
 
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class SquareToroidExampleTest(unittest.TestCase):
+
+    def test_field_is_finite_and_nontrivial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("square_toroid", Path(tmp))
+            _run_cli(workdir / "input.yaml")
+
+            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            B = archive["B_xyz"]
+            mag = archive["B_magnitude"]
+            # Field is finite everywhere on the meridional plane.
+            self.assertTrue(np.all(np.isfinite(B)))
+            self.assertTrue(np.all(np.isfinite(mag)))
+            # |B| from components matches the reported magnitude.
+            np.testing.assert_allclose(
+                np.linalg.norm(B, axis=1), mag, rtol=1e-6, atol=0.0)
+            # A 1.5 kA toroidal sheet magnet produces a clearly non-zero field
+            # inside the bore.
+            self.assertGreater(float(np.max(mag)), 1.0e-4)
+
+
 def _run_pic_cli(yaml_path: Path, steps: int) -> None:
     res = subprocess.run(
         [sys.executable, "-m", "quasar.pic.cli", "run",

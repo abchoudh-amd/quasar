@@ -49,6 +49,12 @@ Deck schema (``quasar.pic.io``)
          temperature_eV: 10.0
          drift_v: [0.0, 0.0, 0.0]           # optional
 
+   boundary:                 # optional, default all-periodic
+     particle: [periodic, periodic, specular, specular]
+                             # one of {periodic, specular, absorbing}; either a
+                             # single string (applied to all four sides) or a
+                             # 4-list ordered [x_lo, x_hi, y_lo, y_hi].
+
    time:
      dt_s: auto              # float or 'auto' (CFL-limited)
      steps: 2000
@@ -78,6 +84,12 @@ Flags:
 * ``--seed N``            — RNG seed for initial-condition sampling (0).
 * ``--print-config``      — echo the resolved deck and ``dt`` before running.
 * ``--steps-override N``  — override ``time.steps`` (smoke tests / CI).
+* ``--log-every N``       — every ``N`` steps, print a progress line
+  (step, time, step-rate, ETA, per-species alive count) and append a row to the
+  scalar ``series_*`` diagnostics. ``0`` (default) disables periodic logging;
+  a final row is still recorded at the end of the run.
+* ``--write-every N``     — flush a rolling checkpoint of ``out.npz`` every
+  ``N`` steps. ``0`` (default) writes only once at the end of the run.
 
 Output (``out.npz``)
 --------------------
@@ -92,6 +104,10 @@ Top-level keys:
   snapshots when ``per_species: true``.
 * ``snapshot_steps``, ``snapshot_times_s``, ``snapshot_field_<name>`` —
   populated when ``cadence > 0``.
+* ``series_step``, ``series_time_s``, ``series_alive_<name>`` — scalar time
+  series recorded at each ``--log-every`` tick (plus a final row). The
+  per-species ``series_alive_<name>`` is the live-particle count, computed by a
+  device-side reduction so logging does not copy the full particle arrays.
 
 Worked example
 --------------

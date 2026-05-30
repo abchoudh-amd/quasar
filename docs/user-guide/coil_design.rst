@@ -50,6 +50,16 @@ conductor system + observation cloud, launches the Biot-Savart HIP
 kernel via :py:class:`quasar.coil.BiotSavartEvaluator`, and writes a
 ``.npz`` archive next to the input.
 
+Flags:
+
+* ``--print-config``  — echo the parsed deck before running.
+* ``--quiet``         — suppress informational output.
+
+(The PIC driver, ``quasar.pic.cli``, shares the same ``run <input.yaml>``
+subcommand shape and the ``--print-config`` flag; see
+:doc:`pic_simulation` for its additional ``--seed`` / ``--log-every`` /
+``--write-every`` / ``--steps-override`` options.)
+
 Schema reference
 ----------------
 

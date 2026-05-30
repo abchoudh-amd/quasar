@@ -1,8 +1,7 @@
-if(NOT QUASAR_ENABLE_HIP)
-  return()
-endif()
-
-add_executable(quasar_pic_app quasar_pic/main.cpp)
-set_source_files_properties(quasar_pic/main.cpp PROPERTIES LANGUAGE HIP)
-set_target_properties(quasar_pic_app PROPERTIES OUTPUT_NAME quasar_pic)
-target_link_libraries(quasar_pic_app PRIVATE quasar::core)
+# No C++ apps are built today. Both vertical slices are driven from Python:
+#   - magnetostatics: `python -m quasar.coil.cli run <deck.yaml>`
+#   - PIC:            `python -m quasar.pic.cli  run <deck.yaml>`
+# The thin C++ entry points (apps/*/main.cpp) were placeholder stubs that only
+# parsed nothing and printed a banner; they were removed in favor of the Python
+# drivers. Add a real deck-driver target here if a standalone C++ binary is ever
+# needed.
