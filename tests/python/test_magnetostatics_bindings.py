@@ -10,7 +10,6 @@ import os
 import sys
 import unittest
 
-import numpy as np
 
 from quasar import Vec3, mu0_over_4pi  # noqa: E402
 from quasar.coil import (  # noqa: E402
@@ -81,11 +80,11 @@ class ObservationSetBindingsTest(unittest.TestCase):
         self.assertEqual(len(pc), 12)
 
     def test_line_probe_to_point_cloud(self):
-        l = LineProbe()
-        l.start = Vec3(0, 0, 0)
-        l.end = Vec3(1, 0, 0)
-        l.n_points = 5
-        pc = l.to_point_cloud()
+        probe = LineProbe()
+        probe.start = Vec3(0, 0, 0)
+        probe.end = Vec3(1, 0, 0)
+        probe.n_points = 5
+        pc = probe.to_point_cloud()
         self.assertEqual(len(pc), 5)
 
 
@@ -95,12 +94,12 @@ class BiotSavartBindingsTest(unittest.TestCase):
     def test_finite_segment_matches_closed_form(self):
         """Mirror of C++ test_finite_segment, exercised through Python."""
         L = 2.0
-        I = 1.0
+        current = 1.0
         H = L / 2
 
         cs = ConductorSystem()
         cs.add(Filament(
-            name="seg", current_A=I,
+            name="seg", current_A=current,
             points=[Vec3(0, 0, -H), Vec3(0, 0, +H)],
         ))
 
@@ -113,7 +112,7 @@ class BiotSavartBindingsTest(unittest.TestCase):
                 B = eval_.evaluate_B(cs, pc)
 
                 self.assertEqual(B.shape, (1, 3))
-                ref_By = mu0_over_4pi * I * 2 * H / (d * math.sqrt(d * d + H * H))
+                ref_By = mu0_over_4pi * current * 2 * H / (d * math.sqrt(d * d + H * H))
                 self.assertLess(abs(B[0, 0]), 1e-14)
                 self.assertLess(abs(B[0, 2]), 1e-14)
                 self.assertAlmostEqual(B[0, 1], ref_By,
@@ -145,19 +144,19 @@ class BiotSavartBindingsTest(unittest.TestCase):
     def test_circular_loop_on_axis_matches_closed_form(self):
         """Mirror of C++ test_circular_loop_on_axis at N=256, z=0.05."""
         R = 0.1
-        I = 1.0
+        current = 1.0
         z = 0.05
         cs = ConductorSystem()
         cs.add(circular_loop(
             center=Vec3(0, 0, 0), axis=Vec3(0, 0, 1),
-            radius_m=R, n_segments=256, current_A=I,
+            radius_m=R, n_segments=256, current_A=current,
         ))
         pc = PointCloud()
         pc.add(Vec3(0, 0, z))
 
         B = BiotSavartEvaluator().evaluate_B(cs, pc)
         from quasar import mu0
-        ref_Bz = mu0 * I * R * R / (2 * (R * R + z * z) ** 1.5)
+        ref_Bz = mu0 * current * R * R / (2 * (R * R + z * z) ** 1.5)
         self.assertEqual(B.shape, (1, 3))
         self.assertAlmostEqual(B[0, 2], ref_Bz, delta=1e-4 * abs(ref_Bz))
 

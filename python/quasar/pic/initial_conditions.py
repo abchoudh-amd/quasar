@@ -12,15 +12,6 @@ def maxwellian(n_particles: int, thermal_speed: float, drift=(0.0, 0.0, 0.0), se
     return v
 
 
-def quiet_positions_2d(n_particles: int, lx: float, ly: float):
-    side = int(np.ceil(np.sqrt(n_particles)))
-    x = (np.arange(side) + 0.5) * lx / side
-    y = (np.arange(side) + 0.5) * ly / side
-    xx, yy = np.meshgrid(x, y, indexing="ij")
-    pts = np.column_stack([xx.ravel(), yy.ravel()])
-    return pts[:n_particles]
-
-
 def quiet_positions_2d_block(n_particles: int, x_min: float, x_max: float,
                               y_min: float, y_max: float):
     side = int(np.ceil(np.sqrt(n_particles)))
@@ -29,3 +20,10 @@ def quiet_positions_2d_block(n_particles: int, x_min: float, x_max: float,
     xx, yy = np.meshgrid(x, y, indexing="ij")
     pts = np.column_stack([xx.ravel(), yy.ravel()])
     return pts[:n_particles]
+
+
+def quiet_positions_2d(n_particles: int, lx: float, ly: float):
+    """Quiet-start grid over the whole [0, lx) x [0, ly) domain.
+
+    Special case of quiet_positions_2d_block."""
+    return quiet_positions_2d_block(n_particles, 0.0, lx, 0.0, ly)

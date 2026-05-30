@@ -50,9 +50,13 @@ def _do_run(args: argparse.Namespace) -> int:
     payload["observation_kind"] = np.asarray(
         deck.observation.kind, dtype="<U16")
 
-    out_path = Path(deck.output.path)
-    if not out_path.is_absolute():
-        out_path = Path(args.input).resolve().parent / out_path
+    # Confine the deck-supplied output path to the input deck's directory so a
+    # stray absolute path or "../" cannot write outside it.
+    base = Path(args.input).resolve().parent
+    out_path = (base / deck.output.path).resolve()
+    if not out_path.is_relative_to(base):
+        raise ValueError(
+            f"output.path {deck.output.path!r} escapes the deck directory {base}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(out_path, **payload)
 

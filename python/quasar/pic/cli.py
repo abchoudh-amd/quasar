@@ -21,15 +21,15 @@ import numpy as np
 from .. import _core
 from . import initial_conditions as ic
 from . import io as pic_io
+from .numerics import C_LIGHT, cfl_dt
 
 EV_TO_J = 1.602176634e-19
-C_LIGHT = 299792458.0
 
 
-def _cfl_dt(domain) -> float:
+def _cfl_dt(domain, fdtd_order: int = 2) -> float:
     dx = domain.lx_m / domain.nx
     dy = domain.ly_m / domain.ny
-    return 0.5 / (C_LIGHT * np.sqrt(1.0 / (dx * dx) + 1.0 / (dy * dy)))
+    return cfl_dt(dx, dy, c=C_LIGHT, fdtd_order=fdtd_order)
 
 
 def _make_solver(deck: pic_io.PicDeck):
@@ -169,7 +169,8 @@ def _do_run(args: argparse.Namespace) -> int:
     rng = np.random.default_rng(args.seed)
     species_indices = _seed_species(solver, deck, rng)
 
-    dt = _cfl_dt(deck.domain) if deck.time.dt_s == "auto" else float(deck.time.dt_s)
+    dt = (_cfl_dt(deck.domain, deck.numerics.fdtd_order)
+          if deck.time.dt_s == "auto" else float(deck.time.dt_s))
     if args.print_config:
         print(f"deck   : {deck_path}")
         print(f"grid   : {deck.domain.nx}x{deck.domain.ny}  "
@@ -180,7 +181,14 @@ def _do_run(args: argparse.Namespace) -> int:
 
     snapshots: list[dict] = []
     sim_time = 0.0
-    out_path = (deck_path.parent / deck.diagnostics.output_path).resolve()
+    # Confine the deck-supplied output path to the deck's own directory so a
+    # stray absolute path or "../" cannot write outside it.
+    base = deck_path.parent.resolve()
+    out_path = (base / deck.diagnostics.output_path).resolve()
+    if not out_path.is_relative_to(base):
+        raise ValueError(
+            f"diagnostics.output_path {deck.diagnostics.output_path!r} escapes "
+            f"the deck directory {base}")
     series: dict[str, list] = {"step": [], "time_s": []}
     for sp in deck.species:
         series[f"alive_{sp.name}"] = []

@@ -58,7 +58,7 @@ def plot_loss(data, deck: dict) -> Path:
 
 def plot_final_state(data, deck: dict) -> Path:
     x_lo, x_hi, y_lo, y_hi = _domain_extent(deck)
-    nx, ny = int(data["nx"].item()), int(data["ny"].item())
+    ny = int(data["ny"].item())
     bz_full = data["external_bz"]
     # Fields are stored on a Yee grid with a 1-cell ghost halo on each side.
     side = int(round(bz_full.size ** 0.5))
@@ -99,7 +99,7 @@ def plot_final_state(data, deck: dict) -> Path:
 
 
 def main() -> int:
-    data = np.load(NPZ)
+    data = np.load(NPZ, allow_pickle=False)
     with open(DECK) as fh:
         deck = yaml.safe_load(fh)
     print(f"loaded {NPZ}  (final_time = {float(data['final_time_s'].item()):.3e} s)")

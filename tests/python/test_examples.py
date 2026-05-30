@@ -65,10 +65,10 @@ class SingleLoopExampleTest(unittest.TestCase):
             # Closed form for a circular loop of radius R, current I, on-axis:
             # B_z = mu0 I R^2 / (2 (R^2 + z^2)^(3/2)).
             R = 0.1
-            I = 1.0
+            current = 1.0
             mu0 = 4 * math.pi * 1e-7
             zs = np.linspace(0.0, 0.2, 5)
-            ref = mu0 * I * R * R / (2 * (R * R + zs * zs) ** 1.5)
+            ref = mu0 * current * R * R / (2 * (R * R + zs * zs) ** 1.5)
 
             np.testing.assert_allclose(
                 B[:, 2], ref, rtol=1e-4,
@@ -92,7 +92,7 @@ class SolenoidExampleTest(unittest.TestCase):
             R = 0.02
             L = 0.50
             N = 200
-            I = 1.0
+            current = 1.0
             mu0 = 4 * math.pi * 1e-7
             n = N / L
 
@@ -100,7 +100,7 @@ class SolenoidExampleTest(unittest.TestCase):
 
             # Surface-current closed form.
             def Bz_ideal(z):
-                return (mu0 * n * I / 2) * (
+                return (mu0 * n * current / 2) * (
                     (L / 2 + z) / math.sqrt(R * R + (L / 2 + z) ** 2)
                     + (L / 2 - z) / math.sqrt(R * R + (L / 2 - z) ** 2)
                 )
@@ -189,10 +189,10 @@ class HelmholtzPairExampleTest(unittest.TestCase):
             self.assertEqual(B.shape, (9, 3))
 
             R = 0.1
-            I = 1.0
+            current = 1.0
             mu0 = 4 * math.pi * 1e-7
-            # (4/5)^(3/2) * mu0 * I / R
-            B_z_center = mu0 * I / R * (4.0 / 5.0) ** 1.5
+            # (4/5)^(3/2) * mu0 * current / R
+            B_z_center = mu0 * current / R * (4.0 / 5.0) ** 1.5
 
             midpoint = B[4, 2]  # 9 points -> index 4 is z=0
             self.assertAlmostEqual(midpoint, B_z_center,

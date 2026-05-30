@@ -30,6 +30,14 @@ from typing import Any, Sequence, Union
 import yaml
 
 
+# Sanity ceilings on deck-supplied sizes that flow into device allocations.
+# These guard against typos / hostile decks requesting absurd buffers, not
+# against legitimate large runs (raise them if a real workload needs more).
+MAX_GRID_DIM = 1 << 16        # 65536 cells per axis
+MAX_GRID_CELLS = 1 << 30      # ~1.07e9 cells total
+MAX_PARTICLES = 1 << 31       # ~2.1e9 particles per species
+
+
 def _require(d: dict, key: str, context: str) -> Any:
     if key not in d:
         raise ValueError(f"{context}: missing required field {key!r}")
@@ -139,6 +147,16 @@ class PicDeck:
             raise ValueError("units must be 'SI'")
         if self.domain.nx <= 0 or self.domain.ny <= 0:
             raise ValueError("domain.nx and domain.ny must be positive")
+        # Upper-bound grid and particle counts so a typo (or hostile deck) cannot
+        # request a multi-terabyte device allocation; these flow straight into
+        # Grid2D storage and per-species particle buffers.
+        if self.domain.nx > MAX_GRID_DIM or self.domain.ny > MAX_GRID_DIM:
+            raise ValueError(
+                f"domain.nx/ny must be <= {MAX_GRID_DIM} (got "
+                f"{self.domain.nx}x{self.domain.ny})")
+        if self.domain.nx * self.domain.ny > MAX_GRID_CELLS:
+            raise ValueError(
+                f"domain.nx*ny must be <= {MAX_GRID_CELLS} cells")
         if self.domain.lx_m <= 0 or self.domain.ly_m <= 0:
             raise ValueError("domain.lx_m and domain.ly_m must be positive")
         if self.numerics.fdtd_order not in (2, 4):
@@ -160,6 +178,10 @@ class PicDeck:
                 raise ValueError(f"species {sp.name!r}: mass_kg must be positive")
             if sp.n_particles <= 0:
                 raise ValueError(f"species {sp.name!r}: n_particles must be positive")
+            if sp.n_particles > MAX_PARTICLES:
+                raise ValueError(
+                    f"species {sp.name!r}: n_particles must be <= {MAX_PARTICLES} "
+                    f"(got {sp.n_particles})")
             if sp.initial.distribution not in ("maxwellian_uniform",
                                                  "maxwellian_block"):
                 raise ValueError(
@@ -324,17 +346,8 @@ def load(path: Union[str, Path]) -> PicDeck:
 def build_conductor_system(conductors: list[dict]):
     """Build a ConductorSystem from a list of conductor dicts.
 
-    Delegates per-conductor geometry construction to ``quasar.coil.io`` so the
-    same schema (circular_loop, helix, polygon, ...) is shared with the coil
-    workflow.
+    Thin re-export of ``quasar.coil.io.build_conductor_system`` so the PIC
+    external-field loader shares the conductor schema with the coil workflow.
     """
-    from .. import coil
-    from ..coil.io import _build_geometry, _require as _req
-
-    cs = coil.ConductorSystem()
-    for c in conductors:
-        name = str(_req(c, "name", "conductor"))
-        current_A = float(_req(c, "current_A", f"conductor {name!r}"))
-        geom_spec = _req(c, "geometry", f"conductor {name!r}")
-        cs.add(_build_geometry(geom_spec, current_A, name))
-    return cs
+    from ..coil.io import build_conductor_system as _build
+    return _build(conductors)

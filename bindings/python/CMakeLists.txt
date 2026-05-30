@@ -37,6 +37,7 @@ set(_quasar_py_sources
   pic/__init__.py
   pic/io.py
   pic/initial_conditions.py
+  pic/numerics.py
   pic/postprocess.py
   pic/cli.py
 )

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence, Union
+from typing import Any, Sequence, Union
 
 import yaml
 
@@ -127,6 +127,21 @@ def _build_geometry(spec: dict, current_A: float, name: str) -> Filament:
         pts = [_vec3(p) for p in _require(spec, "points_xyz_m", "polyline")]
         return generic_polyline(points=pts, current_A=current_A, name=name)
     raise ValueError(f"conductor {name!r}.geometry.type {gt!r} is not recognized")
+
+
+def build_conductor_system(conductors: Sequence[dict]) -> ConductorSystem:
+    """Build a ConductorSystem from a list of conductor dicts.
+
+    Shared by the coil deck parser and the PIC external-field loader so the
+    conductor schema (name / current_A / geometry) has a single home.
+    """
+    cs = ConductorSystem()
+    for c in conductors:
+        name = str(_require(c, "name", "conductor"))
+        current_A = float(_require(c, "current_A", f"conductor {name!r}"))
+        geom_spec = _require(c, "geometry", f"conductor {name!r}")
+        cs.add(_build_geometry(geom_spec, current_A, name))
+    return cs
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +263,7 @@ def parse(data: dict) -> CoilDeck:
     if not raw_conductors:
         raise ValueError("deck.conductors must be non-empty")
 
-    cs = ConductorSystem()
-    for c in raw_conductors:
-        name = str(_require(c, "name", "conductor"))
-        current_A = float(_require(c, "current_A", f"conductor {name!r}"))
-        geom_spec = _require(c, "geometry", f"conductor {name!r}")
-        cs.add(_build_geometry(geom_spec, current_A, name))
+    cs = build_conductor_system(raw_conductors)
 
     obs = _build_observation(_require(data, "observation", "deck"))
     out = _parse_output(_require(data, "output", "deck"))

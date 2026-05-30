@@ -10,8 +10,19 @@ which drives in-plane cyclotron gyration of the species.
 
 from __future__ import annotations
 
+import importlib.util
 import math
 from pathlib import Path
+
+# Load the package's single CFL helper directly from its file (without importing
+# the quasar package, which would require the compiled _core extension) so this
+# standalone generator and the CLI share one formula.
+_numerics_path = (Path(__file__).resolve().parents[2]
+                  / "python" / "quasar" / "pic" / "numerics.py")
+_spec = importlib.util.spec_from_file_location("_quasar_pic_numerics", _numerics_path)
+_numerics = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_numerics)
+_cfl_dt = _numerics.cfl_dt
 
 
 R0_M = 0.10
@@ -36,10 +47,9 @@ PIC_ORIGIN_X_M = R0_M - PIC_LX_M / 2.0
 PIC_ORIGIN_Y_M = -PIC_LY_M / 2.0
 
 TOTAL_TIME_S = 1.0e-6
-_C_LIGHT = 299792458.0
 _DX = PIC_LX_M / PIC_NX
 _DY = PIC_LY_M / PIC_NY
-DT_CFL_S = 0.5 / (_C_LIGHT * math.sqrt(1.0 / (_DX * _DX) + 1.0 / (_DY * _DY)))
+DT_CFL_S = _cfl_dt(_DX, _DY)  # fdtd_order=2 default; matches the CLI's auto dt
 STEPS = int(math.ceil(TOTAL_TIME_S / DT_CFL_S))
 CADENCE = 0  # In-memory field snapshots disabled; use --write-every for rolling out.npz checkpoint.
 

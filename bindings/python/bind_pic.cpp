@@ -32,8 +32,11 @@ namespace {
 
 using ::quasar::Real;
 
-std::vector<Real> numpy_to_real_vector(const py::array_t<Real>& arr,
-                                       const char* what) {
+// Forces a contiguous, correctly-typed array at the binding boundary so the raw
+// data()+shape(0) copy below never reads strided/wrong-type memory.
+using RealArray = py::array_t<Real, py::array::c_style | py::array::forcecast>;
+
+std::vector<Real> numpy_to_real_vector(const RealArray& arr, const char* what) {
   if (arr.ndim() != 1) {
     throw std::invalid_argument(std::string{what} + ": expected 1-D NumPy array");
   }
@@ -159,9 +162,9 @@ void bind_pic(py::module_& m) {
       .def_property_readonly("capacity", &quasar::pic::ParticleSpecies::capacity)
       .def("set_host_particles",
            [](quasar::pic::ParticleSpecies& self,
-              const py::array_t<Real>& x, const py::array_t<Real>& y,
-              const py::array_t<Real>& vx, const py::array_t<Real>& vy,
-              const py::array_t<Real>& vz, const py::array_t<Real>& w) {
+              const RealArray& x, const RealArray& y,
+              const RealArray& vx, const RealArray& vy,
+              const RealArray& vz, const RealArray& w) {
              self.set_host_particles(
                  numpy_to_real_vector(x, "x"), numpy_to_real_vector(y, "y"),
                  numpy_to_real_vector(vx, "vx"), numpy_to_real_vector(vy, "vy"),

@@ -46,7 +46,7 @@ def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     out_dir = Path(out_dir) if out_dir is not None else npz_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    data = np.load(npz_path)
+    data = np.load(npz_path, allow_pickle=False)
     nx = int(data["nx"][0])
     ny = int(data["ny"][0])
     written: list[Path] = []
