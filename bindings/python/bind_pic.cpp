@@ -153,13 +153,22 @@ void bind_pic(py::module_& m) {
            },
            py::arg("side"));
 
+  py::class_<quasar::pic::FilterSpec>(pic, "FilterSpec")
+      .def(py::init([](std::string name, int passes) {
+             return quasar::pic::FilterSpec{std::move(name), passes};
+           }),
+           py::arg("name"), py::arg("passes") = 1)
+      .def_readwrite("name", &quasar::pic::FilterSpec::name)
+      .def_readwrite("passes", &quasar::pic::FilterSpec::passes);
+
   py::class_<quasar::pic::EmPicConfig>(pic, "EmPicConfig")
       .def(py::init<>())
       .def_readwrite("grid", &quasar::pic::EmPicConfig::grid)
       .def_readwrite("fdtd_order", &quasar::pic::EmPicConfig::fdtd_order)
       .def_readwrite("shape_order", &quasar::pic::EmPicConfig::shape_order)
       .def_readwrite("boundary", &quasar::pic::EmPicConfig::boundary)
-      .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization);
+      .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization)
+      .def_readwrite("filters", &quasar::pic::EmPicConfig::filters);
 
   // -- Species --------------------------------------------------------------
 
@@ -243,9 +252,9 @@ void bind_pic(py::module_& m) {
              return self.species()[idx];
            },
            py::return_value_policy::reference_internal, py::arg("index"))
-      .def("sample_external_field_biot_savart",
+      .def("sample_external_field",
            [](quasar::pic::EmPic2D3V& self,
-              quasar::magnetostatics::BiotSavartEvaluator& evaluator,
+              quasar::numerics::IFieldEvaluator& evaluator,
               const quasar::magnetostatics::ConductorSystem& conductors,
               Real length_scale, Real e_field_scale, Real b_field_scale) {
              quasar::pic::sample_external_field(evaluator, conductors,

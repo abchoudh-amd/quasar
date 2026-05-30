@@ -59,6 +59,11 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     }
     for side, name in enumerate(deck.boundary.particle):
         cfg.boundary.set_particle_side(side, kind_map[name])
+    # Current-smoothing pipeline: each entry is {type: <name>, passes: <int>}.
+    cfg.filters = [
+        pic.FilterSpec(name=str(spec["type"]), passes=int(spec.get("passes", 1)))
+        for spec in deck.numerics.current_filter
+    ]
     return pic.EmPic2D3V(cfg)
 
 
@@ -116,13 +121,17 @@ def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
 def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
     if deck.external_field is None:
         return
-    if deck.external_field.evaluator_type != "biot_savart":
-        raise NotImplementedError(
-            f"evaluator {deck.external_field.evaluator_type!r} is not bound yet")
+    ms = _core.magnetostatics
+    ev_type = deck.external_field.evaluator_type
+    if ev_type == "uniform":
+        b = deck.external_field.uniform_b
+        evaluator = ms.UniformEvaluator(b0=_core.Vec3(b[0], b[1], b[2]))
+    else:
+        # Registry-selected evaluator by name (biot_savart, dipole, gradient, ...).
+        evaluator = ms.create_field_evaluator(ev_type)
     cs = pic_io.build_conductor_system(deck.external_field.conductors)
-    evaluator = _core.magnetostatics.BiotSavartEvaluator()
     length_scale, e_field_scale, b_field_scale = units.external_scales()
-    solver.sample_external_field_biot_savart(
+    solver.sample_external_field(
         evaluator, cs, length_scale, e_field_scale, b_field_scale)
 
 

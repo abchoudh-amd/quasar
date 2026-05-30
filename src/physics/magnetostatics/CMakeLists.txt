@@ -15,7 +15,7 @@ set(_quasar_magnetostatics_sources
 set_source_files_properties(biot_savart_evaluator.cpp
   PROPERTIES LANGUAGE HIP)
 
-quasar_add_module(magnetostatics SOURCES ${_quasar_magnetostatics_sources})
+quasar_add_module(magnetostatics REGISTERS SOURCES ${_quasar_magnetostatics_sources})
 
 # Pull in the HIP kernel translation unit, which defines the extern "C"
 # launch_biot_savart_B symbol referenced by biot_savart_evaluator.cpp.

@@ -18,7 +18,7 @@ from typing import Sequence
 
 import numpy as np
 
-from . import BiotSavartEvaluator
+from .._core import magnetostatics as _ms
 from . import io as coil_io
 
 
@@ -28,7 +28,9 @@ def _do_run(args: argparse.Namespace) -> int:
     if args.print_config:
         print(f"deck: {deck.raw}")
 
-    evaluator = BiotSavartEvaluator()
+    # Select the evaluator by name through the registry (default Biot-Savart for
+    # coil design); the deck may override via output.evaluator in a later phase.
+    evaluator = _ms.create_field_evaluator(deck.evaluator_type)
     B = evaluator.evaluate_B(deck.conductors, deck.observation.points)
     # B is shape (M, 3).
 

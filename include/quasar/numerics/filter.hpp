@@ -18,12 +18,17 @@ class ICurrentFilter {
  public:
   virtual ~ICurrentFilter() = default;
   virtual void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const = 0;
+  // Sets the number of smoothing passes. Registry-created filters are default
+  // constructed (one pass); the deck loader calls this to apply the configured
+  // pass count without needing a type-specific constructor.
+  virtual void set_passes(int n_passes) = 0;
 };
 
 class BinomialFilter final : public ICurrentFilter {
  public:
   explicit BinomialFilter(int n_passes = 1) : n_passes_{n_passes} {}
   void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const override;
+  void set_passes(int n_passes) override { n_passes_ = n_passes; }
   int passes() const noexcept { return n_passes_; }
 
  private:
@@ -37,6 +42,7 @@ class CompensatedBinomialFilter final : public ICurrentFilter {
  public:
   explicit CompensatedBinomialFilter(int n_passes = 1) : n_passes_{n_passes} {}
   void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const override;
+  void set_passes(int n_passes) override { n_passes_ = n_passes; }
   int passes() const noexcept { return n_passes_; }
 
  private:

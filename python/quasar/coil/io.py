@@ -238,6 +238,8 @@ class CoilDeck:
     observation: _ObservationResult
     output: OutputSpec
     raw: dict
+    # Registry name of the field evaluator; coil design uses Biot-Savart.
+    evaluator_type: str = "biot_savart"
 
 
 def _parse_output(spec: dict) -> OutputSpec:
@@ -268,8 +270,10 @@ def parse(data: dict) -> CoilDeck:
     obs = _build_observation(_require(data, "observation", "deck"))
     out = _parse_output(_require(data, "output", "deck"))
 
+    evaluator_type = str(data.get("evaluator", {}).get("type", "biot_savart"))
+
     return CoilDeck(units=units, conductors=cs, observation=obs,
-                    output=out, raw=data)
+                    output=out, raw=data, evaluator_type=evaluator_type)
 
 
 def load(path: Union[str, Path]) -> CoilDeck:

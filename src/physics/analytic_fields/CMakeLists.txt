@@ -5,4 +5,4 @@ set(_quasar_analytic_fields_sources
   file_grid.cpp
 )
 
-quasar_add_module(analytic_fields SOURCES ${_quasar_analytic_fields_sources})
+quasar_add_module(analytic_fields REGISTERS SOURCES ${_quasar_analytic_fields_sources})

@@ -81,6 +81,14 @@ class Normalization:
 class ExternalField:
     evaluator_type: str
     conductors: list[dict] = field(default_factory=list)
+    # For evaluator_type == "uniform": the constant external B (Tesla, SI decks).
+    uniform_b: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+# Field evaluators selectable from a PIC deck's external_field.evaluator.type.
+# These are registered on the C++ side (QUASAR_REGISTER_FIELD_EVALUATOR) and bound
+# to Python; biot_savart and uniform additionally take deck parameters.
+SUPPORTED_EVALUATORS = ("biot_savart", "uniform", "dipole", "gradient")
 
 
 @dataclass
@@ -164,12 +172,14 @@ class PicDeck:
         if self.numerics.shape not in ("cic", "tsc"):
             raise ValueError("numerics.shape must be 'cic' or 'tsc'")
         if self.external_field is not None:
-            if self.external_field.evaluator_type != "biot_savart":
+            ev = self.external_field.evaluator_type
+            if ev not in SUPPORTED_EVALUATORS:
                 raise ValueError(
-                    "external_field.evaluator.type must be 'biot_savart' "
-                    "(only Biot-Savart is bound to Python today)"
-                )
-            if not self.external_field.conductors:
+                    f"external_field.evaluator.type {ev!r} must be one of "
+                    f"{list(SUPPORTED_EVALUATORS)}")
+            # Biot-Savart is driven by conductor geometry; the others are
+            # closed-form and need no conductors.
+            if ev == "biot_savart" and not self.external_field.conductors:
                 raise ValueError("external_field.evaluator.conductors must be non-empty")
         if not self.species:
             raise ValueError("deck.species must be non-empty")
@@ -252,7 +262,8 @@ def _parse_external_field(d: dict | None) -> Union[ExternalField, None]:
     ev = _require(d, "evaluator", "external_field")
     ev_type = str(_require(ev, "type", "external_field.evaluator"))
     return ExternalField(evaluator_type=ev_type,
-                         conductors=list(ev.get("conductors", [])))
+                         conductors=list(ev.get("conductors", [])),
+                         uniform_b=_vec3(ev.get("b_tesla")))
 
 
 def _parse_species(items: list[dict] | None) -> list[Species]:

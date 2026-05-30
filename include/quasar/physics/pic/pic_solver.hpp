@@ -12,6 +12,7 @@
 
 #include <array>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace quasar::magnetostatics {
@@ -20,12 +21,20 @@ class ConductorSystem;
 
 namespace quasar::pic {
 
+// One current-smoothing filter in the deck-configured pipeline: a registry name
+// ("binomial" / "compensated_binomial") and its pass count.
+struct FilterSpec {
+  std::string name{};
+  int passes{1};
+};
+
 struct EmPicConfig {
   Grid2D grid{};
   int fdtd_order{2};
   int shape_order{1};
   boundary::BoundarySpec boundary{};
   Normalization normalization{};
+  std::vector<FilterSpec> filters{};
 };
 
 class EmPic2D3V {

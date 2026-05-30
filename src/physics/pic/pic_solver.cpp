@@ -130,6 +130,14 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   const bool periodic_y = pb[2] == boundary::ParticleBoundaryKind::periodic
                        && pb[3] == boundary::ParticleBoundaryKind::periodic;
   deposit_->set_periodic_axes(periodic_x, periodic_y);
+
+  // Build the current-smoothing pipeline from the deck via the registry (same
+  // pluggable path as the BCs); concrete filters self-register in src/numerics.
+  for (const auto& spec : cfg_.filters) {
+    auto filter = Registry<numerics::ICurrentFilter>::instance().create(spec.name);
+    filter->set_passes(spec.passes);
+    filters_.add(std::move(filter));
+  }
 }
 
 void EmPic2D3V::add_species(ParticleSpecies s) {

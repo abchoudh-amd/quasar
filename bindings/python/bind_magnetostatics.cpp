@@ -10,6 +10,9 @@
 #include <pybind11/stl.h>
 
 #include "quasar/core/types.hpp"
+#include "quasar/physics/analytic_fields/dipole.hpp"
+#include "quasar/physics/analytic_fields/gradient.hpp"
+#include "quasar/physics/analytic_fields/uniform.hpp"
 #include "quasar/physics/magnetostatics/biot_savart.hpp"
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/field_evaluator.hpp"
@@ -184,21 +187,53 @@ PYBIND11_MODULE(_core, m) {
       .def_readwrite("tile_segments", &BiotSavartConfig::tile_segments)
       .def_readwrite("block_size",    &BiotSavartConfig::block_size);
 
-  py::class_<BiotSavartEvaluator>(ms, "BiotSavartEvaluator")
-      .def(py::init<>())
-      .def(py::init<BiotSavartConfig>(), py::arg("config"))
+  // Abstract field-evaluator base so concrete evaluators (Biot-Savart + the
+  // analytic fields) can be passed polymorphically to the PIC external-field
+  // sampler and selected by registry name.
+  using ::quasar::numerics::IFieldEvaluator;
+  py::class_<IFieldEvaluator>(ms, "IFieldEvaluator")
       .def("evaluate_B",
-           [](const BiotSavartEvaluator& self,
+           [](const IFieldEvaluator& self,
               const ConductorSystem& cs, const PointCloud& obs) {
              return field_to_numpy(self.evaluate_B(cs, obs));
            },
            py::arg("conductors"), py::arg("observations"))
       .def("evaluate_grad_B",
-           [](const BiotSavartEvaluator& self,
+           [](const IFieldEvaluator& self,
               const ConductorSystem& cs, const PointCloud& obs) {
              return grad_field_to_numpy(self.evaluate_grad_B(cs, obs));
            },
            py::arg("conductors"), py::arg("observations"));
+
+  py::class_<BiotSavartEvaluator, IFieldEvaluator>(ms, "BiotSavartEvaluator")
+      .def(py::init<>())
+      .def(py::init<BiotSavartConfig>(), py::arg("config"));
+
+  py::class_<::quasar::analytic_fields::UniformEvaluator, IFieldEvaluator>(
+      ms, "UniformEvaluator")
+      .def(py::init<>())
+      .def(py::init<Vec3, Vec3>(), py::arg("b0"), py::arg("e0") = Vec3{0, 0, 0});
+
+  py::class_<::quasar::analytic_fields::DipoleEvaluator, IFieldEvaluator>(
+      ms, "DipoleEvaluator")
+      .def(py::init<>())
+      .def(py::init<Vec3, Vec3>(), py::arg("moment"),
+           py::arg("origin") = Vec3{0, 0, 0});
+
+  py::class_<::quasar::analytic_fields::GradientEvaluator, IFieldEvaluator>(
+      ms, "GradientEvaluator")
+      .def(py::init<>());
+
+  // Create a registered evaluator by name (default-constructed). Mirrors the
+  // string-keyed selection the C++ deck boundary uses; concrete evaluators
+  // self-register via QUASAR_REGISTER_FIELD_EVALUATOR.
+  ms.def("create_field_evaluator",
+         [](const std::string& name) {
+           return ::quasar::Registry<IFieldEvaluator>::instance().create(name);
+         },
+         py::arg("name"),
+         "Construct a registered IFieldEvaluator by name (e.g. 'biot_savart', "
+         "'uniform', 'dipole', 'gradient', 'file_grid').");
 
   // -- geometry generators -------------------------------------------------
 
