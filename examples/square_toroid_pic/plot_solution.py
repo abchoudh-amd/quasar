@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
+from quasar.pic.postprocess import reshape_with_ghost, species_names
+
 HERE = Path(__file__).resolve().parent
 NPZ = HERE / "out.npz"
 DECK = HERE / "input.yaml"
@@ -28,15 +30,10 @@ def _domain_extent(deck: dict) -> tuple[float, float, float, float]:
     return x_lo, x_lo + d["lx_m"], y_lo, y_lo + d["ly_m"]
 
 
-def _species_names(data) -> list[str]:
-    return sorted({k.split("_", 1)[1].rsplit("_", 1)[0]
-                   for k in data.files if k.startswith("species_")})
-
-
 def plot_loss(data, deck: dict) -> Path:
     t = data["series_time_s"] * 1e6  # µs
     fig, ax = plt.subplots(figsize=(8, 5))
-    for sp in _species_names(data):
+    for sp in species_names(data):
         key = f"series_alive_{sp}"
         if key not in data.files:
             continue
@@ -58,14 +55,10 @@ def plot_loss(data, deck: dict) -> Path:
 
 def plot_final_state(data, deck: dict) -> Path:
     x_lo, x_hi, y_lo, y_hi = _domain_extent(deck)
+    nx = int(data["nx"].item())
     ny = int(data["ny"].item())
-    bz_full = data["external_bz"]
-    # Fields are stored on a Yee grid with a 1-cell ghost halo on each side.
-    side = int(round(bz_full.size ** 0.5))
-    bz = bz_full.reshape(side, side)
-    if side == ny + 2:
-        bz = bz[1:-1, 1:-1]
-    species = _species_names(data)
+    bz = reshape_with_ghost(data["external_bz"], nx, ny)
+    species = species_names(data)
 
     fig, axes = plt.subplots(1, len(species), figsize=(6 * len(species), 6),
                               sharex=True, sharey=True, squeeze=False)

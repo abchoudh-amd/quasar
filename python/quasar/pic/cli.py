@@ -20,6 +20,7 @@ from typing import Sequence
 import numpy as np
 
 from .. import _core
+from .._paths import confine_output_path
 from . import initial_conditions as ic
 from . import io as pic_io
 from ._units import Units
@@ -294,12 +295,8 @@ def _do_run(args: argparse.Namespace) -> int:
     sim_time = 0.0
     # Confine the deck-supplied output path to the deck's own directory so a
     # stray absolute path or "../" cannot write outside it.
-    base = deck_path.parent.resolve()
-    out_path = (base / deck.diagnostics.output_path).resolve()
-    if not out_path.is_relative_to(base):
-        raise ValueError(
-            f"diagnostics.output_path {deck.diagnostics.output_path!r} escapes "
-            f"the deck directory {base}")
+    out_path = confine_output_path(deck_path.parent, deck.diagnostics.output_path,
+                                   label="diagnostics.output_path")
     series: dict[str, list] = {"step": [], "time_s": []}
     for sp in deck.species:
         series[f"alive_{sp.name}"] = []

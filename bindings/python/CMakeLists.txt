@@ -30,6 +30,7 @@ target_link_libraries(quasar_core_py
 # works from the build tree.
 set(_quasar_py_sources
   __init__.py
+  _paths.py
   coil/__init__.py
   coil/io.py
   coil/cli.py

@@ -110,6 +110,50 @@ void dispatch_launch_gradB(const T* ax, const T* ay, const T* az,
   }
 }
 
+// Device-resident conductor + observation inputs for the Biot-Savart kernels.
+// Owns the segment SoA (a/b endpoints + current) and the observation points on
+// the device, uploaded asynchronously on cfg.stream. Both evaluate_*_impl build
+// one of these, then allocate only their own output buffer.
+template <class T>
+struct UploadedInputs {
+  using DeviceBuffer = ::quasar::backend::DeviceBuffer<T>;
+  DeviceBuffer ax, ay, az, bx, by, bz, I, px, py, pz;
+  int N{0};
+  int M{0};
+
+  UploadedInputs(const SegmentSoA& seg, const PointSoA& pts, stream_t stream)
+      : ax(seg.n_segments()), ay(seg.n_segments()), az(seg.n_segments()),
+        bx(seg.n_segments()), by(seg.n_segments()), bz(seg.n_segments()),
+        I(seg.n_segments()),
+        px(pts.n_points()), py(pts.n_points()), pz(pts.n_points()),
+        N(static_cast<int>(seg.n_segments())),
+        M(static_cast<int>(pts.n_points())) {
+    // UploadSrc keeps each narrowed/aliased host buffer alive until the sync that
+    // the caller performs after the kernel launch.
+    const UploadSrc<T> s_ax{seg.ax}, s_ay{seg.ay}, s_az{seg.az};
+    const UploadSrc<T> s_bx{seg.bx}, s_by{seg.by}, s_bz{seg.bz};
+    const UploadSrc<T> s_I{seg.I};
+    const UploadSrc<T> s_px{pts.px}, s_py{pts.py}, s_pz{pts.pz};
+    ax.copy_from_host_async(s_ax.data(), N, stream);
+    ay.copy_from_host_async(s_ay.data(), N, stream);
+    az.copy_from_host_async(s_az.data(), N, stream);
+    bx.copy_from_host_async(s_bx.data(), N, stream);
+    by.copy_from_host_async(s_by.data(), N, stream);
+    bz.copy_from_host_async(s_bz.data(), N, stream);
+    I.copy_from_host_async(s_I.data(), N, stream);
+    px.copy_from_host_async(s_px.data(), M, stream);
+    py.copy_from_host_async(s_py.data(), M, stream);
+    pz.copy_from_host_async(s_pz.data(), M, stream);
+    // The host UploadSrc buffers must outlive the async copies; the copies are on
+    // `stream` and the destructors run at end of scope, so synchronize the upload
+    // here before they die. (For the identity Real path UploadSrc aliases the
+    // caller's SoA, which outlives this ctor, so the sync is only strictly needed
+    // for the narrowed float path — but syncing unconditionally is simplest and
+    // the subsequent kernel+readback already serialize on the same stream.)
+    ::quasar::backend::device_synchronize(stream);
+  }
+};
+
 template <class T>
 Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
                                 const ConductorSystem&    cs,
@@ -129,39 +173,14 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
     return result;
   }
 
-  const UploadSrc<T> seg_ax{seg.ax};
-  const UploadSrc<T> seg_ay{seg.ay};
-  const UploadSrc<T> seg_az{seg.az};
-  const UploadSrc<T> seg_bx{seg.bx};
-  const UploadSrc<T> seg_by{seg.by};
-  const UploadSrc<T> seg_bz{seg.bz};
-  const UploadSrc<T> seg_I {seg.I};
-  const UploadSrc<T> pts_px{pts.px};
-  const UploadSrc<T> pts_py{pts.py};
-  const UploadSrc<T> pts_pz{pts.pz};
-
-  DeviceBuffer<T> d_ax(N), d_ay(N), d_az(N);
-  DeviceBuffer<T> d_bx(N), d_by(N), d_bz(N);
-  DeviceBuffer<T> d_I (N);
-  DeviceBuffer<T> d_px(M), d_py(M), d_pz(M);
+  const UploadedInputs<T> in{seg, pts, cfg.stream};
   DeviceBuffer<T> d_Bx(M), d_By(M), d_Bz(M);
 
-  d_ax.copy_from_host_async(seg_ax.data(), N, cfg.stream);
-  d_ay.copy_from_host_async(seg_ay.data(), N, cfg.stream);
-  d_az.copy_from_host_async(seg_az.data(), N, cfg.stream);
-  d_bx.copy_from_host_async(seg_bx.data(), N, cfg.stream);
-  d_by.copy_from_host_async(seg_by.data(), N, cfg.stream);
-  d_bz.copy_from_host_async(seg_bz.data(), N, cfg.stream);
-  d_I .copy_from_host_async(seg_I .data(), N, cfg.stream);
-  d_px.copy_from_host_async(pts_px.data(), M, cfg.stream);
-  d_py.copy_from_host_async(pts_py.data(), M, cfg.stream);
-  d_pz.copy_from_host_async(pts_pz.data(), M, cfg.stream);
-
   dispatch_launch_B<T>(
-      d_ax.device_ptr(), d_ay.device_ptr(), d_az.device_ptr(),
-      d_bx.device_ptr(), d_by.device_ptr(), d_bz.device_ptr(),
-      d_I.device_ptr(), N,
-      d_px.device_ptr(), d_py.device_ptr(), d_pz.device_ptr(), M,
+      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
+      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
+      in.I.device_ptr(), N,
+      in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_Bx.device_ptr(), d_By.device_ptr(), d_Bz.device_ptr(),
       cfg.stream);
 
@@ -201,40 +220,15 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
     return result;
   }
 
-  const UploadSrc<T> seg_ax{seg.ax};
-  const UploadSrc<T> seg_ay{seg.ay};
-  const UploadSrc<T> seg_az{seg.az};
-  const UploadSrc<T> seg_bx{seg.bx};
-  const UploadSrc<T> seg_by{seg.by};
-  const UploadSrc<T> seg_bz{seg.bz};
-  const UploadSrc<T> seg_I {seg.I};
-  const UploadSrc<T> pts_px{pts.px};
-  const UploadSrc<T> pts_py{pts.py};
-  const UploadSrc<T> pts_pz{pts.pz};
-
-  DeviceBuffer<T> d_ax(N), d_ay(N), d_az(N);
-  DeviceBuffer<T> d_bx(N), d_by(N), d_bz(N);
-  DeviceBuffer<T> d_I (N);
-  DeviceBuffer<T> d_px(M), d_py(M), d_pz(M);
+  const UploadedInputs<T> in{seg, pts, cfg.stream};
   DeviceBuffer<T> d_G(static_cast<std::size_t>(9)
                       * static_cast<std::size_t>(M));
 
-  d_ax.copy_from_host_async(seg_ax.data(), N, cfg.stream);
-  d_ay.copy_from_host_async(seg_ay.data(), N, cfg.stream);
-  d_az.copy_from_host_async(seg_az.data(), N, cfg.stream);
-  d_bx.copy_from_host_async(seg_bx.data(), N, cfg.stream);
-  d_by.copy_from_host_async(seg_by.data(), N, cfg.stream);
-  d_bz.copy_from_host_async(seg_bz.data(), N, cfg.stream);
-  d_I .copy_from_host_async(seg_I .data(), N, cfg.stream);
-  d_px.copy_from_host_async(pts_px.data(), M, cfg.stream);
-  d_py.copy_from_host_async(pts_py.data(), M, cfg.stream);
-  d_pz.copy_from_host_async(pts_pz.data(), M, cfg.stream);
-
   dispatch_launch_gradB<T>(
-      d_ax.device_ptr(), d_ay.device_ptr(), d_az.device_ptr(),
-      d_bx.device_ptr(), d_by.device_ptr(), d_bz.device_ptr(),
-      d_I.device_ptr(), N,
-      d_px.device_ptr(), d_py.device_ptr(), d_pz.device_ptr(), M,
+      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
+      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
+      in.I.device_ptr(), N,
+      in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_G.device_ptr(),
       cfg.stream);
 

@@ -44,6 +44,17 @@ def reshape_with_ghost(flat: np.ndarray, nx: int, ny: int) -> np.ndarray:
 _reshape_with_ghost = reshape_with_ghost
 
 
+def species_names(data) -> list[str]:
+    """Species names present in an ``out.npz``, derived from the ``species_<name>_x``
+    keys. Single source of truth for the per-species key schema so callers do not
+    re-implement the string surgery."""
+    return sorted({
+        k[len("species_"):-len("_x")]
+        for k in data.files
+        if k.startswith("species_") and k.endswith("_x")
+    })
+
+
 def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     """Render diagnostic PNGs for an ``out.npz``. Returns written paths."""
     import matplotlib
@@ -89,17 +100,13 @@ def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
         plt.close(fig)
         written.append(p)
 
-    species_names = sorted({
-        k[len("species_"):-len("_x")]
-        for k in data.files
-        if k.startswith("species_") and k.endswith("_x")
-    })
-    if species_names:
+    names = species_names(data)
+    if names:
         fig, ax = plt.subplots(figsize=(6, 5))
         ax.imshow(np.abs(ext_bz), origin="lower", aspect="equal",
                   cmap="Greys", alpha=0.4)
         colors = ["tab:red", "tab:blue", "tab:green", "tab:orange"]
-        for i, sp in enumerate(species_names):
+        for i, sp in enumerate(names):
             x = data[f"species_{sp}_x"]
             y = data[f"species_{sp}_y"]
             alive = data[f"species_{sp}_alive"].astype(bool)

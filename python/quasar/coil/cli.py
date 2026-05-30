@@ -19,6 +19,7 @@ from typing import Sequence
 import numpy as np
 
 from .._core import magnetostatics as _ms
+from .._paths import confine_output_path
 from . import io as coil_io
 
 
@@ -54,12 +55,8 @@ def _do_run(args: argparse.Namespace) -> int:
 
     # Confine the deck-supplied output path to the input deck's directory so a
     # stray absolute path or "../" cannot write outside it.
-    base = Path(args.input).resolve().parent
-    out_path = (base / deck.output.path).resolve()
-    if not out_path.is_relative_to(base):
-        raise ValueError(
-            f"output.path {deck.output.path!r} escapes the deck directory {base}")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = confine_output_path(Path(args.input).resolve().parent,
+                                   deck.output.path, label="output.path")
     np.savez(out_path, **payload)
 
     if not args.quiet:
