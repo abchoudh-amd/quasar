@@ -94,10 +94,29 @@ void bind_pic(py::module_& m) {
       .def("dx", &quasar::Grid2D::dx)
       .def("dy", &quasar::Grid2D::dy);
 
+  py::enum_<quasar::UnitTag>(pic, "UnitTag")
+      .value("time", quasar::UnitTag::time)
+      .value("length", quasar::UnitTag::length)
+      .value("velocity", quasar::UnitTag::velocity)
+      .value("e_field", quasar::UnitTag::e_field)
+      .value("b_field", quasar::UnitTag::b_field)
+      .value("density", quasar::UnitTag::density)
+      .value("charge", quasar::UnitTag::charge)
+      .value("mass", quasar::UnitTag::mass)
+      .value("temperature_eV", quasar::UnitTag::temperature_eV);
+
   py::class_<quasar::Normalization>(pic, "Normalization")
       .def(py::init<>())
       .def_static("plasma", &quasar::Normalization::plasma,
                   py::arg("n_ref"), py::arg("q_ref"), py::arg("m_ref"))
+      .def("to_internal", &quasar::Normalization::to_internal,
+           py::arg("value"), py::arg("tag"))
+      .def("to_si", &quasar::Normalization::to_si,
+           py::arg("value"), py::arg("tag"))
+      .def("length_scale", &quasar::Normalization::length_scale)
+      .def("time_scale", &quasar::Normalization::time_scale)
+      .def("e_field_scale", &quasar::Normalization::e_field_scale)
+      .def("b_field_scale", &quasar::Normalization::b_field_scale)
       .def_readonly("n_ref", &quasar::Normalization::n_ref)
       .def_readonly("q_ref", &quasar::Normalization::q_ref)
       .def_readonly("m_ref", &quasar::Normalization::m_ref)
@@ -223,11 +242,16 @@ void bind_pic(py::module_& m) {
       .def("sample_external_field_biot_savart",
            [](quasar::pic::EmPic2D3V& self,
               quasar::magnetostatics::BiotSavartEvaluator& evaluator,
-              const quasar::magnetostatics::ConductorSystem& conductors) {
+              const quasar::magnetostatics::ConductorSystem& conductors,
+              Real length_scale, Real e_field_scale, Real b_field_scale) {
              quasar::pic::sample_external_field(evaluator, conductors,
-                                                self.external_fields());
+                                                self.external_fields(),
+                                                length_scale, e_field_scale,
+                                                b_field_scale);
            },
-           py::arg("evaluator"), py::arg("conductors"))
+           py::arg("evaluator"), py::arg("conductors"),
+           py::arg("length_scale") = 1.0, py::arg("e_field_scale") = 1.0,
+           py::arg("b_field_scale") = 1.0)
       .def("fields_to_host",
            [](quasar::pic::EmPic2D3V& self) {
              return yee_field_to_dict(self.fields());

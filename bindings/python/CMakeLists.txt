@@ -40,6 +40,7 @@ set(_quasar_py_sources
   pic/numerics.py
   pic/postprocess.py
   pic/cli.py
+  pic/_units.py
 )
 
 foreach(_py IN LISTS _quasar_py_sources)

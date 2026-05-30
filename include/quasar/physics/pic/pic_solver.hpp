@@ -68,8 +68,18 @@ class EmPic2D3V {
   std::array<std::unique_ptr<boundary::IFieldBoundary>, 4> field_bcs_{};
 };
 
+// Samples the evaluator's E/B at the Yee grid's cell-staggered points and stores
+// them in external_fields. The grid coordinates are multiplied by `length_scale`
+// (internal -> SI metres) before the SI evaluator is called, and the returned SI
+// field is divided by `e_field_scale`/`b_field_scale` to land in the solver's
+// internal units. All scales default to 1, i.e. a pure SI pass-through that leaves
+// the existing (SI) behaviour unchanged; pass a plasma normalization's scales to
+// drive an SI field source from a normalized solver.
 void sample_external_field(numerics::IFieldEvaluator& evaluator,
                            const magnetostatics::ConductorSystem& conductors,
-                           YeeField2D<Real>& external_fields);
+                           YeeField2D<Real>& external_fields,
+                           Real length_scale = Real{1},
+                           Real e_field_scale = Real{1},
+                           Real b_field_scale = Real{1});
 
 }  // namespace quasar::pic

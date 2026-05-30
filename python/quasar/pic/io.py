@@ -143,8 +143,8 @@ class PicDeck:
     raw: dict = field(default_factory=dict)
 
     def validate(self) -> None:
-        if self.units != "SI":
-            raise ValueError("units must be 'SI'")
+        if self.units not in ("SI", "normalized"):
+            raise ValueError("units must be 'SI' or 'normalized'")
         if self.domain.nx <= 0 or self.domain.ny <= 0:
             raise ValueError("domain.nx and domain.ny must be positive")
         # Upper-bound grid and particle counts so a typo (or hostile deck) cannot

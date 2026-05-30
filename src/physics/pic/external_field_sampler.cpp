@@ -32,13 +32,25 @@ magnetostatics::PointCloud yee_points(const Grid2D& g, int component) {
   return pts;
 }
 
+// Scales every point in `pts` from internal length units to SI (factor
+// length_scale) so the SI field evaluator sees physical coordinates.
+magnetostatics::PointCloud to_si_points(const magnetostatics::PointCloud& pts,
+                                        Real length_scale) {
+  magnetostatics::PointCloud out;
+  for (const Vec3& p : pts.points()) {
+    out.add(Vec3{p.x * length_scale, p.y * length_scale, p.z * length_scale});
+  }
+  return out;
+}
+
 void copy_component(const Grid2D& g, const Field<Vec3>& values, int axis,
-                    backend::DeviceBuffer<Real>& dst) {
+                    Real field_scale, backend::DeviceBuffer<Real>& dst) {
   std::vector<Real> host(g.storage_size(), Real{0});
   for (int j = 0; j < g.ny; ++j) {
     for (int i = 0; i < g.nx; ++i) {
       const Vec3 v = values[static_cast<std::size_t>(i + g.nx * j)];
-      host[g.index(i, j)] = axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+      const Real c = axis == 0 ? v.x : (axis == 1 ? v.y : v.z);
+      host[g.index(i, j)] = c / field_scale;
     }
   }
   dst.copy_from_host(host.data(), host.size());
@@ -48,21 +60,23 @@ void copy_component(const Grid2D& g, const Field<Vec3>& values, int axis,
 
 void sample_external_field(numerics::IFieldEvaluator& evaluator,
                            const magnetostatics::ConductorSystem& conductors,
-                           YeeField2D<Real>& external_fields) {
+                           YeeField2D<Real>& external_fields,
+                           Real length_scale, Real e_field_scale,
+                           Real b_field_scale) {
   const Grid2D g = external_fields.grid;
-  auto ex_pts = yee_points(g, 0);
-  auto ey_pts = yee_points(g, 1);
-  auto ez_pts = yee_points(g, 2);
-  auto bx_pts = yee_points(g, 3);
-  auto by_pts = yee_points(g, 4);
-  auto bz_pts = yee_points(g, 5);
+  auto ex_pts = to_si_points(yee_points(g, 0), length_scale);
+  auto ey_pts = to_si_points(yee_points(g, 1), length_scale);
+  auto ez_pts = to_si_points(yee_points(g, 2), length_scale);
+  auto bx_pts = to_si_points(yee_points(g, 3), length_scale);
+  auto by_pts = to_si_points(yee_points(g, 4), length_scale);
+  auto bz_pts = to_si_points(yee_points(g, 5), length_scale);
 
-  copy_component(g, evaluator.evaluate_E(conductors, ex_pts), 0, external_fields.ex);
-  copy_component(g, evaluator.evaluate_E(conductors, ey_pts), 1, external_fields.ey);
-  copy_component(g, evaluator.evaluate_E(conductors, ez_pts), 2, external_fields.ez);
-  copy_component(g, evaluator.evaluate_B(conductors, bx_pts), 0, external_fields.bx);
-  copy_component(g, evaluator.evaluate_B(conductors, by_pts), 1, external_fields.by);
-  copy_component(g, evaluator.evaluate_B(conductors, bz_pts), 2, external_fields.bz);
+  copy_component(g, evaluator.evaluate_E(conductors, ex_pts), 0, e_field_scale, external_fields.ex);
+  copy_component(g, evaluator.evaluate_E(conductors, ey_pts), 1, e_field_scale, external_fields.ey);
+  copy_component(g, evaluator.evaluate_E(conductors, ez_pts), 2, e_field_scale, external_fields.ez);
+  copy_component(g, evaluator.evaluate_B(conductors, bx_pts), 0, b_field_scale, external_fields.bx);
+  copy_component(g, evaluator.evaluate_B(conductors, by_pts), 1, b_field_scale, external_fields.by);
+  copy_component(g, evaluator.evaluate_B(conductors, bz_pts), 2, b_field_scale, external_fields.bz);
 }
 
 }  // namespace quasar::pic
