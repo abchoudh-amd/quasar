@@ -1,5 +1,8 @@
 units: normalized
 domain: {nx: 64, ny: 64, lx_m: 1.0, ly_m: 1.0}
 numerics: {fdtd_order: 4, shape: cic, current_filter: []}
-fields: {initial: {type: seed_em_wave, mode: [1, 0], component: Ez}}
+# A vacuum plane wave seeded in Ez/By, propagating in +x on a fully periodic grid
+# with no particles. The total EM energy is conserved as the wave translates.
+fields: {initial: {type: seed_em_wave, mode: [1, 0], component: Ez, amplitude: 1.0}}
 time: {dt_s: auto, steps: 128}
+diagnostics: {output_path: out.npz, cadence: 8, fields: [ez, by], per_species: false}

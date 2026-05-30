@@ -1,7 +1,14 @@
 units: normalized
 domain: {nx: 64, ny: 64, lx_m: 1.0, ly_m: 1.0}
+# A closed PEC cavity (reflecting on all four field walls) seeded with an Ez/By
+# pulse. With no particles and lossless PEC walls the total EM energy is conserved
+# as the pulse bounces around the cavity. Particles are specular so the deck also
+# stays valid if species are added later.
 boundary:
   field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
   particle: {x_lo: specular, x_hi: specular, y_lo: specular, y_hi: specular}
 numerics: {fdtd_order: 4, shape: cic, current_filter: []}
+fields:
+  initial: {type: seed_em_wave, component: Ez, mode: [1, 0], amplitude: 1.0}
 time: {dt_s: auto, steps: 128}
+diagnostics: {output_path: out.npz, cadence: 8, fields: [ez, by], per_species: false}

@@ -9,4 +9,14 @@ external_field:
         current_A: 1000.0
         geometry: {type: circular_loop, radius_m: 0.05, center_xyz: [0, 0, 0], axis_xyz: [0, 0, 1], n_segments: 128}
 numerics: {fdtd_order: 2, shape: cic, current_filter: []}
+species:
+  - name: electron
+    charge_C: -1.602176634e-19
+    mass_kg: 9.1093837015e-31
+    n_particles: 8192
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.0e18
+      temperature_eV: 50.0
 time: {dt_s: auto, steps: 128}
+diagnostics: {output_path: out.npz, cadence: 8, fields: [bz], per_species: true}

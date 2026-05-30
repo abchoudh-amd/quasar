@@ -12,6 +12,7 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import math
 import time
 from pathlib import Path
 from typing import Sequence
@@ -59,9 +60,16 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     }
     for side, name in enumerate(deck.boundary.particle):
         cfg.boundary.set_particle_side(side, kind_map[name])
-    # Current-smoothing pipeline: each entry is {type: <name>, passes: <int>}.
+    field_kind_map = {
+        "periodic": pic.FieldBoundaryKind.periodic,
+        "pec": pic.FieldBoundaryKind.pec,
+    }
+    for side, name in enumerate(deck.boundary.field):
+        cfg.boundary.set_field_side(side, field_kind_map[name])
+    # Current-smoothing pipeline: each entry is {type: <name>, n_passes|passes}.
     cfg.filters = [
-        pic.FilterSpec(name=str(spec["type"]), passes=int(spec.get("passes", 1)))
+        pic.FilterSpec(name=str(spec["type"]),
+                       passes=int(spec.get("n_passes", spec.get("passes", 1))))
         for spec in deck.numerics.current_filter
     ]
     return pic.EmPic2D3V(cfg)
@@ -133,6 +141,52 @@ def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
     length_scale, e_field_scale, b_field_scale = units.external_scales()
     solver.sample_external_field(
         evaluator, cs, length_scale, e_field_scale, b_field_scale)
+
+
+def _seed_fields(solver, deck: pic_io.PicDeck) -> None:
+    """Apply an optional initial field seed (normalized-unit decks only).
+
+    The interior is written on a ghost-padded buffer matching the solver storage
+    (pitch = nx + 2*nghost). Amplitudes are dimensionless / internal units."""
+    init = deck.fields.initial
+    if init is None:
+        return
+    nx, ny = deck.domain.nx, deck.domain.ny
+    # Recover nghost from the solver storage size: storage = (nx+2g)*(ny+2g).
+    storage = solver.storage_size()
+    g = 0
+    while (nx + 2 * (g + 1)) * (ny + 2 * (g + 1)) <= storage:
+        g += 1
+    pitch = nx + 2 * g
+    height = ny + 2 * g
+
+    def _flat(component: str, fn) -> None:
+        buf = np.zeros(pitch * height, dtype=np.float64)
+        for j in range(ny):
+            for i in range(nx):
+                buf[(i + g) + pitch * (j + g)] = fn(i, j)
+        solver.seed_field(component, buf)
+
+    comp = init.component.lower()
+    if init.type == "seed_perturbation":
+        mx = max(1, init.mode[0])
+        amp = init.amplitude
+        _flat(comp, lambda i, j: amp * math.sin(2 * math.pi * mx * (i + 0.5) / nx))
+    elif init.type == "seed_em_wave":
+        mx, my = init.mode
+        amp = init.amplitude
+        # A +x-propagating wave: Ez = sin(kx), By = -Ez (c = 1 internal units).
+        kx = 2 * math.pi * mx
+        if comp == "ez":
+            _flat("ez", lambda i, j: amp * math.sin(kx * (i + 0.5) / nx))
+            _flat("by", lambda i, j: -amp * math.sin(kx * (i + 0.5) / nx))
+        elif comp == "ey":
+            _flat("ey", lambda i, j: amp * math.sin(kx * (i + 0.5) / nx))
+            _flat("bz", lambda i, j: amp * math.sin(kx * (i + 0.5) / nx))
+        else:
+            raise ValueError(f"seed_em_wave: unsupported component {init.component!r}")
+    else:
+        raise ValueError(f"fields.initial.type {init.type!r} is not supported")
 
 
 def _field_to_si(name: str, arr: np.ndarray, units: Units) -> np.ndarray:
@@ -216,6 +270,7 @@ def _do_run(args: argparse.Namespace) -> int:
     units = Units(deck)
     solver = _make_solver(deck, units)
     _apply_external_field(solver, deck, units)
+    _seed_fields(solver, deck)
     rng = np.random.default_rng(args.seed)
     species_indices = _seed_species(solver, deck, units, rng)
 

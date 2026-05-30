@@ -304,6 +304,97 @@ def _write_deck(into: Path, text: str) -> Path:
     return deck
 
 
+def _run_example_pic(name: str, steps: int) -> np.ndarray:
+    with tempfile.TemporaryDirectory() as tmp:
+        workdir = _copy_example(name, Path(tmp))
+        _run_pic_cli(workdir / "input.yaml", steps)
+        return np.load(workdir / "out.npz", allow_pickle=False)
+
+
+def _all_finite(data) -> bool:
+    return all(
+        not np.isnan(data[k]).any()
+        for k in data.files
+        if np.issubdtype(data[k].dtype, np.floating))
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class PicAspirationalExampleTests(unittest.TestCase):
+    """The nine canonical PIC validation decks must load and run end-to-end and
+    show their characteristic signature."""
+
+    def test_two_stream_field_energy_grows(self):
+        data = _run_example_pic("two_stream", 200)
+        self.assertTrue(_all_finite(data))
+        ex = data["snapshot_field_ex"]
+        energy = (ex ** 2).sum(axis=1)
+        # The two-stream instability grows the longitudinal field energy by orders
+        # of magnitude before saturation.
+        self.assertGreater(energy[-1], 50.0 * energy[0],
+                           msg=f"Ex energy did not grow: {energy[0]} -> {energy[-1]}")
+
+    def test_filtered_two_stream_runs_and_grows(self):
+        data = _run_example_pic("filtered_two_stream", 200)
+        self.assertTrue(_all_finite(data))
+        ex = data["snapshot_field_ex"]
+        energy = (ex ** 2).sum(axis=1)
+        self.assertGreater(energy[-1], 10.0 * energy[0])
+
+    def test_landau_damping_runs(self):
+        data = _run_example_pic("landau_damping", 60)
+        self.assertTrue(_all_finite(data))
+        self.assertIn("snapshot_field_ex", data.files)
+
+    def test_weibel_grows_transverse_b(self):
+        data = _run_example_pic("weibel", 200)
+        self.assertTrue(_all_finite(data))
+        bz = data["snapshot_field_bz"]
+        energy = (bz ** 2).sum(axis=1)
+        # Weibel grows a transverse magnetic field from noise.
+        self.assertGreater(energy[-1], energy[0],
+                           msg=f"Bz energy did not grow: {energy[0]} -> {energy[-1]}")
+
+    def test_em_wave_energy_stays_bounded(self):
+        data = _run_example_pic("em_wave_propagation", 120)
+        self.assertTrue(_all_finite(data))
+        ez = data["snapshot_field_ez"]
+        by = data["snapshot_field_by"]
+        energy = (ez ** 2 + by ** 2).sum(axis=1)
+        # Vacuum propagation on a periodic grid: energy bounded (no blow-up). The
+        # instantaneous E^2+B^2 oscillates with the leapfrog half-step staggering.
+        self.assertLess(energy.max(), 2.0 * energy.min())
+
+    def test_beam_in_channel_confines_particles(self):
+        data = _run_example_pic("beam_in_channel", 60)
+        self.assertTrue(_all_finite(data))
+        alive = data["species_electron_beam_alive"].astype(bool)
+        # Reflecting y walls keep every particle alive.
+        self.assertEqual(int(alive.sum()), alive.size,
+                         msg="specular walls lost particles")
+
+    def test_pec_cavity_energy_bounded(self):
+        data = _run_example_pic("pec_cavity", 120)
+        self.assertTrue(_all_finite(data))
+        ez = data["snapshot_field_ez"]
+        by = data["snapshot_field_by"]
+        energy = (ez ** 2 + by ** 2).sum(axis=1)
+        # Closed lossless PEC cavity: energy must not blow up.
+        self.assertLess(energy.max(), 2.0 * energy.min())
+
+    def test_magnetized_plasma_runs(self):
+        data = _run_example_pic("magnetized_plasma", 40)
+        self.assertTrue(_all_finite(data))
+        ext_bz = data["external_bz"]
+        # Uniform 1 T field present in the external buffer.
+        self.assertGreater(float(np.max(np.abs(ext_bz))), 0.5)
+
+    def test_coil_confinement_runs(self):
+        data = _run_example_pic("coil_confinement", 40)
+        self.assertTrue(_all_finite(data))
+        ext_bz = data["external_bz"]
+        self.assertGreater(float(np.max(np.abs(ext_bz))), 1.0e-4)
+
+
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class PicRunSmokeTest(unittest.TestCase):
     """End-to-end CLI run on a minimal SI deck: clean exit, finite fields,

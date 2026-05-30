@@ -120,13 +120,36 @@ class Time:
 
 @dataclass
 class BoundaryConfig:
-    """Per-side particle boundary kinds. Order: [x_min, x_max, y_min, y_max].
+    """Per-side boundary kinds. Order: [x_min, x_max, y_min, y_max].
 
-    Each entry is one of ``periodic`` (no-op), ``specular`` (reflect), or
-    ``absorbing`` (mark out-of-domain particles as dead).
+    ``particle`` is one of ``periodic`` (no-op), ``specular`` (reflect), or
+    ``absorbing`` (mark out-of-domain particles as dead). ``field`` is one of
+    ``periodic`` or ``pec`` (perfect electric conductor / reflecting wall).
     """
     particle: tuple[str, str, str, str] = (
         "periodic", "periodic", "periodic", "periodic")
+    field: tuple[str, str, str, str] = (
+        "periodic", "periodic", "periodic", "periodic")
+
+
+@dataclass
+class FieldsInitial:
+    """Optional initial field seeding (for field-driven validation decks).
+
+    * ``seed_perturbation``: a single-mode sinusoid in one E component
+      (``component``, ``amplitude``, ``mode`` half-wavelengths along x).
+    * ``seed_em_wave``: a propagating plane wave (``component`` Ez or Ey with its
+      partner B set for +x/+y propagation, ``mode`` = (mx, my)).
+    """
+    type: str
+    component: str = "Ex"
+    amplitude: float = 1.0e-4
+    mode: tuple[int, int] = (1, 0)
+
+
+@dataclass
+class Fields:
+    initial: Union[FieldsInitial, None] = None
 
 
 @dataclass
@@ -147,6 +170,7 @@ class PicDeck:
     time: Time = field(default_factory=Time)
     diagnostics: Diagnostics = field(default_factory=Diagnostics)
     boundary: BoundaryConfig = field(default_factory=BoundaryConfig)
+    fields: Fields = field(default_factory=Fields)
     units: str = "SI"
     raw: dict = field(default_factory=dict)
 
@@ -181,8 +205,14 @@ class PicDeck:
             # closed-form and need no conductors.
             if ev == "biot_savart" and not self.external_field.conductors:
                 raise ValueError("external_field.evaluator.conductors must be non-empty")
-        if not self.species:
-            raise ValueError("deck.species must be non-empty")
+        # A deck must drive *something*: particles, an external field, or an
+        # initial field seed. Field-only decks (e.g. EM-wave propagation, coil
+        # confinement) legitimately have no species.
+        if (not self.species and self.external_field is None
+                and self.fields.initial is None):
+            raise ValueError(
+                "deck must define at least one of: species, external_field, "
+                "or fields.initial")
         for sp in self.species:
             if sp.mass_kg <= 0:
                 raise ValueError(f"species {sp.name!r}: mass_kg must be positive")
@@ -219,11 +249,16 @@ class PicDeck:
             raise ValueError("time.dt_s must be a float or the string 'auto'")
         if self.time.steps <= 0:
             raise ValueError("time.steps must be positive")
-        allowed_bc = {"periodic", "specular", "absorbing"}
+        allowed_pbc = {"periodic", "specular", "absorbing"}
         for i, bc in enumerate(self.boundary.particle):
-            if bc not in allowed_bc:
+            if bc not in allowed_pbc:
                 raise ValueError(
-                    f"boundary.particle[{i}] = {bc!r} must be one of {sorted(allowed_bc)}")
+                    f"boundary.particle[{i}] = {bc!r} must be one of {sorted(allowed_pbc)}")
+        allowed_fbc = {"periodic", "pec"}
+        for i, bc in enumerate(self.boundary.field):
+            if bc not in allowed_fbc:
+                raise ValueError(
+                    f"boundary.field[{i}] = {bc!r} must be one of {sorted(allowed_fbc)}")
 
 
 def _parse_domain(d: dict) -> Domain:
@@ -261,9 +296,11 @@ def _parse_external_field(d: dict | None) -> Union[ExternalField, None]:
         return None
     ev = _require(d, "evaluator", "external_field")
     ev_type = str(_require(ev, "type", "external_field.evaluator"))
+    # Uniform external B may be given as B_T or b_tesla.
+    b = ev.get("B_T", ev.get("b_tesla"))
     return ExternalField(evaluator_type=ev_type,
                          conductors=list(ev.get("conductors", [])),
-                         uniform_b=_vec3(ev.get("b_tesla")))
+                         uniform_b=_vec3(b))
 
 
 def _parse_species(items: list[dict] | None) -> list[Species]:
@@ -316,17 +353,49 @@ def _parse_diagnostics(d: dict | None) -> Diagnostics:
     )
 
 
+_SIDE_KEYS = ("x_lo", "x_hi", "y_lo", "y_hi")
+
+
+def _parse_side_map(spec, default: str, what: str) -> tuple[str, str, str, str]:
+    # Accepts a scalar (all sides), a 4-element list ([x_lo, x_hi, y_lo, y_hi]),
+    # or a dict keyed by side name.
+    if spec is None:
+        return (default, default, default, default)
+    if isinstance(spec, str):
+        return (spec, spec, spec, spec)
+    if isinstance(spec, (list, tuple)) and len(spec) == 4:
+        return (str(spec[0]), str(spec[1]), str(spec[2]), str(spec[3]))
+    if isinstance(spec, dict):
+        return tuple(str(spec.get(k, default)) for k in _SIDE_KEYS)  # type: ignore[return-value]
+    raise ValueError(f"{what} must be a string, 4-element list, or side-keyed map")
+
+
 def _parse_boundary(d: dict | None) -> BoundaryConfig:
     if d is None:
         return BoundaryConfig()
-    p = d.get("particle", "periodic")
-    if isinstance(p, str):
-        particle = (p, p, p, p)
-    elif isinstance(p, (list, tuple)) and len(p) == 4:
-        particle = (str(p[0]), str(p[1]), str(p[2]), str(p[3]))
+    return BoundaryConfig(
+        particle=_parse_side_map(d.get("particle"), "periodic", "boundary.particle"),
+        field=_parse_side_map(d.get("field"), "periodic", "boundary.field"),
+    )
+
+
+def _parse_fields(d: dict | None) -> Fields:
+    if d is None:
+        return Fields()
+    init = d.get("initial")
+    if init is None:
+        return Fields()
+    mode_raw = init.get("mode", [1, 0])
+    if isinstance(mode_raw, int):
+        mode = (int(mode_raw), 0)
     else:
-        raise ValueError("boundary.particle must be a string or 4-element list")
-    return BoundaryConfig(particle=particle)
+        mode = (int(mode_raw[0]), int(mode_raw[1]) if len(mode_raw) > 1 else 0)
+    return Fields(initial=FieldsInitial(
+        type=str(_require(init, "type", "fields.initial")),
+        component=str(init.get("component", "Ex")),
+        amplitude=float(init.get("amplitude", 1.0e-4)),
+        mode=mode,
+    ))
 
 
 def parse(data: dict) -> PicDeck:
@@ -339,6 +408,7 @@ def parse(data: dict) -> PicDeck:
         time=_parse_time(data.get("time")),
         diagnostics=_parse_diagnostics(data.get("diagnostics")),
         boundary=_parse_boundary(data.get("boundary")),
+        fields=_parse_fields(data.get("fields")),
         units=str(data.get("units", "SI")),
         raw=data,
     )

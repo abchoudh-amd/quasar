@@ -131,6 +131,10 @@ void bind_pic(py::module_& m) {
       .value("specular", quasar::boundary::ParticleBoundaryKind::specular)
       .value("absorbing", quasar::boundary::ParticleBoundaryKind::absorbing);
 
+  py::enum_<quasar::boundary::FieldBoundaryKind>(pic, "FieldBoundaryKind")
+      .value("periodic", quasar::boundary::FieldBoundaryKind::periodic)
+      .value("pec", quasar::boundary::FieldBoundaryKind::pec);
+
   py::class_<quasar::boundary::BoundarySpec>(pic, "BoundarySpec")
       .def(py::init<>())
       .def("set_particle_all",
@@ -150,6 +154,19 @@ void bind_pic(py::module_& m) {
            [](const quasar::boundary::BoundarySpec& self, int side) {
              if (side < 0 || side > 3) throw std::out_of_range("side");
              return self.particle[side];
+           },
+           py::arg("side"))
+      .def("set_field_side",
+           [](quasar::boundary::BoundarySpec& self, int side,
+              quasar::boundary::FieldBoundaryKind k) {
+             if (side < 0 || side > 3) throw std::out_of_range("side");
+             self.field[side] = k;
+           },
+           py::arg("side"), py::arg("kind"))
+      .def("field_side",
+           [](const quasar::boundary::BoundarySpec& self, int side) {
+             if (side < 0 || side > 3) throw std::out_of_range("side");
+             return self.field[side];
            },
            py::arg("side"));
 
@@ -265,6 +282,33 @@ void bind_pic(py::module_& m) {
            py::arg("evaluator"), py::arg("conductors"),
            py::arg("length_scale") = 1.0, py::arg("e_field_scale") = 1.0,
            py::arg("b_field_scale") = 1.0)
+      .def("seed_field",
+           [](quasar::pic::EmPic2D3V& self, const std::string& component,
+              const RealArray& values) {
+             // Writes one Yee field component from a (storage_size,) host array,
+             // for deck-driven initial-field seeding. The array must already be in
+             // the solver's internal (normalized) units and full ghost-padded
+             // storage layout (matches fields_to_host()).
+             auto& f = self.fields();
+             auto pick = [&]() -> quasar::backend::DeviceBuffer<Real>& {
+               if (component == "ex") return f.ex;
+               if (component == "ey") return f.ey;
+               if (component == "ez") return f.ez;
+               if (component == "bx") return f.bx;
+               if (component == "by") return f.by;
+               if (component == "bz") return f.bz;
+               throw std::invalid_argument("seed_field: unknown component '" + component + "'");
+             };
+             auto& buf = pick();
+             const auto vec = numpy_to_real_vector(values, "values");
+             if (vec.size() != buf.size()) {
+               throw std::invalid_argument("seed_field: array size does not match field storage");
+             }
+             buf.copy_from_host(vec.data(), vec.size());
+           },
+           py::arg("component"), py::arg("values"))
+      .def("storage_size",
+           [](quasar::pic::EmPic2D3V& self) { return self.grid().storage_size(); })
       .def("fields_to_host",
            [](quasar::pic::EmPic2D3V& self) {
              return yee_field_to_dict(self.fields());

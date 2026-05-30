@@ -1,5 +1,19 @@
 units: normalized
 domain: {nx: 128, ny: 8, lx_m: 1.0, ly_m: 0.0625}
 numerics: {fdtd_order: 2, shape: tsc, current_filter: []}
-fields: {initial: {type: seed_perturbation, component: Ex, amplitude: 1.0e-4}}
+# Warm Maxwellian electrons with a small seeded Ex perturbation. The Landau
+# mechanism damps the longitudinal mode: the seeded field energy decays (rather
+# than grows as in two_stream). Thermal velocity is in units of c.
+fields: {initial: {type: seed_perturbation, component: Ex, mode: 1, amplitude: 1.0e-4}}
+species:
+  - name: electron
+    charge_C: -1
+    mass_kg: 1
+    n_particles: 32768
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.0
+      temperature_eV: 0.0
+      drift_v: [0.05, 0.0, 0.0]
 time: {dt_s: auto, steps: 256}
+diagnostics: {output_path: out.npz, cadence: 8, fields: [ex], per_species: true}
