@@ -21,21 +21,33 @@
 
 namespace {
 
+// The Yee fields here are node-collocated (the curl uses forward differences, so
+// the conductor surface sits ON the boundary interior node, not on a half-cell
+// face). The mirror is therefore node-centred: ghost layer gh reflects the
+// interior node gh cells inside the wall node. Odd components (tangential E,
+// normal B) flip sign and are pinned to zero at the wall node itself (Dirichlet);
+// even components reflect unchanged. A face-centred mirror (reflecting nx-gh
+// instead of nx-1-gh) shifts the wall by half a cell relative to the field
+// locations and drives an exponential boundary instability.
 __device__ inline void mirror_x(const quasar::Grid2D& g, double* f, int side,
                                 int gh, int j, double sign) {
-  if (side == 0) {  // x_lo: ghost col -gh mirrors interior col gh-1
-    f[g.index(-gh, j)] = sign * f[g.index(gh - 1, j)];
-  } else {          // x_hi: ghost col nx-1+gh mirrors interior col nx-gh
-    f[g.index(g.nx - 1 + gh, j)] = sign * f[g.index(g.nx - gh, j)];
+  if (side == 0) {  // x_lo: wall node i=0
+    f[g.index(-gh, j)] = sign * f[g.index(gh, j)];
+    if (sign < 0.0 && gh == 1) f[g.index(0, j)] = 0.0;
+  } else {          // x_hi: wall node i=nx-1
+    f[g.index(g.nx - 1 + gh, j)] = sign * f[g.index(g.nx - 1 - gh, j)];
+    if (sign < 0.0 && gh == 1) f[g.index(g.nx - 1, j)] = 0.0;
   }
 }
 
 __device__ inline void mirror_y(const quasar::Grid2D& g, double* f, int side,
                                 int gh, int i, double sign) {
-  if (side == 2) {  // y_lo
-    f[g.index(i, -gh)] = sign * f[g.index(i, gh - 1)];
-  } else {          // y_hi
-    f[g.index(i, g.ny - 1 + gh)] = sign * f[g.index(i, g.ny - gh)];
+  if (side == 2) {  // y_lo: wall node j=0
+    f[g.index(i, -gh)] = sign * f[g.index(i, gh)];
+    if (sign < 0.0 && gh == 1) f[g.index(i, 0)] = 0.0;
+  } else {          // y_hi: wall node j=ny-1
+    f[g.index(i, g.ny - 1 + gh)] = sign * f[g.index(i, g.ny - 1 - gh)];
+    if (sign < 0.0 && gh == 1) f[g.index(i, g.ny - 1)] = 0.0;
   }
 }
 

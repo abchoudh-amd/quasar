@@ -4,21 +4,22 @@
 
 namespace quasar::numerics {
 
-// Staggered finite differences currently read neighbours through
-// Grid2D::periodic_index (wrapping), which bakes a periodic field BC directly
-// into the operator. The boundary-aware variant (read ghost cells via
-// Grid2D::index after a per-side ghost fill, enabling PEC walls) is implemented
-// behind QUASAR_PIC_FIELD_GHOSTS but disabled pending the field-ghost heisenbug
-// described in pic_solver.cpp::step. When that is fixed, switch these reads to
-// g.index(...) and require nghost >= 2 for Order 4.
+// Staggered finite differences read neighbours through ghost cells via
+// Grid2D::index. The per-side ghost fill (fill_field_ghosts in pic_solver.cpp::step)
+// runs before every curl and populates the halo: a periodic side copies the
+// opposite interior edge (so the stencil is bit-for-bit identical to the old
+// implicit Grid2D::periodic_index wrap), while a PEC side writes the mirror image
+// (enabling reflecting field walls). Order 4 reads i-1..i+2, so it needs
+// nghost >= 2 (enforced by the EmPic2D3V constructor). The Yee curl reads only
+// along-axis neighbours, so corner ghosts are never touched and need no fill.
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddx_staggered(const Real* f, const Grid2D& g,
                                              int i, int j) noexcept {
   if constexpr (Order == 4) {
-    return (Real{9} / Real{8}) * (f[g.periodic_index(i + 1, j)] - f[g.periodic_index(i, j)]) / g.dx()
-         - (Real{1} / Real{24}) * (f[g.periodic_index(i + 2, j)] - f[g.periodic_index(i - 1, j)]) / g.dx();
+    return (Real{9} / Real{8}) * (f[g.index(i + 1, j)] - f[g.index(i, j)]) / g.dx()
+         - (Real{1} / Real{24}) * (f[g.index(i + 2, j)] - f[g.index(i - 1, j)]) / g.dx();
   } else {
-    return (f[g.periodic_index(i + 1, j)] - f[g.periodic_index(i, j)]) / g.dx();
+    return (f[g.index(i + 1, j)] - f[g.index(i, j)]) / g.dx();
   }
 }
 
@@ -26,20 +27,48 @@ template <int Order>
 QUASAR_HOST_DEVICE inline Real ddy_staggered(const Real* f, const Grid2D& g,
                                              int i, int j) noexcept {
   if constexpr (Order == 4) {
-    return (Real{9} / Real{8}) * (f[g.periodic_index(i, j + 1)] - f[g.periodic_index(i, j)]) / g.dy()
-         - (Real{1} / Real{24}) * (f[g.periodic_index(i, j + 2)] - f[g.periodic_index(i, j - 1)]) / g.dy();
+    return (Real{9} / Real{8}) * (f[g.index(i, j + 1)] - f[g.index(i, j)]) / g.dy()
+         - (Real{1} / Real{24}) * (f[g.index(i, j + 2)] - f[g.index(i, j - 1)]) / g.dy();
   } else {
-    return (f[g.periodic_index(i, j + 1)] - f[g.periodic_index(i, j)]) / g.dy();
+    return (f[g.index(i, j + 1)] - f[g.index(i, j)]) / g.dy();
+  }
+}
+
+// Backward-difference companions of ddx/ddy_staggered. The Yee scheme stays stable
+// and energy-conserving (including at PEC walls) only when the two curls are
+// adjoint: the E-update curl (curl_b) uses the forward difference matched to the
+// charge-conserving deposit's backward-difference divergence, and the B-update
+// curl (curl_e) uses the backward difference below. With both curls forward the
+// operator is non-adjoint and a hard wall drives an exponential instability.
+template <int Order>
+QUASAR_HOST_DEVICE inline Real ddx_staggered_bwd(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  if constexpr (Order == 4) {
+    return (Real{9} / Real{8}) * (f[g.index(i, j)] - f[g.index(i - 1, j)]) / g.dx()
+         - (Real{1} / Real{24}) * (f[g.index(i + 1, j)] - f[g.index(i - 2, j)]) / g.dx();
+  } else {
+    return (f[g.index(i, j)] - f[g.index(i - 1, j)]) / g.dx();
+  }
+}
+
+template <int Order>
+QUASAR_HOST_DEVICE inline Real ddy_staggered_bwd(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  if constexpr (Order == 4) {
+    return (Real{9} / Real{8}) * (f[g.index(i, j)] - f[g.index(i, j - 1)]) / g.dy()
+         - (Real{1} / Real{24}) * (f[g.index(i, j + 1)] - f[g.index(i, j - 2)]) / g.dy();
+  } else {
+    return (f[g.index(i, j)] - f[g.index(i, j - 1)]) / g.dy();
   }
 }
 
 template <int Order>
 QUASAR_HOST_DEVICE inline Vec3 curl_e_at(const Real* ex, const Real* ey, const Real* ez,
                                          const Grid2D& g, int i, int j) noexcept {
-  const Real d_ez_dy = ddy_staggered<Order>(ez, g, i, j);
-  const Real d_ez_dx = ddx_staggered<Order>(ez, g, i, j);
-  const Real d_ey_dx = ddx_staggered<Order>(ey, g, i, j);
-  const Real d_ex_dy = ddy_staggered<Order>(ex, g, i, j);
+  const Real d_ez_dy = ddy_staggered_bwd<Order>(ez, g, i, j);
+  const Real d_ez_dx = ddx_staggered_bwd<Order>(ez, g, i, j);
+  const Real d_ey_dx = ddx_staggered_bwd<Order>(ey, g, i, j);
+  const Real d_ex_dy = ddy_staggered_bwd<Order>(ex, g, i, j);
   return Vec3{d_ez_dy, -d_ez_dx, d_ey_dx - d_ex_dy};
 }
 

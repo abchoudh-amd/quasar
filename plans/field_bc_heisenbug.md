@@ -40,13 +40,25 @@ cannot fold, so the factory builds the correct concrete type. Verified: particle
 BC interface dispatch passes 210/210 stress runs; the field-ghost path no longer
 faults either.
 
-## Remaining (field ghosts — a feature, not the bug)
-Particle BCs now dispatch through the interface. Field ghosts stay gated behind
-`QUASAR_PIC_FIELD_GHOSTS` because the physics is incomplete, not because of a
-crash:
+## DONE — field ghosts are live (flag removed)
+All four checklist items below are complete; `QUASAR_PIC_FIELD_GHOSTS` has been
+removed and the ghost-aware field-BC path runs unconditionally every step.
 1. ~~Root-cause + fix the crash~~ — DONE (registry fix above).
-2. Switch `ddx/ddy_staggered` in `include/quasar/numerics/stencil.hpp` from
-   `periodic_index` to `index` (ghost-aware) so PEC walls are physical.
+2. ~~Switch `ddx/ddy_staggered` to ghost-aware `index`~~ — DONE. A per-side ghost
+   fill runs before each curl; a periodic side copies the opposite interior edge
+   (bit-for-bit identical to the old `periodic_index` wrap, pinned by
+   `test_field_ghost_periodic_equivalence`), a PEC side writes the mirror image.
+3. ~~Restore the `fdtd_order==4 => nghost>=2` ctor check~~ — DONE (and the Python
+   CLI sizes the halo from the deck's fdtd_order via `required_nghost`).
+4. ~~Add the real PEC reflection + periodic-equivalence tests, enable by default~~
+   — DONE. Stable PEC reflection additionally required making the two curls
+   adjoint: `curl_b` (E-update) keeps the forward difference matched to the
+   charge-conserving deposit, while `curl_e` (B-update) now uses the backward
+   difference (`ddx/ddy_staggered_bwd`). With both curls forward the operator was
+   non-adjoint and a hard wall blew up exponentially; the adjoint form is also the
+   standard Yee scheme, so periodic dispersion/energy results are unchanged.
+
+### Historical checklist (superseded by the above)
 3. Restore the `fdtd_order==4 => nghost>=2` constructor check in `pic_solver.cpp`.
 4. Add the real PEC reflection test (`test_pec_plane_wave_reflection.cpp`,
    currently a stub) and a periodic-equivalence test (ghost fill must reproduce

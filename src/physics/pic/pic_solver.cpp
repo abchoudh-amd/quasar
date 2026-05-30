@@ -91,11 +91,9 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
     fields_{grid_},
     external_fields_{grid_},
     current_{grid_} {
-  // NOTE: once the boundary-aware stencil (QUASAR_PIC_FIELD_GHOSTS) is enabled,
-  // fdtd_order 4 will require grid nghost >= 2 (it reads two cells past the
-  // boundary). While field ghosts are wrap-based that constraint does not apply.
   // Build per-side boundary conditions through the registry (the documented
   // pluggable construction path); concrete BCs self-register in src/boundary.
+  // The FDTD stencil is ghost-aware, so these field BCs run every step (see step).
   for (int side = 0; side < 4; ++side) {
     particle_bcs_[side] = Registry<boundary::IParticleBoundary>::instance().create(
         particle_bc_name(cfg_.boundary.particle[side]));
@@ -170,18 +168,11 @@ void EmPic2D3V::step(Real dt) {
   backend::device_memset(current_.jy.device_ptr(), 0, current_.jy.bytes());
   backend::device_memset(current_.jz.device_ptr(), 0, current_.jz.bytes());
 
-  // The field-ghost fill (fill_field_ghosts + the periodic/PEC field kernels) is
-  // wired but gated behind QUASAR_PIC_FIELD_GHOSTS. The crash that originally
-  // blocked it was the registry factory collision (now fixed in
-  // core/registry.hpp), and the gated path no longer faults. It stays OFF by
-  // default only because the FDTD stencil still reads via periodic_index (the
-  // implicit periodic wrap), so PEC field walls are not yet physically correct
-  // — completing them requires switching the stencil to ghost-aware index reads
-  // (nghost>=2 for order 4) and a PEC reflection test. See
-  // plans/field_bc_heisenbug.md for the remaining checklist.
-#ifdef QUASAR_PIC_FIELD_GHOSTS
+  // The FDTD stencil reads neighbours through ghost cells, so the per-side ghost
+  // fill must run before each curl. A periodic side copies the opposite interior
+  // edge (reproducing the implicit wrap bit-for-bit); a PEC side writes the mirror
+  // image so reflecting field walls are physical.
   fill_field_ghosts();
-#endif
   field_solver_->advance_b(fields_, dt);
   for (auto& s : species_) {
     pusher_->push(s, fields_, external_fields_, dt);
@@ -197,9 +188,7 @@ void EmPic2D3V::step(Real dt) {
     }
   }
   filters_.apply(current_, cfg_.boundary);
-#ifdef QUASAR_PIC_FIELD_GHOSTS
   fill_field_ghosts();
-#endif
   field_solver_->advance_e(fields_, current_, dt);
 
   // Reclaim slots vacated by absorbing boundaries on a fixed cadence so the
