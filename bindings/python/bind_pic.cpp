@@ -91,8 +91,12 @@ void bind_pic(py::module_& m) {
       .def_readwrite("ly", &quasar::Grid2D::ly)
       .def_readwrite("origin_x", &quasar::Grid2D::origin_x)
       .def_readwrite("origin_y", &quasar::Grid2D::origin_y)
+      .def_readwrite("nghost", &quasar::Grid2D::nghost)
       .def("dx", &quasar::Grid2D::dx)
       .def("dy", &quasar::Grid2D::dy);
+
+  pic.def("required_nghost", &quasar::required_nghost, py::arg("fdtd_order"),
+          "Minimum ghost-cell halo for the given FDTD order (1 for order 2, 2 for order 4).");
 
   py::enum_<quasar::UnitTag>(pic, "UnitTag")
       .value("time", quasar::UnitTag::time)

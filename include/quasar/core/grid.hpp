@@ -111,6 +111,12 @@ struct Grid2D {
   }
 };
 
+// Minimum ghost-cell halo for a given FDTD order: the 2nd-order curl reads one
+// cell past the boundary, the 4th-order curl reads two.
+constexpr int required_nghost(int fdtd_order) noexcept {
+  return fdtd_order == 4 ? 2 : 1;
+}
+
 inline Real cfl_dt(const Grid2D& g, int fdtd_order, Real c = Real{1}) {
   g.validate();
   if (c <= Real{0} || !std::isfinite(c)) {

@@ -38,12 +38,14 @@ def _cfl_dt_internal(domain, units: Units, fdtd_order: int = 2) -> float:
 
 def _make_solver(deck: pic_io.PicDeck, units: Units):
     pic = _core.pic
-    # Grid coordinates enter the solver in internal length units.
+    # Grid coordinates enter the solver in internal length units. The ghost halo
+    # must be wide enough for the FDTD order (order 4 reads two cells past a wall).
     grid = pic.Grid2D(nx=deck.domain.nx, ny=deck.domain.ny,
                       lx=units.length(deck.domain.lx_m),
                       ly=units.length(deck.domain.ly_m),
                       origin_x=units.length(deck.domain.origin_x_m),
-                      origin_y=units.length(deck.domain.origin_y_m))
+                      origin_y=units.length(deck.domain.origin_y_m),
+                      nghost=pic.required_nghost(deck.numerics.fdtd_order))
     cfg = pic.EmPicConfig()
     cfg.grid = grid
     cfg.fdtd_order = deck.numerics.fdtd_order

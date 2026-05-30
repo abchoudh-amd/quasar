@@ -103,6 +103,12 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
         field_bc_name(cfg_.boundary.field[side]));
   }
   if (cfg_.fdtd_order == 4) {
+    // The 4th-order staggered curl reads two cells past each boundary, so the
+    // ghost-aware stencil + PEC mirror need at least two ghost layers.
+    if (grid_.nghost < 2) {
+      throw std::invalid_argument{
+          "EmPic2D3V: fdtd_order 4 requires grid nghost >= 2"};
+    }
     field_solver_ = std::make_unique<numerics::YeeFdtd2D<4>>();
   } else if (cfg_.fdtd_order == 2) {
     field_solver_ = std::make_unique<numerics::YeeFdtd2D<2>>();
