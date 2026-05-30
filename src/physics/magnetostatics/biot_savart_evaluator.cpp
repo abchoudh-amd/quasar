@@ -52,16 +52,28 @@ namespace quasar::magnetostatics {
 
 namespace {
 
-// Cast a host-side std::vector<Real> into std::vector<T> for upload. When T
-// is double the function returns by value-copy of the source; for float each
-// element is narrowed.
+// Provides an upload-ready const T* for a host-side std::vector<Real>. When T is
+// Real (double) it aliases the source directly (no copy); for float it owns a
+// narrowed copy. Stored at function scope so the pointer stays valid across the
+// async H2D copy until the stream sync.
 template <class T>
-std::vector<T> cast_to(const std::vector<Real>& src) {
-  std::vector<T> out;
-  out.reserve(src.size());
-  for (Real v : src) out.push_back(static_cast<T>(v));
-  return out;
-}
+class UploadSrc {
+ public:
+  explicit UploadSrc(const std::vector<Real>& src) {
+    if constexpr (std::is_same_v<T, Real>) {
+      view_ = &src;
+    } else {
+      owned_.reserve(src.size());
+      for (Real v : src) owned_.push_back(static_cast<T>(v));
+      view_ = &owned_;
+    }
+  }
+  const T* data() const noexcept { return view_->data(); }
+
+ private:
+  std::vector<T> owned_{};
+  const std::vector<T>* view_{nullptr};
+};
 
 template <class T>
 void dispatch_launch_B(const T* ax, const T* ay, const T* az,
@@ -114,16 +126,16 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
     return result;
   }
 
-  const std::vector<T> seg_ax = cast_to<T>(seg.ax);
-  const std::vector<T> seg_ay = cast_to<T>(seg.ay);
-  const std::vector<T> seg_az = cast_to<T>(seg.az);
-  const std::vector<T> seg_bx = cast_to<T>(seg.bx);
-  const std::vector<T> seg_by = cast_to<T>(seg.by);
-  const std::vector<T> seg_bz = cast_to<T>(seg.bz);
-  const std::vector<T> seg_I  = cast_to<T>(seg.I);
-  const std::vector<T> pts_px = cast_to<T>(pts.px);
-  const std::vector<T> pts_py = cast_to<T>(pts.py);
-  const std::vector<T> pts_pz = cast_to<T>(pts.pz);
+  const UploadSrc<T> seg_ax{seg.ax};
+  const UploadSrc<T> seg_ay{seg.ay};
+  const UploadSrc<T> seg_az{seg.az};
+  const UploadSrc<T> seg_bx{seg.bx};
+  const UploadSrc<T> seg_by{seg.by};
+  const UploadSrc<T> seg_bz{seg.bz};
+  const UploadSrc<T> seg_I {seg.I};
+  const UploadSrc<T> pts_px{pts.px};
+  const UploadSrc<T> pts_py{pts.py};
+  const UploadSrc<T> pts_pz{pts.pz};
 
   DeviceBuffer<T> d_ax(N), d_ay(N), d_az(N);
   DeviceBuffer<T> d_bx(N), d_by(N), d_bz(N);
@@ -187,16 +199,16 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
     return result;
   }
 
-  const std::vector<T> seg_ax = cast_to<T>(seg.ax);
-  const std::vector<T> seg_ay = cast_to<T>(seg.ay);
-  const std::vector<T> seg_az = cast_to<T>(seg.az);
-  const std::vector<T> seg_bx = cast_to<T>(seg.bx);
-  const std::vector<T> seg_by = cast_to<T>(seg.by);
-  const std::vector<T> seg_bz = cast_to<T>(seg.bz);
-  const std::vector<T> seg_I  = cast_to<T>(seg.I);
-  const std::vector<T> pts_px = cast_to<T>(pts.px);
-  const std::vector<T> pts_py = cast_to<T>(pts.py);
-  const std::vector<T> pts_pz = cast_to<T>(pts.pz);
+  const UploadSrc<T> seg_ax{seg.ax};
+  const UploadSrc<T> seg_ay{seg.ay};
+  const UploadSrc<T> seg_az{seg.az};
+  const UploadSrc<T> seg_bx{seg.bx};
+  const UploadSrc<T> seg_by{seg.by};
+  const UploadSrc<T> seg_bz{seg.bz};
+  const UploadSrc<T> seg_I {seg.I};
+  const UploadSrc<T> pts_px{pts.px};
+  const UploadSrc<T> pts_py{pts.py};
+  const UploadSrc<T> pts_pz{pts.pz};
 
   DeviceBuffer<T> d_ax(N), d_ay(N), d_az(N);
   DeviceBuffer<T> d_bx(N), d_by(N), d_bz(N);

@@ -9,13 +9,25 @@
 
 namespace quasar::numerics {
 
+namespace {
+// Grow the scratch buffer to at least `n` doubles, reusing it across calls.
+Real* ensure_scratch(backend::DeviceBuffer<Real>& scratch, std::size_t n) {
+  if (scratch.size() < n) {
+    scratch = backend::DeviceBuffer<Real>{n};
+  }
+  return scratch.device_ptr();
+}
+}  // namespace
+
 void BinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec&) const {
-  ::launch_pic_filter_binomial(current.grid, current, n_passes_, nullptr);
+  Real* scratch = ensure_scratch(scratch_, current.grid.storage_size());
+  ::launch_pic_filter_binomial(current.grid, current, scratch, n_passes_, nullptr);
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 void CompensatedBinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec&) const {
-  ::launch_pic_filter_compensated(current.grid, current, n_passes_, nullptr);
+  Real* scratch = ensure_scratch(scratch_, current.grid.storage_size());
+  ::launch_pic_filter_compensated(current.grid, current, scratch, n_passes_, nullptr);
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 

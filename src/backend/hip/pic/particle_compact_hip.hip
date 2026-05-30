@@ -69,40 +69,41 @@ extern "C" void launch_pic_particle_compact(quasar::pic::ParticleSpecies& s,
   const std::size_t n = s.size();
   if (n == 0) return;
 
-  quasar::backend::DeviceBuffer<double> ox{n}, oy{n}, ox_prev{n}, oy_prev{n};
-  quasar::backend::DeviceBuffer<double> ovx{n}, ovy{n}, ovz{n}, oweight{n};
-  quasar::backend::DeviceBuffer<std::uint8_t> oalive{n};
-  quasar::backend::DeviceBuffer<unsigned int> counter{1};  // zero-init by ctor
+  // Scratch is owned by the species (capacity-sized, allocated once). Reset only
+  // the running counter rather than reallocating ten buffers per call.
+  QUASAR_HIP_CHECK(::hipMemsetAsync(s.compact_counter(), 0, sizeof(unsigned int), stream));
 
   const dim3 block(256);
   const dim3 grid((n + block.x - 1) / block.x);
   hipLaunchKernelGGL(compact_scatter_kernel, grid, block, 0, stream, n,
                      s.x(), s.y(), s.x_prev(), s.y_prev(), s.vx(), s.vy(), s.vz(),
                      s.weight(), s.alive(),
-                     ox.device_ptr(), oy.device_ptr(), ox_prev.device_ptr(),
-                     oy_prev.device_ptr(), ovx.device_ptr(), ovy.device_ptr(),
-                     ovz.device_ptr(), oweight.device_ptr(), oalive.device_ptr(),
-                     counter.device_ptr());
+                     s.compact_x(), s.compact_y(), s.compact_x_prev(),
+                     s.compact_y_prev(), s.compact_vx(), s.compact_vy(),
+                     s.compact_vz(), s.compact_weight(), s.compact_alive(),
+                     s.compact_counter());
   QUASAR_HIP_CHECK(::hipGetLastError());
 
   unsigned int alive_n = 0;
-  counter.copy_to_host(&alive_n, 1);
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(&alive_n, s.compact_counter(), sizeof(unsigned int),
+                                    ::hipMemcpyDeviceToHost, stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
 
   if (alive_n > 0) {
     const std::size_t bytes_d = static_cast<std::size_t>(alive_n) * sizeof(double);
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.x(), ox.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.y(), oy.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.x_prev(), ox_prev.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.y_prev(), oy_prev.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vx(), ovx.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vy(), ovy.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vz(), ovz.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.weight(), oweight.device_ptr(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.alive(), oalive.device_ptr(),
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.x(), s.compact_x(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.y(), s.compact_y(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.x_prev(), s.compact_x_prev(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.y_prev(), s.compact_y_prev(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vx(), s.compact_vx(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vy(), s.compact_vy(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vz(), s.compact_vz(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.weight(), s.compact_weight(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.alive(), s.compact_alive(),
                                       static_cast<std::size_t>(alive_n) * sizeof(std::uint8_t),
                                       ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
   }
-  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
   s.set_count(alive_n);
 }
 

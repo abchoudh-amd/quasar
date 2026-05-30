@@ -45,10 +45,12 @@ void launch_pic_deposit_shape2(const quasar::Grid2D&, const quasar::pic::Particl
                                quasar::JField2D<double>&, double, hipStream_t);
 
 // -- Current filtering -------------------------------------------------------
+// `scratch` is caller-owned ping-pong storage of at least grid.storage_size()
+// doubles (hoisted out of the per-step path).
 void launch_pic_filter_binomial(const quasar::Grid2D&, quasar::JField2D<double>&,
-                                int, hipStream_t);
+                                double* scratch, int, hipStream_t);
 void launch_pic_filter_compensated(const quasar::Grid2D&, quasar::JField2D<double>&,
-                                   int, hipStream_t);
+                                   double* scratch, int, hipStream_t);
 
 // -- Particle boundary conditions --------------------------------------------
 void launch_pic_boundary_absorb_particles(const quasar::Grid2D&,

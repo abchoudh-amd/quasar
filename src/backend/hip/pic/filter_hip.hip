@@ -43,29 +43,30 @@ void filter_component(const quasar::Grid2D& g, double* data, double* scratch,
   hipLaunchKernelGGL(stencil_y_kernel, grid, block, 0, stream, g, scratch, data, a, b);
 }
 
-void run_passes(const quasar::Grid2D& g, quasar::JField2D<double>& j, int passes,
-                double a, double b, hipStream_t stream) {
+void run_passes(const quasar::Grid2D& g, quasar::JField2D<double>& j, double* scratch,
+                int passes, double a, double b, hipStream_t stream) {
   if (passes <= 0) return;
-  quasar::backend::DeviceBuffer<double> scratch{g.storage_size()};
   for (int p = 0; p < passes; ++p) {
-    filter_component(g, j.jx.device_ptr(), scratch.device_ptr(), a, b, stream);
-    filter_component(g, j.jy.device_ptr(), scratch.device_ptr(), a, b, stream);
-    filter_component(g, j.jz.device_ptr(), scratch.device_ptr(), a, b, stream);
+    filter_component(g, j.jx.device_ptr(), scratch, a, b, stream);
+    filter_component(g, j.jy.device_ptr(), scratch, a, b, stream);
+    filter_component(g, j.jz.device_ptr(), scratch, a, b, stream);
   }
 }
 
 }  // namespace
 
+// `scratch` is caller-owned ping-pong storage of at least g.storage_size()
+// doubles, hoisted out of the per-step hot path (see numerics/filter.cpp).
 extern "C" void launch_pic_filter_binomial(const quasar::Grid2D& g, quasar::JField2D<double>& j,
-                                           int passes, hipStream_t stream) {
-  run_passes(g, j, passes, 0.25, 0.5, stream);
+                                           double* scratch, int passes, hipStream_t stream) {
+  run_passes(g, j, scratch, passes, 0.25, 0.5, stream);
 }
 
 extern "C" void launch_pic_filter_compensated(const quasar::Grid2D& g, quasar::JField2D<double>& j,
-                                              int passes, hipStream_t stream) {
+                                              double* scratch, int passes, hipStream_t stream) {
   // Standard compensated binomial: `passes` smoothing passes followed by one
   // sharpening pass that restores the low-wavenumber amplitude the smoother
   // attenuated.
-  run_passes(g, j, passes, 0.25, 0.5, stream);
-  run_passes(g, j, 1, -0.5, 2.0, stream);
+  run_passes(g, j, scratch, passes, 0.25, 0.5, stream);
+  run_passes(g, j, scratch, 1, -0.5, 2.0, stream);
 }

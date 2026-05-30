@@ -64,6 +64,21 @@ class ParticleSpecies {
   const Grid2D& grid() const noexcept { return grid_; }
   void set_grid(Grid2D g) noexcept { grid_ = g; }
 
+  // Compaction scratch: capacity-sized double buffers + an alive flag buffer and
+  // a single counter, allocated once with the species so the periodic compaction
+  // op does not reallocate every call. Accessors are non-const (mutated by the
+  // backend launch).
+  Real* compact_x() noexcept { return c_x_.device_ptr(); }
+  Real* compact_y() noexcept { return c_y_.device_ptr(); }
+  Real* compact_x_prev() noexcept { return c_x_prev_.device_ptr(); }
+  Real* compact_y_prev() noexcept { return c_y_prev_.device_ptr(); }
+  Real* compact_vx() noexcept { return c_vx_.device_ptr(); }
+  Real* compact_vy() noexcept { return c_vy_.device_ptr(); }
+  Real* compact_vz() noexcept { return c_vz_.device_ptr(); }
+  Real* compact_weight() noexcept { return c_weight_.device_ptr(); }
+  std::uint8_t* compact_alive() noexcept { return c_alive_.device_ptr(); }
+  unsigned int* compact_counter() noexcept { return c_counter_.device_ptr(); }
+
  private:
   std::string name_{"species"};
   Real charge_{Real{-1}};
@@ -80,6 +95,17 @@ class ParticleSpecies {
   backend::DeviceBuffer<Real> vz_{};
   backend::DeviceBuffer<Real> weight_{};
   backend::DeviceBuffer<std::uint8_t> alive_{};
+  // Compaction scratch (capacity-sized, allocated alongside the particle arrays).
+  backend::DeviceBuffer<Real> c_x_{};
+  backend::DeviceBuffer<Real> c_y_{};
+  backend::DeviceBuffer<Real> c_x_prev_{};
+  backend::DeviceBuffer<Real> c_y_prev_{};
+  backend::DeviceBuffer<Real> c_vx_{};
+  backend::DeviceBuffer<Real> c_vy_{};
+  backend::DeviceBuffer<Real> c_vz_{};
+  backend::DeviceBuffer<Real> c_weight_{};
+  backend::DeviceBuffer<std::uint8_t> c_alive_{};
+  backend::DeviceBuffer<unsigned int> c_counter_{};
 };
 
 }  // namespace quasar::pic

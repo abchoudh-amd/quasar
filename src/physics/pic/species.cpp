@@ -18,7 +18,17 @@ ParticleSpecies::ParticleSpecies(SpeciesConfig cfg)
     vy_{capacity_},
     vz_{capacity_},
     weight_{capacity_},
-    alive_{capacity_} {
+    alive_{capacity_},
+    c_x_{capacity_},
+    c_y_{capacity_},
+    c_x_prev_{capacity_},
+    c_y_prev_{capacity_},
+    c_vx_{capacity_},
+    c_vy_{capacity_},
+    c_vz_{capacity_},
+    c_weight_{capacity_},
+    c_alive_{capacity_},
+    c_counter_{1} {
   if (mass_ <= Real{0}) {
     throw std::invalid_argument{"ParticleSpecies: mass must be positive"};
   }

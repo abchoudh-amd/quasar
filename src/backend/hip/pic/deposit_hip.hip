@@ -68,6 +68,12 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
     Sy1[a] = weight_1d<ShapeOrder>(gy1 - iy);
   }
 
+  // NOTE(perf): current is accumulated with scattered global atomicAdd into a
+  // 6x6 window per particle (~100 atomics/particle). Particles sharing a cell
+  // collide on the same addresses, so this is the typical PIC bottleneck. The
+  // `run != 0.0` / `smid != 0.0` guards skip zero writes, which helps; a future
+  // optimization is per-block shared-memory partial accumulation or cell-binning
+  // to reduce cross-thread address contention. Left as a follow-up.
   const double qw = q * weight[p];
   const double inv_area = 1.0 / (g.dx() * g.dy());
 

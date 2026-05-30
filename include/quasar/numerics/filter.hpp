@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quasar/backend/memory.hpp"
 #include "quasar/core/registry.hpp"
 #include "quasar/core/yee_field.hpp"
 
@@ -27,6 +28,9 @@ class BinomialFilter final : public ICurrentFilter {
 
  private:
   int n_passes_{1};
+  // Ping-pong scratch, allocated once on first use and reused across steps so the
+  // per-step filter does not hipMalloc a full grid every call.
+  mutable backend::DeviceBuffer<Real> scratch_{};
 };
 
 class CompensatedBinomialFilter final : public ICurrentFilter {
@@ -37,6 +41,7 @@ class CompensatedBinomialFilter final : public ICurrentFilter {
 
  private:
   int n_passes_{1};
+  mutable backend::DeviceBuffer<Real> scratch_{};
 };
 
 class FilterPipeline {
