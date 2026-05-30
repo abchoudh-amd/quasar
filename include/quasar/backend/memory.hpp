@@ -2,8 +2,6 @@
 
 #include "quasar/backend/device.hpp"
 
-#include <hip/hip_runtime.h>
-
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -20,10 +18,9 @@ class DeviceBuffer {
 
   explicit DeviceBuffer(std::size_t n) : size_{n}, bytes_{n * sizeof(T)} {
     if (n != 0) {
-      QUASAR_HIP_CHECK(::hipMalloc(&ptr_, bytes_));
-      // Zero-initialize so freshly constructed fields/particles never observe
-      // recycled device memory from a prior allocation.
-      QUASAR_HIP_CHECK(::hipMemset(ptr_, 0, bytes_));
+      // device_alloc zero-initializes, so freshly constructed fields/particles
+      // never observe recycled device memory from a prior allocation.
+      ptr_ = device_alloc(bytes_);
     }
   }
 
@@ -59,27 +56,22 @@ class DeviceBuffer {
   bool        empty()      const noexcept { return size_ == 0; }
 
   void copy_from_host(const T* host_src, std::size_t n) {
-    QUASAR_HIP_CHECK(::hipMemcpy(ptr_, host_src, n * sizeof(T),
-                                 ::hipMemcpyHostToDevice));
+    device_memcpy_h2d(ptr_, host_src, n * sizeof(T));
   }
   void copy_from_host_async(const T* host_src, std::size_t n, stream_t stream) {
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(ptr_, host_src, n * sizeof(T),
-                                      ::hipMemcpyHostToDevice, stream));
+    device_memcpy_h2d_async(ptr_, host_src, n * sizeof(T), stream);
   }
   void copy_to_host(T* host_dst, std::size_t n) const {
-    QUASAR_HIP_CHECK(::hipMemcpy(host_dst, ptr_, n * sizeof(T),
-                                 ::hipMemcpyDeviceToHost));
+    device_memcpy_d2h(host_dst, ptr_, n * sizeof(T));
   }
   void copy_to_host_async(T* host_dst, std::size_t n, stream_t stream) const {
-    QUASAR_HIP_CHECK(::hipMemcpyAsync(host_dst, ptr_, n * sizeof(T),
-                                      ::hipMemcpyDeviceToHost, stream));
+    device_memcpy_d2h_async(host_dst, ptr_, n * sizeof(T), stream);
   }
 
  private:
   void release() noexcept {
     if (ptr_ != nullptr) {
-      // Destructor must not throw; swallow free errors.
-      (void)::hipFree(ptr_);
+      device_free(ptr_);  // noexcept; swallows free errors
       ptr_ = nullptr;
     }
     size_  = 0;

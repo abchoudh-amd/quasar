@@ -3,6 +3,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/core/registry.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>

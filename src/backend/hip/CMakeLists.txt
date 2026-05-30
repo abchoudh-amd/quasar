@@ -4,6 +4,7 @@ endif()
 
 set(_quasar_backend_hip_sources
   device.cpp
+  device_memory.cpp
 )
 
 # The .cpp file uses the HIP runtime API; route it through the HIP compiler so

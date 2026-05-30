@@ -8,6 +8,8 @@
 #include "quasar/core/field.hpp"
 #include "quasar/core/types.hpp"
 
+#include "backend/hip/hip_check.hpp"
+
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
@@ -160,7 +162,7 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
       d_I.device_ptr(), N,
       d_px.device_ptr(), d_py.device_ptr(), d_pz.device_ptr(), M,
       d_Bx.device_ptr(), d_By.device_ptr(), d_Bz.device_ptr(),
-      cfg.stream);
+      static_cast<::hipStream_t>(cfg.stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 
   std::vector<T> hBx(static_cast<std::size_t>(M));
@@ -169,7 +171,7 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
   d_Bx.copy_to_host_async(hBx.data(), M, cfg.stream);
   d_By.copy_to_host_async(hBy.data(), M, cfg.stream);
   d_Bz.copy_to_host_async(hBz.data(), M, cfg.stream);
-  QUASAR_HIP_CHECK(::hipStreamSynchronize(cfg.stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(static_cast<::hipStream_t>(cfg.stream)));
 
   for (int i = 0; i < M; ++i) {
     result[static_cast<std::size_t>(i)] =
@@ -234,13 +236,13 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
       d_I.device_ptr(), N,
       d_px.device_ptr(), d_py.device_ptr(), d_pz.device_ptr(), M,
       d_G.device_ptr(),
-      cfg.stream);
+      static_cast<::hipStream_t>(cfg.stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 
   std::vector<T> hG(static_cast<std::size_t>(9)
                     * static_cast<std::size_t>(M));
   d_G.copy_to_host_async(hG.data(), hG.size(), cfg.stream);
-  QUASAR_HIP_CHECK(::hipStreamSynchronize(cfg.stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(static_cast<::hipStream_t>(cfg.stream)));
 
   for (int i = 0; i < M; ++i) {
     const std::size_t mi = static_cast<std::size_t>(i);
