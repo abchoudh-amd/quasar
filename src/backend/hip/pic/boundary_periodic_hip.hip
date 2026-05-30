@@ -9,13 +9,22 @@
 namespace {
 
 __global__ void wrap_particles_kernel(quasar::Grid2D g, std::size_t n,
-                                      double* x, double* y, unsigned char* alive) {
+                                      double* x, double* y,
+                                      double* x_prev, double* y_prev,
+                                      unsigned char* alive) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
-  while (x[p] < g.origin_x) x[p] += g.lx;
-  while (x[p] >= g.origin_x + g.lx) x[p] -= g.lx;
-  while (y[p] < g.origin_y) y[p] += g.ly;
-  while (y[p] >= g.origin_y + g.ly) y[p] -= g.ly;
+  // Constant-time wrap. The same shift applied to x must also be applied to
+  // x_prev so the charge-conserving deposit (which runs after this BC and forms
+  // current from x_prev -> x) still sees a sub-cell displacement; otherwise a
+  // seam-crossing particle records a ~whole-domain jump the deposit window
+  // cannot span, injecting uncancelled current.
+  const double sx = g.lx * floor((x[p] - g.origin_x) / g.lx);
+  x[p] -= sx;
+  x_prev[p] -= sx;
+  const double sy = g.ly * floor((y[p] - g.origin_y) / g.ly);
+  y[p] -= sy;
+  y_prev[p] -= sy;
 }
 
 // Copies a single component's ghost layer on `side` from the opposite interior
@@ -64,7 +73,7 @@ extern "C" void launch_pic_boundary_periodic_particles(const quasar::Grid2D& g,
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
   hipLaunchKernelGGL(wrap_particles_kernel, grid, block, 0, stream,
-                     g, s.size(), s.x(), s.y(), s.alive());
+                     g, s.size(), s.x(), s.y(), s.x_prev(), s.y_prev(), s.alive());
 }
 
 extern "C" void launch_pic_boundary_periodic_fields(const quasar::Grid2D& g,

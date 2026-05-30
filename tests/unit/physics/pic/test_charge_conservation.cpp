@@ -34,15 +34,18 @@ void accumulate_rho(std::vector<double>& rho, const quasar::Grid2D& g,
 }
 
 // Runs one field-free step of a single drifting macro-particle and returns the
-// worst-case discrete-continuity residual and the peak |J|.
+// worst-case discrete-continuity residual and the peak |J|. When `seam` is true
+// the particle starts adjacent to the upper periodic boundary and drifts across
+// it within the step, exercising the wrap BC's x_prev co-shift.
 template <int ShapeOrder>
-void run_continuity_case(double* out_resid, double* out_jmag) {
+void run_continuity_case(double* out_resid, double* out_jmag, bool seam = false) {
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
   quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, ShapeOrder}};
 
   const double q = 1.0, m = 1.0, w = 1.0;
-  const double x0 = 0.51, y0 = 0.52;
-  const double vx = 0.37, vy = -0.29, vz = 0.13;
+  const double x0 = seam ? 0.985 : 0.51;
+  const double y0 = seam ? 0.985 : 0.52;
+  const double vx = seam ? 0.8 : 0.37, vy = seam ? 0.8 : -0.29, vz = 0.13;
   quasar::pic::ParticleSpecies sp{quasar::pic::SpeciesConfig{"q", q, m, 1}};
   sp.set_host_particles({x0}, {y0}, {vx}, {vy}, {vz}, {w});
   solver.add_species(std::move(sp));
@@ -51,6 +54,8 @@ void run_continuity_case(double* out_resid, double* out_jmag) {
   const double dt = 0.05;
   solver.step(dt);
 
+  // Unwrapped post-move position; periodic_index folds it back onto the torus,
+  // matching where the deposit lands after the wrap co-shift.
   const double x1 = x0 + dt * vx;
   const double y1 = y0 + dt * vy;
 
@@ -96,6 +101,17 @@ TEST(PicChargeConservation, EsirkepovSatisfiesContinuityTSC) {
   run_continuity_case<2>(&resid, &jmag);
   EXPECT_GT(jmag, 1.0e-6);
   EXPECT_LT(resid, 1.0e-9) << "max continuity residual " << resid;
+}
+
+TEST(PicChargeConservation, EsirkepovConservesAcrossPeriodicSeam) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  // Regression: a particle wrapping the periodic boundary in one step must keep
+  // the deposit charge-conserving. Before the wrap kernel co-shifted x_prev,
+  // the deposit saw a ~whole-domain displacement and the residual blew up.
+  double resid = 0.0, jmag = 0.0;
+  run_continuity_case<1>(&resid, &jmag, /*seam=*/true);
+  EXPECT_GT(jmag, 1.0e-6);
+  EXPECT_LT(resid, 1.0e-9) << "max continuity residual across seam " << resid;
 }
 
 TEST(PicChargeConservation, DepositTypesExist) {
