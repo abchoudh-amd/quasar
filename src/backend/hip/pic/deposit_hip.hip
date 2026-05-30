@@ -2,6 +2,7 @@
 #include "quasar/numerics/shape.hpp"
 #include "quasar/physics/pic/species.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -135,13 +136,15 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
 extern "C" void launch_pic_deposit_shape1(const quasar::Grid2D& g,
                                           const quasar::pic::ParticleSpecies& s,
                                           quasar::JField2D<double>& j,
-                                          double dt, hipStream_t stream) {
-  launch<1>(g, s, j, dt, stream);
+                                          double dt, quasar_stream_t stream) {
+  launch<1>(g, s, j, dt, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_deposit_shape2(const quasar::Grid2D& g,
                                           const quasar::pic::ParticleSpecies& s,
                                           quasar::JField2D<double>& j,
-                                          double dt, hipStream_t stream) {
-  launch<2>(g, s, j, dt, stream);
+                                          double dt, quasar_stream_t stream) {
+  launch<2>(g, s, j, dt, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

@@ -1,6 +1,8 @@
+#include "quasar/backend/device.hpp"
 #include "quasar/core/types.hpp"
 
 #include "physics/magnetostatics/detail/biot_savart_segment.hpp"
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/magnetostatics/launch_params.hpp"
 
 #include <hip/hip_runtime.h>
@@ -102,8 +104,10 @@ extern "C" void launch_biot_savart_gradB_f64(
     const double* I_, int N,
     const double* px, const double* py, const double* pz, int M,
     double* G,
-    hipStream_t stream) {
-  launch_impl<double>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G, stream);
+    ::quasar::backend::stream_t stream) {
+  launch_impl<double>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G,
+                      static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_biot_savart_gradB_f32(
@@ -112,6 +116,8 @@ extern "C" void launch_biot_savart_gradB_f32(
     const float* I_, int N,
     const float* px, const float* py, const float* pz, int M,
     float* G,
-    hipStream_t stream) {
-  launch_impl<float>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G, stream);
+    ::quasar::backend::stream_t stream) {
+  launch_impl<float>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G,
+                     static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

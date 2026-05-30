@@ -1,6 +1,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/numerics/stencil.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -44,14 +45,16 @@ extern "C" void launch_pic_fdtd_e_order2(const quasar::Grid2D& g,
                                          double* ex, double* ey, double* ez,
                                          const double* bx, const double* by, const double* bz,
                                          const double* jx, const double* jy, const double* jz,
-                                         double dt, hipStream_t stream) {
-  launch<2>(g, ex, ey, ez, bx, by, bz, jx, jy, jz, dt, stream);
+                                         double dt, quasar_stream_t stream) {
+  launch<2>(g, ex, ey, ez, bx, by, bz, jx, jy, jz, dt, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_fdtd_e_order4(const quasar::Grid2D& g,
                                          double* ex, double* ey, double* ez,
                                          const double* bx, const double* by, const double* bz,
                                          const double* jx, const double* jy, const double* jz,
-                                         double dt, hipStream_t stream) {
-  launch<4>(g, ex, ey, ez, bx, by, bz, jx, jy, jz, dt, stream);
+                                         double dt, quasar_stream_t stream) {
+  launch<4>(g, ex, ey, ez, bx, by, bz, jx, jy, jz, dt, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

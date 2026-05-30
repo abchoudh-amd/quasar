@@ -8,10 +8,10 @@ set(_quasar_magnetostatics_sources
   biot_savart_evaluator.cpp
 )
 
-# The evaluator orchestrator includes <hip/hip_runtime.h> and calls into HIP
-# device-memory helpers; compile it with the HIP toolchain so the runtime
-# library links in transitively. conductor.cpp / observation.cpp stay plain
-# C++ (host-only).
+# The evaluator orchestrator owns device buffers and links the biot_savart HIP
+# kernel module; compile it with the HIP toolchain so the runtime library links
+# in transitively. conductor.cpp / geometry_generators.cpp stay plain C++
+# (host-only); the observation types now live in core.
 set_source_files_properties(biot_savart_evaluator.cpp
   PROPERTIES LANGUAGE HIP)
 

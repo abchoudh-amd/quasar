@@ -3,10 +3,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/boundary/boundary_condition.hpp"
 
-#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
-
-#include <hip/hip_runtime.h>
 
 namespace quasar::numerics {
 
@@ -23,13 +20,11 @@ Real* ensure_scratch(backend::DeviceBuffer<Real>& scratch, std::size_t n) {
 void BinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec&) const {
   Real* scratch = ensure_scratch(scratch_, current.grid.storage_size());
   ::launch_pic_filter_binomial(current.grid, current, scratch, n_passes_, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 void CompensatedBinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec&) const {
   Real* scratch = ensure_scratch(scratch_, current.grid.storage_size());
   ::launch_pic_filter_compensated(current.grid, current, scratch, n_passes_, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 void FilterPipeline::apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const {

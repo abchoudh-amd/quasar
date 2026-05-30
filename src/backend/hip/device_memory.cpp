@@ -26,6 +26,14 @@ void device_free(void* ptr) noexcept {
   (void)::hipFree(ptr);
 }
 
+void device_memset(void* ptr, int value, std::size_t bytes) {
+  QUASAR_HIP_CHECK(::hipMemset(ptr, value, bytes));
+}
+
+void device_synchronize(stream_t stream) {
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(as_hip(stream)));
+}
+
 void device_memcpy_h2d(void* dst, const void* src, std::size_t bytes) {
   QUASAR_HIP_CHECK(::hipMemcpy(dst, src, bytes, ::hipMemcpyHostToDevice));
 }

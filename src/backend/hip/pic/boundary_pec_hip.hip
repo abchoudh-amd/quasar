@@ -1,6 +1,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/yee_field.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -72,22 +73,24 @@ __global__ void pec_y_kernel(quasar::Grid2D g, int side,
 
 extern "C" void launch_pic_boundary_pec_fields(const quasar::Grid2D& g,
                                                quasar::YeeField2D<double>& f,
-                                               int side, hipStream_t stream) {
+                                               int side, quasar_stream_t stream) {
   if (g.nghost <= 0) return;
+  const auto hip_stream = static_cast<hipStream_t>(stream);
   const dim3 block(256);
   if (side == 0 || side == 1) {
     const int total = g.nghost * g.ny;
     if (total <= 0) return;
     const dim3 grid((total + block.x - 1) / block.x);
-    hipLaunchKernelGGL(pec_x_kernel, grid, block, 0, stream, g, side,
+    hipLaunchKernelGGL(pec_x_kernel, grid, block, 0, hip_stream, g, side,
                        f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),
                        f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
   } else {
     const int total = g.nghost * g.nx;
     if (total <= 0) return;
     const dim3 grid((total + block.x - 1) / block.x);
-    hipLaunchKernelGGL(pec_y_kernel, grid, block, 0, stream, g, side,
+    hipLaunchKernelGGL(pec_y_kernel, grid, block, 0, hip_stream, g, side,
                        f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),
                        f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
   }
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

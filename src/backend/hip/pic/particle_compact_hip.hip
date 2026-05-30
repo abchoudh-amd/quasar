@@ -66,7 +66,8 @@ __global__ void alive_count_kernel(std::size_t n, const unsigned char* __restric
 }  // namespace
 
 extern "C" void launch_pic_particle_compact(quasar::pic::ParticleSpecies& s,
-                                            hipStream_t stream) {
+                                            quasar_stream_t stream_in) {
+  const auto stream = static_cast<hipStream_t>(stream_in);
   const std::size_t n = s.size();
   if (n == 0) return;
 
@@ -109,7 +110,8 @@ extern "C" void launch_pic_particle_compact(quasar::pic::ParticleSpecies& s,
 }
 
 extern "C" std::size_t launch_pic_alive_count(const quasar::pic::ParticleSpecies& s,
-                                              hipStream_t stream) {
+                                              quasar_stream_t stream_in) {
+  const auto stream = static_cast<hipStream_t>(stream_in);
   const std::size_t n = s.size();
   if (n == 0) return 0;
   const dim3 block(256);

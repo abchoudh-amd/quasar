@@ -1,5 +1,6 @@
 #include "quasar/core/yee_field.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -58,15 +59,18 @@ void run_passes(const quasar::Grid2D& g, quasar::JField2D<double>& j, double* sc
 // `scratch` is caller-owned ping-pong storage of at least g.storage_size()
 // doubles, hoisted out of the per-step hot path (see numerics/filter.cpp).
 extern "C" void launch_pic_filter_binomial(const quasar::Grid2D& g, quasar::JField2D<double>& j,
-                                           double* scratch, int passes, hipStream_t stream) {
-  run_passes(g, j, scratch, passes, 0.25, 0.5, stream);
+                                           double* scratch, int passes, quasar_stream_t stream) {
+  run_passes(g, j, scratch, passes, 0.25, 0.5, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_filter_compensated(const quasar::Grid2D& g, quasar::JField2D<double>& j,
-                                              double* scratch, int passes, hipStream_t stream) {
+                                              double* scratch, int passes, quasar_stream_t stream) {
   // Standard compensated binomial: `passes` smoothing passes followed by one
   // sharpening pass that restores the low-wavenumber amplitude the smoother
   // attenuated.
-  run_passes(g, j, scratch, passes, 0.25, 0.5, stream);
-  run_passes(g, j, scratch, 1, -0.5, 2.0, stream);
+  const auto hip_stream = static_cast<hipStream_t>(stream);
+  run_passes(g, j, scratch, passes, 0.25, 0.5, hip_stream);
+  run_passes(g, j, scratch, 1, -0.5, 2.0, hip_stream);
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

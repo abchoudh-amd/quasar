@@ -1,6 +1,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/physics/pic/species.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -40,11 +41,12 @@ __global__ void specular_kernel(quasar::Grid2D g, std::size_t n, int side,
 
 extern "C" void launch_pic_boundary_specular_particles(const quasar::Grid2D& g,
                                                        quasar::pic::ParticleSpecies& s,
-                                                       int side, hipStream_t stream) {
+                                                       int side, quasar_stream_t stream) {
   if (s.size() == 0) return;
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
-  hipLaunchKernelGGL(specular_kernel, grid, block, 0, stream,
+  hipLaunchKernelGGL(specular_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, s.size(), side, s.x(), s.y(), s.x_prev(), s.y_prev(),
                      s.vx(), s.vy(), s.alive());
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

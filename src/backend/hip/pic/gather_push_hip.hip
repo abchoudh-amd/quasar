@@ -2,6 +2,7 @@
 #include "quasar/numerics/shape.hpp"
 #include "quasar/physics/pic/species.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -99,14 +100,16 @@ extern "C" void launch_pic_gather_push_shape1(const quasar::Grid2D& g,
                                               quasar::pic::ParticleSpecies& s,
                                               const quasar::YeeField2D<double>& self,
                                               const quasar::YeeField2D<double>& ext,
-                                              double dt, hipStream_t stream) {
-  launch<1>(g, s, self, ext, dt, stream);
+                                              double dt, quasar_stream_t stream) {
+  launch<1>(g, s, self, ext, dt, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_gather_push_shape2(const quasar::Grid2D& g,
                                               quasar::pic::ParticleSpecies& s,
                                               const quasar::YeeField2D<double>& self,
                                               const quasar::YeeField2D<double>& ext,
-                                              double dt, hipStream_t stream) {
-  launch<2>(g, s, self, ext, dt, stream);
+                                              double dt, quasar_stream_t stream) {
+  launch<2>(g, s, self, ext, dt, static_cast<hipStream_t>(stream));
+  QUASAR_HIP_CHECK(::hipGetLastError());
 }

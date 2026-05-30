@@ -3,10 +3,8 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/core/registry.hpp"
 
-#include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
 
-#include <hip/hip_runtime.h>
 
 #include <stdexcept>
 #include <string_view>
@@ -17,14 +15,12 @@ template <>
 void YeeFdtd2D<2>::advance_b(YeeField2D<Real>& f, Real dt) const {
   ::launch_pic_fdtd_b_order2(f.grid, f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
                              f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(), dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
 void YeeFdtd2D<4>::advance_b(YeeField2D<Real>& f, Real dt) const {
   ::launch_pic_fdtd_b_order4(f.grid, f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
                              f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(), dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
@@ -32,7 +28,6 @@ void YeeFdtd2D<2>::advance_e(YeeField2D<Real>& f, const JField2D<Real>& j, Real 
   ::launch_pic_fdtd_e_order2(f.grid, f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),
                              f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
                              j.jx.device_ptr(), j.jy.device_ptr(), j.jz.device_ptr(), dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
@@ -40,33 +35,28 @@ void YeeFdtd2D<4>::advance_e(YeeField2D<Real>& f, const JField2D<Real>& j, Real 
   ::launch_pic_fdtd_e_order4(f.grid, f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),
                              f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
                              j.jx.device_ptr(), j.jy.device_ptr(), j.jz.device_ptr(), dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
 void BorisPusher<1>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
                           const YeeField2D<Real>& ext, Real dt) const {
   ::launch_pic_gather_push_shape1(f.grid, s, f, ext, dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
 void BorisPusher<2>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
                           const YeeField2D<Real>& ext, Real dt) const {
   ::launch_pic_gather_push_shape2(f.grid, s, f, ext, dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
 void Esirkepov2D<1>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, Real dt) const {
   ::launch_pic_deposit_shape1(j.grid, s, j, dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 template <>
 void Esirkepov2D<2>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, Real dt) const {
   ::launch_pic_deposit_shape2(j.grid, s, j, dt, nullptr);
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 }  // namespace quasar::numerics
@@ -172,24 +162,21 @@ void EmPic2D3V::apply_particle_bcs(ParticleSpecies& s) {
         break;
       case boundary::ParticleBoundaryKind::specular:
         ::launch_pic_boundary_specular_particles(grid_, s, side, nullptr);
-        QUASAR_HIP_CHECK(::hipGetLastError());
         break;
       case boundary::ParticleBoundaryKind::absorbing:
         ::launch_pic_boundary_absorb_particles(grid_, s, side, nullptr);
-        QUASAR_HIP_CHECK(::hipGetLastError());
         break;
     }
   }
   if (any_periodic) {
     ::launch_pic_boundary_periodic_particles(grid_, s, nullptr);
-    QUASAR_HIP_CHECK(::hipGetLastError());
   }
 }
 
 void EmPic2D3V::step(Real dt) {
-  QUASAR_HIP_CHECK(::hipMemset(current_.jx.device_ptr(), 0, current_.jx.bytes()));
-  QUASAR_HIP_CHECK(::hipMemset(current_.jy.device_ptr(), 0, current_.jy.bytes()));
-  QUASAR_HIP_CHECK(::hipMemset(current_.jz.device_ptr(), 0, current_.jz.bytes()));
+  backend::device_memset(current_.jx.device_ptr(), 0, current_.jx.bytes());
+  backend::device_memset(current_.jy.device_ptr(), 0, current_.jy.bytes());
+  backend::device_memset(current_.jz.device_ptr(), 0, current_.jz.bytes());
 
   // TODO(field-bc-heisenbug): The boundary-aware stencil + field-ghost fill is
   // wired (fill_field_ghosts + the periodic/PEC field kernels) but currently

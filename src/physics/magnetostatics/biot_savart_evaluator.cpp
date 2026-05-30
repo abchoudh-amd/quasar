@@ -8,13 +8,14 @@
 #include "quasar/core/field.hpp"
 #include "quasar/core/types.hpp"
 
-#include "backend/hip/hip_check.hpp"
-
-#include <hip/hip_runtime.h>
-
 #include <cstddef>
 #include <type_traits>
 #include <vector>
+
+// The biot_savart launch ABI speaks the backend-neutral stream handle, so this
+// orchestrator (compiled with the HIP toolchain for device-memory ownership)
+// needs no HIP header. The .hip definitions cast the handle back internally.
+using stream_t = ::quasar::backend::stream_t;
 
 // Defined in src/backend/hip/magnetostatics/biot_savart_hip.hip.
 extern "C" void launch_biot_savart_B_f64(
@@ -23,7 +24,7 @@ extern "C" void launch_biot_savart_B_f64(
     const double* I_, int N,
     const double* px, const double* py, const double* pz, int M,
     double* Bx, double* By, double* Bz,
-    ::hipStream_t stream);
+    stream_t stream);
 
 extern "C" void launch_biot_savart_B_f32(
     const float* ax, const float* ay, const float* az,
@@ -31,7 +32,7 @@ extern "C" void launch_biot_savart_B_f32(
     const float* I_, int N,
     const float* px, const float* py, const float* pz, int M,
     float* Bx, float* By, float* Bz,
-    ::hipStream_t stream);
+    stream_t stream);
 
 // Defined in src/backend/hip/magnetostatics/biot_savart_grad_hip.hip.
 extern "C" void launch_biot_savart_gradB_f64(
@@ -40,7 +41,7 @@ extern "C" void launch_biot_savart_gradB_f64(
     const double* I_, int N,
     const double* px, const double* py, const double* pz, int M,
     double* G,
-    ::hipStream_t stream);
+    stream_t stream);
 
 extern "C" void launch_biot_savart_gradB_f32(
     const float* ax, const float* ay, const float* az,
@@ -48,7 +49,7 @@ extern "C" void launch_biot_savart_gradB_f32(
     const float* I_, int N,
     const float* px, const float* py, const float* pz, int M,
     float* G,
-    ::hipStream_t stream);
+    stream_t stream);
 
 namespace quasar::magnetostatics {
 
@@ -83,7 +84,7 @@ void dispatch_launch_B(const T* ax, const T* ay, const T* az,
                        const T* I_, int N,
                        const T* px, const T* py, const T* pz, int M,
                        T* Bx, T* By, T* Bz,
-                       ::hipStream_t stream) {
+                       stream_t stream) {
   if constexpr (std::is_same_v<T, double>) {
     ::launch_biot_savart_B_f64(ax, ay, az, bx, by, bz, I_, N,
                                 px, py, pz, M, Bx, By, Bz, stream);
@@ -99,7 +100,7 @@ void dispatch_launch_gradB(const T* ax, const T* ay, const T* az,
                            const T* I_, int N,
                            const T* px, const T* py, const T* pz, int M,
                            T* G,
-                           ::hipStream_t stream) {
+                           stream_t stream) {
   if constexpr (std::is_same_v<T, double>) {
     ::launch_biot_savart_gradB_f64(ax, ay, az, bx, by, bz, I_, N,
                                     px, py, pz, M, G, stream);
@@ -162,8 +163,7 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
       d_I.device_ptr(), N,
       d_px.device_ptr(), d_py.device_ptr(), d_pz.device_ptr(), M,
       d_Bx.device_ptr(), d_By.device_ptr(), d_Bz.device_ptr(),
-      static_cast<::hipStream_t>(cfg.stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
+      cfg.stream);
 
   std::vector<T> hBx(static_cast<std::size_t>(M));
   std::vector<T> hBy(static_cast<std::size_t>(M));
@@ -171,7 +171,7 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
   d_Bx.copy_to_host_async(hBx.data(), M, cfg.stream);
   d_By.copy_to_host_async(hBy.data(), M, cfg.stream);
   d_Bz.copy_to_host_async(hBz.data(), M, cfg.stream);
-  QUASAR_HIP_CHECK(::hipStreamSynchronize(static_cast<::hipStream_t>(cfg.stream)));
+  ::quasar::backend::device_synchronize(cfg.stream);
 
   for (int i = 0; i < M; ++i) {
     result[static_cast<std::size_t>(i)] =
@@ -236,13 +236,12 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
       d_I.device_ptr(), N,
       d_px.device_ptr(), d_py.device_ptr(), d_pz.device_ptr(), M,
       d_G.device_ptr(),
-      static_cast<::hipStream_t>(cfg.stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
+      cfg.stream);
 
   std::vector<T> hG(static_cast<std::size_t>(9)
                     * static_cast<std::size_t>(M));
   d_G.copy_to_host_async(hG.data(), hG.size(), cfg.stream);
-  QUASAR_HIP_CHECK(::hipStreamSynchronize(static_cast<::hipStream_t>(cfg.stream)));
+  ::quasar::backend::device_synchronize(cfg.stream);
 
   for (int i = 0; i < M; ++i) {
     const std::size_t mi = static_cast<std::size_t>(i);

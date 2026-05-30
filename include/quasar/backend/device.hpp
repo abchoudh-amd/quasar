@@ -38,9 +38,13 @@ bool has_hip_runtime();
 // allocations are zero-initialized. Throws DeviceError on failure.
 void* device_alloc(std::size_t bytes);
 void  device_free(void* ptr) noexcept;
+void  device_memset(void* ptr, int value, std::size_t bytes);
 void  device_memcpy_h2d(void* dst, const void* src, std::size_t bytes);
 void  device_memcpy_d2h(void* dst, const void* src, std::size_t bytes);
 void  device_memcpy_h2d_async(void* dst, const void* src, std::size_t bytes, stream_t stream);
 void  device_memcpy_d2h_async(void* dst, const void* src, std::size_t bytes, stream_t stream);
+
+// Block until all work on `stream` (nullptr = default stream) completes.
+void  device_synchronize(stream_t stream);
 
 }  // namespace quasar::backend
