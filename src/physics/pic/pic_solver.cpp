@@ -39,13 +39,15 @@ void YeeFdtd2D<4>::advance_e(YeeField2D<Real>& f, const JField2D<Real>& j, Real 
 template <>
 void BorisPusher<1>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
                           const YeeField2D<Real>& ext, Real dt) const {
-  ::launch_pic_gather_push_shape1(f.grid, s, f, ext, dt, nullptr);
+  ::launch_pic_gather_push_shape1(f.grid, s, f, ext, periodic_x_ ? 1 : 0,
+                                  periodic_y_ ? 1 : 0, dt, nullptr);
 }
 
 template <>
 void BorisPusher<2>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
                           const YeeField2D<Real>& ext, Real dt) const {
-  ::launch_pic_gather_push_shape2(f.grid, s, f, ext, dt, nullptr);
+  ::launch_pic_gather_push_shape2(f.grid, s, f, ext, periodic_x_ ? 1 : 0,
+                                  periodic_y_ ? 1 : 0, dt, nullptr);
 }
 
 template <>
@@ -122,14 +124,17 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   } else {
     throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
   }
-  // The deposit wraps an axis only when both of its sides are periodic; a wall on
-  // either side switches that axis to ghost-cell deposition + specular fold-back.
+  // The deposit/gather wrap an axis only when both of its sides are periodic; a
+  // wall on either side switches that axis to ghost-cell deposition + specular
+  // fold-back (deposit) and ghost-clamped interpolation (gather), so neither
+  // wraps across a non-periodic boundary.
   const auto& pb = cfg_.boundary.particle;
   const bool periodic_x = pb[0] == boundary::ParticleBoundaryKind::periodic
                        && pb[1] == boundary::ParticleBoundaryKind::periodic;
   const bool periodic_y = pb[2] == boundary::ParticleBoundaryKind::periodic
                        && pb[3] == boundary::ParticleBoundaryKind::periodic;
   deposit_->set_periodic_axes(periodic_x, periodic_y);
+  pusher_->set_periodic_axes(periodic_x, periodic_y);
 
   // Build the current-smoothing pipeline from the deck via the registry (same
   // pluggable path as the BCs); concrete filters self-register in src/numerics.

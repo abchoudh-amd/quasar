@@ -26,6 +26,14 @@ interfaces may still change between entries.
   by integration tests.
 
 ### Fixed
+- PIC: the particle field gather now honors per-axis boundaries. It previously
+  wrapped the interpolation stencil periodically on every axis; on a non-periodic
+  (wall) axis it now clamps into the boundary ghost layer (matching the deposit),
+  so near-wall particles see the boundary field instead of the wrapped far edge.
+  The sampled external field's ghost layer is edge-replicated to match.
+- Coil: `observation.plane` now normalizes the `u_axis_xyz` / `v_axis_xyz`
+  direction vectors before scaling by the extent, so a non-unit axis no longer
+  silently changes the sampled plane size; a zero axis raises a clear error.
 - PIC: charge conservation across particle boundary crossings. The periodic-wrap
   kernel co-shifts the previous particle position, and specular reflection now
   deposits into ghost cells with an image-charge fold-back instead of mirroring the

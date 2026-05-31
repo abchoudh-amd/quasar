@@ -40,3 +40,4 @@ out.npz
 examples/**/out.npz
 examples/**/*.png
 logs/
+.cursor/

@@ -37,12 +37,18 @@ void launch_pic_fdtd_e_order4(const quasar::Grid2D&, double*, double*, double*,
                               quasar_stream_t);
 
 // -- Particle gather + push --------------------------------------------------
+// `periodic_x`/`periodic_y` (0/1) select per-axis field-gather indexing: a
+// periodic axis wraps; a non-periodic (wall) axis clamps the interpolation
+// stencil into the ghost layer (reading the field-boundary closure / replicated
+// external field) instead of wrapping to the far edge. Mirrors the deposit.
 void launch_pic_gather_push_shape1(const quasar::Grid2D&, quasar::pic::ParticleSpecies&,
                                    const quasar::YeeField2D<double>&,
-                                   const quasar::YeeField2D<double>&, double, quasar_stream_t);
+                                   const quasar::YeeField2D<double>&, int periodic_x,
+                                   int periodic_y, double, quasar_stream_t);
 void launch_pic_gather_push_shape2(const quasar::Grid2D&, quasar::pic::ParticleSpecies&,
                                    const quasar::YeeField2D<double>&,
-                                   const quasar::YeeField2D<double>&, double, quasar_stream_t);
+                                   const quasar::YeeField2D<double>&, int periodic_x,
+                                   int periodic_y, double, quasar_stream_t);
 
 // -- Current deposition ------------------------------------------------------
 // `periodic_x`/`periodic_y` (0/1) select per-axis node indexing: a periodic axis

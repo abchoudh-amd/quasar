@@ -53,6 +53,21 @@ void copy_component(const Grid2D& g, const Field<Vec3>& values, int axis,
       host[g.index(i, j)] = c / field_scale;
     }
   }
+  // Replicate the interior edge into the ghost layer. The particle gather clamps
+  // its interpolation stencil into the ghost cells on a non-periodic axis, so an
+  // unfilled (zero) ghost would otherwise bias the external force on near-wall
+  // particles; edge replication is the natural Neumann fill for a sampled field.
+  for (int gh = 1; gh <= g.nghost; ++gh) {
+    for (int j = 0; j < g.ny; ++j) {
+      host[g.index(-gh, j)]          = host[g.index(0, j)];
+      host[g.index(g.nx - 1 + gh, j)] = host[g.index(g.nx - 1, j)];
+    }
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const int ic = i < 0 ? 0 : (i > g.nx - 1 ? g.nx - 1 : i);
+      host[g.index(i, -gh)]          = host[g.index(ic, 0)];
+      host[g.index(i, g.ny - 1 + gh)] = host[g.index(ic, g.ny - 1)];
+    }
+  }
   dst.copy_from_host(host.data(), host.size());
 }
 

@@ -26,6 +26,7 @@ example.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence, Union
@@ -58,6 +59,13 @@ def _vec3(xyz: Sequence[float]) -> Vec3:
     if len(xyz) != 3:
         raise ValueError(f"expected 3-element xyz triple, got {xyz!r}")
     return Vec3(float(xyz[0]), float(xyz[1]), float(xyz[2]))
+
+
+def _unit(v: Vec3, context: str) -> Vec3:
+    norm = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+    if norm == 0.0:
+        raise ValueError(f"{context}: axis vector must be non-zero")
+    return Vec3(v.x / norm, v.y / norm, v.z / norm)
 
 
 def _require(d: dict, key: str, context: str) -> Any:
@@ -195,8 +203,10 @@ def _build_observation(spec: dict) -> _ObservationResult:
 
     if ot == "plane":
         origin = _vec3(_require(spec, "origin_xyz", "observation.plane"))
-        u = _vec3(_require(spec, "u_axis_xyz", "observation.plane"))
-        v = _vec3(_require(spec, "v_axis_xyz", "observation.plane"))
+        u = _unit(_vec3(_require(spec, "u_axis_xyz", "observation.plane")),
+                  "observation.plane.u_axis_xyz")
+        v = _unit(_vec3(_require(spec, "v_axis_xyz", "observation.plane")),
+                  "observation.plane.v_axis_xyz")
         u_extent = float(_require(spec, "u_extent_m", "observation.plane"))
         v_extent = float(_require(spec, "v_extent_m", "observation.plane"))
         nu = int(_require(spec, "nu", "observation.plane"))
