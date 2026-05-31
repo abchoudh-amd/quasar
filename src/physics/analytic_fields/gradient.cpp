@@ -4,7 +4,7 @@
 
 namespace quasar::analytic_fields {
 
-Field<Vec3> GradientEvaluator::evaluate_B(const magnetostatics::ConductorSystem&,
+Field<Vec3> GradientEvaluator::evaluate_B(const core::IFieldSource&,
                                           const core::PointCloud& obs) const {
   Field<Vec3> out(obs.size());
   const auto& pts = obs.points();
@@ -14,7 +14,7 @@ Field<Vec3> GradientEvaluator::evaluate_B(const magnetostatics::ConductorSystem&
   return out;
 }
 
-Field<Mat3x3> GradientEvaluator::evaluate_grad_B(const magnetostatics::ConductorSystem&,
+Field<Mat3x3> GradientEvaluator::evaluate_grad_B(const core::IFieldSource&,
                                                  const core::PointCloud& obs) const {
   Field<Mat3x3> out(obs.size());
   for (std::size_t i = 0; i < out.size(); ++i) out[i] = grad_;

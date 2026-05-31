@@ -11,9 +11,9 @@ class FileGridEvaluator final : public numerics::IFieldEvaluator {
   FileGridEvaluator() = default;
   explicit FileGridEvaluator(std::string path) : path_{std::move(path)} {}
 
-  Field<Vec3> evaluate_B(const magnetostatics::ConductorSystem&,
+  Field<Vec3> evaluate_B(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
-  Field<Mat3x3> evaluate_grad_B(const magnetostatics::ConductorSystem&,
+  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
                                 const core::PointCloud& observations) const override;
 
   const std::string& path() const noexcept { return path_; }

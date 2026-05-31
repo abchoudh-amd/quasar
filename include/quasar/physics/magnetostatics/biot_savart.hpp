@@ -28,11 +28,14 @@ class BiotSavartEvaluator final : public IFieldEvaluator {
   BiotSavartEvaluator();
   explicit BiotSavartEvaluator(BiotSavartConfig cfg);
 
-  Field<Vec3>   evaluate_B     (const ConductorSystem& conductors,
-                                const PointCloud&      observations) const override;
+  // The IFieldEvaluator contract is axis-neutral (core::IFieldSource); this
+  // evaluator downcasts to ConductorSystem, throwing std::invalid_argument if
+  // handed a source of another type.
+  Field<Vec3>   evaluate_B     (const core::IFieldSource& source,
+                                const PointCloud&         observations) const override;
 
-  Field<Mat3x3> evaluate_grad_B(const ConductorSystem& conductors,
-                                const PointCloud&      observations) const override;
+  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource& source,
+                                const PointCloud&         observations) const override;
 
   const BiotSavartConfig& config() const noexcept { return cfg_; }
 

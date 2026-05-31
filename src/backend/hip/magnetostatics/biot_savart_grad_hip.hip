@@ -1,4 +1,5 @@
 #include "quasar/backend/device.hpp"
+#include "quasar/backend/magnetostatics_kernels.hpp"
 #include "quasar/core/types.hpp"
 
 #include "physics/magnetostatics/detail/biot_savart_segment.hpp"

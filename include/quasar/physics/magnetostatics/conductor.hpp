@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quasar/core/field_source.hpp"
 #include "quasar/core/types.hpp"
 
 #include <cstddef>
@@ -25,7 +26,7 @@ struct SegmentSoA {
   std::size_t n_segments() const noexcept { return ax.size(); }
 };
 
-class ConductorSystem {
+class ConductorSystem : public core::IFieldSource {
  public:
   void add(Filament f);
 

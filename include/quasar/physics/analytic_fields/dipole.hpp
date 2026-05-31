@@ -10,9 +10,9 @@ class DipoleEvaluator final : public numerics::IFieldEvaluator {
   DipoleEvaluator(Vec3 moment, Vec3 origin = Vec3{0, 0, 0})
     : moment_{moment}, origin_{origin} {}
 
-  Field<Vec3> evaluate_B(const magnetostatics::ConductorSystem&,
+  Field<Vec3> evaluate_B(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
-  Field<Mat3x3> evaluate_grad_B(const magnetostatics::ConductorSystem&,
+  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
                                 const core::PointCloud& observations) const override;
 
  private:

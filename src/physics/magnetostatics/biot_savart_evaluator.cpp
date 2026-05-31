@@ -4,52 +4,20 @@
 #include "quasar/physics/magnetostatics/observation.hpp"
 
 #include "quasar/backend/device.hpp"
+#include "quasar/backend/magnetostatics_kernels.hpp"
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/field.hpp"
 #include "quasar/core/types.hpp"
 
 #include <cstddef>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
-// The biot_savart launch ABI speaks the backend-neutral stream handle, so this
-// orchestrator (compiled with the HIP toolchain for device-memory ownership)
-// needs no HIP header. The .hip definitions cast the handle back internally.
+// The biot_savart launch ABI (declared once in
+// include/quasar/backend/magnetostatics_kernels.hpp) speaks the backend-neutral
+// stream handle, so this orchestrator needs no HIP header.
 using stream_t = ::quasar::backend::stream_t;
-
-// Defined in src/backend/hip/magnetostatics/biot_savart_hip.hip.
-extern "C" void launch_biot_savart_B_f64(
-    const double* ax, const double* ay, const double* az,
-    const double* bx, const double* by, const double* bz,
-    const double* I_, int N,
-    const double* px, const double* py, const double* pz, int M,
-    double* Bx, double* By, double* Bz,
-    stream_t stream);
-
-extern "C" void launch_biot_savart_B_f32(
-    const float* ax, const float* ay, const float* az,
-    const float* bx, const float* by, const float* bz,
-    const float* I_, int N,
-    const float* px, const float* py, const float* pz, int M,
-    float* Bx, float* By, float* Bz,
-    stream_t stream);
-
-// Defined in src/backend/hip/magnetostatics/biot_savart_grad_hip.hip.
-extern "C" void launch_biot_savart_gradB_f64(
-    const double* ax, const double* ay, const double* az,
-    const double* bx, const double* by, const double* bz,
-    const double* I_, int N,
-    const double* px, const double* py, const double* pz, int M,
-    double* G,
-    stream_t stream);
-
-extern "C" void launch_biot_savart_gradB_f32(
-    const float* ax, const float* ay, const float* az,
-    const float* bx, const float* by, const float* bz,
-    const float* I_, int N,
-    const float* px, const float* py, const float* pz, int M,
-    float* G,
-    stream_t stream);
 
 namespace quasar::magnetostatics {
 
@@ -256,14 +224,28 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
 BiotSavartEvaluator::BiotSavartEvaluator() = default;
 BiotSavartEvaluator::BiotSavartEvaluator(BiotSavartConfig cfg) : cfg_{cfg} {}
 
-Field<Vec3> BiotSavartEvaluator::evaluate_B(const ConductorSystem& cs,
-                                             const PointCloud&      obs) const {
-  return evaluate_B_impl<double>(cfg_, cs, obs);
+namespace {
+
+// Downcast the axis-neutral source to the conductor system this evaluator needs.
+const ConductorSystem& as_conductors(const core::IFieldSource& source) {
+  const auto* cs = dynamic_cast<const ConductorSystem*>(&source);
+  if (cs == nullptr) {
+    throw std::invalid_argument{
+        "BiotSavartEvaluator: field source is not a ConductorSystem"};
+  }
+  return *cs;
 }
 
-Field<Mat3x3> BiotSavartEvaluator::evaluate_grad_B(const ConductorSystem& cs,
+}  // namespace
+
+Field<Vec3> BiotSavartEvaluator::evaluate_B(const core::IFieldSource& source,
+                                             const PointCloud&      obs) const {
+  return evaluate_B_impl<double>(cfg_, as_conductors(source), obs);
+}
+
+Field<Mat3x3> BiotSavartEvaluator::evaluate_grad_B(const core::IFieldSource& source,
                                                     const PointCloud&      obs) const {
-  return evaluate_grad_B_impl<double>(cfg_, cs, obs);
+  return evaluate_grad_B_impl<double>(cfg_, as_conductors(source), obs);
 }
 
 // -- Single-precision evaluator --------------------------------------------
