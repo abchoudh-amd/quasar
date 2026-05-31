@@ -4,6 +4,7 @@
 
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -236,20 +237,17 @@ extern "C" void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D& 
                                                           int side, double dt,
                                                           quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
-  const dim3 block(256);
-  if (side == 0 || side == 1) {
-    if (g.ny <= 0) return;
-    const dim3 grid((g.ny + block.x - 1) / block.x);
-    hipLaunchKernelGGL((wall_correct_b_x_kernel<2>), grid, block, 0, hip_stream, g, side, dt,
-                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
-                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
-  } else {
-    if (g.nx <= 0) return;
-    const dim3 grid((g.nx + block.x - 1) / block.x);
-    hipLaunchKernelGGL((wall_correct_b_y_kernel<2>), grid, block, 0, hip_stream, g, side, dt,
-                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
-                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
-  }
+  quasar::backend::pic::launch_along_side(g, side,
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL((wall_correct_b_x_kernel<2>), grid, block, 0, hip_stream, g, side, dt,
+                         f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
+                         f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
+    },
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL((wall_correct_b_y_kernel<2>), grid, block, 0, hip_stream, g, side, dt,
+                         f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
+                         f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
+    });
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
@@ -257,18 +255,15 @@ extern "C" void launch_pic_boundary_wall_correct_e(const quasar::Grid2D& g,
                                                    quasar::YeeField2D<double>& f,
                                                    int side, quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
-  const dim3 block(256);
-  if (side == 0 || side == 1) {
-    if (g.ny <= 0) return;
-    const dim3 grid((g.ny + block.x - 1) / block.x);
-    hipLaunchKernelGGL(wall_correct_e_x_kernel, grid, block, 0, hip_stream, g, side,
-                       f.ey.device_ptr(), f.ez.device_ptr());
-  } else {
-    if (g.nx <= 0) return;
-    const dim3 grid((g.nx + block.x - 1) / block.x);
-    hipLaunchKernelGGL(wall_correct_e_y_kernel, grid, block, 0, hip_stream, g, side,
-                       f.ex.device_ptr(), f.ez.device_ptr());
-  }
+  quasar::backend::pic::launch_along_side(g, side,
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL(wall_correct_e_x_kernel, grid, block, 0, hip_stream, g, side,
+                         f.ey.device_ptr(), f.ez.device_ptr());
+    },
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL(wall_correct_e_y_kernel, grid, block, 0, hip_stream, g, side,
+                         f.ex.device_ptr(), f.ez.device_ptr());
+    });
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
@@ -277,20 +272,17 @@ extern "C" void launch_pic_boundary_wall_correct_b_order4(const quasar::Grid2D& 
                                                           int side, double dt,
                                                           quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
-  const dim3 block(256);
-  if (side == 0 || side == 1) {
-    if (g.ny <= 0) return;
-    const dim3 grid((g.ny + block.x - 1) / block.x);
-    hipLaunchKernelGGL(wall_correct_b_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
-                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
-                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
-  } else {
-    if (g.nx <= 0) return;
-    const dim3 grid((g.nx + block.x - 1) / block.x);
-    hipLaunchKernelGGL(wall_correct_b_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
-                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
-                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
-  }
+  quasar::backend::pic::launch_along_side(g, side,
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL(wall_correct_b_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                         f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
+                         f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
+    },
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL(wall_correct_b_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                         f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
+                         f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
+    });
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
@@ -299,19 +291,16 @@ extern "C" void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D& 
                                                           int side, double dt,
                                                           quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
-  const dim3 block(256);
-  if (side == 0 || side == 1) {
-    if (g.ny <= 0) return;
-    const dim3 grid((g.ny + block.x - 1) / block.x);
-    hipLaunchKernelGGL(wall_correct_e_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
-                       f.ey.device_ptr(), f.ez.device_ptr(),
-                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
-  } else {
-    if (g.nx <= 0) return;
-    const dim3 grid((g.nx + block.x - 1) / block.x);
-    hipLaunchKernelGGL(wall_correct_e_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
-                       f.ex.device_ptr(), f.ez.device_ptr(),
-                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
-  }
+  quasar::backend::pic::launch_along_side(g, side,
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL(wall_correct_e_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                         f.ey.device_ptr(), f.ez.device_ptr(),
+                         f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
+    },
+    [&](dim3 grid, dim3 block) {
+      hipLaunchKernelGGL(wall_correct_e_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                         f.ex.device_ptr(), f.ez.device_ptr(),
+                         f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
+    });
   QUASAR_HIP_CHECK(::hipGetLastError());
 }

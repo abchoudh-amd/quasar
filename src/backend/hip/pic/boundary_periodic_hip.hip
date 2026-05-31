@@ -4,6 +4,7 @@
 
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -76,8 +77,8 @@ extern "C" void launch_pic_boundary_periodic_particles(const quasar::Grid2D& g,
                                                        quasar::pic::ParticleSpecies& s,
                                                        int axis, quasar_stream_t stream) {
   if (s.size() == 0) return;
-  const dim3 block(256);
-  const dim3 grid((s.size() + block.x - 1) / block.x);
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(s.size());
   hipLaunchKernelGGL(wrap_particles_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, s.size(), axis, s.x(), s.y(), s.x_prev(), s.y_prev(), s.alive());
   QUASAR_HIP_CHECK(::hipGetLastError());
@@ -90,8 +91,8 @@ extern "C" void launch_pic_boundary_periodic_fields(const quasar::Grid2D& g,
   const int len = (side == 0 || side == 1) ? g.ny : g.nx;
   const int total = g.nghost * len;
   if (total <= 0) return;
-  const dim3 block(256);
-  const dim3 grid((total + block.x - 1) / block.x);
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(static_cast<std::size_t>(total));
   hipLaunchKernelGGL(periodic_fields_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, side, len,
                      f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),

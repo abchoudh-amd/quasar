@@ -3,6 +3,7 @@
 
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -26,8 +27,8 @@ extern "C" void launch_pic_boundary_absorb_particles(const quasar::Grid2D& g,
                                                      quasar::pic::ParticleSpecies& s,
                                                      int side, quasar_stream_t stream) {
   if (s.size() == 0) return;
-  const dim3 block(256);
-  const dim3 grid((s.size() + block.x - 1) / block.x);
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(s.size());
   hipLaunchKernelGGL(absorb_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, s.size(), side, s.x(), s.y(), s.alive());
   QUASAR_HIP_CHECK(::hipGetLastError());

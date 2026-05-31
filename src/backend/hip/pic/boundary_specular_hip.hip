@@ -3,6 +3,7 @@
 
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -84,8 +85,8 @@ extern "C" void launch_pic_boundary_specular_particles(const quasar::Grid2D& g,
                                                        quasar::pic::ParticleSpecies& s,
                                                        int side, quasar_stream_t stream) {
   if (s.size() == 0) return;
-  const dim3 block(256);
-  const dim3 grid((s.size() + block.x - 1) / block.x);
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(s.size());
   hipLaunchKernelGGL(specular_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, s.size(), side, s.x(), s.y(), s.x_prev(), s.y_prev(),
                      s.vx(), s.vy(), s.alive());
@@ -98,8 +99,8 @@ extern "C" void launch_pic_boundary_specular_foldback(const quasar::Grid2D& g,
   const int len = (side < 2) ? g.ny : g.nx;
   const int total = g.nghost * len;
   if (total <= 0) return;
-  const dim3 block(256);
-  const dim3 grid((total + block.x - 1) / block.x);
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(static_cast<std::size_t>(total));
   hipLaunchKernelGGL(foldback_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, side, j.jx.device_ptr(), j.jy.device_ptr(), j.jz.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
