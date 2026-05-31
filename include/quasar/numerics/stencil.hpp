@@ -62,6 +62,55 @@ QUASAR_HOST_DEVICE inline Real ddy_staggered_bwd(const Real* f, const Grid2D& g,
   }
 }
 
+// One-sided first-derivative closures for a boundary node whose centered/staggered
+// stencil would otherwise reach outside the domain. These read ONLY interior
+// nodes (no ghost), so a non-periodic boundary can be closed without a ghost
+// fill. `h` is the axis spacing (g.dx()/g.dy()).
+//
+// First order (two-node) variants — robust, used for the order-2 scheme and as
+// the (order-reduced) closure for the outer two layers of the order-4 scheme:
+QUASAR_HOST_DEVICE inline Real ddx_onesided_fwd1(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (f[g.index(i + 1, j)] - f[g.index(i, j)]) / g.dx();
+}
+QUASAR_HOST_DEVICE inline Real ddx_onesided_bwd1(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (f[g.index(i, j)] - f[g.index(i - 1, j)]) / g.dx();
+}
+QUASAR_HOST_DEVICE inline Real ddy_onesided_fwd1(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (f[g.index(i, j + 1)] - f[g.index(i, j)]) / g.dy();
+}
+QUASAR_HOST_DEVICE inline Real ddy_onesided_bwd1(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (f[g.index(i, j)] - f[g.index(i, j - 1)]) / g.dy();
+}
+
+// Second order (three-node) variants — preserve the interior order at the
+// boundary node where stability allows:
+//   forward : (-3 f0 + 4 f1 - f2) / (2h)
+//   backward: ( 3 f0 - 4 f-1 + f-2) / (2h)
+QUASAR_HOST_DEVICE inline Real ddx_onesided_fwd2(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (Real{-3} * f[g.index(i, j)] + Real{4} * f[g.index(i + 1, j)]
+          - f[g.index(i + 2, j)]) / (Real{2} * g.dx());
+}
+QUASAR_HOST_DEVICE inline Real ddx_onesided_bwd2(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (Real{3} * f[g.index(i, j)] - Real{4} * f[g.index(i - 1, j)]
+          + f[g.index(i - 2, j)]) / (Real{2} * g.dx());
+}
+QUASAR_HOST_DEVICE inline Real ddy_onesided_fwd2(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (Real{-3} * f[g.index(i, j)] + Real{4} * f[g.index(i, j + 1)]
+          - f[g.index(i, j + 2)]) / (Real{2} * g.dy());
+}
+QUASAR_HOST_DEVICE inline Real ddy_onesided_bwd2(const Real* f, const Grid2D& g,
+                                                 int i, int j) noexcept {
+  return (Real{3} * f[g.index(i, j)] - Real{4} * f[g.index(i, j - 1)]
+          + f[g.index(i, j - 2)]) / (Real{2} * g.dy());
+}
+
 template <int Order>
 QUASAR_HOST_DEVICE inline Vec3 curl_e_at(const Real* ex, const Real* ey, const Real* ez,
                                          const Grid2D& g, int i, int j) noexcept {
