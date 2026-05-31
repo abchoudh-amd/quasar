@@ -95,6 +95,19 @@ void launch_pic_boundary_pec_fields(const quasar::Grid2D&, quasar::YeeField2D<do
 void launch_pic_boundary_periodic_fields(const quasar::Grid2D&, quasar::YeeField2D<double>&,
                                          int, quasar_stream_t);
 
+// Characteristic-wall (PEC) one-sided closures, run after the interior curl.
+// correct_b rewrites the boundary-node tangential B with a one-sided normal-axis
+// derivative (low walls only; high walls are interior-correct at 2nd order) and
+// pins normal B to zero; correct_e pins tangential E to zero (all sides). `side`
+// is the Side enum (0=x_lo,1=x_hi,2=y_lo,3=y_hi). The order-4 variant
+// (outer-two-layer closure) is added with the 4th-order PEC commit.
+void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D&,
+                                               quasar::YeeField2D<double>&, int side,
+                                               double dt, quasar_stream_t);
+void launch_pic_boundary_wall_correct_e(const quasar::Grid2D&,
+                                        quasar::YeeField2D<double>&, int side,
+                                        quasar_stream_t);
+
 // -- Particle array compaction -----------------------------------------------
 // Compacts alive particles to the front of every species array (order is not
 // preserved — irrelevant for PIC) and shrinks the active count. Returns the new

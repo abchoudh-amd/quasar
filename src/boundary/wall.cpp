@@ -7,7 +7,22 @@
 namespace quasar::boundary {
 
 void PecFieldBC::fill_ghosts(YeeField2D<Real>& field, Side side) const {
-  ::launch_pic_boundary_pec_fields(field.grid, field, static_cast<int>(side), nullptr);
+  // 4th order still uses the mirror ghost fill; 2nd order corrects boundary
+  // nodes after each curl instead (fill is then a no-op).
+  if (order_ == 4) {
+    ::launch_pic_boundary_pec_fields(field.grid, field, static_cast<int>(side), nullptr);
+  }
+}
+
+void PecFieldBC::correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const {
+  if (order_ == 4) return;  // mirror path handles 4th order
+  ::launch_pic_boundary_wall_correct_b_order2(field.grid, field,
+                                              static_cast<int>(side), dt, nullptr);
+}
+
+void PecFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real /*dt*/) const {
+  if (order_ == 4) return;  // mirror path handles 4th order
+  ::launch_pic_boundary_wall_correct_e(field.grid, field, static_cast<int>(side), nullptr);
 }
 
 void SpecularParticleBC::apply(pic::ParticleSpecies& species, Side side) const {
