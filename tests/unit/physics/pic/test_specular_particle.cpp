@@ -25,7 +25,7 @@ TEST(PicSpecularParticle, ParticleReflectsOffWall) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   for (int side = 0; side < 4; ++side) {
     cfg.boundary.particle[side] = quasar::boundary::ParticleBoundaryKind::specular;
   }

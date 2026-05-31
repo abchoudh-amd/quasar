@@ -6,6 +6,7 @@
 #include "quasar/backend/pic_kernels.hpp"
 
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 namespace quasar::numerics {
@@ -98,31 +99,6 @@ std::string_view field_bc_name(boundary::FieldBoundaryKind k) {
   throw std::invalid_argument{"EmPic2D3V: unknown FieldBoundaryKind"};
 }
 
-// Deck-facing registry names for the order/shape-templated numerics schemes.
-std::string_view field_solver_name(int fdtd_order) {
-  switch (fdtd_order) {
-    case 2: return "yee_o2";
-    case 4: return "yee_o4";
-  }
-  throw std::invalid_argument{"EmPic2D3V: fdtd_order must be 2 or 4"};
-}
-
-std::string_view pusher_name(int shape_order) {
-  switch (shape_order) {
-    case 1: return "boris_cic";
-    case 2: return "boris_tsc";
-  }
-  throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
-}
-
-std::string_view deposit_name(int shape_order) {
-  switch (shape_order) {
-    case 1: return "esirkepov_cic";
-    case 2: return "esirkepov_tsc";
-  }
-  throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
-}
-
 }  // namespace
 
 EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
@@ -158,14 +134,14 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
     throw std::invalid_argument{"EmPic2D3V: fdtd_order 4 requires grid nghost >= 2"};
   }
   // Build the order/shape-templated schemes through the registry (same pluggable
-  // path as the BCs/filters) instead of an if/else ladder over the integers; the
-  // name helpers validate the order/shape and throw on an unsupported value.
+  // path as the BCs/filters) by deriving the registry name from the deck-facing
+  // order/shape vocabulary; Registry::create throws on an unregistered name.
   field_solver_ = Registry<numerics::IFieldSolver>::instance().create(
-      field_solver_name(cfg_.fdtd_order));
+      "yee_o" + std::to_string(cfg_.fdtd_order));
   pusher_ = Registry<numerics::IParticlePusher>::instance().create(
-      pusher_name(cfg_.shape_order));
+      "boris_" + cfg_.shape);
   deposit_ = Registry<numerics::IDepositScheme>::instance().create(
-      deposit_name(cfg_.shape_order));
+      "esirkepov_" + cfg_.shape);
   // The deposit/gather wrap an axis only when both of its sides are periodic; a
   // wall on either side switches that axis to ghost-cell deposition + specular
   // fold-back (deposit) and ghost-clamped interpolation (gather), so neither

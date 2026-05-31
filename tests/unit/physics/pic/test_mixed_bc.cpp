@@ -22,7 +22,7 @@ TEST(PicMixedBc, PeriodicXWrapsAbsorbingYKills) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   using PK = quasar::boundary::ParticleBoundaryKind;
   cfg.boundary.particle[0] = PK::periodic;   // x_lo
   cfg.boundary.particle[1] = PK::periodic;   // x_hi

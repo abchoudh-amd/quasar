@@ -31,7 +31,7 @@ TEST(PicEmWaveDispersion, PlaneWaveTravelsAtYeePhaseVelocity) {
   // 1D-along-x wave on a tall-enough grid; periodic in both directions.
   const int nx = 64, ny = 4;
   quasar::Grid2D g{nx, ny, 1.0, ny / static_cast<double>(nx), 0.0, 0.0, 1};
-  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
 
   const double c = 1.0;
   const int mode = 1;                          // one wavelength across lx

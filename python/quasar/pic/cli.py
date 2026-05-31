@@ -52,7 +52,7 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     cfg = pic.EmPicConfig()
     cfg.grid = grid
     cfg.fdtd_order = deck.numerics.fdtd_order
-    cfg.shape_order = 2 if deck.numerics.shape == "tsc" else 1
+    cfg.shape = deck.numerics.shape
     if units.normalization is not None:
         cfg.normalization = units.normalization
     kind_map = {

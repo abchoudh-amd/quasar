@@ -43,7 +43,7 @@ TEST(PicEnergyConservation, KineticEnergyIgnoresDeadParticles) {
 
   // Seed two particles in a solver with absorbing walls; push one out so it dies.
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   for (int side = 0; side < 4; ++side) {
     cfg.boundary.particle[side] = quasar::boundary::ParticleBoundaryKind::absorbing;
   }
@@ -68,7 +68,7 @@ TEST(PicEnergyConservation, EmEnergyMatchesUniformField) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   quasar::Grid2D g{8, 8, 2.0, 2.0, 0.0, 0.0, 1};  // dx=dy=0.25, dA=0.0625
-  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
 
   // Set a uniform Ez = E0 and Bx = B0 over the interior storage.
   const quasar::Real E0 = 3.0, B0 = 2.0;
@@ -94,7 +94,7 @@ TEST(PicEnergyConservation, EmEnergyMatchesUniformField) {
 TEST(PicGaussResidual, UniformFieldHasZeroDivergence) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
   quasar::Grid2D g{8, 8, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
 
   // Uniform Ex over the (periodically-wrapped) grid: backward differences cancel
   // everywhere, so the discrete divergence — and the residual — must be ~0.
@@ -112,7 +112,7 @@ TEST(PicGaussResidual, UniformFieldHasZeroDivergence) {
 TEST(PicGaussResidual, NonUniformFieldMatchesHandComputed) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
   quasar::Grid2D g{4, 4, 1.0, 1.0, 0.0, 0.0, 1};  // dx = dy = 0.25
-  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
 
   // Put a single nonzero Ex at one interior cell. The residual is the L2 norm of
   // the backward-difference divergence (∂Ex/∂x), which is nonzero only at that

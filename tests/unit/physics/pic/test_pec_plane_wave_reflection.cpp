@@ -25,7 +25,7 @@ template <int Order>
 void run_reflection(int nghost) {
   const int nx = 128, ny = 4;
   quasar::Grid2D g{nx, ny, 1.0, ny / static_cast<double>(nx), 0.0, 0.0, nghost};
-  quasar::pic::EmPicConfig cfg{g, Order, 1};
+  quasar::pic::EmPicConfig cfg{g, Order, "cic"};
   // PEC on the x walls, periodic on y.
   cfg.boundary.field[static_cast<int>(quasar::Side::x_lo)] =
       quasar::boundary::FieldBoundaryKind::pec;

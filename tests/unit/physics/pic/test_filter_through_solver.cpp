@@ -21,7 +21,7 @@ namespace {
 // with `n_passes` binomial filter passes configured (0 = no filter).
 double peak_jz_after_step(int n_passes) {
   quasar::Grid2D g{32, 32, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   if (n_passes > 0) {
     cfg.filters.push_back(quasar::pic::FilterSpec{"binomial", n_passes});
   }

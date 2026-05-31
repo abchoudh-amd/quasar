@@ -38,7 +38,7 @@ void seed_pulse(quasar::pic::EmPic2D3V& solver, const quasar::Grid2D& g,
 
 // Outflow on both x walls, periodic in y (a channel; no outflow-outflow corner).
 quasar::pic::EmPic2D3V make_channel(const quasar::Grid2D& g, int order) {
-  quasar::pic::EmPicConfig cfg{g, order, 1};
+  quasar::pic::EmPicConfig cfg{g, order, "cic"};
   cfg.boundary.field[static_cast<int>(quasar::Side::x_lo)] =
       quasar::boundary::FieldBoundaryKind::outflow;
   cfg.boundary.field[static_cast<int>(quasar::Side::x_hi)] =
@@ -122,7 +122,7 @@ TEST(PicOutflowFieldAbsorption, PecXOutflowYCornerStable) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
   const int nx = 64, ny = 64;
   quasar::Grid2D g{nx, ny, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   cfg.boundary.field[static_cast<int>(quasar::Side::x_lo)] =
       quasar::boundary::FieldBoundaryKind::pec;
   cfg.boundary.field[static_cast<int>(quasar::Side::x_hi)] =

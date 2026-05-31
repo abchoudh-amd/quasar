@@ -26,7 +26,7 @@ TEST(PicAbsorbingParticleDecay, ParticleLeavingDomainIsKilled) {
 
   // Unit-square grid, origin at 0. Absorbing on every side.
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   for (int side = 0; side < 4; ++side) {
     cfg.boundary.particle[side] = quasar::boundary::ParticleBoundaryKind::absorbing;
   }

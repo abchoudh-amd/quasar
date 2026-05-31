@@ -40,7 +40,8 @@ void accumulate_rho(std::vector<double>& rho, const quasar::Grid2D& g,
 template <int ShapeOrder>
 void run_continuity_case(double* out_resid, double* out_jmag, bool seam = false) {
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
-  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, ShapeOrder}};
+  quasar::pic::EmPic2D3V solver{
+      quasar::pic::EmPicConfig{g, 2, ShapeOrder == 1 ? "cic" : "tsc"}};
 
   const double q = 1.0, m = 1.0, w = 1.0;
   const double x0 = seam ? 0.985 : 0.51;

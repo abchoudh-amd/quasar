@@ -30,8 +30,13 @@ struct FilterSpec {
 
 struct EmPicConfig {
   Grid2D grid{};
+  // FDTD order (2 or 4): numeric because it also sets the ghost-halo width and the
+  // boundary closures' one-sided layer count. The field-solver registry name is
+  // derived from it ("yee_o{order}").
   int fdtd_order{2};
-  int shape_order{1};
+  // Particle shape, carried as the deck vocabulary ("cic" / "tsc"). The pusher and
+  // deposit registry names are derived from it ("boris_{shape}", "esirkepov_{shape}").
+  std::string shape{"cic"};
   boundary::BoundarySpec boundary{};
   Normalization normalization{};
   std::vector<FilterSpec> filters{};

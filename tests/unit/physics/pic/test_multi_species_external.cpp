@@ -43,7 +43,7 @@ TEST(PicMultiSpeciesExternal, ProtonAndMuonStepInBiotSavartField) {
   // Small grid centered on a circular loop placed at the origin. The loop has
   // axis ẑ so it produces a strong Bz on the equatorial slice the PIC sees.
   quasar::Grid2D g{16, 16, 0.10, 0.10, -0.05, -0.05, 1};
-  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, 1}};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
 
   quasar::magnetostatics::ConductorSystem cs;
   cs.add(quasar::magnetostatics::circular_loop(

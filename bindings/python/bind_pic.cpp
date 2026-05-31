@@ -183,7 +183,7 @@ void bind_pic(py::module_& m) {
       .def(py::init<>())
       .def_readwrite("grid", &quasar::pic::EmPicConfig::grid)
       .def_readwrite("fdtd_order", &quasar::pic::EmPicConfig::fdtd_order)
-      .def_readwrite("shape_order", &quasar::pic::EmPicConfig::shape_order)
+      .def_readwrite("shape", &quasar::pic::EmPicConfig::shape)
       .def_readwrite("boundary", &quasar::pic::EmPicConfig::boundary)
       .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization)
       .def_readwrite("filters", &quasar::pic::EmPicConfig::filters);
