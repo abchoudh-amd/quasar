@@ -21,12 +21,17 @@ def main() -> int:
     from quasar.pic import io as pic_io
 
     deck = pic_io.load(DECK)
-    solver = pic_cli._make_solver(deck)
-    pic_cli._apply_external_field(solver, deck)
+    units = pic_cli.Units(deck)
+    solver = pic_cli._make_solver(deck, units)
+    pic_cli._apply_external_field(solver, deck, units)
     rng = np.random.default_rng(0)
-    indices = pic_cli._seed_species(solver, deck, rng)
-    dt = (pic_cli._cfl_dt(deck.domain)
-          if deck.time.dt_s == "auto" else float(deck.time.dt_s))
+    indices = pic_cli._seed_species(solver, deck, units, rng)
+    # The solver steps in internal time units; convert for display via dt_si.
+    if deck.time.dt_s == "auto":
+        dt = pic_cli._cfl_dt_internal(deck.domain, units, deck.numerics.fdtd_order)
+    else:
+        dt = units.time(float(deck.time.dt_s))
+    dt_si = units.time_to_si(dt)
 
     initial = []
     for idx in indices:
@@ -39,7 +44,7 @@ def main() -> int:
         })
 
     steps = deck.time.steps
-    print(f"running {steps} steps at dt={dt:.3e} s ...", flush=True)
+    print(f"running {steps} steps at dt={dt_si:.3e} s ...", flush=True)
     report_every = max(1, steps // 10)
     for s in range(steps):
         solver.step(dt)
@@ -101,7 +106,7 @@ def main() -> int:
               f"alive_end={int(n_alive_end)} lost={n_lost}")
 
     fig.suptitle(f"square_toroid_pic: {steps} steps, "
-                 f"t_final = {steps * dt:.3e} s")
+                 f"t_final = {steps * dt_si:.3e} s")
     fig.tight_layout()
     out = HERE / "particle_loss.png"
     fig.savefig(out, dpi=130)
