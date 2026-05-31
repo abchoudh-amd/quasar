@@ -20,6 +20,12 @@ Top-level deck structure::
       path:   <relative or absolute path>
       fields: [B_xyz, B_magnitude]
 
+Note: the output block intentionally differs from the PIC deck. The coil deck
+writes a single field snapshot, so it uses ``output.path``; the PIC deck writes a
+time series and groups it under ``diagnostics.output_path`` alongside cadence /
+per-species options. The two schemas are kept distinct rather than forced into a
+shared key because their output semantics differ.
+
 See ``examples/single_loop/input.yaml`` (added in Phase 2.F) for a worked
 example.
 """
@@ -74,58 +80,63 @@ def _unit(v: Vec3, context: str) -> Vec3:
 
 def _build_geometry(spec: dict, current_A: float, name: str) -> Filament:
     gt = _require(spec, "type", f"conductor {name!r}.geometry")
+    # The error context is the geometry type already in hand, so bind it once and
+    # require fields through `req` instead of repeating the literal on every field.
+    def req(key):
+        return _require(spec, key, gt)
+
     if gt == "circular_loop":
         return circular_loop(
-            center=_vec3(_require(spec, "center_xyz", "circular_loop")),
-            axis=_vec3(_require(spec, "axis_xyz", "circular_loop")),
-            radius_m=float(_require(spec, "radius_m", "circular_loop")),
-            n_segments=int(_require(spec, "n_segments", "circular_loop")),
+            center=_vec3(req("center_xyz")),
+            axis=_vec3(req("axis_xyz")),
+            radius_m=float(req("radius_m")),
+            n_segments=int(req("n_segments")),
             current_A=current_A,
             name=name,
         )
     if gt == "helix":
         return helix(
-            center=_vec3(_require(spec, "center_xyz", "helix")),
-            axis=_vec3(_require(spec, "axis_xyz", "helix")),
-            radius_m=float(_require(spec, "radius_m", "helix")),
-            pitch_m=float(_require(spec, "pitch_m", "helix")),
-            n_turns=int(_require(spec, "n_turns", "helix")),
-            n_segments_per_turn=int(_require(spec, "n_segments_per_turn", "helix")),
+            center=_vec3(req("center_xyz")),
+            axis=_vec3(req("axis_xyz")),
+            radius_m=float(req("radius_m")),
+            pitch_m=float(req("pitch_m")),
+            n_turns=int(req("n_turns")),
+            n_segments_per_turn=int(req("n_segments_per_turn")),
             current_A=current_A,
             name=name,
         )
     if gt == "solenoid":
         return solenoid(
-            center=_vec3(_require(spec, "center_xyz", "solenoid")),
-            axis=_vec3(_require(spec, "axis_xyz", "solenoid")),
-            radius_m=float(_require(spec, "radius_m", "solenoid")),
-            length_m=float(_require(spec, "length_m", "solenoid")),
-            n_turns=int(_require(spec, "n_turns", "solenoid")),
-            n_segments_per_turn=int(_require(spec, "n_segments_per_turn", "solenoid")),
+            center=_vec3(req("center_xyz")),
+            axis=_vec3(req("axis_xyz")),
+            radius_m=float(req("radius_m")),
+            length_m=float(req("length_m")),
+            n_turns=int(req("n_turns")),
+            n_segments_per_turn=int(req("n_segments_per_turn")),
             current_A=current_A,
             name=name,
         )
     if gt == "racetrack":
         return racetrack(
-            center=_vec3(_require(spec, "center_xyz", "racetrack")),
-            axis=_vec3(_require(spec, "axis_xyz", "racetrack")),
-            straight_length_m=float(_require(spec, "straight_length_m", "racetrack")),
-            arc_radius_m=float(_require(spec, "arc_radius_m", "racetrack")),
-            n_arc_segments=int(_require(spec, "n_arc_segments", "racetrack")),
+            center=_vec3(req("center_xyz")),
+            axis=_vec3(req("axis_xyz")),
+            straight_length_m=float(req("straight_length_m")),
+            arc_radius_m=float(req("arc_radius_m")),
+            n_arc_segments=int(req("n_arc_segments")),
             current_A=current_A,
             name=name,
         )
     if gt == "polygon":
         return polygon(
-            center=_vec3(_require(spec, "center_xyz", "polygon")),
-            axis=_vec3(_require(spec, "axis_xyz", "polygon")),
-            circumradius_m=float(_require(spec, "circumradius_m", "polygon")),
-            n_sides=int(_require(spec, "n_sides", "polygon")),
+            center=_vec3(req("center_xyz")),
+            axis=_vec3(req("axis_xyz")),
+            circumradius_m=float(req("circumradius_m")),
+            n_sides=int(req("n_sides")),
             current_A=current_A,
             name=name,
         )
     if gt == "polyline":
-        pts = [_vec3(p) for p in _require(spec, "points_xyz_m", "polyline")]
+        pts = [_vec3(p) for p in req("points_xyz_m")]
         return generic_polyline(points=pts, current_A=current_A, name=name)
     raise ValueError(f"conductor {name!r}.geometry.type {gt!r} is not recognized")
 
@@ -243,6 +254,14 @@ def _build_observation(spec: dict) -> _ObservationResult:
 # ---------------------------------------------------------------------------
 
 
+# Field evaluators selectable from a coil deck's top-level evaluator.type. These
+# are registered on the C++ side (QUASAR_REGISTER_FIELD_EVALUATOR) and constructed
+# by name via create_field_evaluator. "file_grid" is registered but not yet
+# implemented, so it is intentionally excluded here (a deck selecting it would hit
+# a raw C++ std::logic_error otherwise).
+SUPPORTED_EVALUATORS = ("biot_savart", "uniform", "dipole", "gradient")
+
+
 @dataclass
 class OutputSpec:
     format: str
@@ -259,6 +278,19 @@ class CoilDeck:
     raw: dict
     # Registry name of the field evaluator; coil design uses Biot-Savart.
     evaluator_type: str = "biot_savart"
+
+    def validate(self) -> None:
+        """Validate the parsed deck. Mirrors :meth:`PicDeck.validate` so the two
+        loaders share one validation convention (most per-field checks happen
+        inline during parsing; this is the consolidated cross-field pass)."""
+        if self.units != "SI":
+            raise ValueError(f"only units: SI is supported, got {self.units!r}")
+        if self.conductors.empty():
+            raise ValueError("deck.conductors must be non-empty")
+        if self.evaluator_type not in SUPPORTED_EVALUATORS:
+            raise ValueError(
+                f"evaluator.type {self.evaluator_type!r} must be one of "
+                f"{list(SUPPORTED_EVALUATORS)}")
 
 
 def _parse_output(spec: dict) -> OutputSpec:
@@ -291,8 +323,10 @@ def parse(data: dict) -> CoilDeck:
 
     evaluator_type = str(data.get("evaluator", {}).get("type", "biot_savart"))
 
-    return CoilDeck(units=units, conductors=cs, observation=obs,
+    deck = CoilDeck(units=units, conductors=cs, observation=obs,
                     output=out, raw=data, evaluator_type=evaluator_type)
+    deck.validate()
+    return deck
 
 
 def load(path: Union[str, Path]) -> CoilDeck:

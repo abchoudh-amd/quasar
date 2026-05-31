@@ -31,6 +31,13 @@ interfaces may still change between entries.
   `weibel`, `em_wave_propagation`, `beam_in_channel`, `pec_cavity`,
   `magnetized_plasma`, `coil_confinement`) are now runnable, documented, and covered
   by integration tests.
+- PIC test coverage: a real FDTD plane-wave dispersion check, a behavioral
+  mixed-boundary test, Gauss-residual diagnostics tests, an end-to-end CLI run
+  smoke test, and a `--log-every` / `--write-every` diagnostics test.
+- CPU-only registry-linkage tests for the current-filter and
+  field-solver/pusher/deposit registries (a dropped registration now fails in the
+  standard suite, not only at device-build time), and coil deck-parse tests for
+  the `plane` observation and every geometry type.
 
 ### Fixed
 - PIC: the particle field gather now honors per-axis boundaries. It previously
@@ -59,6 +66,12 @@ interfaces may still change between entries.
   boundary "heisenbug". Boundary dispatch now goes through the interface.
 - PIC: the periodic particle wrap is side/axis-aware, so periodic and
   non-periodic (e.g. absorbing) walls can coexist per side.
+- PIC: current filters now honor boundary periodicity instead of always wrapping
+  across the far edge; non-periodic axes clamp the filter stencil at the wall.
+- PIC: oversized particle displacements in the Esirkepov deposit now fail loudly
+  instead of silently truncating the current-deposition window.
+- PIC: `dipole` and `gradient` external-field deck evaluators now require and use
+  their evaluator parameters rather than default-constructing zero/trivial fields.
 
 ### Changed
 - PIC field boundaries are now imposed by one-sided / characteristic node
@@ -113,15 +126,6 @@ interfaces may still change between entries.
 - Magnetostatics: transient Biot–Savart output buffers skip the allocation
   zero-fill (the kernel overwrites them in full), via a new
   `device_alloc_uninit` / `DeviceBuffer(n, uninitialized)` path.
-
-### Added
-- PIC test coverage: a real FDTD plane-wave dispersion check, a behavioral
-  mixed-boundary test, Gauss-residual diagnostics tests, an end-to-end CLI run
-  smoke test, and a `--log-every` / `--write-every` diagnostics test.
-- CPU-only registry-linkage tests for the current-filter and
-  field-solver/pusher/deposit registries (a dropped registration now fails in the
-  standard suite, not only at device-build time), and coil deck-parse tests for
-  the `plane` observation and every geometry type.
 
 ### Upcoming changes
 - A `file_grid` field evaluator name is reserved in the registry but not yet

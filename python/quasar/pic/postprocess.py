@@ -53,10 +53,8 @@ def species_names(data) -> list[str]:
 
 def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     """Render diagnostic PNGs for an ``out.npz``. Returns written paths."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    from .._plotting import require_pyplot
+    plt = require_pyplot(agg=True)
 
     npz_path = Path(npz_path)
     out_dir = Path(out_dir) if out_dir is not None else npz_path.parent

@@ -1,8 +1,11 @@
 """Integration tests for the worked examples in ``examples/``.
 
-Each test invokes ``python -m quasar.coil.cli run <input.yaml>`` for one of
-the example decks, loads the produced ``out.npz``, and compares the
-computed B-field to a closed-form analytical reference.
+Covers both CLIs. The coil tests invoke ``python -m quasar.coil.cli run
+<input.yaml>``, load the produced ``out.npz``, and compare the computed B-field
+to a closed-form analytical reference. The PIC tests invoke
+``python -m quasar.pic.cli run <input.yaml>`` and check the end-to-end run
+(output signature, finiteness, and physical diagnostics) rather than a
+closed-form field.
 """
 
 from __future__ import annotations

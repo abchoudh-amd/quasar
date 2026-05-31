@@ -67,11 +67,15 @@ void launch_pic_deposit_shape2(const quasar::Grid2D&, const quasar::pic::Particl
 
 // -- Current filtering -------------------------------------------------------
 // `scratch` is caller-owned ping-pong storage of at least grid.storage_size()
-// doubles (hoisted out of the per-step path).
+// doubles (hoisted out of the per-step path). `periodic_x`/`periodic_y` select
+// whether the smoothing stencil wraps on that axis; non-periodic axes clamp at
+// the edge so a filter cannot couple current across a wall.
 void launch_pic_filter_binomial(const quasar::Grid2D&, quasar::JField2D<double>&,
-                                double* scratch, int, quasar_stream_t);
+                                double* scratch, int, int periodic_x, int periodic_y,
+                                quasar_stream_t);
 void launch_pic_filter_compensated(const quasar::Grid2D&, quasar::JField2D<double>&,
-                                   double* scratch, int, quasar_stream_t);
+                                   double* scratch, int, int periodic_x, int periodic_y,
+                                   quasar_stream_t);
 
 // -- Particle boundary conditions --------------------------------------------
 void launch_pic_boundary_absorb_particles(const quasar::Grid2D&,
@@ -84,10 +88,11 @@ void launch_pic_boundary_specular_particles(const quasar::Grid2D&,
 void launch_pic_boundary_specular_foldback(const quasar::Grid2D&,
                                            quasar::JField2D<double>&, int side,
                                            quasar_stream_t);
-// `axis` selects the wrapped axis: 0 = x, 1 = y. A per-side periodic BC wraps
-// only its own axis so it does not interfere with non-periodic walls.
+// `side` is the Side enum (0=x_lo,1=x_hi,2=y_lo,3=y_hi). A per-side periodic BC
+// wraps only particles that cross that side, so a one-sided periodic wall does
+// not hide exits through the opposite non-periodic wall.
 void launch_pic_boundary_periodic_particles(const quasar::Grid2D&,
-                                            quasar::pic::ParticleSpecies&, int axis,
+                                            quasar::pic::ParticleSpecies&, int side,
                                             quasar_stream_t);
 
 // -- Field boundary conditions -----------------------------------------------

@@ -17,7 +17,10 @@ from __future__ import annotations
 from .. import _core
 
 # SI constants for resolving the reference species of the plasma normalization.
-_QE = 1.602176634e-19          # elementary charge (C)
+# QE is the single source of truth for the elementary charge; it doubles as the
+# eV->Joule conversion factor (1 eV = QE J) used by the CLI's thermal-speed calc.
+QE = 1.602176634e-19           # elementary charge (C)
+_QE = QE                       # internal alias (reference charge)
 _ME = 9.1093837015e-31         # electron mass (kg)
 _MP = 1.67262192369e-27        # proton mass (kg)
 

@@ -21,6 +21,7 @@
 
 #include <array>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,17 @@ using ::quasar::magnetostatics::racetrack;
 using ::quasar::magnetostatics::solenoid;
 
 namespace {
+
+::quasar::Mat3x3 matrix_from_rows(const std::vector<std::vector<Real>>& rows) {
+  if (rows.size() != 3 || rows[0].size() != 3 || rows[1].size() != 3 ||
+      rows[2].size() != 3) {
+    throw std::invalid_argument{"GradientEvaluator: grad must be a 3x3 matrix"};
+  }
+  return ::quasar::Mat3x3{
+      Vec3{rows[0][0], rows[0][1], rows[0][2]},
+      Vec3{rows[1][0], rows[1][1], rows[1][2]},
+      Vec3{rows[2][0], rows[2][1], rows[2][2]}};
+}
 
 // Pack a Field<Vec3> result into a NumPy (N, 3) array of Real.
 py::array_t<Real> field_to_numpy(const ::quasar::Field<Vec3>& field) {
@@ -106,8 +118,15 @@ PYBIND11_MODULE(_core, m) {
 
   // -- magnetostatics submodule -------------------------------------------
 
+  // `magnetostatics` is the deliberate shared home for ALL IFieldEvaluator types
+  // (Biot-Savart plus the analytic_fields evaluators Uniform/Dipole/Gradient and
+  // the create_field_evaluator factory): they share the single IFieldEvaluator
+  // registry, and the PIC external-field sampler consumes them through that one
+  // surface. Binding them here rather than in a separate `analytic_fields`
+  // submodule keeps that shared registry surface in one place; it is an
+  // intentional choice, not accidental coupling.
   py::module_ ms = m.def_submodule("magnetostatics",
-      "Biot-Savart magnetic-field evaluator on HIP.");
+      "Field-evaluator surface (Biot-Savart + analytic fields) on HIP.");
 
   py::class_<Filament>(ms, "Filament")
       .def(py::init<>())
@@ -222,7 +241,13 @@ PYBIND11_MODULE(_core, m) {
 
   py::class_<::quasar::analytic_fields::GradientEvaluator, IFieldEvaluator>(
       ms, "GradientEvaluator")
-      .def(py::init<>());
+      .def(py::init<>())
+      .def(py::init([](Vec3 b0, const std::vector<std::vector<Real>>& grad,
+                       Vec3 origin) {
+             return ::quasar::analytic_fields::GradientEvaluator{
+                 b0, matrix_from_rows(grad), origin};
+           }),
+           py::arg("b0"), py::arg("grad"), py::arg("origin") = Vec3{0, 0, 0});
 
   // Create a registered evaluator by name (default-constructed). Mirrors the
   // string-keyed selection the C++ deck boundary uses; concrete evaluators

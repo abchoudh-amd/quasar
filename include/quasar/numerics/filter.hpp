@@ -5,6 +5,7 @@
 #include "quasar/core/yee_field.hpp"
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -26,9 +27,14 @@ class ICurrentFilter {
 
 class BinomialFilter final : public ICurrentFilter {
  public:
-  explicit BinomialFilter(int n_passes = 1) : n_passes_{n_passes} {}
+  explicit BinomialFilter(int n_passes = 1) { set_passes(n_passes); }
   void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const override;
-  void set_passes(int n_passes) override { n_passes_ = n_passes; }
+  void set_passes(int n_passes) override {
+    if (n_passes < 1) {
+      throw std::invalid_argument{"BinomialFilter: passes must be >= 1"};
+    }
+    n_passes_ = n_passes;
+  }
   int passes() const noexcept { return n_passes_; }
 
  private:
@@ -40,9 +46,14 @@ class BinomialFilter final : public ICurrentFilter {
 
 class CompensatedBinomialFilter final : public ICurrentFilter {
  public:
-  explicit CompensatedBinomialFilter(int n_passes = 1) : n_passes_{n_passes} {}
+  explicit CompensatedBinomialFilter(int n_passes = 1) { set_passes(n_passes); }
   void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const override;
-  void set_passes(int n_passes) override { n_passes_ = n_passes; }
+  void set_passes(int n_passes) override {
+    if (n_passes < 1) {
+      throw std::invalid_argument{"CompensatedBinomialFilter: passes must be >= 1"};
+    }
+    n_passes_ = n_passes;
+  }
   int passes() const noexcept { return n_passes_; }
 
  private:

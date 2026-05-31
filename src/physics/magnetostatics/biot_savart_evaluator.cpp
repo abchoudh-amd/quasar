@@ -4,7 +4,7 @@
 #include "quasar/physics/magnetostatics/observation.hpp"
 
 #include "quasar/backend/device.hpp"
-#include "quasar/backend/magnetostatics_kernels.hpp"
+#include "quasar/physics/magnetostatics/kernels.hpp"
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/field.hpp"
 #include "quasar/core/types.hpp"
@@ -15,7 +15,7 @@
 #include <vector>
 
 // The biot_savart launch ABI (declared once in
-// include/quasar/backend/magnetostatics_kernels.hpp) speaks the backend-neutral
+// include/quasar/physics/magnetostatics/kernels.hpp) speaks the backend-neutral
 // stream handle, so this orchestrator needs no HIP header.
 using stream_t = ::quasar::backend::stream_t;
 
@@ -112,13 +112,15 @@ struct UploadedInputs {
     px.copy_from_host_async(s_px.data(), M, stream);
     py.copy_from_host_async(s_py.data(), M, stream);
     pz.copy_from_host_async(s_pz.data(), M, stream);
-    // The host UploadSrc buffers must outlive the async copies; the copies are on
-    // `stream` and the destructors run at end of scope, so synchronize the upload
-    // here before they die. (For the identity Real path UploadSrc aliases the
-    // caller's SoA, which outlives this ctor, so the sync is only strictly needed
-    // for the narrowed float path — but syncing unconditionally is simplest and
-    // the subsequent kernel+readback already serialize on the same stream.)
-    ::quasar::backend::device_synchronize(stream);
+    // The host UploadSrc buffers must outlive the async copies (the copies are on
+    // `stream`). For the narrowed-float path UploadSrc::owned_ is a ctor-local that
+    // dies at scope exit, so we must sync the upload here before it is freed. For
+    // the identity Real path UploadSrc aliases the caller's SoA, which outlives
+    // this ctor, so the upload can stay queued — the subsequent kernel + readback
+    // already serialize on the same stream — and we skip the extra sync.
+    if constexpr (!std::is_same_v<T, Real>) {
+      ::quasar::backend::device_synchronize(stream);
+    }
   }
 };
 

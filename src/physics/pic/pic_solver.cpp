@@ -7,7 +7,6 @@
 
 #include <stdexcept>
 #include <string>
-#include <string_view>
 
 namespace quasar::numerics {
 
@@ -79,28 +78,6 @@ QUASAR_REGISTER_DEPOSIT("esirkepov_tsc", ::quasar::numerics::Esirkepov2D<2>)
 
 namespace quasar::pic {
 
-namespace {
-
-std::string_view particle_bc_name(boundary::ParticleBoundaryKind k) {
-  switch (k) {
-    case boundary::ParticleBoundaryKind::periodic:  return "periodic";
-    case boundary::ParticleBoundaryKind::specular:  return "specular";
-    case boundary::ParticleBoundaryKind::absorbing: return "absorbing";
-  }
-  throw std::invalid_argument{"EmPic2D3V: unknown ParticleBoundaryKind"};
-}
-
-std::string_view field_bc_name(boundary::FieldBoundaryKind k) {
-  switch (k) {
-    case boundary::FieldBoundaryKind::periodic: return "periodic";
-    case boundary::FieldBoundaryKind::pec:      return "pec";
-    case boundary::FieldBoundaryKind::outflow:  return "outflow";
-  }
-  throw std::invalid_argument{"EmPic2D3V: unknown FieldBoundaryKind"};
-}
-
-}  // namespace
-
 EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   : cfg_{cfg},
     grid_{cfg.grid},
@@ -112,9 +89,9 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   // The FDTD stencil is ghost-aware, so these field BCs run every step (see step).
   for (int side = 0; side < 4; ++side) {
     particle_bcs_[side] = Registry<boundary::IParticleBoundary>::instance().create(
-        particle_bc_name(cfg_.boundary.particle[side]));
+        cfg_.boundary.particle[side]);
     field_bcs_[side] = Registry<boundary::IFieldBoundary>::instance().create(
-        field_bc_name(cfg_.boundary.field[side]));
+        cfg_.boundary.field[side]);
     // The FDTD order fixes how many boundary layers a one-sided/characteristic
     // closure must rewrite; let each field BC pick its order-dependent kernel.
     field_bcs_[side]->configure(cfg_.fdtd_order);
@@ -124,8 +101,8 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   // its end columns abut a non-periodic x-face so it can skip ez there (the
   // x-face's pin / Mur already handled it). PEC y-faces ignore this (idempotent).
   const auto& fb = cfg_.boundary.field;
-  const bool x_lo_np = fb[0] != boundary::FieldBoundaryKind::periodic;
-  const bool x_hi_np = fb[1] != boundary::FieldBoundaryKind::periodic;
+  const bool x_lo_np = fb[0] != "periodic";
+  const bool x_hi_np = fb[1] != "periodic";
   field_bcs_[2]->set_corner_skip(x_lo_np, x_hi_np);  // y_lo
   field_bcs_[3]->set_corner_skip(x_lo_np, x_hi_np);  // y_hi
   if (cfg_.fdtd_order == 4 && grid_.nghost < 2) {
@@ -147,10 +124,8 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   // fold-back (deposit) and ghost-clamped interpolation (gather), so neither
   // wraps across a non-periodic boundary.
   const auto& pb = cfg_.boundary.particle;
-  const bool periodic_x = pb[0] == boundary::ParticleBoundaryKind::periodic
-                       && pb[1] == boundary::ParticleBoundaryKind::periodic;
-  const bool periodic_y = pb[2] == boundary::ParticleBoundaryKind::periodic
-                       && pb[3] == boundary::ParticleBoundaryKind::periodic;
+  const bool periodic_x = pb[0] == "periodic" && pb[1] == "periodic";
+  const bool periodic_y = pb[2] == "periodic" && pb[3] == "periodic";
   deposit_->set_periodic_axes(periodic_x, periodic_y);
   pusher_->set_periodic_axes(periodic_x, periodic_y);
 
@@ -170,7 +145,7 @@ void EmPic2D3V::add_species(ParticleSpecies s) {
 
 bool EmPic2D3V::has_absorbing_boundary() const noexcept {
   for (int side = 0; side < 4; ++side) {
-    if (cfg_.boundary.particle[side] == boundary::ParticleBoundaryKind::absorbing) {
+    if (cfg_.boundary.particle[side] == "absorbing") {
       return true;
     }
   }

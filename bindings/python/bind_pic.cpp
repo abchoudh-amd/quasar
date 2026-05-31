@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -126,29 +127,21 @@ void bind_pic(py::module_& m) {
       .def_readonly("m_ref", &quasar::Normalization::m_ref)
       .def_readonly("omega_p_ref", &quasar::Normalization::omega_p_ref);
 
-  py::enum_<quasar::boundary::ParticleBoundaryKind>(pic, "ParticleBoundaryKind")
-      .value("periodic", quasar::boundary::ParticleBoundaryKind::periodic)
-      .value("specular", quasar::boundary::ParticleBoundaryKind::specular)
-      .value("absorbing", quasar::boundary::ParticleBoundaryKind::absorbing);
-
-  py::enum_<quasar::boundary::FieldBoundaryKind>(pic, "FieldBoundaryKind")
-      .value("periodic", quasar::boundary::FieldBoundaryKind::periodic)
-      .value("pec", quasar::boundary::FieldBoundaryKind::pec)
-      .value("outflow", quasar::boundary::FieldBoundaryKind::outflow);
-
+  // Boundaries are selected by registry name (no enum): the string is passed
+  // straight through to Registry<I*Boundary>::create(), so adding a boundary is a
+  // single QUASAR_REGISTER_*_BOUNDARY with nothing to update here.
   py::class_<quasar::boundary::BoundarySpec>(pic, "BoundarySpec")
       .def(py::init<>())
       .def("set_particle_all",
-           [](quasar::boundary::BoundarySpec& self,
-              quasar::boundary::ParticleBoundaryKind k) {
-             for (int i = 0; i < 4; ++i) self.particle[i] = k;
+           [](quasar::boundary::BoundarySpec& self, const std::string& kind) {
+             for (int i = 0; i < 4; ++i) self.particle[i] = kind;
            },
            py::arg("kind"))
       .def("set_particle_side",
            [](quasar::boundary::BoundarySpec& self, int side,
-              quasar::boundary::ParticleBoundaryKind k) {
+              const std::string& kind) {
              if (side < 0 || side > 3) throw std::out_of_range("side");
-             self.particle[side] = k;
+             self.particle[side] = kind;
            },
            py::arg("side"), py::arg("kind"))
       .def("particle_side",
@@ -159,9 +152,9 @@ void bind_pic(py::module_& m) {
            py::arg("side"))
       .def("set_field_side",
            [](quasar::boundary::BoundarySpec& self, int side,
-              quasar::boundary::FieldBoundaryKind k) {
+              const std::string& kind) {
              if (side < 0 || side > 3) throw std::out_of_range("side");
-             self.field[side] = k;
+             self.field[side] = kind;
            },
            py::arg("side"), py::arg("kind"))
       .def("field_side",

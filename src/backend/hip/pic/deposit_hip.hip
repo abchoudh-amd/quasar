@@ -7,6 +7,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include <stdexcept>
+
 // Charge-conserving (Esirkepov density-decomposition) current deposition.
 //
 // Given a macro-particle's pre-move (x_prev) and post-move (x) positions, the
@@ -20,10 +22,15 @@
 
 namespace {
 
-// Local stencil window. CFL keeps |displacement| < ~1 cell, so a 6-node window
-// around min(old,new) base covers both the CIC (2-node) and TSC (3-node)
-// supports plus a one-cell crossing with margin.
-constexpr int kWindow = 6;
+// Local stencil window sized per shape order. CFL keeps |displacement| < ~1 cell,
+// so the window must span the lowest support node of the min endpoint to the
+// highest support node of the max endpoint, plus a one-node margin each side.
+// CIC (support 2) needs a 5-node window with base floor(min)-1; TSC (support 3)
+// needs a 6-node window with base floor(min)-2. Both follow from:
+//   window = ShapeOrder + 4,  base margin = ShapeOrder.
+// (The TSC values match the historical fixed 6 / -2, so that path is unchanged.)
+template <int ShapeOrder>
+inline constexpr int kWindowFor = ShapeOrder + 4;
 
 // Per-axis deposit indexing. On a periodic axis (both sides periodic) the node is
 // wrapped exactly as before (bit-identical to the historical behaviour). On a
@@ -60,7 +67,8 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
                                const double* __restrict__ vz, const double* __restrict__ weight,
                                const unsigned char* __restrict__ alive,
                                double* __restrict__ jx, double* __restrict__ jy,
-                               double* __restrict__ jz) {
+                               double* __restrict__ jz,
+                               unsigned int* __restrict__ overflow) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
 
@@ -74,12 +82,11 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
   // diverging field): static_cast<int>(NaN) is UB and would seed a garbage
   // window base. Skip the deposit for such particles.
   if (!isfinite(gx0) || !isfinite(gx1) || !isfinite(gy0) || !isfinite(gy1)) return;
-  // TODO(charge): kWindow is fixed at 6, sized for a sub-CFL displacement. A
-  // non-relativistic pusher places no ceiling on |v|, so a displacement past the
-  // window would silently drop the crossing current and break discrete charge
-  // conservation. Bound the displacement or size the window from the CFL.
-  const int bx = static_cast<int>(floor(gx0 < gx1 ? gx0 : gx1)) - 2;
-  const int by = static_cast<int>(floor(gy0 < gy1 ? gy0 : gy1)) - 2;
+  // Window base sits one support-radius (= ShapeOrder nodes) below the lower
+  // endpoint; the window then reaches one node past the upper endpoint's support.
+  constexpr int kWindow = kWindowFor<ShapeOrder>;
+  const int bx = static_cast<int>(floor(gx0 < gx1 ? gx0 : gx1)) - ShapeOrder;
+  const int by = static_cast<int>(floor(gy0 < gy1 ? gy0 : gy1)) - ShapeOrder;
 
   double Sx0[kWindow], Sx1[kWindow], Sy0[kWindow], Sy1[kWindow];
   for (int a = 0; a < kWindow; ++a) {
@@ -89,6 +96,24 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
     Sx1[a] = weight_1d<ShapeOrder>(gx1 - ix);
     Sy0[a] = weight_1d<ShapeOrder>(gy0 - iy);
     Sy1[a] = weight_1d<ShapeOrder>(gy1 - iy);
+  }
+
+  // kWindow is sized for sub-CFL particle motion. If either endpoint shape spills
+  // outside the window, continuing would silently truncate the current path and
+  // violate discrete continuity. Flag it and let the host throw a clear
+  // "reduce dt / split the step" error instead of returning corrupt current.
+  double sx0_sum = 0.0, sx1_sum = 0.0, sy0_sum = 0.0, sy1_sum = 0.0;
+  for (int a = 0; a < kWindow; ++a) {
+    sx0_sum += Sx0[a];
+    sx1_sum += Sx1[a];
+    sy0_sum += Sy0[a];
+    sy1_sum += Sy1[a];
+  }
+  constexpr double kWeightTol = 1.0e-10;
+  if (fabs(sx0_sum - 1.0) > kWeightTol || fabs(sx1_sum - 1.0) > kWeightTol ||
+      fabs(sy0_sum - 1.0) > kWeightTol || fabs(sy1_sum - 1.0) > kWeightTol) {
+    atomicAdd(overflow, 1u);
+    return;
   }
 
   // The destination index for window node (bx+a, by+b) is identical across the
@@ -157,11 +182,22 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
   if (s.size() == 0) return;
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
+  QUASAR_HIP_CHECK(::hipMemsetAsync(s.compact_counter(), 0, sizeof(unsigned int), stream));
   hipLaunchKernelGGL((deposit_kernel<ShapeOrder>), grid, block, 0, stream,
                      g, s.size(), s.charge(), dt, periodic_x, periodic_y,
                      s.x(), s.y(), s.x_prev(), s.y_prev(),
                      s.vz(), s.weight(), s.alive(), j.jx.device_ptr(), j.jy.device_ptr(),
-                     j.jz.device_ptr());
+                     j.jz.device_ptr(), s.compact_counter());
+  QUASAR_HIP_CHECK(::hipGetLastError());
+  unsigned int overflow = 0;
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(&overflow, s.compact_counter(), sizeof(unsigned int),
+                                    ::hipMemcpyDeviceToHost, stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
+  if (overflow != 0) {
+    throw std::runtime_error{
+        "PIC deposit displacement exceeded the fixed current-deposition window; "
+        "reduce dt or subcycle/split the particle step"};
+  }
 }
 
 }  // namespace

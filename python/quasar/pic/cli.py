@@ -23,10 +23,9 @@ from .._paths import confine_output_path
 from ..coil.io import build_conductor_system
 from . import initial_conditions as ic
 from . import io as pic_io
+from ._units import QE as EV_TO_J  # elementary charge in C == eV->J factor
 from ._units import Units
 from .numerics import cfl_dt
-
-EV_TO_J = 1.602176634e-19
 
 
 def _cfl_dt_internal(domain, units: Units, fdtd_order: int = 2) -> float:
@@ -54,20 +53,12 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     cfg.shape = deck.numerics.shape
     if units.normalization is not None:
         cfg.normalization = units.normalization
-    kind_map = {
-        "periodic": pic.ParticleBoundaryKind.periodic,
-        "specular": pic.ParticleBoundaryKind.specular,
-        "absorbing": pic.ParticleBoundaryKind.absorbing,
-    }
+    # Boundaries are selected by registry name; the deck strings (already
+    # validated in io.py) pass straight through to the C++ registry.
     for side, name in enumerate(deck.boundary.particle):
-        cfg.boundary.set_particle_side(side, kind_map[name])
-    field_kind_map = {
-        "periodic": pic.FieldBoundaryKind.periodic,
-        "pec": pic.FieldBoundaryKind.pec,
-        "outflow": pic.FieldBoundaryKind.outflow,
-    }
+        cfg.boundary.set_particle_side(side, name)
     for side, name in enumerate(deck.boundary.field):
-        cfg.boundary.set_field_side(side, field_kind_map[name])
+        cfg.boundary.set_field_side(side, name)
     # Current-smoothing pipeline: each entry is {type: <name>, n_passes|passes}.
     cfg.filters = [
         pic.FilterSpec(name=str(spec["type"]),
@@ -137,7 +128,23 @@ def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
     ev_type = deck.external_field.evaluator_type
     if ev_type == "uniform":
         b = deck.external_field.uniform_b
-        evaluator = ms.UniformEvaluator(b0=_core.Vec3(b[0], b[1], b[2]))
+        e = deck.external_field.uniform_e
+        evaluator = ms.UniformEvaluator(
+            b0=_core.Vec3(b[0], b[1], b[2]),
+            e0=_core.Vec3(e[0], e[1], e[2]))
+    elif ev_type == "dipole":
+        m = deck.external_field.dipole_moment
+        o = deck.external_field.dipole_origin
+        evaluator = ms.DipoleEvaluator(
+            moment=_core.Vec3(m[0], m[1], m[2]),
+            origin=_core.Vec3(o[0], o[1], o[2]))
+    elif ev_type == "gradient":
+        b0 = deck.external_field.gradient_b0
+        o = deck.external_field.gradient_origin
+        evaluator = ms.GradientEvaluator(
+            b0=_core.Vec3(b0[0], b0[1], b0[2]),
+            grad=deck.external_field.gradient_matrix,
+            origin=_core.Vec3(o[0], o[1], o[2]))
     else:
         # Registry-selected evaluator by name (biot_savart, dipole, gradient, ...).
         evaluator = ms.create_field_evaluator(ev_type)
@@ -179,6 +186,13 @@ def _seed_fields(solver, deck: pic_io.PicDeck) -> None:
     elif init.type == "seed_em_wave":
         mx, my = init.mode
         amp = init.amplitude
+        # Only +x propagation is implemented; a non-zero my would request a +y /
+        # oblique wave that this seeding does not build, so reject it loudly rather
+        # than silently seeding a +x wave instead.
+        if my != 0:
+            raise ValueError(
+                f"seed_em_wave: only +x propagation (mode my=0) is supported, "
+                f"got mode={init.mode!r}")
         # A +x-propagating wave: Ez = sin(kx), By = -Ez (c = 1 internal units).
         wave = amp * np.sin(2 * np.pi * mx * (ii + 0.5) / nx)
         if comp == "ez":

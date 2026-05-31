@@ -80,15 +80,8 @@ def _slice_axis(B_grid: np.ndarray, axis: int, index: int) -> np.ndarray:
 
 
 def _require_matplotlib():
-    try:
-        import matplotlib  # noqa: F401
-        import matplotlib.pyplot as plt
-    except ImportError as e:
-        raise ImportError(
-            "matplotlib is required for plotting; install it via "
-            "`pip install matplotlib`"
-        ) from e
-    return plt
+    from .._plotting import require_pyplot
+    return require_pyplot()
 
 
 def plot_magnitude_slice(

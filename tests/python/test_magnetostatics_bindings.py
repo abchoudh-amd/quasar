@@ -12,6 +12,7 @@ import unittest
 
 
 from quasar import Vec3, mu0_over_4pi  # noqa: E402
+from quasar import _core  # noqa: E402
 from quasar.coil import (  # noqa: E402
     BiotSavartEvaluator,
     ConductorSystem,
@@ -86,6 +87,26 @@ class ObservationSetBindingsTest(unittest.TestCase):
         probe.n_points = 5
         pc = probe.to_point_cloud()
         self.assertEqual(len(pc), 5)
+
+
+class AnalyticEvaluatorBindingsTest(unittest.TestCase):
+
+    def test_gradient_evaluator_uses_bound_matrix_constructor(self):
+        eval_ = _core.magnetostatics.GradientEvaluator(
+            b0=Vec3(0.0, 0.0, 1.0),
+            grad=[[1.0, 0.0, 0.0],
+                  [0.0, 2.0, 0.0],
+                  [0.0, 0.0, 3.0]],
+        )
+        cs = ConductorSystem()
+        pc = PointCloud()
+        pc.add(Vec3(0.5, 0.25, 0.0))
+
+        B = eval_.evaluate_B(cs, pc)
+        self.assertEqual(B.shape, (1, 3))
+        self.assertAlmostEqual(B[0, 0], 0.5)
+        self.assertAlmostEqual(B[0, 1], 0.5)
+        self.assertAlmostEqual(B[0, 2], 1.0)
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")

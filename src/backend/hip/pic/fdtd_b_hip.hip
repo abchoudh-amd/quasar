@@ -3,6 +3,7 @@
 
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -29,9 +30,9 @@ template <int Order>
 void launch(quasar::Grid2D g, double* bx, double* by, double* bz,
             const double* ex, const double* ey, const double* ez, double dt,
             hipStream_t stream) {
-  const dim3 block(16, 16);
-  const dim3 grid((g.nx + block.x - 1) / block.x,
-                  (g.ny + block.y - 1) / block.y);
+  const dim3 block(quasar::backend::pic::kLaunchBlock2D,
+                   quasar::backend::pic::kLaunchBlock2D);
+  const dim3 grid = quasar::backend::pic::grid_2d(g, block);
   hipLaunchKernelGGL((fdtd_b_kernel<Order>), grid, block, 0, stream,
                      g, bx, by, bz, ex, ey, ez, dt);
 }

@@ -23,18 +23,10 @@ from .._paths import confine_output_path
 from . import io as coil_io
 
 
-def _do_run(args: argparse.Namespace) -> int:
-    deck = coil_io.load(args.input)
-
-    if args.print_config:
-        print(f"deck: {deck.raw}")
-
-    # Select the evaluator by name through the registry (default Biot-Savart for
-    # coil design); a deck overrides via the top-level `evaluator.type` key.
-    evaluator = _ms.create_field_evaluator(deck.evaluator_type)
-    B = evaluator.evaluate_B(deck.conductors, deck.observation.points)
-    # B is shape (M, 3).
-
+def _build_payload(deck: coil_io.CoilDeck, B: np.ndarray) -> dict[str, np.ndarray]:
+    """Assemble the .npz payload from the evaluated B field (shape (M, 3)) and the
+    deck's requested output fields. Pure (no I/O, no kernel) so the field-shaping
+    and the B_xyz_grid/observation-kind guard are unit-testable without a GPU."""
     payload: dict[str, np.ndarray] = {}
     fields = set(deck.output.fields)
 
@@ -52,6 +44,23 @@ def _do_run(args: argparse.Namespace) -> int:
     payload["dims"] = np.asarray(deck.observation.dims, dtype=np.int64)
     payload["observation_kind"] = np.asarray(
         deck.observation.kind, dtype="<U16")
+    return payload
+
+
+def _do_run(args: argparse.Namespace) -> int:
+    deck = coil_io.load(args.input)
+
+    if args.print_config:
+        print(f"deck: {deck.raw}")
+
+    # Select the evaluator by name through the registry (default Biot-Savart for
+    # coil design); a deck overrides via the top-level `evaluator.type` key.
+    evaluator = _ms.create_field_evaluator(deck.evaluator_type)
+    B = evaluator.evaluate_B(deck.conductors, deck.observation.points)
+    # B is shape (M, 3).
+
+    payload = _build_payload(deck, B)
+    fields = set(deck.output.fields)
 
     # Confine the deck-supplied output path to the input deck's directory so a
     # stray absolute path or "../" cannot write outside it.

@@ -2,10 +2,12 @@ Adding a field evaluator
 ========================
 
 External PIC fields and the magnetostatics module share
-``quasar::numerics::IFieldEvaluator``. A new evaluator implements the two pure
-virtuals ``evaluate_B`` **and** ``evaluate_grad_B`` (only ``evaluate_E`` has a
-default zero implementation that may optionally be overridden), then registers
-with ``QUASAR_REGISTER_FIELD_EVALUATOR``. Both take an axis-neutral
+``quasar::numerics::IFieldEvaluator``. A new evaluator implements the single pure
+virtual ``evaluate_B``; ``evaluate_grad_B`` and ``evaluate_E`` both have default
+zero implementations that may optionally be overridden (e.g. Biot-Savart and the
+gradient field override ``evaluate_grad_B``; a uniform field with an E component
+overrides ``evaluate_E``). It then registers with
+``QUASAR_REGISTER_FIELD_EVALUATOR``. The methods take an axis-neutral
 ``core::IFieldSource`` and a ``core::PointCloud``; an evaluator that needs a
 concrete source (e.g. Biot-Savart) downcasts it, while the analytic fields
 ignore the source entirely.

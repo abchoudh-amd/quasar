@@ -255,6 +255,72 @@ class CoilIoErrorPathTest(unittest.TestCase):
             """)
 
 
+class BuildPayloadTest(unittest.TestCase):
+    """CPU-only tests for the output-field assembly (no kernel / GPU needed)."""
+
+    def _write(self, body: str) -> Path:
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".yaml", mode="w", delete=False)
+        tmp.write(textwrap.dedent(body))
+        tmp.flush()
+        tmp.close()
+        return Path(tmp.name)
+
+    def _grid_deck(self, fields: str) -> "coil_io.CoilDeck":
+        path = self._write(f"""
+            units: SI
+            conductors:
+              - name: loop
+                current_A: 1.0
+                geometry: {{type: circular_loop, radius_m: 0.05,
+                           center_xyz: [0,0,0], axis_xyz: [0,0,1], n_segments: 16}}
+            observation:
+              type: grid
+              bounds_m: [[-0.1, 0.1], [-0.1, 0.1], [-0.05, 0.05]]
+              resolution: [4, 3, 2]
+            output: {{format: npz, path: out.npz, fields: {fields}}}
+            """)
+        try:
+            return coil_io.load(path)
+        finally:
+            path.unlink()
+
+    def _line_deck(self, fields: str) -> "coil_io.CoilDeck":
+        path = self._write(f"""
+            units: SI
+            conductors:
+              - name: loop
+                current_A: 1.0
+                geometry: {{type: circular_loop, radius_m: 0.05,
+                           center_xyz: [0,0,0], axis_xyz: [0,0,1], n_segments: 16}}
+            observation:
+              type: line
+              start_xyz: [0, 0, 0]
+              end_xyz:   [0, 0, 0.2]
+              n_points: 6
+            output: {{format: npz, path: out.npz, fields: {fields}}}
+            """)
+        try:
+            return coil_io.load(path)
+        finally:
+            path.unlink()
+
+    def test_b_xyz_grid_reshapes_to_nz_ny_nx_3(self):
+        from quasar.coil.cli import _build_payload
+        deck = self._grid_deck("[B_xyz_grid]")
+        # resolution [4,3,2] => 24 points, x-fastest ordering as the kernel emits.
+        B = np.arange(24 * 3, dtype=np.float64).reshape(24, 3)
+        payload = _build_payload(deck, B)
+        self.assertEqual(payload["B_xyz_grid"].shape, (2, 3, 4, 3))
+
+    def test_b_xyz_grid_rejected_for_non_grid_observation(self):
+        from quasar.coil.cli import _build_payload
+        deck = self._line_deck("[B_xyz_grid]")
+        B = np.zeros((6, 3), dtype=np.float64)
+        with self.assertRaises(ValueError):
+            _build_payload(deck, B)
+
+
 class ConfineOutputPathTest(unittest.TestCase):
 
     def test_rejects_parent_escape(self):

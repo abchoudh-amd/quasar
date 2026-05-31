@@ -10,6 +10,7 @@ from quasar.pic.io import (
     SpeciesInitial,
     Time,
     _parse_boundary,
+    _parse_fields,
     parse,
 )
 
@@ -55,6 +56,39 @@ class PicIoTests(unittest.TestCase):
             _deck(external_field=ExternalField(
                 evaluator_type="biot_savart",
                 conductors=[])).validate()
+
+    def test_gradient_evaluator_requires_matrix(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=ExternalField(evaluator_type="gradient")).validate()
+
+    def test_current_filter_passes_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            _deck(numerics=Numerics(
+                current_filter=[{"type": "compensated_binomial", "passes": 0}]
+            )).validate()
+
+    def test_parse_gradient_external_field_params(self):
+        deck = parse({
+            "units": "SI",
+            "domain": {"nx": 4, "ny": 4, "lx_m": 1.0, "ly_m": 1.0},
+            "external_field": {
+                "evaluator": {
+                    "type": "gradient",
+                    "B0_T": [0.0, 0.0, 1.0],
+                    "grad_T_per_m": [
+                        [1.0, 0.0, 0.0],
+                        [0.0, 2.0, 0.0],
+                        [0.0, 0.0, 3.0],
+                    ],
+                    "origin_xyz_m": [0.1, 0.2, 0.3],
+                },
+            },
+            "species": [],
+            "time": {"dt_s": "auto", "steps": 1},
+        })
+        self.assertEqual(deck.external_field.gradient_b0, (0.0, 0.0, 1.0))
+        self.assertEqual(deck.external_field.gradient_matrix[2], (0.0, 0.0, 3.0))
+        self.assertEqual(deck.external_field.gradient_origin, (0.1, 0.2, 0.3))
 
     def test_parse_full_deck(self):
         data = {
@@ -177,12 +211,51 @@ class MaxwellianBlockRegionTests(unittest.TestCase):
             region_y_min_m=0.0, region_y_max_m=1.0)]).validate()
 
 
+class ParseFieldsTests(unittest.TestCase):
+
+    def test_none_yields_empty_fields(self):
+        self.assertIsNone(_parse_fields(None).initial)
+        self.assertIsNone(_parse_fields({}).initial)
+
+    def test_scalar_mode_coerces_to_pair(self):
+        f = _parse_fields({"initial": {"type": "seed_perturbation", "mode": 3}})
+        self.assertEqual(f.initial.mode, (3, 0))
+
+    def test_list_mode_maps_both_components(self):
+        f = _parse_fields({"initial": {"type": "seed_em_wave", "mode": [2, 1]}})
+        self.assertEqual(f.initial.mode, (2, 1))
+
+    def test_one_element_list_mode_defaults_my(self):
+        f = _parse_fields({"initial": {"type": "seed_em_wave", "mode": [2]}})
+        self.assertEqual(f.initial.mode, (2, 0))
+
+    def test_defaults_component_and_amplitude(self):
+        f = _parse_fields({"initial": {"type": "seed_perturbation"}})
+        self.assertEqual(f.initial.component, "Ex")
+        self.assertEqual(f.initial.amplitude, 1.0e-4)
+        self.assertEqual(f.initial.mode, (1, 0))
+
+    def test_missing_type_raises(self):
+        with self.assertRaises(ValueError):
+            _parse_fields({"initial": {"component": "Ez"}})
+
+
 class ResourceCeilingTests(unittest.TestCase):
 
     def test_oversized_grid_dim_rejected(self):
         from quasar.pic.io import MAX_GRID_DIM
         with self.assertRaises(ValueError):
             _deck(domain=Domain(nx=MAX_GRID_DIM + 1, ny=8,
+                                lx_m=1.0, ly_m=1.0)).validate()
+
+    def test_oversized_grid_cells_rejected(self):
+        # nx and ny each pass the per-axis MAX_GRID_DIM check, but their product
+        # exceeds MAX_GRID_CELLS, so the distinct cell-count branch must fire.
+        from quasar.pic.io import MAX_GRID_CELLS, MAX_GRID_DIM
+        self.assertLessEqual(MAX_GRID_DIM, MAX_GRID_DIM)  # per-axis ok by construction
+        self.assertGreater(MAX_GRID_DIM * MAX_GRID_DIM, MAX_GRID_CELLS)
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=MAX_GRID_DIM, ny=MAX_GRID_DIM,
                                 lx_m=1.0, ly_m=1.0)).validate()
 
     def test_too_many_particles_rejected(self):

@@ -19,6 +19,11 @@ Top-level structure::
           density_per_m3, temperature_eV, drift_v?}
     time: {dt_s, steps}
     diagnostics: {output_path, cadence, fields, per_species}
+
+Note: the PIC deck groups output under ``diagnostics.output_path`` (with cadence /
+fields / per_species) because it writes a time series; the coil deck writes a
+single snapshot and uses ``output.path`` instead. The two output schemas are
+intentionally distinct (see ``quasar.coil.io``).
 """
 
 from __future__ import annotations
@@ -48,6 +53,17 @@ def _vec3(xyz: Sequence[float] | None,
     return _triple(xyz)
 
 
+def _matrix3(rows: Sequence[Sequence[float]] | None,
+             ) -> tuple[tuple[float, float, float],
+                        tuple[float, float, float],
+                        tuple[float, float, float]] | None:
+    if rows is None:
+        return None
+    if len(rows) != 3:
+        raise ValueError("expected 3x3 matrix")
+    return (_triple(rows[0]), _triple(rows[1]), _triple(rows[2]))
+
+
 @dataclass
 class Domain:
     nx: int
@@ -75,8 +91,17 @@ class Normalization:
 class ExternalField:
     evaluator_type: str
     conductors: list[dict] = field(default_factory=list)
-    # For evaluator_type == "uniform": the constant external B (Tesla, SI decks).
+    # Evaluator parameters are in SI for SI decks and internal units for
+    # normalized decks. The sampler handles the conversion into solver units.
     uniform_b: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    uniform_e: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    dipole_moment: tuple[float, float, float] | None = None
+    dipole_origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gradient_b0: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    gradient_matrix: tuple[tuple[float, float, float],
+                           tuple[float, float, float],
+                           tuple[float, float, float]] | None = None
+    gradient_origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 # Field evaluators selectable from a PIC deck's external_field.evaluator.type.
@@ -189,6 +214,19 @@ class PicDeck:
             raise ValueError("numerics.fdtd_order must be 2 or 4")
         if self.numerics.shape not in ("cic", "tsc"):
             raise ValueError("numerics.shape must be 'cic' or 'tsc'")
+        allowed_filters = {"binomial", "compensated_binomial"}
+        for i, spec in enumerate(self.numerics.current_filter):
+            if not isinstance(spec, dict):
+                raise ValueError(f"numerics.current_filter[{i}] must be a mapping")
+            name = spec.get("type")
+            if name not in allowed_filters:
+                raise ValueError(
+                    f"numerics.current_filter[{i}].type {name!r} must be one of "
+                    f"{sorted(allowed_filters)}")
+            passes = int(spec.get("n_passes", spec.get("passes", 1)))
+            if passes < 1:
+                raise ValueError(
+                    f"numerics.current_filter[{i}] passes must be >= 1")
         if self.external_field is not None:
             ev = self.external_field.evaluator_type
             if ev not in SUPPORTED_EVALUATORS:
@@ -199,6 +237,12 @@ class PicDeck:
             # closed-form and need no conductors.
             if ev == "biot_savart" and not self.external_field.conductors:
                 raise ValueError("external_field.evaluator.conductors must be non-empty")
+            if ev == "dipole" and self.external_field.dipole_moment is None:
+                raise ValueError(
+                    "external_field.evaluator.moment_Am2 is required for type 'dipole'")
+            if ev == "gradient" and self.external_field.gradient_matrix is None:
+                raise ValueError(
+                    "external_field.evaluator.grad_T_per_m is required for type 'gradient'")
         # A deck must drive *something*: particles, an external field, or an
         # initial field seed. Field-only decks (e.g. EM-wave propagation, coil
         # confinement) legitimately have no species.
@@ -290,11 +334,24 @@ def _parse_external_field(d: dict | None) -> Union[ExternalField, None]:
         return None
     ev = _require(d, "evaluator", "external_field")
     ev_type = str(_require(ev, "type", "external_field.evaluator"))
-    # Uniform external B may be given as B_T or b_tesla.
-    b = ev.get("B_T", ev.get("b_tesla"))
+    # Uniform external fields may use either terse or unit-explicit names.
+    b = ev.get("B_T", ev.get("b_tesla", ev.get("B")))
+    e = ev.get("E_V_per_m", ev.get("e_v_per_m", ev.get("E")))
+    # Dipole/gradient parameter names keep the SI unit in the key; shorter aliases
+    # are accepted for normalized decks and for hand-written tests.
+    moment = ev.get("moment_Am2", ev.get("moment_A_m2", ev.get("moment")))
+    origin = ev.get("origin_xyz_m", ev.get("origin", [0.0, 0.0, 0.0]))
+    b0 = ev.get("B0_T", ev.get("b0_tesla", ev.get("b0", [0.0, 0.0, 0.0])))
+    grad = ev.get("grad_T_per_m", ev.get("gradient_T_per_m", ev.get("gradient")))
     return ExternalField(evaluator_type=ev_type,
                          conductors=list(ev.get("conductors", [])),
-                         uniform_b=_vec3(b))
+                         uniform_b=_vec3(b),
+                         uniform_e=_vec3(e),
+                         dipole_moment=None if moment is None else _vec3(moment),
+                         dipole_origin=_vec3(origin),
+                         gradient_b0=_vec3(b0),
+                         gradient_matrix=_matrix3(grad),
+                         gradient_origin=_vec3(origin))
 
 
 def _parse_species(items: list[dict] | None) -> list[Species]:

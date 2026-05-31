@@ -28,9 +28,9 @@ void run_reflection(int nghost) {
   quasar::pic::EmPicConfig cfg{g, Order, "cic"};
   // PEC on the x walls, periodic on y.
   cfg.boundary.field[static_cast<int>(quasar::Side::x_lo)] =
-      quasar::boundary::FieldBoundaryKind::pec;
+      "pec";
   cfg.boundary.field[static_cast<int>(quasar::Side::x_hi)] =
-      quasar::boundary::FieldBoundaryKind::pec;
+      "pec";
   quasar::pic::EmPic2D3V solver{cfg};
 
   // Seed a localized Ez/By pulse travelling +x.

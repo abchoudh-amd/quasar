@@ -29,7 +29,7 @@ Deck schema (``quasar.pic.io``)
      fdtd_order: 2          # 2 or 4
      shape: cic             # 'cic' (linear) or 'tsc' (quadratic)
      current_filter:        # optional; ordered current-smoothing pipeline
-       - {type: binomial, n_passes: 2}
+       - {type: binomial, n_passes: 2}   # n_passes must be >= 1
        # types: 'binomial', 'compensated_binomial'
 
    external_field:          # optional
@@ -44,6 +44,11 @@ Deck schema (``quasar.pic.io``)
              axis_xyz:   [0.0, 0.0, 1.0]
              radius_m: 0.04
              n_segments: 64
+       # Other evaluator forms:
+       #   uniform:  {type: uniform,  B_T: [0, 0, 1.0], E_V_per_m: [0, 0, 0]}
+       #   dipole:   {type: dipole,   moment_Am2: [0, 0, 1], origin_xyz_m: [0, 0, 0]}
+       #   gradient: {type: gradient, B0_T: [0, 0, 0],
+       #              grad_T_per_m: [[1, 0, 0], [0, 1, 0], [0, 0, -2]]}
 
    species:
      - name: H+

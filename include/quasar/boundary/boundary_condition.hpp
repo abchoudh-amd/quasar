@@ -13,16 +13,14 @@ class ParticleSpecies;
 
 namespace quasar::boundary {
 
-enum class FieldBoundaryKind { periodic, pec, outflow };
-enum class ParticleBoundaryKind { periodic, specular, absorbing };
-
+// Per-side boundary selection by registry name (order: x_lo, x_hi, y_lo, y_hi).
+// The names map directly to the QUASAR_REGISTER_*_BOUNDARY keys, so adding a
+// boundary is a single registration with no enum / switch / binding to update.
+// Field names: "periodic" | "pec" | "outflow". Particle names: "periodic" |
+// "specular" | "absorbing".
 struct BoundarySpec {
-  std::array<FieldBoundaryKind, 4> field{
-      FieldBoundaryKind::periodic, FieldBoundaryKind::periodic,
-      FieldBoundaryKind::periodic, FieldBoundaryKind::periodic};
-  std::array<ParticleBoundaryKind, 4> particle{
-      ParticleBoundaryKind::periodic, ParticleBoundaryKind::periodic,
-      ParticleBoundaryKind::periodic, ParticleBoundaryKind::periodic};
+  std::array<std::string, 4> field{"periodic", "periodic", "periodic", "periodic"};
+  std::array<std::string, 4> particle{"periodic", "periodic", "periodic", "periodic"};
 };
 
 class IFieldBoundary {

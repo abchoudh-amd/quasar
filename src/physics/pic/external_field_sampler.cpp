@@ -10,7 +10,12 @@ namespace quasar::pic {
 
 namespace {
 
-magnetostatics::PointCloud yee_points(const Grid2D& g, int component) {
+// Builds the Yee-staggered sample points for one field component already scaled
+// from internal length units to SI (factor length_scale), so the SI field
+// evaluator sees physical coordinates. Folding the scale in here avoids a second
+// full PointCloud copy (the former to_si_points pass).
+magnetostatics::PointCloud yee_points(const Grid2D& g, int component,
+                                      Real length_scale) {
   magnetostatics::PointCloud pts;
   for (int j = 0; j < g.ny; ++j) {
     for (int i = 0; i < g.nx; ++i) {
@@ -26,21 +31,10 @@ magnetostatics::PointCloud yee_points(const Grid2D& g, int component) {
         x = g.x_at_bz(i);
         y = g.y_at_bz(j);
       }
-      pts.add(Vec3{x, y, 0});
+      pts.add(Vec3{x * length_scale, y * length_scale, Real{0}});
     }
   }
   return pts;
-}
-
-// Scales every point in `pts` from internal length units to SI (factor
-// length_scale) so the SI field evaluator sees physical coordinates.
-magnetostatics::PointCloud to_si_points(const magnetostatics::PointCloud& pts,
-                                        Real length_scale) {
-  magnetostatics::PointCloud out;
-  for (const Vec3& p : pts.points()) {
-    out.add(Vec3{p.x * length_scale, p.y * length_scale, p.z * length_scale});
-  }
-  return out;
 }
 
 void copy_component(const Grid2D& g, const Field<Vec3>& values, int axis,
@@ -79,12 +73,12 @@ void sample_external_field(numerics::IFieldEvaluator& evaluator,
                            Real length_scale, Real e_field_scale,
                            Real b_field_scale) {
   const Grid2D g = external_fields.grid;
-  auto ex_pts = to_si_points(yee_points(g, 0), length_scale);
-  auto ey_pts = to_si_points(yee_points(g, 1), length_scale);
-  auto ez_pts = to_si_points(yee_points(g, 2), length_scale);
-  auto bx_pts = to_si_points(yee_points(g, 3), length_scale);
-  auto by_pts = to_si_points(yee_points(g, 4), length_scale);
-  auto bz_pts = to_si_points(yee_points(g, 5), length_scale);
+  auto ex_pts = yee_points(g, 0, length_scale);
+  auto ey_pts = yee_points(g, 1, length_scale);
+  auto ez_pts = yee_points(g, 2, length_scale);
+  auto bx_pts = yee_points(g, 3, length_scale);
+  auto by_pts = yee_points(g, 4, length_scale);
+  auto bz_pts = yee_points(g, 5, length_scale);
 
   copy_component(g, evaluator.evaluate_E(conductors, ex_pts), 0, e_field_scale, external_fields.ex);
   copy_component(g, evaluator.evaluate_E(conductors, ey_pts), 1, e_field_scale, external_fields.ey);

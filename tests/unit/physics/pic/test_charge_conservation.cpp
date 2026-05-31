@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -113,6 +114,18 @@ TEST(PicChargeConservation, EsirkepovConservesAcrossPeriodicSeam) {
   run_continuity_case<1>(&resid, &jmag, /*seam=*/true);
   EXPECT_GT(jmag, 1.0e-6);
   EXPECT_LT(resid, 1.0e-9) << "max continuity residual across seam " << resid;
+}
+
+TEST(PicChargeConservation, OversizedDisplacementFailsInsteadOfTruncatingCurrent) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
+  quasar::pic::ParticleSpecies sp{quasar::pic::SpeciesConfig{"q", 1.0, 1.0, 1}};
+  sp.set_host_particles({0.5}, {0.5}, {10.0}, {0.0}, {0.0}, {1.0});
+  solver.add_species(std::move(sp));
+
+  EXPECT_THROW(solver.step(0.2), std::runtime_error);
 }
 
 TEST(PicChargeConservation, DepositTypesExist) {

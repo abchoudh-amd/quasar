@@ -13,9 +13,20 @@ namespace quasar::backend::pic {
 
 inline constexpr unsigned kLaunchBlock = 256;
 
+// Standard 2-D thread block for full-grid (nx x ny) field/filter kernels.
+inline constexpr unsigned kLaunchBlock2D = 16;
+
 // 1-D launch grid covering n threads at the standard block size.
 inline dim3 grid_1d(std::size_t n, unsigned block = kLaunchBlock) {
   return dim3(static_cast<unsigned>((n + block - 1) / block));
+}
+
+// 2-D launch grid covering the full nx x ny interior at `block` (default 16x16),
+// shared by the FDTD E/B updates and the current filter so the tiling lives in
+// one place.
+inline dim3 grid_2d(const quasar::Grid2D& g, dim3 block = dim3(kLaunchBlock2D, kLaunchBlock2D)) {
+  return dim3((static_cast<unsigned>(g.nx) + block.x - 1) / block.x,
+              (static_cast<unsigned>(g.ny) + block.y - 1) / block.y);
 }
 
 // Per-side field-BC launch. A x-face side (0/1) iterates over the ny boundary

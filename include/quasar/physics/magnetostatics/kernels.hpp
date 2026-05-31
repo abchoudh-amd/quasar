@@ -1,6 +1,9 @@
-// Public, backend-neutral declaration of the magnetostatics kernel-launch ABI.
+// Backend-neutral declaration of the magnetostatics kernel-launch ABI.
 //
-// Each launch_biot_savart_* entry point defined under
+// This is a per-physics seam (it names the magnetostatics launch entry points),
+// so it lives under physics/magnetostatics/ rather than backend/ — the backend
+// axis stays physics-neutral (device.hpp / memory.hpp only), mirroring
+// physics/pic/kernels.hpp. Each launch_biot_savart_* entry point defined under
 // src/backend/hip/magnetostatics/ is declared here exactly once and included
 // both by its .hip definition (so a signature drift is a compile error) and by
 // the host orchestrator (biot_savart_evaluator.cpp). Do not hand-redeclare these

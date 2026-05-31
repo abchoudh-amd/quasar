@@ -2,7 +2,57 @@ import unittest
 
 import numpy as np
 
-from quasar.pic.cli import _build_parser, _flatten_for_npz
+from quasar.pic.cli import _build_parser, _flatten_for_npz, _seed_fields
+from quasar.pic.io import Domain, Fields, FieldsInitial, Numerics, PicDeck, Species, SpeciesInitial
+
+
+class _RecordingSolver:
+    """Captures seed_field(component, values) calls without a GPU."""
+
+    def __init__(self):
+        self.calls = []
+
+    def seed_field(self, component, values):
+        self.calls.append((component, np.asarray(values)))
+
+
+def _fields_deck(initial: FieldsInitial) -> PicDeck:
+    return PicDeck(
+        domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0),
+        numerics=Numerics(fdtd_order=2, shape="cic"),
+        species=[Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
+                         initial=SpeciesInitial())],
+        fields=Fields(initial=initial),
+        units="normalized",
+    )
+
+
+class SeedFieldsTests(unittest.TestCase):
+
+    def test_seed_em_wave_rejects_nonzero_my(self):
+        deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Ez",
+                                          mode=(1, 1)))
+        with self.assertRaises(ValueError):
+            _seed_fields(_RecordingSolver(), deck)
+
+    def test_seed_em_wave_rejects_unsupported_component(self):
+        deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Bz",
+                                          mode=(1, 0)))
+        with self.assertRaises(ValueError):
+            _seed_fields(_RecordingSolver(), deck)
+
+    def test_unsupported_initial_type_raises(self):
+        deck = _fields_deck(FieldsInitial(type="seed_blastwave", component="Ex"))
+        with self.assertRaises(ValueError):
+            _seed_fields(_RecordingSolver(), deck)
+
+    def test_seed_em_wave_ez_seeds_ez_and_by(self):
+        deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Ez",
+                                          mode=(1, 0)))
+        solver = _RecordingSolver()
+        _seed_fields(solver, deck)
+        seeded = {c for c, _ in solver.calls}
+        self.assertEqual(seeded, {"ez", "by"})
 
 
 class BuildParserTests(unittest.TestCase):

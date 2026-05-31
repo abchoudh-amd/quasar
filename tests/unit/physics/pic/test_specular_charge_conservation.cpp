@@ -44,7 +44,7 @@ void accumulate_rho(std::vector<double>& rho, const quasar::Grid2D& g,
 quasar::pic::EmPicConfig specular_config(const quasar::Grid2D& g, int shape_order) {
   quasar::pic::EmPicConfig cfg{g, 2, shape_order == 1 ? "cic" : "tsc"};
   for (int side = 0; side < 4; ++side) {
-    cfg.boundary.particle[side] = quasar::boundary::ParticleBoundaryKind::specular;
+    cfg.boundary.particle[side] = "specular";
   }
   return cfg;
 }
