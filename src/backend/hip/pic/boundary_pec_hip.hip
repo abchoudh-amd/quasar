@@ -7,85 +7,19 @@
 
 #include <hip/hip_runtime.h>
 
-// Perfect-electric-conductor (PEC) wall as a ghost-cell fill.
+// Perfect-electric-conductor (PEC) reflecting wall as a one-sided closure.
 //
-// A PEC wall forces the tangential electric field and the normal magnetic field
-// to vanish at the conductor surface. On the Yee mesh this is imposed by image
-// (mirror) symmetry across the boundary plane: the tangential-E / normal-B
-// components are reflected with a sign flip (odd), and the remaining components
-// are reflected unchanged (even). After this fill the standard staggered curl
-// reproduces a reflecting wall with no normal energy flux.
+// A PEC wall forces tangential E and normal B to vanish at the conductor
+// surface. Rather than fill mirror ghost cells before the curl, the boundary
+// nodes are corrected AFTER each interior curl (see the closure block below),
+// so no ghost halo participates in the field BC. The Yee fields are
+// node-collocated: the wall sits ON the boundary interior node.
 //
-// For a wall on an x-face (sides 0/1): tangential E = {Ey, Ez}, normal B = Bx
-// are odd; Ex, By, Bz are even. For a y-face (sides 2/3): tangential E =
-// {Ex, Ez}, normal B = By are odd; Ey, Bx, Bz are even.
-
-namespace {
-
-// The Yee fields here are node-collocated (the curl uses forward differences, so
-// the conductor surface sits ON the boundary interior node, not on a half-cell
-// face). The mirror is therefore node-centred: ghost layer gh reflects the
-// interior node gh cells inside the wall node. Odd components (tangential E,
-// normal B) flip sign and are pinned to zero at the wall node itself (Dirichlet);
-// even components reflect unchanged. A face-centred mirror (reflecting nx-gh
-// instead of nx-1-gh) shifts the wall by half a cell relative to the field
-// locations and drives an exponential boundary instability.
-__device__ inline void mirror_x(const quasar::Grid2D& g, double* f, int side,
-                                int gh, int j, double sign) {
-  if (side == 0) {  // x_lo: wall node i=0
-    f[g.index(-gh, j)] = sign * f[g.index(gh, j)];
-    if (sign < 0.0 && gh == 1) f[g.index(0, j)] = 0.0;
-  } else {          // x_hi: wall node i=nx-1
-    f[g.index(g.nx - 1 + gh, j)] = sign * f[g.index(g.nx - 1 - gh, j)];
-    if (sign < 0.0 && gh == 1) f[g.index(g.nx - 1, j)] = 0.0;
-  }
-}
-
-__device__ inline void mirror_y(const quasar::Grid2D& g, double* f, int side,
-                                int gh, int i, double sign) {
-  if (side == 2) {  // y_lo: wall node j=0
-    f[g.index(i, -gh)] = sign * f[g.index(i, gh)];
-    if (sign < 0.0 && gh == 1) f[g.index(i, 0)] = 0.0;
-  } else {          // y_hi: wall node j=ny-1
-    f[g.index(i, g.ny - 1 + gh)] = sign * f[g.index(i, g.ny - 1 - gh)];
-    if (sign < 0.0 && gh == 1) f[g.index(i, g.ny - 1)] = 0.0;
-  }
-}
-
-__global__ void pec_x_kernel(quasar::Grid2D g, int side,
-                             double* ex, double* ey, double* ez,
-                             double* bx, double* by, double* bz) {
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int gh = tid / g.ny + 1;
-  const int j  = tid % g.ny;
-  if (gh > g.nghost) return;
-  mirror_x(g, ex, side, gh, j, +1.0);  // normal E: even
-  mirror_x(g, ey, side, gh, j, -1.0);  // tangential E: odd
-  mirror_x(g, ez, side, gh, j, -1.0);  // tangential E: odd
-  mirror_x(g, bx, side, gh, j, -1.0);  // normal B: odd
-  mirror_x(g, by, side, gh, j, +1.0);
-  mirror_x(g, bz, side, gh, j, +1.0);
-}
-
-__global__ void pec_y_kernel(quasar::Grid2D g, int side,
-                             double* ex, double* ey, double* ez,
-                             double* bx, double* by, double* bz) {
-  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int gh = tid / g.nx + 1;
-  const int i  = tid % g.nx;
-  if (gh > g.nghost) return;
-  mirror_y(g, ex, side, gh, i, -1.0);  // tangential E: odd
-  mirror_y(g, ey, side, gh, i, +1.0);  // normal E: even
-  mirror_y(g, ez, side, gh, i, -1.0);  // tangential E: odd
-  mirror_y(g, bx, side, gh, i, +1.0);
-  mirror_y(g, by, side, gh, i, -1.0);  // normal B: odd
-  mirror_y(g, bz, side, gh, i, +1.0);
-}
-
-}  // namespace
+// For a wall on an x-face (sides 0/1): tangential E = {Ey, Ez}, normal B = Bx.
+// For a y-face (sides 2/3): tangential E = {Ex, Ez}, normal B = By.
 
 // --------------------------------------------------------------------------
-// One-sided characteristic-wall closure (replaces the mirror fill).
+// One-sided characteristic-wall closure.
 //
 // Run AFTER the interior curl. The interior kernel updated the boundary row
 // reading ghost cells; we correct it without ever filling ghosts:
@@ -170,6 +104,131 @@ __global__ void wall_correct_e_y_kernel(quasar::Grid2D g, int side,
   ez[k] = 0.0;
 }
 
+// --- 4th-order closures -----------------------------------------------------
+// The order-4 staggered curls reach two cells past a wall, so the outer boundary
+// layers are reduced to an interior-only stencil on the normal-axis derivative.
+// The backward B-curl overruns the LOW wall at nodes {0,1} and the HIGH wall at
+// node {N-1}; the forward E-curl overruns the HIGH wall's second interior layer
+// {N-2} (the wall node itself is pinned). Each fix applies the delta
+// dt*(interior_stencil - order4_stencil) of just that derivative; the order-4
+// term reproduces what the interior kernel used (the field is unchanged since the
+// curl), so the ghost contribution cancels exactly.
+
+// Replace the x-derivative of tangential B (by,bz) at node (i,j) using `new_*`.
+__device__ inline void b_x_delta(const quasar::Grid2D& g, double dt,
+                                 double* by, double* bz, const double* ey,
+                                 const double* ez, int i, int j,
+                                 double new_ez, double new_ey) {
+  const std::size_t k = g.index(i, j);
+  by[k] += dt * (new_ez - qn::ddx_staggered_bwd<4>(ez, g, i, j));
+  bz[k] -= dt * (new_ey - qn::ddx_staggered_bwd<4>(ey, g, i, j));
+}
+
+__device__ inline void b_y_delta(const quasar::Grid2D& g, double dt,
+                                 double* bx, double* bz, const double* ex,
+                                 const double* ez, int i, int j,
+                                 double new_ez, double new_ex) {
+  const std::size_t k = g.index(i, j);
+  bx[k] -= dt * (new_ez - qn::ddy_staggered_bwd<4>(ez, g, i, j));
+  bz[k] += dt * (new_ex - qn::ddy_staggered_bwd<4>(ex, g, i, j));
+}
+
+__global__ void wall_correct_b_x_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                           double* bx, double* by, double* bz,
+                                           const double* ex, const double* ey,
+                                           const double* ez) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= g.ny) return;
+  if (side == 0) {  // x_lo: backward curl overruns nodes 0 and 1
+    bx[g.index(0, j)] = 0.0;
+    b_x_delta(g, dt, by, bz, ey, ez, 0, j,
+              qn::ddx_onesided_fwd1(ez, g, 0, j),
+              qn::ddx_onesided_fwd1(ey, g, 0, j));
+    b_x_delta(g, dt, by, bz, ey, ez, 1, j,
+              qn::ddx_staggered_bwd<2>(ez, g, 1, j),
+              qn::ddx_staggered_bwd<2>(ey, g, 1, j));
+  } else {          // x_hi: overruns node nx-1
+    const int iw = g.nx - 1;
+    bx[g.index(iw, j)] = 0.0;
+    b_x_delta(g, dt, by, bz, ey, ez, iw, j,
+              qn::ddx_staggered_bwd<2>(ez, g, iw, j),
+              qn::ddx_staggered_bwd<2>(ey, g, iw, j));
+  }
+}
+
+__global__ void wall_correct_b_y_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                           double* bx, double* by, double* bz,
+                                           const double* ex, const double* ey,
+                                           const double* ez) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= g.nx) return;
+  if (side == 2) {  // y_lo: overruns nodes 0 and 1
+    by[g.index(i, 0)] = 0.0;
+    b_y_delta(g, dt, bx, bz, ex, ez, i, 0,
+              qn::ddy_onesided_fwd1(ez, g, i, 0),
+              qn::ddy_onesided_fwd1(ex, g, i, 0));
+    b_y_delta(g, dt, bx, bz, ex, ez, i, 1,
+              qn::ddy_staggered_bwd<2>(ez, g, i, 1),
+              qn::ddy_staggered_bwd<2>(ex, g, i, 1));
+  } else {          // y_hi: overruns node ny-1
+    const int jw = g.ny - 1;
+    by[g.index(i, jw)] = 0.0;
+    b_y_delta(g, dt, bx, bz, ex, ez, i, jw,
+              qn::ddy_staggered_bwd<2>(ez, g, i, jw),
+              qn::ddy_staggered_bwd<2>(ex, g, i, jw));
+  }
+}
+
+// E forward curl overruns only the HIGH wall's second interior layer (the wall
+// node is pinned). Low walls need only the pin.
+__global__ void wall_correct_e_x_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                           double* ey, double* ez,
+                                           const double* bx, const double* by,
+                                           const double* bz) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= g.ny) return;
+  if (side == 0) {
+    ey[g.index(0, j)] = 0.0;
+    ez[g.index(0, j)] = 0.0;
+  } else {
+    const int iw = g.nx - 1;
+    ey[g.index(iw, j)] = 0.0;
+    ez[g.index(iw, j)] = 0.0;
+    const int i2 = g.nx - 2;  // second layer overran by the forward curl
+    const std::size_t k = g.index(i2, j);
+    const double dby = qn::ddx_staggered<2>(by, g, i2, j)
+                     - qn::ddx_staggered<4>(by, g, i2, j);
+    const double dbz = qn::ddx_staggered<2>(bz, g, i2, j)
+                     - qn::ddx_staggered<4>(bz, g, i2, j);
+    ey[k] -= dt * dbz;  // ey += dt*(-d_bz_dx)
+    ez[k] += dt * dby;  // ez += dt*( d_by_dx)
+  }
+}
+
+__global__ void wall_correct_e_y_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                           double* ex, double* ez,
+                                           const double* bx, const double* by,
+                                           const double* bz) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= g.nx) return;
+  if (side == 2) {
+    ex[g.index(i, 0)] = 0.0;
+    ez[g.index(i, 0)] = 0.0;
+  } else {
+    const int jw = g.ny - 1;
+    ex[g.index(i, jw)] = 0.0;
+    ez[g.index(i, jw)] = 0.0;
+    const int j2 = g.ny - 2;
+    const std::size_t k = g.index(i, j2);
+    const double dbx = qn::ddy_staggered<2>(bx, g, i, j2)
+                     - qn::ddy_staggered<4>(bx, g, i, j2);
+    const double dbz = qn::ddy_staggered<2>(bz, g, i, j2)
+                     - qn::ddy_staggered<4>(bz, g, i, j2);
+    ex[k] += dt * dbz;  // ex += dt*( d_bz_dy)
+    ez[k] -= dt * dbx;  // ez += dt*(-d_bx_dy)
+  }
+}
+
 }  // namespace
 
 extern "C" void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D& g,
@@ -213,25 +272,45 @@ extern "C" void launch_pic_boundary_wall_correct_e(const quasar::Grid2D& g,
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
-extern "C" void launch_pic_boundary_pec_fields(const quasar::Grid2D& g,
-                                               quasar::YeeField2D<double>& f,
-                                               int side, quasar_stream_t stream) {
-  if (g.nghost <= 0) return;
+extern "C" void launch_pic_boundary_wall_correct_b_order4(const quasar::Grid2D& g,
+                                                          quasar::YeeField2D<double>& f,
+                                                          int side, double dt,
+                                                          quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   const dim3 block(256);
   if (side == 0 || side == 1) {
-    const int total = g.nghost * g.ny;
-    if (total <= 0) return;
-    const dim3 grid((total + block.x - 1) / block.x);
-    hipLaunchKernelGGL(pec_x_kernel, grid, block, 0, hip_stream, g, side,
-                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),
+    if (g.ny <= 0) return;
+    const dim3 grid((g.ny + block.x - 1) / block.x);
+    hipLaunchKernelGGL(wall_correct_b_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
+                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
+  } else {
+    if (g.nx <= 0) return;
+    const dim3 grid((g.nx + block.x - 1) / block.x);
+    hipLaunchKernelGGL(wall_correct_b_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr(),
+                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr());
+  }
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+extern "C" void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D& g,
+                                                          quasar::YeeField2D<double>& f,
+                                                          int side, double dt,
+                                                          quasar_stream_t stream) {
+  const auto hip_stream = static_cast<hipStream_t>(stream);
+  const dim3 block(256);
+  if (side == 0 || side == 1) {
+    if (g.ny <= 0) return;
+    const dim3 grid((g.ny + block.x - 1) / block.x);
+    hipLaunchKernelGGL(wall_correct_e_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.ey.device_ptr(), f.ez.device_ptr(),
                        f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
   } else {
-    const int total = g.nghost * g.nx;
-    if (total <= 0) return;
-    const dim3 grid((total + block.x - 1) / block.x);
-    hipLaunchKernelGGL(pec_y_kernel, grid, block, 0, hip_stream, g, side,
-                       f.ex.device_ptr(), f.ey.device_ptr(), f.ez.device_ptr(),
+    if (g.nx <= 0) return;
+    const dim3 grid((g.nx + block.x - 1) / block.x);
+    hipLaunchKernelGGL(wall_correct_e_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.ex.device_ptr(), f.ez.device_ptr(),
                        f.bx.device_ptr(), f.by.device_ptr(), f.bz.device_ptr());
   }
   QUASAR_HIP_CHECK(::hipGetLastError());

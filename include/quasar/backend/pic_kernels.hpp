@@ -90,8 +90,6 @@ void launch_pic_boundary_periodic_particles(const quasar::Grid2D&,
                                             quasar_stream_t);
 
 // -- Field boundary conditions -----------------------------------------------
-void launch_pic_boundary_pec_fields(const quasar::Grid2D&, quasar::YeeField2D<double>&,
-                                    int, quasar_stream_t);
 void launch_pic_boundary_periodic_fields(const quasar::Grid2D&, quasar::YeeField2D<double>&,
                                          int, quasar_stream_t);
 
@@ -107,6 +105,16 @@ void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D&,
 void launch_pic_boundary_wall_correct_e(const quasar::Grid2D&,
                                         quasar::YeeField2D<double>&, int side,
                                         quasar_stream_t);
+// 4th-order variants: the outer two boundary layers are reduced to the 2nd-order
+// staggered scheme (interior-only) on the normal-axis derivative, then the wall
+// closure / pin is applied. correct_e_order4 additionally re-closes the second
+// interior layer the forward E-curl overran on the high wall.
+void launch_pic_boundary_wall_correct_b_order4(const quasar::Grid2D&,
+                                               quasar::YeeField2D<double>&, int side,
+                                               double dt, quasar_stream_t);
+void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D&,
+                                               quasar::YeeField2D<double>&, int side,
+                                               double dt, quasar_stream_t);
 
 // -- Particle array compaction -----------------------------------------------
 // Compacts alive particles to the front of every species array (order is not
