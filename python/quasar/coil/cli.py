@@ -59,7 +59,7 @@ def _do_run(args: argparse.Namespace) -> int:
                                    deck.output.path, label="output.path")
     np.savez(out_path, **payload)
 
-    if not args.quiet:
+    if args.verbose:
         print(f"quasar coil: wrote {out_path} ({len(B)} points, "
               f"{', '.join(sorted(fields))})")
     return 0
@@ -70,18 +70,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="quasar-coil",
         description="Quasar magnetostatics coil-design driver.",
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="command", required=True)
 
     run_p = sub.add_parser("run", help="evaluate a coil.yaml deck")
     run_p.add_argument("input", help="path to the input YAML deck")
     run_p.add_argument("--print-config", action="store_true",
                        help="echo the parsed deck before running")
-    run_p.add_argument("--quiet", action="store_true",
-                       help="suppress informational output")
-    run_p.set_defaults(fn=_do_run)
+    run_p.add_argument("--verbose", action="store_true",
+                       help="print informational output (default: quiet)")
+    run_p.set_defaults(func=_do_run)
 
     args = parser.parse_args(argv)
-    return args.fn(args)
+    return args.func(args)
 
 
 if __name__ == "__main__":

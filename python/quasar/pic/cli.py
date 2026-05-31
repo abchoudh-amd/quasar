@@ -291,7 +291,7 @@ def _do_run(args: argparse.Namespace) -> int:
     out_path = confine_output_path(deck_path.parent, deck.diagnostics.output_path,
                                    label="diagnostics.output_path")
     _run_loop(solver, deck, species_indices, units, dt, dt_si, out_path, args)
-    if args.print_config:
+    if args.print_config or args.verbose:
         print(f"wrote  : {out_path}")
     return 0
 
@@ -350,13 +350,15 @@ def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="quasar.pic.cli",
+    p = argparse.ArgumentParser(prog="quasar-pic",
                                 description="Quasar PIC driver.")
     sub = p.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="Run a PIC simulation from a YAML deck.")
     run.add_argument("input", help="Path to the YAML deck.")
     run.add_argument("--seed", type=int, default=0,
                      help="RNG seed for initial-condition sampling.")
+    run.add_argument("--verbose", action="store_true",
+                     help="print informational output (default: quiet)")
     run.add_argument("--print-config", action="store_true",
                      help="Print resolved deck + dt before running.")
     run.add_argument("--steps-override", type=int, default=None,

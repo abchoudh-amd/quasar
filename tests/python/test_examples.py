@@ -39,7 +39,7 @@ def _copy_example(name: str, into: Path) -> Path:
 def _run_cli(yaml_path: Path) -> None:
     res = subprocess.run(
         [sys.executable, "-m", "quasar.coil.cli", "run",
-         str(yaml_path), "--quiet"],
+         str(yaml_path)],
         capture_output=True, text=True,
         env={**os.environ},
     )
