@@ -20,9 +20,17 @@ class IFieldEvaluator {
   virtual Field<Vec3> evaluate_B(const core::IFieldSource& source,
                                  const core::PointCloud& observations) const = 0;
 
-  virtual Field<Mat3x3> evaluate_grad_B(const core::IFieldSource& source,
-                                        const core::PointCloud& observations) const = 0;
+  // Field gradient (grad B)_{ij} = dB_i/dp_j. Defaults to zero so an evaluator
+  // with no analytic Jacobian (uniform, dipole) need not restate it; evaluators
+  // that model a gradient (gradient, Biot-Savart) override.
+  virtual Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
+                                        const core::PointCloud& observations) const {
+    return Field<Mat3x3>(observations.size());
+  }
 
+  // E field. Defaults to zero: the magnetostatic evaluators model no E field, so
+  // a caller using one as a PIC external-field source contributes zero E.
+  // Evaluators that model an E field (uniform with e0) override.
   virtual Field<Vec3> evaluate_E(const core::IFieldSource&,
                                  const core::PointCloud& observations) const {
     Field<Vec3> out(observations.size());

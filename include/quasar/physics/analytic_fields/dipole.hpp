@@ -12,8 +12,7 @@ class DipoleEvaluator final : public numerics::IFieldEvaluator {
 
   Field<Vec3> evaluate_B(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
-  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
-                                const core::PointCloud& observations) const override;
+  // evaluate_grad_B uses the base-class zero default (no analytic Jacobian).
 
  private:
   Vec3 moment_{0, 0, 1};

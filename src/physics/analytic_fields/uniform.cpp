@@ -18,13 +18,6 @@ Field<Vec3> UniformEvaluator::evaluate_E(const core::IFieldSource&,
   return out;
 }
 
-Field<Mat3x3> UniformEvaluator::evaluate_grad_B(const core::IFieldSource&,
-                                                const core::PointCloud& obs) const {
-  Field<Mat3x3> out(obs.size());
-  for (std::size_t i = 0; i < out.size(); ++i) out[i] = Mat3x3{};
-  return out;
-}
-
 QUASAR_REGISTER_FIELD_EVALUATOR("uniform", UniformEvaluator)
 
 }  // namespace quasar::analytic_fields

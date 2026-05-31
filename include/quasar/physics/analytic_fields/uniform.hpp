@@ -13,8 +13,7 @@ class UniformEvaluator final : public numerics::IFieldEvaluator {
                          const core::PointCloud& observations) const override;
   Field<Vec3> evaluate_E(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
-  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
-                                const core::PointCloud& observations) const override;
+  // evaluate_grad_B uses the base-class zero default (no analytic Jacobian).
 
  private:
   Vec3 b0_{0, 0, 0};
