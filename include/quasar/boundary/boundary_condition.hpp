@@ -58,6 +58,12 @@ class IParticleBoundary {
  public:
   virtual ~IParticleBoundary() = default;
   virtual void apply(pic::ParticleSpecies& species, Side side) const = 0;
+
+  // Post-deposit current closure. A reflecting BC (specular) deposits boundary-
+  // crossing current into the ghost cells; this hook folds it back into the
+  // interior as image current before the filter / E-update read J. Non-reflecting
+  // BCs (periodic, absorbing) leave this a no-op.
+  virtual void fold_current(JField2D<Real>& current, Side side) const {}
 };
 
 }  // namespace quasar::boundary

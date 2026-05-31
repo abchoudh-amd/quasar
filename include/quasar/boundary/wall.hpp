@@ -22,6 +22,7 @@ class PecFieldBC final : public IFieldBoundary {
 class SpecularParticleBC final : public IParticleBoundary {
  public:
   void apply(pic::ParticleSpecies& species, Side side) const override;
+  void fold_current(JField2D<Real>& current, Side side) const override;
 };
 
 class AbsorbingParticleBC final : public IParticleBoundary {

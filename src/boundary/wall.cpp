@@ -34,6 +34,10 @@ void SpecularParticleBC::apply(pic::ParticleSpecies& species, Side side) const {
   ::launch_pic_boundary_specular_particles(species.grid(), species, static_cast<int>(side), nullptr);
 }
 
+void SpecularParticleBC::fold_current(JField2D<Real>& current, Side side) const {
+  ::launch_pic_boundary_specular_foldback(current.grid, current, static_cast<int>(side), nullptr);
+}
+
 void AbsorbingParticleBC::apply(pic::ParticleSpecies& species, Side side) const {
   ::launch_pic_boundary_absorb_particles(species.grid(), species, static_cast<int>(side), nullptr);
 }

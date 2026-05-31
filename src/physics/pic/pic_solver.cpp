@@ -250,12 +250,11 @@ void EmPic2D3V::step(Real dt) {
     deposit_->deposit(s, current_, dt);
   }
   // On reflecting (specular) sides the deposit left boundary-crossing current in
-  // the ghost cells; fold it back into the interior as image current before the
-  // filter / E-update read the interior J. Periodic/absorbing sides need no fold.
+  // the ghost cells; the BC's fold_current hook folds it back into the interior
+  // as image current before the filter / E-update read J. Periodic/absorbing
+  // BCs leave fold_current a no-op.
   for (int side = 0; side < 4; ++side) {
-    if (cfg_.boundary.particle[side] == boundary::ParticleBoundaryKind::specular) {
-      ::launch_pic_boundary_specular_foldback(grid_, current_, side, nullptr);
-    }
+    particle_bcs_[side]->fold_current(current_, static_cast<Side>(side));
   }
   filters_.apply(current_, cfg_.boundary);
   fill_field_ghosts();
