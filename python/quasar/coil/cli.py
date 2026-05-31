@@ -30,7 +30,7 @@ def _do_run(args: argparse.Namespace) -> int:
         print(f"deck: {deck.raw}")
 
     # Select the evaluator by name through the registry (default Biot-Savart for
-    # coil design); the deck may override via output.evaluator in a later phase.
+    # coil design); a deck overrides via the top-level `evaluator.type` key.
     evaluator = _ms.create_field_evaluator(deck.evaluator_type)
     B = evaluator.evaluate_B(deck.conductors, deck.observation.points)
     # B is shape (M, 3).

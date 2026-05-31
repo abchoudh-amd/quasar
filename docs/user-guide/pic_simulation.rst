@@ -11,7 +11,11 @@ Deck schema (``quasar.pic.io``)
 
 .. code-block:: yaml
 
-   units: SI
+   units: SI                # 'SI' or 'normalized'
+
+   normalization:           # optional; required when units == normalized
+     reference_density_per_m3: 1.0e15
+     reference_species: electron
 
    domain:
      nx: 128
@@ -24,6 +28,9 @@ Deck schema (``quasar.pic.io``)
    numerics:
      fdtd_order: 2          # 2 or 4
      shape: cic             # 'cic' (linear) or 'tsc' (quadratic)
+     current_filter:        # optional; ordered current-smoothing pipeline
+       - {type: binomial, n_passes: 2}
+       # types: 'binomial', 'compensated_binomial'
 
    external_field:          # optional
      evaluator:
@@ -44,16 +51,28 @@ Deck schema (``quasar.pic.io``)
        mass_kg: 1.67262192369e-27
        n_particles: 20000
        initial:
-         distribution: maxwellian_uniform   # only option today
+         distribution: maxwellian_uniform   # 'maxwellian_uniform' or 'maxwellian_block'
          density_per_m3: 1.0e15
          temperature_eV: 10.0
          drift_v: [0.0, 0.0, 0.0]           # optional
+         # maxwellian_block also needs a region (metres):
+         # region: {x_min_m: ..., x_max_m: ..., y_min_m: ..., y_max_m: ...}
+
+   fields:                   # optional initial field seed (normalized decks)
+     initial:
+       type: seed_em_wave    # 'seed_perturbation' or 'seed_em_wave'
+       component: ez         # field component to seed
+       mode: [1, 0]          # spatial mode numbers
+       amplitude: 1.0e-3
 
    boundary:                 # optional, default all-periodic
      particle: [periodic, periodic, specular, specular]
                              # one of {periodic, specular, absorbing}; either a
                              # single string (applied to all four sides) or a
                              # 4-list ordered [x_lo, x_hi, y_lo, y_hi].
+     field: [periodic, periodic, pec, outflow]
+                             # one of {periodic, pec, outflow}; same single-string
+                             # or 4-list [x_lo, x_hi, y_lo, y_hi] form.
 
    time:
      dt_s: auto              # float or 'auto' (CFL-limited)
@@ -82,6 +101,8 @@ CLI
 Flags:
 
 * ``--seed N``            — RNG seed for initial-condition sampling (0).
+* ``--verbose``           — print informational output (the driver is quiet by
+  default).
 * ``--print-config``      — echo the resolved deck and ``dt`` before running.
 * ``--steps-override N``  — override ``time.steps`` (smoke tests / CI).
 * ``--log-every N``       — every ``N`` steps, print a progress line
@@ -98,7 +119,9 @@ Top-level keys:
 
 * ``final_step``, ``final_time_s``, ``nx``, ``ny``  — scalars in 1-D arrays.
 * ``external_bx``, ``external_by``, ``external_bz`` — sampled external
-  field, flat ``(nx+2)*(ny+2)`` arrays including one ghost cell per side.
+  field, flat ``(nx+2*g)*(ny+2*g)`` arrays where ``g = required_nghost(fdtd_order)``
+  (1 for 2nd-order, 2 for 4th-order). Use ``quasar.pic.postprocess.reshape_with_ghost``
+  to recover the interior view.
 * ``field_<name>`` — per-component Yee field at the final step (same layout).
 * ``species_<name>_{x,y,vx,vy,vz,weight,alive}`` — per-species particle
   snapshots when ``per_species: true``.

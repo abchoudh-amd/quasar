@@ -53,10 +53,10 @@ kernel via :py:class:`quasar.coil.BiotSavartEvaluator`, and writes a
 Flags:
 
 * ``--print-config``  — echo the parsed deck before running.
-* ``--quiet``         — suppress informational output.
+* ``--verbose``       — print informational output (quiet by default).
 
 (The PIC driver, ``quasar.pic.cli``, shares the same ``run <input.yaml>``
-subcommand shape and the ``--print-config`` flag; see
+subcommand shape and the ``--print-config`` / ``--verbose`` flags; see
 :doc:`pic_simulation` for its additional ``--seed`` / ``--log-every`` /
 ``--write-every`` / ``--steps-override`` options.)
 
@@ -73,6 +73,8 @@ Key            Meaning
 ``conductors`` Non-empty list of conductor specifications (see below).
 ``observation`` Single observation-set specification (see below).
 ``output``     Output archive descriptor (``format``, ``path``, ``fields``).
+``evaluator``  Optional. ``{type: <name>}`` selects the registry field
+               evaluator (default ``biot_savart``).
 ============== =================================================================
 
 Conductor spec
