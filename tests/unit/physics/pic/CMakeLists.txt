@@ -23,6 +23,7 @@ set(_quasar_pic_tests
   test_two_stream_growth_rate
   test_weibel_growth_rate
   test_fp32_vs_fp64
+  test_scheme_registry_linkage
 )
 
 foreach(_test_name IN LISTS _quasar_pic_tests)

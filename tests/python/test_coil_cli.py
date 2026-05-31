@@ -100,6 +100,92 @@ class CoilIoDeckParseTest(unittest.TestCase):
         finally:
             path.unlink()
 
+    def test_parses_plane_observation(self):
+        path = self._write("""
+            units: SI
+            conductors:
+              - name: loop
+                current_A: 1.0
+                geometry:
+                  type: circular_loop
+                  radius_m: 0.05
+                  center_xyz: [0, 0, 0]
+                  axis_xyz:   [0, 0, 1]
+                  n_segments: 16
+            observation:
+              type: plane
+              origin_xyz:  [0, 0, 0]
+              u_axis_xyz:  [1, 0, 0]
+              v_axis_xyz:  [0, 1, 0]
+              u_extent_m:  0.2
+              v_extent_m:  0.1
+              nu: 5
+              nv: 3
+            output: {format: npz, path: out.npz, fields: [B_xyz]}
+            """)
+        try:
+            deck = coil_io.load(path)
+        finally:
+            path.unlink()
+        self.assertEqual(deck.observation.kind, "plane")
+        self.assertEqual(deck.observation.dims, [5, 3])
+        self.assertEqual(len(deck.observation.points), 15)
+
+    def _deck_with_geometry(self, geom_inline: str) -> str:
+        # geom_inline is a YAML flow-mapping ({...}) so indentation is irrelevant.
+        return (
+            "units: SI\n"
+            "conductors:\n"
+            "  - name: c\n"
+            "    current_A: 1.0\n"
+            f"    geometry: {geom_inline}\n"
+            "observation: {type: points, points_xyz_m: [[0,0,0.2]]}\n"
+            "output: {format: npz, path: out.npz, fields: [B_xyz]}\n"
+        )
+
+    def test_parses_each_geometry_type(self):
+        geometries = {
+            "helix": ("{type: helix, center_xyz: [0,0,0], axis_xyz: [0,0,1], "
+                      "radius_m: 0.05, pitch_m: 0.01, n_turns: 2, "
+                      "n_segments_per_turn: 16}"),
+            "solenoid": ("{type: solenoid, center_xyz: [0,0,0], axis_xyz: [0,0,1], "
+                         "radius_m: 0.05, length_m: 0.1, n_turns: 4, "
+                         "n_segments_per_turn: 16}"),
+            "racetrack": ("{type: racetrack, center_xyz: [0,0,0], axis_xyz: [0,0,1], "
+                          "straight_length_m: 0.1, arc_radius_m: 0.02, "
+                          "n_arc_segments: 16}"),
+            "polygon": ("{type: polygon, center_xyz: [0,0,0], axis_xyz: [0,0,1], "
+                        "circumradius_m: 0.05, n_sides: 6}"),
+            "polyline": "{type: polyline, points_xyz_m: [[0,0,0],[0.1,0,0],[0.1,0.1,0]]}",
+        }
+        for name, geom in geometries.items():
+            with self.subTest(geometry=name):
+                path = self._write(self._deck_with_geometry(geom))
+                try:
+                    deck = coil_io.load(path)
+                finally:
+                    path.unlink()
+                self.assertEqual(len(deck.conductors), 1)
+
+    def test_rejects_missing_required_key_per_geometry(self):
+        # Each geometry should raise when a required field is absent (spot-check
+        # one omitted key per type).
+        missing = {
+            "helix": "{type: helix, axis_xyz: [0,0,1]}",
+            "solenoid": "{type: solenoid, axis_xyz: [0,0,1]}",
+            "racetrack": "{type: racetrack, axis_xyz: [0,0,1]}",
+            "polygon": "{type: polygon, axis_xyz: [0,0,1]}",
+            "polyline": "{type: polyline}",
+        }
+        for name, geom in missing.items():
+            with self.subTest(geometry=name):
+                path = self._write(self._deck_with_geometry(geom))
+                try:
+                    with self.assertRaises((ValueError, KeyError, TypeError)):
+                        coil_io.load(path)
+                finally:
+                    path.unlink()
+
 
 class CoilIoErrorPathTest(unittest.TestCase):
 

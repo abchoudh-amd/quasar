@@ -1,4 +1,4 @@
-foreach(_test_name IN ITEMS test_cic_shape test_tsc_shape test_stencil_order test_onesided_stencil test_filter_impulse_response)
+foreach(_test_name IN ITEMS test_cic_shape test_tsc_shape test_stencil_order test_onesided_stencil test_filter_impulse_response test_filter_registry_linkage)
   set(_target "quasar_${_test_name}")
   add_executable(${_target} "${_test_name}.cpp")
   if(_test_name STREQUAL "test_filter_impulse_response")
