@@ -2,20 +2,21 @@
 
 #include "quasar/core/observations.hpp"
 
+#include <stdexcept>
+
 namespace quasar::analytic_fields {
 
+// The file-backed grid evaluator is registered (so the deck name "file_grid" is
+// reserved for it) but not yet implemented. Fail loudly instead of silently
+// returning a zero field, which would look like a valid-but-trivial result.
 Field<Vec3> FileGridEvaluator::evaluate_B(const core::IFieldSource&,
-                                          const core::PointCloud& obs) const {
-  Field<Vec3> out(obs.size());
-  for (std::size_t i = 0; i < out.size(); ++i) out[i] = Vec3{0, 0, 0};
-  return out;
+                                          const core::PointCloud&) const {
+  throw std::logic_error{"file_grid evaluator is not yet implemented"};
 }
 
 Field<Mat3x3> FileGridEvaluator::evaluate_grad_B(const core::IFieldSource&,
-                                                 const core::PointCloud& obs) const {
-  Field<Mat3x3> out(obs.size());
-  for (std::size_t i = 0; i < out.size(); ++i) out[i] = Mat3x3{};
-  return out;
+                                                 const core::PointCloud&) const {
+  throw std::logic_error{"file_grid evaluator is not yet implemented"};
 }
 
 QUASAR_REGISTER_FIELD_EVALUATOR("file_grid", FileGridEvaluator)

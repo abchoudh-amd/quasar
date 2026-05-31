@@ -21,6 +21,7 @@ import numpy as np
 
 from .. import _core
 from .._paths import confine_output_path
+from ..coil.io import build_conductor_system
 from . import initial_conditions as ic
 from . import io as pic_io
 from ._units import Units
@@ -138,7 +139,7 @@ def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
     else:
         # Registry-selected evaluator by name (biot_savart, dipole, gradient, ...).
         evaluator = ms.create_field_evaluator(ev_type)
-    cs = pic_io.build_conductor_system(deck.external_field.conductors)
+    cs = build_conductor_system(deck.external_field.conductors)
     length_scale, e_field_scale, b_field_scale = units.external_scales()
     solver.sample_external_field(
         evaluator, cs, length_scale, e_field_scale, b_field_scale)
@@ -153,11 +154,10 @@ def _seed_fields(solver, deck: pic_io.PicDeck) -> None:
     if init is None:
         return
     nx, ny = deck.domain.nx, deck.domain.ny
-    # Recover nghost from the solver storage size: storage = (nx+2g)*(ny+2g).
-    storage = solver.storage_size()
-    g = 0
-    while (nx + 2 * (g + 1)) * (ny + 2 * (g + 1)) <= storage:
-        g += 1
+    # The deck carries the FDTD order, so the ghost width is known directly
+    # (required_nghost is the C++ authority); no need to reverse-engineer it from
+    # the storage size.
+    g = _core.pic.required_nghost(deck.numerics.fdtd_order)
     pitch = nx + 2 * g
     height = ny + 2 * g
 
@@ -291,12 +291,21 @@ def _do_run(args: argparse.Namespace) -> int:
         print(f"species: {[sp.name for sp in deck.species]}")
         print(f"dt     : {dt_si:.6e} s    steps: {deck.time.steps}")
 
-    snapshots: list[dict] = []
-    sim_time = 0.0
     # Confine the deck-supplied output path to the deck's own directory so a
     # stray absolute path or "../" cannot write outside it.
     out_path = confine_output_path(deck_path.parent, deck.diagnostics.output_path,
                                    label="diagnostics.output_path")
+    _run_loop(solver, deck, species_indices, units, dt, dt_si, out_path, args)
+    if args.print_config:
+        print(f"wrote  : {out_path}")
+    return 0
+
+
+def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
+              units: Units, dt: float, dt_si: float, out_path,
+              args: argparse.Namespace) -> None:
+    snapshots: list[dict] = []
+    sim_time = 0.0
     series: dict[str, list] = {"step": [], "time_s": []}
     for sp in deck.species:
         series[f"alive_{sp.name}"] = []
@@ -309,7 +318,7 @@ def _do_run(args: argparse.Namespace) -> int:
             # Device-side reduction; avoids a full 7-array host copy per logged step.
             series[f"alive_{sp.name}"].append(int(solver.species_alive_count(idx)))
 
-    def _checkpoint(step_done: int, t_now: float) -> None:
+    def _flush(step_done: int, t_now: float) -> None:
         final = _snapshot(solver, deck, species_indices, step_done, t_now, units)
         np.savez(out_path, **_flatten_for_npz(snapshots, final, series))
 
@@ -338,15 +347,11 @@ def _do_run(args: argparse.Namespace) -> int:
                   f"eta={remaining:.0f}s  alive: {alive_str}",
                   flush=True)
         if write_every > 0 and step_done % write_every == 0:
-            _checkpoint(step_done, sim_time)
+            _flush(step_done, sim_time)
 
     if log_every == 0 or deck.time.steps % log_every != 0:
         _record_scalars(deck.time.steps, sim_time)
-    final = _snapshot(solver, deck, species_indices, deck.time.steps, sim_time, units)
-    np.savez(out_path, **_flatten_for_npz(snapshots, final, series))
-    if args.print_config:
-        print(f"wrote  : {out_path}")
-    return 0
+    _flush(deck.time.steps, sim_time)
 
 
 def _build_parser() -> argparse.ArgumentParser:

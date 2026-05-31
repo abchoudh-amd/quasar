@@ -422,13 +422,3 @@ def load(path: Union[str, Path]) -> PicDeck:
     if not isinstance(data, dict):
         raise ValueError(f"{path}: top-level YAML must be a mapping")
     return parse(data)
-
-
-def build_conductor_system(conductors: list[dict]):
-    """Build a ConductorSystem from a list of conductor dicts.
-
-    Thin re-export of ``quasar.coil.io.build_conductor_system`` so the PIC
-    external-field loader shares the conductor schema with the coil workflow.
-    """
-    from ..coil.io import build_conductor_system as _build
-    return _build(conductors)

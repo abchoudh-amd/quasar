@@ -19,6 +19,8 @@ from typing import Sequence
 
 import numpy as np
 
+from .numerics import infer_nghost
+
 
 def rms(values) -> float:
     arr = np.asarray(values, dtype=float)
@@ -32,9 +34,7 @@ def reshape_with_ghost(flat: np.ndarray, nx: int, ny: int) -> np.ndarray:
     (1 for 2nd-order FDTD, 2 for 4th-order). The ghost width is recovered from the
     flat size rather than assumed, then ``g`` cells are stripped from each side. A
     buffer already sized ``nx * ny`` (no ghosts) is reshaped directly."""
-    g = 0
-    while (nx + 2 * (g + 1)) * (ny + 2 * (g + 1)) <= flat.size:
-        g += 1
+    g = infer_nghost(nx, ny, flat.size)
     if flat.size == (nx + 2 * g) * (ny + 2 * g) and g > 0:
         return flat.reshape(ny + 2 * g, nx + 2 * g)[g:-g, g:-g]
     return flat.reshape(ny, nx)
