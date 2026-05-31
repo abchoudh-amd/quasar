@@ -65,6 +65,7 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     field_kind_map = {
         "periodic": pic.FieldBoundaryKind.periodic,
         "pec": pic.FieldBoundaryKind.pec,
+        "outflow": pic.FieldBoundaryKind.outflow,
     }
     for side, name in enumerate(deck.boundary.field):
         cfg.boundary.set_field_side(side, field_kind_map[name])

@@ -9,6 +9,7 @@ set(_quasar_pic_hip_sources
   deposit_hip.hip
   boundary_periodic_hip.hip
   boundary_pec_hip.hip
+  boundary_outflow_hip.hip
   boundary_specular_hip.hip
   boundary_absorb_hip.hip
   particle_compact_hip.hip

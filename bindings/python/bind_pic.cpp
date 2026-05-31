@@ -133,7 +133,8 @@ void bind_pic(py::module_& m) {
 
   py::enum_<quasar::boundary::FieldBoundaryKind>(pic, "FieldBoundaryKind")
       .value("periodic", quasar::boundary::FieldBoundaryKind::periodic)
-      .value("pec", quasar::boundary::FieldBoundaryKind::pec);
+      .value("pec", quasar::boundary::FieldBoundaryKind::pec)
+      .value("outflow", quasar::boundary::FieldBoundaryKind::outflow);
 
   py::class_<quasar::boundary::BoundarySpec>(pic, "BoundarySpec")
       .def(py::init<>())

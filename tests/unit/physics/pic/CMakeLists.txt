@@ -7,6 +7,7 @@ set(_quasar_pic_tests
   test_specular_charge_conservation
   test_tsc_noise_reduction
   test_pec_plane_wave_reflection
+  test_outflow_field_absorption
   test_field_ghost_periodic_equivalence
   test_specular_particle
   test_absorbing_particle_decay

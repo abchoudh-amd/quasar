@@ -116,6 +116,19 @@ void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D&,
                                                quasar::YeeField2D<double>&, int side,
                                                double dt, quasar_stream_t);
 
+// First-order Mur outflow (open boundary). correct_b applies the same one-sided
+// B closure as the wall but pins nothing; correct_e advances the tangential-E
+// components with the Mur one-way-wave update using `mur_strips` (a per-face
+// history buffer of 4*len doubles: [a_u0, a_u1, b_u0, b_u1]). `init` non-zero
+// seeds the strips from the current field (first step) without advancing.
+void launch_pic_boundary_outflow_correct_b_order2(const quasar::Grid2D&,
+                                                  quasar::YeeField2D<double>&, int side,
+                                                  double dt, quasar_stream_t);
+void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2D&,
+                                                  quasar::YeeField2D<double>&, int side,
+                                                  double dt, double* mur_strips, int init,
+                                                  quasar_stream_t);
+
 // -- Particle array compaction -----------------------------------------------
 // Compacts alive particles to the front of every species array (order is not
 // preserved — irrelevant for PIC) and shrinks the active count. Returns the new

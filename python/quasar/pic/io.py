@@ -254,7 +254,7 @@ class PicDeck:
             if bc not in allowed_pbc:
                 raise ValueError(
                     f"boundary.particle[{i}] = {bc!r} must be one of {sorted(allowed_pbc)}")
-        allowed_fbc = {"periodic", "pec"}
+        allowed_fbc = {"periodic", "pec", "outflow"}
         for i, bc in enumerate(self.boundary.field):
             if bc not in allowed_fbc:
                 raise ValueError(
