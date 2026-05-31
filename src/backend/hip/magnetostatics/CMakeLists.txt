@@ -11,6 +11,7 @@ set(_quasar_magnetostatics_hip_sources
 
 quasar_add_hip_module(magnetostatics_hip
   SOURCES ${_quasar_magnetostatics_hip_sources})
+quasar_add_backend_src_include(magnetostatics_hip)
 
 # Stamp per-gfx launch parameters as PRIVATE compile definitions so both the
 # host launcher (kernel<<<grid,block,...>>>) and the device kernel

@@ -13,6 +13,7 @@ set_source_files_properties(${_quasar_backend_hip_sources}
   PROPERTIES LANGUAGE HIP)
 
 quasar_add_module(backend_hip SOURCES ${_quasar_backend_hip_sources})
+quasar_add_backend_src_include(backend_hip)
 
 add_subdirectory(magnetostatics)
 add_subdirectory(pic)

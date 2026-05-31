@@ -23,11 +23,14 @@ function(_quasar_define_module_target name sources is_hip registers)
     endforeach()
   endif()
 
+  # Only the public include tree is on the path. Modules talk to the backend
+  # through installed headers under include/quasar/backend/, never through a
+  # private src/backend/hip/ path. Backend HIP modules, which legitimately
+  # include their own private detail headers by `backend/hip/...` relative to
+  # src/, opt back in via quasar_add_backend_src_include() below.
   target_include_directories(${_target}
     PUBLIC
       $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    PRIVATE
-      ${PROJECT_SOURCE_DIR}/src
   )
 
   target_compile_features(${_target} PUBLIC cxx_std_20)
@@ -65,4 +68,16 @@ function(quasar_add_hip_module name)
       "quasar_add_hip_module(${name}) requires QUASAR_ENABLE_HIP=ON.")
   endif()
   _quasar_define_module_target("${name}" "${QAHM_SOURCES}" TRUE "${QAHM_REGISTERS}")
+endfunction()
+
+# Grants a backend target access to the private src/ tree so its translation
+# units can include backend-internal detail headers by `backend/hip/...` path
+# (hip_check.hpp, launch_params.hpp, the launch.hpp shim). Restricted to the
+# backend layer; non-backend modules must use installed public headers only.
+function(quasar_add_backend_src_include name)
+  set(_target "quasar_${name}")
+  if(NOT TARGET ${_target})
+    message(FATAL_ERROR "quasar_add_backend_src_include: no target ${_target}")
+  endif()
+  target_include_directories(${_target} PRIVATE ${PROJECT_SOURCE_DIR}/src)
 endfunction()

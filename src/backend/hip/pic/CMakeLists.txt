@@ -16,3 +16,4 @@ set(_quasar_pic_hip_sources
 )
 
 quasar_add_hip_module(pic_hip SOURCES ${_quasar_pic_hip_sources})
+quasar_add_backend_src_include(pic_hip)

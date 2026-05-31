@@ -3,7 +3,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/boundary/boundary_condition.hpp"
 
-#include "backend/hip/pic/launch.hpp"
+#include "quasar/backend/pic_kernels.hpp"
 
 namespace quasar::numerics {
 
