@@ -34,9 +34,12 @@ struct DeviceError : public std::runtime_error {
 int  device_count();
 bool has_hip_runtime();
 
-// Device-memory primitives (implemented over HIP in src/backend/hip/). Returned
-// allocations are zero-initialized. Throws DeviceError on failure.
+// Device-memory primitives (implemented over HIP in src/backend/hip/). Throws
+// DeviceError on failure. device_alloc zero-initializes the allocation;
+// device_alloc_uninit skips the zero-fill for buffers a kernel overwrites in
+// full before any read (transient scratch / output buffers).
 void* device_alloc(std::size_t bytes);
+void* device_alloc_uninit(std::size_t bytes);
 void  device_free(void* ptr) noexcept;
 void  device_memset(void* ptr, int value, std::size_t bytes);
 void  device_memcpy_h2d(void* dst, const void* src, std::size_t bytes);

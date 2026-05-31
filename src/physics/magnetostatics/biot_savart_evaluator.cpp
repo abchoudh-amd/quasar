@@ -142,7 +142,10 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
   }
 
   const UploadedInputs<T> in{seg, pts, cfg.stream};
-  DeviceBuffer<T> d_Bx(M), d_By(M), d_Bz(M);
+  // The kernel writes every observation-point entry, so skip the zero-fill.
+  DeviceBuffer<T> d_Bx(M, ::quasar::backend::uninitialized);
+  DeviceBuffer<T> d_By(M, ::quasar::backend::uninitialized);
+  DeviceBuffer<T> d_Bz(M, ::quasar::backend::uninitialized);
 
   dispatch_launch_B<T>(
       in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
@@ -189,8 +192,9 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
   }
 
   const UploadedInputs<T> in{seg, pts, cfg.stream};
-  DeviceBuffer<T> d_G(static_cast<std::size_t>(9)
-                      * static_cast<std::size_t>(M));
+  // The kernel writes every (component, point) entry, so skip the zero-fill.
+  DeviceBuffer<T> d_G(static_cast<std::size_t>(9) * static_cast<std::size_t>(M),
+                      ::quasar::backend::uninitialized);
 
   dispatch_launch_gradB<T>(
       in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),

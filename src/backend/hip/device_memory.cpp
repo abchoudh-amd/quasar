@@ -13,9 +13,14 @@ namespace {
 ::hipStream_t as_hip(stream_t s) noexcept { return static_cast<::hipStream_t>(s); }
 }  // namespace
 
-void* device_alloc(std::size_t bytes) {
+void* device_alloc_uninit(std::size_t bytes) {
   void* ptr = nullptr;
   QUASAR_HIP_CHECK(::hipMalloc(&ptr, bytes));
+  return ptr;
+}
+
+void* device_alloc(std::size_t bytes) {
+  void* ptr = device_alloc_uninit(bytes);
   // Zero-initialize so freshly allocated buffers never observe recycled memory.
   QUASAR_HIP_CHECK(::hipMemset(ptr, 0, bytes));
   return ptr;

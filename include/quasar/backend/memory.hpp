@@ -8,6 +8,11 @@
 
 namespace quasar::backend {
 
+// Tag selecting an uninitialized device allocation (skips the zero-fill) for a
+// buffer a kernel overwrites in full before any read.
+struct uninitialized_t {};
+inline constexpr uninitialized_t uninitialized{};
+
 // RAII owner of a device-side buffer. Move-only. Allocation/free goes through
 // hipMalloc/hipFree wrapped in QUASAR_HIP_CHECK. Async copy variants accept a
 // quasar::backend::stream_t.
@@ -21,6 +26,14 @@ class DeviceBuffer {
       // device_alloc zero-initializes, so freshly constructed fields/particles
       // never observe recycled device memory from a prior allocation.
       ptr_ = device_alloc(bytes_);
+    }
+  }
+
+  // Allocate without the zero-fill. Only valid when the caller writes every
+  // element before reading (transient scratch / kernel-output buffers).
+  DeviceBuffer(std::size_t n, uninitialized_t) : size_{n}, bytes_{n * sizeof(T)} {
+    if (n != 0) {
+      ptr_ = device_alloc_uninit(bytes_);
     }
   }
 
