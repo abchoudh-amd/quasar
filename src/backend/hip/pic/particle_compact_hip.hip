@@ -1,5 +1,4 @@
 #include "quasar/backend/device.hpp"
-#include "quasar/backend/memory.hpp"
 #include "quasar/physics/pic/species.hpp"
 
 #include "backend/hip/hip_check.hpp"
@@ -9,7 +8,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 // Stream-compaction of the particle arrays: alive particles are scattered to the
 // front of scratch buffers via an atomic running counter (order is not
@@ -51,16 +49,18 @@ __global__ void compact_scatter_kernel(std::size_t n,
   oalive[dst] = 1;
 }
 
-// Block-wise reduction of alive flags into per-block partials.
+// Reduction of alive flags into a single device counter: each block sums its
+// alive flags in shared memory, then one thread folds the block total into the
+// global counter. The caller zeroes the counter before launch.
 __global__ void alive_count_kernel(std::size_t n, const unsigned char* __restrict__ alive,
-                                   unsigned int* __restrict__ partials) {
+                                   unsigned int* __restrict__ total) {
   __shared__ unsigned int s_count;
   if (threadIdx.x == 0) s_count = 0;
   __syncthreads();
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p < n && alive[p] != 0) atomicAdd(&s_count, 1u);
   __syncthreads();
-  if (threadIdx.x == 0) partials[blockIdx.x] = s_count;
+  if (threadIdx.x == 0) atomicAdd(total, s_count);
 }
 
 }  // namespace
@@ -116,13 +116,15 @@ extern "C" std::size_t launch_pic_alive_count(const quasar::pic::ParticleSpecies
   if (n == 0) return 0;
   const dim3 block(256);
   const dim3 grid((n + block.x - 1) / block.x);
-  quasar::backend::DeviceBuffer<unsigned int> partials{grid.x};
-  hipLaunchKernelGGL(alive_count_kernel, grid, block, 0, stream, n, s.alive(),
-                     partials.device_ptr());
+  // Reuse the species-owned compaction counter for the reduction instead of
+  // allocating (and zero-filling) a per-block partials buffer every call.
+  unsigned int* counter = s.compact_counter();
+  QUASAR_HIP_CHECK(::hipMemsetAsync(counter, 0, sizeof(unsigned int), stream));
+  hipLaunchKernelGGL(alive_count_kernel, grid, block, 0, stream, n, s.alive(), counter);
   QUASAR_HIP_CHECK(::hipGetLastError());
-  std::vector<unsigned int> host(grid.x);
-  partials.copy_to_host(host.data(), grid.x);
-  std::size_t total = 0;
-  for (const auto v : host) total += v;
+  unsigned int total = 0;
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(&total, counter, sizeof(unsigned int),
+                                    ::hipMemcpyDeviceToHost, stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
   return total;
 }

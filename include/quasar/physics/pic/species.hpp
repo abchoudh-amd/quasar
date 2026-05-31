@@ -78,6 +78,9 @@ class ParticleSpecies {
   Real* compact_weight() noexcept { return c_weight_.device_ptr(); }
   std::uint8_t* compact_alive() noexcept { return c_alive_.device_ptr(); }
   unsigned int* compact_counter() noexcept { return c_counter_.device_ptr(); }
+  // const overload: the counter is device scratch (mutable), so a logically-const
+  // read-only reduction (alive_count) can reuse it without copying the species.
+  unsigned int* compact_counter() const noexcept { return c_counter_.device_ptr(); }
 
  private:
   std::string name_{"species"};
@@ -105,7 +108,8 @@ class ParticleSpecies {
   backend::DeviceBuffer<Real> c_vz_{};
   backend::DeviceBuffer<Real> c_weight_{};
   backend::DeviceBuffer<std::uint8_t> c_alive_{};
-  backend::DeviceBuffer<unsigned int> c_counter_{};
+  // mutable: device scratch reused by the logically-const alive_count reduction.
+  mutable backend::DeviceBuffer<unsigned int> c_counter_{};
 };
 
 }  // namespace quasar::pic
