@@ -7,12 +7,19 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
+- PIC: `outflow` field boundary kind (`boundary.field: outflow`) — a first-order
+  characteristic (Mur) open wall that lets outgoing radiation leave with little
+  reflection, at both 2nd- and 4th-order FDTD. Stable as an outflow channel
+  (outflow on one axis) or mixed with `pec` walls; an open box with outflow on
+  all four sides is not yet stable (first-order Mur corners need a dedicated
+  corner closure).
 - PIC: support for `units: normalized` decks and physically consistent `units: SI`
   decks. SI decks are non-dimensionalized through `Normalization` before stepping
   (grid, dt, charge/mass/velocity/density, external field) and diagnostics are
   converted back to SI on output.
 - PIC field boundary conditions are live: per-side `boundary.field` (`periodic` /
-  `pec`) selectable from the deck, with stable energy-conserving PEC reflection.
+  `pec` / `outflow`) selectable from the deck, with stable energy-conserving PEC
+  reflection.
 - PIC current-smoothing filter pipeline is wired from the deck
   (`numerics.current_filter`: `binomial` / `compensated_binomial`, with passes).
 - Field-evaluator selection by registry name: `external_field.evaluator.type` may
@@ -54,6 +61,22 @@ interfaces may still change between entries.
   non-periodic (e.g. absorbing) walls can coexist per side.
 
 ### Changed
+- PIC field boundaries are now imposed by one-sided / characteristic node
+  corrections after each curl rather than by filling a ghost halo. `pec` keeps
+  its reflecting, energy-conserving behavior (tangential E / normal B pinned;
+  remaining components closed with one-sided stencils) at both FDTD orders; the
+  4th-order boundary closure is locally reduced to 2nd order on the outer two
+  layers (interior 4th-order convergence is preserved). Periodic still uses the
+  ghost wrap.
+- The PIC kernel-launch ABIs moved to installed public headers
+  (`include/quasar/backend/pic_kernels.hpp`, `magnetostatics_kernels.hpp`); the
+  physics/boundary/numerics modules no longer reach into the private
+  `src/backend/hip/` tree (the blanket `src/` include path was removed from the
+  module CMake helper and re-granted only to the backend HIP modules).
+- The numerics `IFieldEvaluator` takes an axis-neutral `core::IFieldSource`
+  (implemented by `magnetostatics::ConductorSystem`) instead of naming the
+  magnetostatics type directly, so the analytic-field evaluators no longer depend
+  on the magnetostatics module.
 - Backend headers under `include/quasar/backend/` are now HIP-free: an opaque
   `stream_t` and backend-neutral device-memory free functions, with all HIP calls
   confined to `src/backend/hip/`. The kernel-launch ABIs no longer leak

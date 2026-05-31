@@ -106,6 +106,15 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
     // closure must rewrite; let each field BC pick its order-dependent kernel.
     field_bcs_[side]->configure(cfg_.fdtd_order);
   }
+  // Corner ownership: the field-BC corrections run x-faces before y-faces, so the
+  // x-face owns the doubly-tangential ez at a corner. Tell each y-face which of
+  // its end columns abut a non-periodic x-face so it can skip ez there (the
+  // x-face's pin / Mur already handled it). PEC y-faces ignore this (idempotent).
+  const auto& fb = cfg_.boundary.field;
+  const bool x_lo_np = fb[0] != boundary::FieldBoundaryKind::periodic;
+  const bool x_hi_np = fb[1] != boundary::FieldBoundaryKind::periodic;
+  field_bcs_[2]->set_corner_skip(x_lo_np, x_hi_np);  // y_lo
+  field_bcs_[3]->set_corner_skip(x_lo_np, x_hi_np);  // y_hi
   if (cfg_.fdtd_order == 4) {
     // The 4th-order staggered curl reads two cells past each boundary, so the
     // ghost-aware stencil + PEC mirror need at least two ghost layers.

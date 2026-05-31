@@ -45,6 +45,13 @@ class IFieldBoundary {
   // Lets a BC pick an order-dependent kernel once at construction (the FDTD
   // order fixes how many boundary layers the closure must rewrite).
   virtual void configure(int fdtd_order) {}
+
+  // For a y-face BC: whether the x_lo / x_hi ends are non-periodic. The field-BC
+  // corrections run x-faces before y-faces, so x owns the shared corner node
+  // (the doubly-tangential ez). A y-face uses this to skip ez at a corner the
+  // x-face already owns (its pin or one-way-wave update wins), avoiding a double
+  // update. Only matters for the one-sided/characteristic y-face BCs.
+  virtual void set_corner_skip(bool skip_lo, bool skip_hi) {}
 };
 
 class IParticleBoundary {

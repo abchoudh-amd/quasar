@@ -106,6 +106,62 @@ TEST(PicOutflowFieldAbsorption, ChannelBleedsToZeroOrder4) {
   run_channel_bleed(4, 2, 0.05);
 }
 
+// NOTE: an open box with outflow on ALL FOUR sides is intentionally not tested.
+// First-order Mur is weakly unstable where two Mur walls meet at a corner (the
+// two one-way-wave conditions couple through the shared corner node), so an
+// all-outflow box can grow without a dedicated corner-extrapolation closure,
+// which is out of scope here. The supported, stable configurations are an
+// outflow channel (outflow on one axis, periodic/other on the rest) and outflow
+// mixed with PEC walls (the PEC pin breaks the corner feedback) -- both covered
+// above and below. See docs/CHANGELOG for the documented limitation.
+
+// Mixed corner: PEC on the x walls, outflow on the y walls. The PEC corner must
+// win for the doubly-tangential ez (pinned 0, not Mur'd), the box must never gain
+// energy, and the outflow y walls must still remove some.
+TEST(PicOutflowFieldAbsorption, PecXOutflowYCornerStable) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const int nx = 64, ny = 64;
+  quasar::Grid2D g{nx, ny, 1.0, 1.0, 0.0, 0.0, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, 1};
+  cfg.boundary.field[static_cast<int>(quasar::Side::x_lo)] =
+      quasar::boundary::FieldBoundaryKind::pec;
+  cfg.boundary.field[static_cast<int>(quasar::Side::x_hi)] =
+      quasar::boundary::FieldBoundaryKind::pec;
+  cfg.boundary.field[static_cast<int>(quasar::Side::y_lo)] =
+      quasar::boundary::FieldBoundaryKind::outflow;
+  cfg.boundary.field[static_cast<int>(quasar::Side::y_hi)] =
+      quasar::boundary::FieldBoundaryKind::outflow;
+  quasar::pic::EmPic2D3V solver{cfg};
+
+  // A pulse with a +y component so the outflow walls actually see flux.
+  auto& F = solver.fields();
+  std::vector<double> ez(g.storage_size(), 0.0), bx(g.storage_size(), 0.0);
+  for (int j = 0; j < ny; ++j) {
+    for (int i = 0; i < nx; ++i) {
+      const double x = (i + 0.5) / nx, y = (j + 0.5) / ny;
+      const double e = std::exp(-(((x - 0.5) * (x - 0.5) + (y - 0.5) * (y - 0.5)))
+                                / (2 * 0.06 * 0.06));
+      ez[g.index(i, j)] = e;
+      bx[g.index(i, j)] = e;  // Ez/Bx pair -> +y propagation component
+    }
+  }
+  F.ez.copy_from_host(ez.data(), ez.size());
+  F.bx.copy_from_host(bx.data(), bx.size());
+
+  const double dt = 0.5 * g.dx();
+  const double e0 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+  double emax = e0;
+  for (int s = 0; s < static_cast<int>(3.0 / dt); ++s) {
+    solver.step(dt);
+    emax = std::max(emax, quasar::pic::total_em_energy(solver.fields(), solver.grid()));
+  }
+  const double e1 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+  // Corner ez is shorted by the PEC pin (no Mur double-update), so no growth.
+  EXPECT_LT(emax, 1.2 * e0) << "mixed PEC/outflow corner grew energy: " << emax;
+  // The open y walls remove energy overall.
+  EXPECT_LT(e1, 0.7 * e0) << "outflow y walls did not absorb: " << e0 << " -> " << e1;
+}
+
 // Long-run stability guard for the 4th-order one-sided boundary closure: an
 // outflow channel must never gain energy over many thousands of steps (the
 // reduced-order closure is energy-neutral; a sign error would grow unboundedly).

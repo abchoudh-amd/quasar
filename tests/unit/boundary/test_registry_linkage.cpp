@@ -23,4 +23,5 @@ TEST(BoundaryRegistryLinkage, FieldBoundariesAreRegistered) {
       ::quasar::Registry<::quasar::boundary::IFieldBoundary>::instance();
   EXPECT_TRUE(reg.contains("periodic"));
   EXPECT_TRUE(reg.contains("pec"));
+  EXPECT_TRUE(reg.contains("outflow"));
 }

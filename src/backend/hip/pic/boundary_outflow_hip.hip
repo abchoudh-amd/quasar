@@ -62,7 +62,8 @@ __global__ void outflow_mur_x_kernel(quasar::Grid2D g, int side, double dt,
 }
 
 __global__ void outflow_mur_y_kernel(quasar::Grid2D g, int side, double dt,
-                                     double* ex, double* ez, double* mur, int init) {
+                                     double* ex, double* ez, double* mur, int init,
+                                     int skip_lo, int skip_hi) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= g.nx) return;
   const int len = g.nx;
@@ -71,8 +72,14 @@ __global__ void outflow_mur_y_kernel(quasar::Grid2D g, int side, double dt,
   const double coeff = (dt - g.dy()) / (dt + g.dy());
   const std::size_t kw = g.index(i, jw);
   const std::size_t ka = g.index(i, ja);
+  // ex is tangential only to this y-face -> always Mur it.
   mur_advance(ex, mur + 0 * len + i, mur + 1 * len + i, kw, ka, coeff, init != 0);
-  mur_advance(ez, mur + 2 * len + i, mur + 3 * len + i, kw, ka, coeff, init != 0);
+  // ez is tangential to BOTH axes; at a corner an abutting non-periodic x-face
+  // already owns it (ran first), so skip ez there to avoid a double update.
+  const bool corner = (i == 0 && skip_lo != 0) || (i == g.nx - 1 && skip_hi != 0);
+  if (!corner) {
+    mur_advance(ez, mur + 2 * len + i, mur + 3 * len + i, kw, ka, coeff, init != 0);
+  }
 }
 
 // B closure (no pin). 2nd-order backward B-curl overruns only the low wall.
@@ -205,6 +212,7 @@ extern "C" void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2
                                                              quasar::YeeField2D<double>& f,
                                                              int side, double dt,
                                                              double* mur_strips, int init,
+                                                             int skip_lo, int skip_hi,
                                                              quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   const dim3 block(256);
@@ -217,7 +225,8 @@ extern "C" void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2
     if (g.nx <= 0) return;
     const dim3 grid((g.nx + block.x - 1) / block.x);
     hipLaunchKernelGGL(outflow_mur_y_kernel, grid, block, 0, hip_stream, g, side, dt,
-                       f.ex.device_ptr(), f.ez.device_ptr(), mur_strips, init);
+                       f.ex.device_ptr(), f.ez.device_ptr(), mur_strips, init,
+                       skip_lo, skip_hi);
   }
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
@@ -248,6 +257,7 @@ extern "C" void launch_pic_boundary_outflow_correct_e_order4(const quasar::Grid2
                                                              quasar::YeeField2D<double>& f,
                                                              int side, double dt,
                                                              double* mur_strips, int init,
+                                                             int skip_lo, int skip_hi,
                                                              quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   const dim3 block(256);
@@ -268,7 +278,8 @@ extern "C" void launch_pic_boundary_outflow_correct_e_order4(const quasar::Grid2
                        f.ex.device_ptr(), f.ez.device_ptr(),
                        f.bx.device_ptr(), f.bz.device_ptr());
     hipLaunchKernelGGL(outflow_mur_y_kernel, grid, block, 0, hip_stream, g, side, dt,
-                       f.ex.device_ptr(), f.ez.device_ptr(), mur_strips, init);
+                       f.ex.device_ptr(), f.ez.device_ptr(), mur_strips, init,
+                       skip_lo, skip_hi);
   }
   QUASAR_HIP_CHECK(::hipGetLastError());
 }

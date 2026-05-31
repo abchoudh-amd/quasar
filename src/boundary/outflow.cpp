@@ -27,12 +27,16 @@ void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt
     init = true;       // first call: seed the history from the live field only
     primed_ = true;
   }
+  const int slo = skip_lo_ ? 1 : 0;
+  const int shi = skip_hi_ ? 1 : 0;
   if (order_ == 4) {
     ::launch_pic_boundary_outflow_correct_e_order4(
-        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0, nullptr);
+        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0,
+        slo, shi, nullptr);
   } else {
     ::launch_pic_boundary_outflow_correct_e_order2(
-        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0, nullptr);
+        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0,
+        slo, shi, nullptr);
   }
 }
 
