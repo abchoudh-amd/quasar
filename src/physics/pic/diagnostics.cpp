@@ -1,6 +1,6 @@
 #include "quasar/physics/pic/diagnostics.hpp"
 
-#include "quasar/backend/pic_kernels.hpp"
+#include "quasar/physics/pic/kernels.hpp"
 
 #include <cmath>
 #include <cstddef>

@@ -3,7 +3,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/core/registry.hpp"
 
-#include "quasar/backend/pic_kernels.hpp"
+#include "quasar/physics/pic/kernels.hpp"
 
 #include <stdexcept>
 #include <string>

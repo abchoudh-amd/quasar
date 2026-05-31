@@ -1,11 +1,12 @@
-// Public, backend-neutral declaration of the PIC kernel-launch ABI.
+// Backend-neutral declaration of the PIC kernel-launch ABI.
 //
-// Every launch_pic_* entry point defined under src/backend/hip/pic/ is declared
-// here exactly once and included both by its .hip definition (so a signature
-// drift is a compile error) and by every caller in the physics/boundary/numerics
-// layers. Callers reach the backend only through this installed header, never
-// through a private src/backend/hip/ path. Do not hand-redeclare these
-// extern "C" prototypes anywhere else.
+// This is a per-physics seam (it speaks pic types like ParticleSpecies / JField2D),
+// so it lives under physics/pic/ rather than backend/ — the backend axis stays
+// physics-neutral (device.hpp / memory.hpp only). Every launch_pic_* entry point
+// defined under src/backend/hip/pic/ is declared here exactly once and included
+// both by its .hip definition (so a signature drift is a compile error) and by
+// every caller in the physics/boundary/numerics layers. Callers reach the backend
+// only through this header; do not hand-redeclare these extern "C" prototypes.
 #pragma once
 
 #include "quasar/backend/device.hpp"

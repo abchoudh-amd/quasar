@@ -2,7 +2,7 @@
 
 #include "quasar/physics/pic/species.hpp"
 
-#include "quasar/backend/pic_kernels.hpp"
+#include "quasar/physics/pic/kernels.hpp"
 
 namespace quasar::boundary {
 
