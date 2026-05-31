@@ -5,6 +5,7 @@
 #include "physics/magnetostatics/detail/biot_savart_segment.hpp"
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/magnetostatics/launch_params.hpp"
+#include "backend/hip/magnetostatics/biot_savart_tile.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -13,6 +14,7 @@ namespace {
 using ::quasar::magnetostatics::detail::kBlockSize;
 using ::quasar::magnetostatics::detail::kTileSegments;
 using ::quasar::magnetostatics::detail::segment_B;
+using ::quasar::magnetostatics::detail::tiled_segment_reduce;
 
 template <class T>
 __global__ void biot_savart_B_kernel(
@@ -22,14 +24,6 @@ __global__ void biot_savart_B_kernel(
     const T* __restrict__ px,   const T* __restrict__ py,   const T* __restrict__ pz,
     int M,
     T* __restrict__ Bx,         T* __restrict__ By,         T* __restrict__ Bz) {
-  __shared__ T s_ax[kTileSegments];
-  __shared__ T s_ay[kTileSegments];
-  __shared__ T s_az[kTileSegments];
-  __shared__ T s_bx[kTileSegments];
-  __shared__ T s_by[kTileSegments];
-  __shared__ T s_bz[kTileSegments];
-  __shared__ T s_I [kTileSegments];
-
   const int m      = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x)
                      + static_cast<int>(threadIdx.x);
   const bool active = (m < M);
@@ -39,44 +33,19 @@ __global__ void biot_savart_B_kernel(
     p = ::quasar::Vec3T<T>{px[m], py[m], pz[m]};
   }
 
-  T Bx_acc = T{0};
-  T By_acc = T{0};
-  T Bz_acc = T{0};
-
-  for (int base = 0; base < N; base += kTileSegments) {
-    const int lim = (N - base < kTileSegments) ? (N - base) : kTileSegments;
-
-    for (int t = static_cast<int>(threadIdx.x); t < lim;
-         t += static_cast<int>(blockDim.x)) {
-      const int g = base + t;
-      s_ax[t] = ax[g];
-      s_ay[t] = ay[g];
-      s_az[t] = az[g];
-      s_bx[t] = bx[g];
-      s_by[t] = by[g];
-      s_bz[t] = bz[g];
-      s_I [t] = I_[g];
-    }
-    __syncthreads();
-
-    if (active) {
-      for (int s = 0; s < lim; ++s) {
-        const ::quasar::Vec3T<T> a_seg{s_ax[s], s_ay[s], s_az[s]};
-        const ::quasar::Vec3T<T> b_seg{s_bx[s], s_by[s], s_bz[s]};
-        const ::quasar::Vec3T<T> dB = segment_B<T>(a_seg, b_seg, p, s_I[s]);
-        Bx_acc += dB.x;
-        By_acc += dB.y;
-        Bz_acc += dB.z;
-      }
-    }
-
-    __syncthreads();
-  }
+  ::quasar::Vec3T<T> B_acc{T{0}, T{0}, T{0}};
+  tiled_segment_reduce<T>(ax, ay, az, bx, by, bz, I_, N, active,
+      [&](const ::quasar::Vec3T<T>& a_seg, const ::quasar::Vec3T<T>& b_seg, T I) {
+        const ::quasar::Vec3T<T> dB = segment_B<T>(a_seg, b_seg, p, I);
+        B_acc.x += dB.x;
+        B_acc.y += dB.y;
+        B_acc.z += dB.z;
+      });
 
   if (active) {
-    Bx[m] = Bx_acc;
-    By[m] = By_acc;
-    Bz[m] = Bz_acc;
+    Bx[m] = B_acc.x;
+    By[m] = B_acc.y;
+    Bz[m] = B_acc.z;
   }
 }
 
