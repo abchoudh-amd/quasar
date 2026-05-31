@@ -274,10 +274,9 @@ class SquareToroidPicExampleTest(unittest.TestCase):
 
 
 # A minimal, self-contained SI PIC deck. The PIC example decks under examples/
-# are written in `units: normalized` (and assorted shorthand the loader does not
-# accept), so they are not yet runnable through the CLI; rather than depend on
-# them, these tests drive a known-good inline deck that exercises the same
-# end-to-end run path.
+# are runnable through the CLI and covered by PicAspirationalExampleTests below;
+# this inline deck is kept as a fast, deterministic SI smoke case that exercises
+# the same end-to-end run path without depending on any example file.
 _MINIMAL_PIC_DECK = """\
 units: SI
 domain: {nx: 16, ny: 16, lx_m: 1.0, ly_m: 1.0}

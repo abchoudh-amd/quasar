@@ -12,6 +12,8 @@ set(_quasar_python_tests
   test_pic_initial_conditions
   test_pic_cli
   test_pic_numerics
+  test_pic_postprocess
+  test_pic_units
   test_pic_smoke
 )
 

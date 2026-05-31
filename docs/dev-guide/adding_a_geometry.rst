@@ -5,6 +5,13 @@ The magnetostatics module ships six geometry generators
 (``circular_loop``, ``helix``, ``solenoid``, ``racetrack``, ``polygon``,
 ``generic_polyline``). This page is a recipe for adding a seventh.
 
+.. note::
+
+   The C++ free function ``generic_polyline`` is the one generator whose YAML
+   ``type`` discriminator differs from its C++ name: decks select it with
+   ``type: polyline`` (see ``python/quasar/coil/io.py``), not
+   ``generic_polyline``. The other five share one name across both layers.
+
 The walk-through tracks three layers that have to stay in lock-step:
 
 1. the C++ free function (host-side polyline construction),
