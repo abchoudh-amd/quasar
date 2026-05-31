@@ -56,6 +56,8 @@ class EmPic2D3V {
 
  private:
   void fill_field_ghosts();
+  void correct_field_boundaries_b(Real dt);
+  void correct_field_boundaries_e(Real dt);
   void apply_particle_bcs(ParticleSpecies& s);
   bool has_absorbing_boundary() const noexcept;
 

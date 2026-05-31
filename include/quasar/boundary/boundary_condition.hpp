@@ -13,7 +13,7 @@ class ParticleSpecies;
 
 namespace quasar::boundary {
 
-enum class FieldBoundaryKind { periodic, pec };
+enum class FieldBoundaryKind { periodic, pec, outflow };
 enum class ParticleBoundaryKind { periodic, specular, absorbing };
 
 struct BoundarySpec {
@@ -28,7 +28,23 @@ struct BoundarySpec {
 class IFieldBoundary {
  public:
   virtual ~IFieldBoundary() = default;
-  virtual void fill_ghosts(YeeField2D<Real>& field, Side side) const = 0;
+
+  // Pre-curl ghost fill. Used by the periodic BC (copy opposite edge) so the
+  // ghost-aware stencil wraps; the one-sided/characteristic BCs (pec, outflow)
+  // leave this a no-op and instead correct the boundary nodes after each curl.
+  virtual void fill_ghosts(YeeField2D<Real>& field, Side side) const {}
+
+  // Post-update boundary-node corrections. A one-sided / characteristic closure
+  // overwrites the boundary row the interior curl just computed (which read
+  // stale ghosts) with the correct one-sided stencil + closure. correct_after_b
+  // runs right after advance_b; correct_after_e right after advance_e (so the
+  // outflow Mur update can read the just-updated adjacent interior node).
+  virtual void correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const {}
+  virtual void correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const {}
+
+  // Lets a BC pick an order-dependent kernel once at construction (the FDTD
+  // order fixes how many boundary layers the closure must rewrite).
+  virtual void configure(int fdtd_order) {}
 };
 
 class IParticleBoundary {

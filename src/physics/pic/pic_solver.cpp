@@ -81,6 +81,7 @@ std::string_view field_bc_name(boundary::FieldBoundaryKind k) {
   switch (k) {
     case boundary::FieldBoundaryKind::periodic: return "periodic";
     case boundary::FieldBoundaryKind::pec:      return "pec";
+    case boundary::FieldBoundaryKind::outflow:  return "outflow";
   }
   throw std::invalid_argument{"EmPic2D3V: unknown FieldBoundaryKind"};
 }
@@ -101,6 +102,9 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
         particle_bc_name(cfg_.boundary.particle[side]));
     field_bcs_[side] = Registry<boundary::IFieldBoundary>::instance().create(
         field_bc_name(cfg_.boundary.field[side]));
+    // The FDTD order fixes how many boundary layers a one-sided/characteristic
+    // closure must rewrite; let each field BC pick its order-dependent kernel.
+    field_bcs_[side]->configure(cfg_.fdtd_order);
   }
   if (cfg_.fdtd_order == 4) {
     // The 4th-order staggered curl reads two cells past each boundary, so the
@@ -165,6 +169,18 @@ void EmPic2D3V::fill_field_ghosts() {
   }
 }
 
+void EmPic2D3V::correct_field_boundaries_b(Real dt) {
+  for (int side = 0; side < 4; ++side) {
+    field_bcs_[side]->correct_after_b(fields_, static_cast<Side>(side), dt);
+  }
+}
+
+void EmPic2D3V::correct_field_boundaries_e(Real dt) {
+  for (int side = 0; side < 4; ++side) {
+    field_bcs_[side]->correct_after_e(fields_, static_cast<Side>(side), dt);
+  }
+}
+
 void EmPic2D3V::apply_particle_bcs(ParticleSpecies& s) {
   // Dispatch through the registry-built IParticleBoundary objects. The former
   // "heisenbug" that made this path fault was a registry factory collision
@@ -187,6 +203,9 @@ void EmPic2D3V::step(Real dt) {
   // image so reflecting field walls are physical.
   fill_field_ghosts();
   field_solver_->advance_b(fields_, dt);
+  // One-sided / characteristic field BCs (pec, outflow) overwrite the boundary
+  // row the interior B-curl just computed from stale ghosts. Periodic is a no-op.
+  correct_field_boundaries_b(dt);
   for (auto& s : species_) {
     pusher_->push(s, fields_, external_fields_, dt);
     apply_particle_bcs(s);
@@ -203,6 +222,9 @@ void EmPic2D3V::step(Real dt) {
   filters_.apply(current_, cfg_.boundary);
   fill_field_ghosts();
   field_solver_->advance_e(fields_, current_, dt);
+  // Outflow Mur reads the just-updated adjacent interior E node, so the E-side
+  // correction runs after advance_e. PEC pins tangential E here; periodic no-op.
+  correct_field_boundaries_e(dt);
 
   // Reclaim slots vacated by absorbing boundaries on a fixed cadence so the
   // push/deposit/gather kernels stop iterating over dead particles. Only
