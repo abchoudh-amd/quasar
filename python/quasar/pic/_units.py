@@ -102,6 +102,13 @@ class Units:
     def b_field_to_si(self, v):
         return v * self._factor_out(self._tag.b_field)
 
+    def field_component_to_si(self, name: str, v):
+        """Scale a Yee field component to SI by its name: ex/ey/ez use the E-field
+        scale, everything else (bx/by/bz, external_b*) uses the B-field scale.
+        Single source of truth for the component->scale mapping."""
+        return (self.e_field_to_si(v) if name in ("ex", "ey", "ez")
+                else self.b_field_to_si(v))
+
     def external_scales(self) -> tuple[float, float, float]:
         """``(length_scale, e_field_scale, b_field_scale)`` for the external-field
         sampler: internal Yee coordinates are multiplied by ``length_scale`` to reach

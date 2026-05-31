@@ -12,7 +12,6 @@ Run with::
 from __future__ import annotations
 
 import argparse
-import math
 import time
 from pathlib import Path
 from typing import Sequence
@@ -117,13 +116,15 @@ def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
                                 mass=units.mass(sp.mass_kg),
                                 capacity=sp.n_particles)
         idx = solver.add_species(cfg)
+        # The pybind binding is declared with py::array::forcecast, so it copies
+        # to contiguous float64 itself; no host-side astype needed here.
         solver.species_at(idx).set_host_particles(
-            x=positions[:, 0].astype(np.float64),
-            y=positions[:, 1].astype(np.float64),
-            vx=velocities[:, 0].astype(np.float64),
-            vy=velocities[:, 1].astype(np.float64),
-            vz=velocities[:, 2].astype(np.float64),
-            weight=weights.astype(np.float64),
+            x=positions[:, 0],
+            y=positions[:, 1],
+            vx=velocities[:, 0],
+            vy=velocities[:, 1],
+            vz=velocities[:, 2],
+            weight=weights,
         )
         indices.append(idx)
     return indices
@@ -162,41 +163,34 @@ def _seed_fields(solver, deck: pic_io.PicDeck) -> None:
     pitch = nx + 2 * g
     height = ny + 2 * g
 
-    def _flat(component: str, fn) -> None:
-        buf = np.zeros(pitch * height, dtype=np.float64)
-        for j in range(ny):
-            for i in range(nx):
-                buf[(i + g) + pitch * (j + g)] = fn(i, j)
-        solver.seed_field(component, buf)
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny))  # (ny, nx) index grids
+
+    def _seed(component: str, interior: np.ndarray) -> None:
+        # Write the vectorized interior into the ghost-padded buffer's interior.
+        buf = np.zeros((height, pitch), dtype=np.float64)
+        buf[g:g + ny, g:g + nx] = interior
+        solver.seed_field(component, buf.reshape(-1))
 
     comp = init.component.lower()
     if init.type == "seed_perturbation":
         mx = max(1, init.mode[0])
         amp = init.amplitude
-        _flat(comp, lambda i, j: amp * math.sin(2 * math.pi * mx * (i + 0.5) / nx))
+        _seed(comp, amp * np.sin(2 * np.pi * mx * (ii + 0.5) / nx))
     elif init.type == "seed_em_wave":
         mx, my = init.mode
         amp = init.amplitude
         # A +x-propagating wave: Ez = sin(kx), By = -Ez (c = 1 internal units).
-        kx = 2 * math.pi * mx
+        wave = amp * np.sin(2 * np.pi * mx * (ii + 0.5) / nx)
         if comp == "ez":
-            _flat("ez", lambda i, j: amp * math.sin(kx * (i + 0.5) / nx))
-            _flat("by", lambda i, j: -amp * math.sin(kx * (i + 0.5) / nx))
+            _seed("ez", wave)
+            _seed("by", -wave)
         elif comp == "ey":
-            _flat("ey", lambda i, j: amp * math.sin(kx * (i + 0.5) / nx))
-            _flat("bz", lambda i, j: amp * math.sin(kx * (i + 0.5) / nx))
+            _seed("ey", wave)
+            _seed("bz", wave)
         else:
             raise ValueError(f"seed_em_wave: unsupported component {init.component!r}")
     else:
         raise ValueError(f"fields.initial.type {init.type!r} is not supported")
-
-
-def _field_to_si(name: str, arr: np.ndarray, units: Units) -> np.ndarray:
-    # E components (ex/ey/ez) and B components (bx/by/bz) carry different unit
-    # scales; output is reported in SI so downstream consumers see physical values.
-    if name in ("ex", "ey", "ez"):
-        return units.e_field_to_si(arr)
-    return units.b_field_to_si(arr)
 
 
 def _species_to_si(host: dict, units: Units) -> dict:
@@ -217,11 +211,11 @@ def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
     snap = {
         "step": step,
         "time_s": sim_time,
-        "fields": {k: _field_to_si(k, fields_d[k], units)
+        "fields": {k: units.field_component_to_si(k, fields_d[k])
                    for k in deck.diagnostics.fields if k in fields_d},
-        "external_bx": units.b_field_to_si(external_d["bx"]),
-        "external_by": units.b_field_to_si(external_d["by"]),
-        "external_bz": units.b_field_to_si(external_d["bz"]),
+        "external_bx": units.field_component_to_si("bx", external_d["bx"]),
+        "external_by": units.field_component_to_si("by", external_d["by"]),
+        "external_bz": units.field_component_to_si("bz", external_d["bz"]),
         "nx": fields_d["nx"],
         "ny": fields_d["ny"],
     }

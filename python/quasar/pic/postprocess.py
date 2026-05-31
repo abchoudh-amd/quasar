@@ -40,10 +40,6 @@ def reshape_with_ghost(flat: np.ndarray, nx: int, ny: int) -> np.ndarray:
     return flat.reshape(ny, nx)
 
 
-# Backwards-compatible alias (older callers used the private name).
-_reshape_with_ghost = reshape_with_ghost
-
-
 def species_names(data) -> list[str]:
     """Species names present in an ``out.npz``, derived from the ``species_<name>_x``
     keys. Single source of truth for the per-species key schema so callers do not
@@ -71,7 +67,7 @@ def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     ny = int(data["ny"][0])
     written: list[Path] = []
 
-    ext_bz = _reshape_with_ghost(data["external_bz"], nx, ny)
+    ext_bz = reshape_with_ghost(data["external_bz"], nx, ny)
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(ext_bz, origin="lower", aspect="equal", cmap="RdBu_r")
     ax.set_title("external Bz (T)")
@@ -87,7 +83,7 @@ def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     for fname in ("field_bz", "field_ex", "field_ey"):
         if fname not in data.files:
             continue
-        arr = _reshape_with_ghost(data[fname], nx, ny)
+        arr = reshape_with_ghost(data[fname], nx, ny)
         vmax = float(np.max(np.abs(arr))) or 1.0
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.imshow(arr, origin="lower", aspect="equal", cmap="RdBu_r",
