@@ -128,6 +128,17 @@ void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2D&,
                                                   quasar::YeeField2D<double>&, int side,
                                                   double dt, double* mur_strips, int init,
                                                   quasar_stream_t);
+// 4th-order variants: B closure reduces the outer two boundary layers to the
+// interior-only stencil (no pin); E re-closes the second interior layer the
+// forward curl overran (high wall) and then Mur-advances the wall node (Mur
+// itself stays first order regardless of FDTD order).
+void launch_pic_boundary_outflow_correct_b_order4(const quasar::Grid2D&,
+                                                  quasar::YeeField2D<double>&, int side,
+                                                  double dt, quasar_stream_t);
+void launch_pic_boundary_outflow_correct_e_order4(const quasar::Grid2D&,
+                                                  quasar::YeeField2D<double>&, int side,
+                                                  double dt, double* mur_strips, int init,
+                                                  quasar_stream_t);
 
 // -- Particle array compaction -----------------------------------------------
 // Compacts alive particles to the front of every species array (order is not

@@ -46,6 +46,20 @@ quasar::pic::EmPic2D3V make_channel(const quasar::Grid2D& g, int order) {
   return quasar::pic::EmPic2D3V{cfg};
 }
 
+void run_channel_bleed(int order, int nghost, double tol) {
+  const int nx = 256, ny = 4;
+  quasar::Grid2D g{nx, ny, 1.0, ny / static_cast<double>(nx), 0.0, 0.0, nghost};
+  auto solver = make_channel(g, order);
+  seed_pulse(solver, g, 0.5, 0.06);
+  const double dt = 0.5 * g.dx();
+  const double e0 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+  const int steps = static_cast<int>(4.0 / dt);
+  for (int s = 0; s < steps; ++s) solver.step(dt);
+  const double e1 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+  EXPECT_LT(e1, tol * e0) << "outflow channel retained too much energy (order "
+                          << order << "): " << e0 << " -> " << e1;
+}
+
 }  // namespace
 
 TEST(PicOutflowFieldAbsorption, PulseLeavesLowReflectedEnergyOrder2) {
@@ -67,22 +81,52 @@ TEST(PicOutflowFieldAbsorption, PulseLeavesLowReflectedEnergyOrder2) {
                            << e0 << " -> " << e1;
 }
 
-TEST(PicOutflowFieldAbsorption, ChannelBleedsToZeroOrder2) {
+TEST(PicOutflowFieldAbsorption, PulseLeavesLowReflectedEnergyOrder4) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
   const int nx = 256, ny = 4;
-  quasar::Grid2D g{nx, ny, 1.0, ny / static_cast<double>(nx), 0.0, 0.0, 1};
-  auto solver = make_channel(g, 2);
-
-  seed_pulse(solver, g, 0.5, 0.06);
+  quasar::Grid2D g{nx, ny, 1.0, ny / static_cast<double>(nx), 0.0, 0.0, 2};
+  auto solver = make_channel(g, 4);
+  seed_pulse(solver, g, 0.5, 0.05);
   const double dt = 0.5 * g.dx();
   const double e0 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
-
-  // Several light-crossings: the split pulse exits both ends and any first-order
-  // Mur residual decays.
-  const int steps = static_cast<int>(4.0 / dt);
+  const int steps = static_cast<int>(1.2 / dt);
   for (int s = 0; s < steps; ++s) solver.step(dt);
-
   const double e1 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
-  EXPECT_LT(e1, 0.05 * e0) << "outflow channel retained too much energy: "
+  EXPECT_LT(e1, 0.10 * e0) << "order-4 outflow reflected too much: "
+                           << e0 << " -> " << e1;
+}
+
+TEST(PicOutflowFieldAbsorption, ChannelBleedsToZeroOrder2) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  run_channel_bleed(2, 1, 0.05);
+}
+
+TEST(PicOutflowFieldAbsorption, ChannelBleedsToZeroOrder4) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  run_channel_bleed(4, 2, 0.05);
+}
+
+// Long-run stability guard for the 4th-order one-sided boundary closure: an
+// outflow channel must never gain energy over many thousands of steps (the
+// reduced-order closure is energy-neutral; a sign error would grow unboundedly).
+TEST(PicOutflowFieldAbsorption, Order4ChannelLongRunStable) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const int nx = 64, ny = 4;
+  quasar::Grid2D g{nx, ny, 1.0, ny / static_cast<double>(nx), 0.0, 0.0, 2};
+  auto solver = make_channel(g, 4);
+  seed_pulse(solver, g, 0.5, 0.08);
+  const double dt = 0.5 * g.dx();
+  const double e0 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+  for (int s = 0; s < 5000; ++s) {
+    solver.step(dt);
+    if (s % 500 == 0) {
+      const double e = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+      ASSERT_LT(e, 1.5 * e0 + 1e-12) << "energy blew up at step " << s
+                                     << ": " << e << " (e0=" << e0 << ")";
+      ASSERT_FALSE(std::isnan(e)) << "energy NaN at step " << s;
+    }
+  }
+  const double e1 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
+  EXPECT_LT(e1, 0.05 * e0) << "long-run outflow channel did not bleed: "
                            << e0 << " -> " << e1;
 }

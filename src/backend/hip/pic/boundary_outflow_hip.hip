@@ -96,6 +96,87 @@ __global__ void outflow_correct_b_y_kernel(quasar::Grid2D g, int side, double dt
   bz[k] += dt * (qn::ddy_onesided_fwd1(ex, g, i, 0) - qn::ddy_staggered_bwd<2>(ex, g, i, 0));
 }
 
+// --- 4th-order B closure (no pin) -------------------------------------------
+// Like the PEC order-4 B closure but pins nothing: the backward B-curl overruns
+// the low wall at nodes {0,1} and the high wall at {N-1}; each overrun node's
+// normal-axis tangential-B derivative is reduced to the interior-only stencil
+// via the delta dt*(reduced - order4).
+__device__ inline void ob_x_delta(const quasar::Grid2D& g, double dt,
+                                  double* by, double* bz, const double* ey,
+                                  const double* ez, int i, int j,
+                                  double new_ez, double new_ey) {
+  const std::size_t k = g.index(i, j);
+  by[k] += dt * (new_ez - qn::ddx_staggered_bwd<4>(ez, g, i, j));
+  bz[k] -= dt * (new_ey - qn::ddx_staggered_bwd<4>(ey, g, i, j));
+}
+__device__ inline void ob_y_delta(const quasar::Grid2D& g, double dt,
+                                  double* bx, double* bz, const double* ex,
+                                  const double* ez, int i, int j,
+                                  double new_ez, double new_ex) {
+  const std::size_t k = g.index(i, j);
+  bx[k] -= dt * (new_ez - qn::ddy_staggered_bwd<4>(ez, g, i, j));
+  bz[k] += dt * (new_ex - qn::ddy_staggered_bwd<4>(ex, g, i, j));
+}
+
+__global__ void outflow_correct_b_x_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                              double* by, double* bz, const double* ey,
+                                              const double* ez) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= g.ny) return;
+  if (side == 0) {
+    ob_x_delta(g, dt, by, bz, ey, ez, 0, j,
+               qn::ddx_onesided_fwd1(ez, g, 0, j), qn::ddx_onesided_fwd1(ey, g, 0, j));
+    ob_x_delta(g, dt, by, bz, ey, ez, 1, j,
+               qn::ddx_staggered_bwd<2>(ez, g, 1, j), qn::ddx_staggered_bwd<2>(ey, g, 1, j));
+  } else {
+    const int iw = g.nx - 1;
+    ob_x_delta(g, dt, by, bz, ey, ez, iw, j,
+               qn::ddx_staggered_bwd<2>(ez, g, iw, j), qn::ddx_staggered_bwd<2>(ey, g, iw, j));
+  }
+}
+
+__global__ void outflow_correct_b_y_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                              double* bx, double* bz, const double* ex,
+                                              const double* ez) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= g.nx) return;
+  if (side == 2) {
+    ob_y_delta(g, dt, bx, bz, ex, ez, i, 0,
+               qn::ddy_onesided_fwd1(ez, g, i, 0), qn::ddy_onesided_fwd1(ex, g, i, 0));
+    ob_y_delta(g, dt, bx, bz, ex, ez, i, 1,
+               qn::ddy_staggered_bwd<2>(ez, g, i, 1), qn::ddy_staggered_bwd<2>(ex, g, i, 1));
+  } else {
+    const int jw = g.ny - 1;
+    ob_y_delta(g, dt, bx, bz, ex, ez, i, jw,
+               qn::ddy_staggered_bwd<2>(ez, g, i, jw), qn::ddy_staggered_bwd<2>(ex, g, i, jw));
+  }
+}
+
+// 4th-order forward E-curl overruns the HIGH wall's second interior layer (N-2)
+// for the tangential-E components; re-close it to the interior-only stencil. The
+// wall node itself is overwritten by Mur, and low walls don't overrun N-2.
+__global__ void outflow_reclose_e_x_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                              double* ey, double* ez, const double* by,
+                                              const double* bz) {
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= g.ny || side != 1) return;
+  const int i2 = g.nx - 2;
+  const std::size_t k = g.index(i2, j);
+  ey[k] -= dt * (qn::ddx_staggered<2>(bz, g, i2, j) - qn::ddx_staggered<4>(bz, g, i2, j));
+  ez[k] += dt * (qn::ddx_staggered<2>(by, g, i2, j) - qn::ddx_staggered<4>(by, g, i2, j));
+}
+
+__global__ void outflow_reclose_e_y_kernel_o4(quasar::Grid2D g, int side, double dt,
+                                              double* ex, double* ez, const double* bx,
+                                              const double* bz) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= g.nx || side != 3) return;
+  const int j2 = g.ny - 2;
+  const std::size_t k = g.index(i, j2);
+  ex[k] += dt * (qn::ddy_staggered<2>(bz, g, i, j2) - qn::ddy_staggered<4>(bz, g, i, j2));
+  ez[k] -= dt * (qn::ddy_staggered<2>(bx, g, i, j2) - qn::ddy_staggered<4>(bx, g, i, j2));
+}
+
 }  // namespace
 
 extern "C" void launch_pic_boundary_outflow_correct_b_order2(const quasar::Grid2D& g,
@@ -135,6 +216,57 @@ extern "C" void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2
   } else {
     if (g.nx <= 0) return;
     const dim3 grid((g.nx + block.x - 1) / block.x);
+    hipLaunchKernelGGL(outflow_mur_y_kernel, grid, block, 0, hip_stream, g, side, dt,
+                       f.ex.device_ptr(), f.ez.device_ptr(), mur_strips, init);
+  }
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+extern "C" void launch_pic_boundary_outflow_correct_b_order4(const quasar::Grid2D& g,
+                                                             quasar::YeeField2D<double>& f,
+                                                             int side, double dt,
+                                                             quasar_stream_t stream) {
+  const auto hip_stream = static_cast<hipStream_t>(stream);
+  const dim3 block(256);
+  if (side == 0 || side == 1) {
+    if (g.ny <= 0) return;
+    const dim3 grid((g.ny + block.x - 1) / block.x);
+    hipLaunchKernelGGL(outflow_correct_b_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.by.device_ptr(), f.bz.device_ptr(),
+                       f.ey.device_ptr(), f.ez.device_ptr());
+  } else {
+    if (g.nx <= 0) return;
+    const dim3 grid((g.nx + block.x - 1) / block.x);
+    hipLaunchKernelGGL(outflow_correct_b_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.bx.device_ptr(), f.bz.device_ptr(),
+                       f.ex.device_ptr(), f.ez.device_ptr());
+  }
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+extern "C" void launch_pic_boundary_outflow_correct_e_order4(const quasar::Grid2D& g,
+                                                             quasar::YeeField2D<double>& f,
+                                                             int side, double dt,
+                                                             double* mur_strips, int init,
+                                                             quasar_stream_t stream) {
+  const auto hip_stream = static_cast<hipStream_t>(stream);
+  const dim3 block(256);
+  if (side == 0 || side == 1) {
+    if (g.ny <= 0) return;
+    const dim3 grid((g.ny + block.x - 1) / block.x);
+    // Re-close the N-2 layer the forward curl overran (high wall only), then Mur
+    // the wall node. Disjoint nodes, so the order between them is immaterial.
+    hipLaunchKernelGGL(outflow_reclose_e_x_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.ey.device_ptr(), f.ez.device_ptr(),
+                       f.by.device_ptr(), f.bz.device_ptr());
+    hipLaunchKernelGGL(outflow_mur_x_kernel, grid, block, 0, hip_stream, g, side, dt,
+                       f.ey.device_ptr(), f.ez.device_ptr(), mur_strips, init);
+  } else {
+    if (g.nx <= 0) return;
+    const dim3 grid((g.nx + block.x - 1) / block.x);
+    hipLaunchKernelGGL(outflow_reclose_e_y_kernel_o4, grid, block, 0, hip_stream, g, side, dt,
+                       f.ex.device_ptr(), f.ez.device_ptr(),
+                       f.bx.device_ptr(), f.bz.device_ptr());
     hipLaunchKernelGGL(outflow_mur_y_kernel, grid, block, 0, hip_stream, g, side, dt,
                        f.ex.device_ptr(), f.ez.device_ptr(), mur_strips, init);
   }

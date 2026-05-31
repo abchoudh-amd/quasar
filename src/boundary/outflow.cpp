@@ -5,10 +5,13 @@
 namespace quasar::boundary {
 
 void OutflowFieldBC::correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const {
-  // Order 4 falls back to the order-2 closure for now (the outer-layer 4th-order
-  // outflow closure is added with the 4th-order outflow commit).
-  ::launch_pic_boundary_outflow_correct_b_order2(field.grid, field,
-                                                 static_cast<int>(side), dt, nullptr);
+  if (order_ == 4) {
+    ::launch_pic_boundary_outflow_correct_b_order4(field.grid, field,
+                                                   static_cast<int>(side), dt, nullptr);
+  } else {
+    ::launch_pic_boundary_outflow_correct_b_order2(field.grid, field,
+                                                   static_cast<int>(side), dt, nullptr);
+  }
 }
 
 void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const {
@@ -24,8 +27,13 @@ void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt
     init = true;       // first call: seed the history from the live field only
     primed_ = true;
   }
-  ::launch_pic_boundary_outflow_correct_e_order2(
-      g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0, nullptr);
+  if (order_ == 4) {
+    ::launch_pic_boundary_outflow_correct_e_order4(
+        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0, nullptr);
+  } else {
+    ::launch_pic_boundary_outflow_correct_e_order2(
+        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0, nullptr);
+  }
 }
 
 QUASAR_REGISTER_FIELD_BOUNDARY("outflow", OutflowFieldBC)
