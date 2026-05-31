@@ -2,9 +2,9 @@
 
 Two performance optimizations from the deep-review fix plan are intentionally
 **deferred**, not dropped. Both touch the same kernel-launch / async-ordering
-path implicated in the field-BC heisenbug (see `field_bc_heisenbug.md`), so
-landing them now would risk re-destabilizing a green suite for a pure
-throughput gain with no correctness benefit.
+path that was implicated in the now-fixed field-BC heisenbug, so landing them
+now would risk re-destabilizing a green suite for a pure throughput gain with
+no correctness benefit.
 
 ## Delivered in Phase 4 (for context)
 - Dead `diagnostics_hip.hip` (no-op, no callers) removed.
@@ -34,6 +34,8 @@ ordering semantics relative to the synchronous `hipMemcpy` readbacks in
 suspicion. Introduce it once the launch path is trusted.
 
 ## Re-enable order
-1. Root-cause the field-BC heisenbug (`field_bc_heisenbug.md`).
-2. Land P4 (persistent stream) with the BC path already trusted.
-3. Land P2 (fused boundary kernel) on top.
+The field-BC heisenbug is already root-caused and fixed (a registry factory
+collision; the ghost-aware adjoint Yee field-BC path now runs unconditionally),
+so the BC launch path is trusted and the remaining order is:
+1. Land P4 (persistent stream) with the BC path already trusted.
+2. Land P2 (fused boundary kernel) on top.

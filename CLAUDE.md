@@ -32,7 +32,7 @@ A single GoogleTest binary can be run directly, e.g. `build/hip-gfx942-release/t
 
 ## Architecture
 
-The codebase is organized around **four orthogonal axes**: `physics × numerics × boundary × backend`. Each axis has matching trees under `include/quasar/<axis>/` (public interfaces, installed) and `src/<axis>/` (private implementations). Adding a scheme in one axis should not touch the others. See `plans/directory_plan.md` for the canonical layout intent.
+The codebase is organized around **four orthogonal axes**: `physics × numerics × boundary × backend`. Each axis has matching trees under `include/quasar/<axis>/` (public interfaces, installed) and `src/<axis>/` (private implementations). Adding a scheme in one axis should not touch the others.
 
 Key conventions:
 
