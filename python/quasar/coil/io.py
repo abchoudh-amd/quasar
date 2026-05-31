@@ -34,6 +34,7 @@ from typing import Any, Sequence, Union
 import yaml
 
 from .._core import Vec3
+from .._deck import require as _require, triple as _triple
 from . import (
     ConductorSystem,
     Filament,
@@ -56,9 +57,7 @@ from . import (
 
 
 def _vec3(xyz: Sequence[float]) -> Vec3:
-    if len(xyz) != 3:
-        raise ValueError(f"expected 3-element xyz triple, got {xyz!r}")
-    return Vec3(float(xyz[0]), float(xyz[1]), float(xyz[2]))
+    return Vec3(*_triple(xyz))
 
 
 def _unit(v: Vec3, context: str) -> Vec3:
@@ -66,12 +65,6 @@ def _unit(v: Vec3, context: str) -> Vec3:
     if norm == 0.0:
         raise ValueError(f"{context}: axis vector must be non-zero")
     return Vec3(v.x / norm, v.y / norm, v.z / norm)
-
-
-def _require(d: dict, key: str, context: str) -> Any:
-    if key not in d:
-        raise ValueError(f"{context}: missing required field {key!r}")
-    return d[key]
 
 
 # ---------------------------------------------------------------------------

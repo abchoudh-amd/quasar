@@ -25,9 +25,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence, Union
+from typing import Sequence, Union
 
 import yaml
+
+from .._deck import require as _require, triple as _triple
 
 
 # Sanity ceilings on deck-supplied sizes that flow into device allocations.
@@ -38,20 +40,12 @@ MAX_GRID_CELLS = 1 << 30      # ~1.07e9 cells total
 MAX_PARTICLES = 1 << 31       # ~2.1e9 particles per species
 
 
-def _require(d: dict, key: str, context: str) -> Any:
-    if key not in d:
-        raise ValueError(f"{context}: missing required field {key!r}")
-    return d[key]
-
-
 def _vec3(xyz: Sequence[float] | None,
           default: tuple[float, float, float] = (0.0, 0.0, 0.0),
           ) -> tuple[float, float, float]:
     if xyz is None:
         return default
-    if len(xyz) != 3:
-        raise ValueError(f"expected 3-element triple, got {xyz!r}")
-    return (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+    return _triple(xyz)
 
 
 @dataclass
