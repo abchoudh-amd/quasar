@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quasar/core/registry.hpp"
 #include "quasar/core/yee_field.hpp"
 
 namespace quasar::numerics {
@@ -21,3 +22,7 @@ class YeeFdtd2D final : public IFieldSolver {
 };
 
 }  // namespace quasar::numerics
+
+// Registers a concrete field solver under a deck-facing name (e.g. "yee_o2").
+#define QUASAR_REGISTER_FIELD_SOLVER(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IFieldSolver, Name, Class)

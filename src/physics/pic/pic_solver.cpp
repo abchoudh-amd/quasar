@@ -64,6 +64,18 @@ void Esirkepov2D<2>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, R
 
 }  // namespace quasar::numerics
 
+// Register the concrete field-solver / pusher / deposit schemes under deck-facing
+// names so EmPic2D3V builds them through the registry instead of an if/else ladder
+// over the integer order/shape. These registrations live in this TU (whose
+// EmPic2D3V symbols are externally referenced), so the static initializers are
+// never dropped by the linker — no WHOLE_ARCHIVE needed.
+QUASAR_REGISTER_FIELD_SOLVER("yee_o2", ::quasar::numerics::YeeFdtd2D<2>)
+QUASAR_REGISTER_FIELD_SOLVER("yee_o4", ::quasar::numerics::YeeFdtd2D<4>)
+QUASAR_REGISTER_PUSHER("boris_cic", ::quasar::numerics::BorisPusher<1>)
+QUASAR_REGISTER_PUSHER("boris_tsc", ::quasar::numerics::BorisPusher<2>)
+QUASAR_REGISTER_DEPOSIT("esirkepov_cic", ::quasar::numerics::Esirkepov2D<1>)
+QUASAR_REGISTER_DEPOSIT("esirkepov_tsc", ::quasar::numerics::Esirkepov2D<2>)
+
 namespace quasar::pic {
 
 namespace {
@@ -84,6 +96,31 @@ std::string_view field_bc_name(boundary::FieldBoundaryKind k) {
     case boundary::FieldBoundaryKind::outflow:  return "outflow";
   }
   throw std::invalid_argument{"EmPic2D3V: unknown FieldBoundaryKind"};
+}
+
+// Deck-facing registry names for the order/shape-templated numerics schemes.
+std::string_view field_solver_name(int fdtd_order) {
+  switch (fdtd_order) {
+    case 2: return "yee_o2";
+    case 4: return "yee_o4";
+  }
+  throw std::invalid_argument{"EmPic2D3V: fdtd_order must be 2 or 4"};
+}
+
+std::string_view pusher_name(int shape_order) {
+  switch (shape_order) {
+    case 1: return "boris_cic";
+    case 2: return "boris_tsc";
+  }
+  throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
+}
+
+std::string_view deposit_name(int shape_order) {
+  switch (shape_order) {
+    case 1: return "esirkepov_cic";
+    case 2: return "esirkepov_tsc";
+  }
+  throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
 }
 
 }  // namespace
@@ -115,28 +152,20 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   const bool x_hi_np = fb[1] != boundary::FieldBoundaryKind::periodic;
   field_bcs_[2]->set_corner_skip(x_lo_np, x_hi_np);  // y_lo
   field_bcs_[3]->set_corner_skip(x_lo_np, x_hi_np);  // y_hi
-  if (cfg_.fdtd_order == 4) {
+  if (cfg_.fdtd_order == 4 && grid_.nghost < 2) {
     // The 4th-order staggered curl reads two cells past each boundary, so the
-    // ghost-aware stencil + PEC mirror need at least two ghost layers.
-    if (grid_.nghost < 2) {
-      throw std::invalid_argument{
-          "EmPic2D3V: fdtd_order 4 requires grid nghost >= 2"};
-    }
-    field_solver_ = std::make_unique<numerics::YeeFdtd2D<4>>();
-  } else if (cfg_.fdtd_order == 2) {
-    field_solver_ = std::make_unique<numerics::YeeFdtd2D<2>>();
-  } else {
-    throw std::invalid_argument{"EmPic2D3V: fdtd_order must be 2 or 4"};
+    // ghost-aware stencil needs at least two ghost layers.
+    throw std::invalid_argument{"EmPic2D3V: fdtd_order 4 requires grid nghost >= 2"};
   }
-  if (cfg_.shape_order == 2) {
-    pusher_ = std::make_unique<numerics::BorisPusher<2>>();
-    deposit_ = std::make_unique<numerics::Esirkepov2D<2>>();
-  } else if (cfg_.shape_order == 1) {
-    pusher_ = std::make_unique<numerics::BorisPusher<1>>();
-    deposit_ = std::make_unique<numerics::Esirkepov2D<1>>();
-  } else {
-    throw std::invalid_argument{"EmPic2D3V: shape_order must be 1 or 2"};
-  }
+  // Build the order/shape-templated schemes through the registry (same pluggable
+  // path as the BCs/filters) instead of an if/else ladder over the integers; the
+  // name helpers validate the order/shape and throw on an unsupported value.
+  field_solver_ = Registry<numerics::IFieldSolver>::instance().create(
+      field_solver_name(cfg_.fdtd_order));
+  pusher_ = Registry<numerics::IParticlePusher>::instance().create(
+      pusher_name(cfg_.shape_order));
+  deposit_ = Registry<numerics::IDepositScheme>::instance().create(
+      deposit_name(cfg_.shape_order));
   // The deposit/gather wrap an axis only when both of its sides are periodic; a
   // wall on either side switches that axis to ghost-cell deposition + specular
   // fold-back (deposit) and ghost-clamped interpolation (gather), so neither

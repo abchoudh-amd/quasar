@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quasar/core/registry.hpp"
 #include "quasar/core/yee_field.hpp"
 
 namespace quasar::pic {
@@ -39,3 +40,7 @@ class BorisPusher final : public IParticlePusher {
 };
 
 }  // namespace quasar::numerics
+
+// Registers a concrete pusher under a deck-facing name (e.g. "boris_cic").
+#define QUASAR_REGISTER_PUSHER(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IParticlePusher, Name, Class)

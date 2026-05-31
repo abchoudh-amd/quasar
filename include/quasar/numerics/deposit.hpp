@@ -1,5 +1,6 @@
 #pragma once
 
+#include "quasar/core/registry.hpp"
 #include "quasar/core/yee_field.hpp"
 
 namespace quasar::pic {
@@ -35,3 +36,7 @@ class Esirkepov2D final : public IDepositScheme {
 };
 
 }  // namespace quasar::numerics
+
+// Registers a concrete deposit scheme under a deck-facing name (e.g. "esirkepov_cic").
+#define QUASAR_REGISTER_DEPOSIT(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IDepositScheme, Name, Class)
