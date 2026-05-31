@@ -68,11 +68,13 @@ interfaces may still change between entries.
   4th-order boundary closure is locally reduced to 2nd order on the outer two
   layers (interior 4th-order convergence is preserved). Periodic still uses the
   ghost wrap.
-- The PIC kernel-launch ABIs moved to installed public headers
-  (`include/quasar/backend/pic_kernels.hpp`, `magnetostatics_kernels.hpp`); the
+- The kernel-launch ABIs moved to installed public headers; the
   physics/boundary/numerics modules no longer reach into the private
   `src/backend/hip/` tree (the blanket `src/` include path was removed from the
-  module CMake helper and re-granted only to the backend HIP modules).
+  module CMake helper and re-granted only to the backend HIP modules). The PIC
+  ABI now lives at `include/quasar/physics/pic/kernels.hpp` (a per-physics seam)
+  so the backend axis stays physics-neutral; `magnetostatics_kernels.hpp` keeps
+  its raw-pointer form under `include/quasar/backend/`.
 - The numerics `IFieldEvaluator` takes an axis-neutral `core::IFieldSource`
   (implemented by `magnetostatics::ConductorSystem`) instead of naming the
   magnetostatics type directly, so the analytic-field evaluators no longer depend
@@ -87,13 +89,41 @@ interfaces may still change between entries.
 - `BiotSavartConfig` drops the never-consumed `tile_segments` / `block_size`
   fields; kernel tiling is compile-time and tuned per-gfx in
   `cmake/QuasarLaunchParams.cmake`.
+- The `quasar-coil` and `quasar-pic` CLIs are standardized: both use the
+  `command` subparser dest, a `func` handler, and a default-quiet output model
+  with a `--verbose` flag. The coil CLI's previous default-chatty `--quiet`
+  behavior is replaced by `--verbose` (off by default).
+- PIC `EmPicConfig` carries the particle shape as a deck-vocabulary string
+  (`shape`: `cic` / `tsc`) instead of an integer `shape_order`; the solver derives
+  the field-solver / pusher / deposit registry names directly from the deck order
+  and shape, dropping the internal switch ladders. The specular current fold-back
+  is now a `fold_current` hook on `IParticleBoundary` rather than a special case
+  in the solver step.
 
 ### Optimized
 - PIC: per-step full-grid scratch allocations hoisted out of the current filter
   and particle compaction; the Biot–Savart double-precision path uploads the host
   SoA directly instead of an element-by-element copy.
+- PIC: the particle gather computes its shape weights once per particle (was four
+  times) and gathers self + external E/B in a single stencil sweep; the
+  charge-conserving deposit computes each window node index once across the
+  Jx/Jy/Jz loops.
+- PIC: the per-logged-step alive-particle count reuses the species compaction
+  counter instead of allocating a per-block reduction buffer each call.
+- Magnetostatics: transient Biot–Savart output buffers skip the allocation
+  zero-fill (the kernel overwrites them in full), via a new
+  `device_alloc_uninit` / `DeviceBuffer(n, uninitialized)` path.
 
 ### Added
 - PIC test coverage: a real FDTD plane-wave dispersion check, a behavioral
   mixed-boundary test, Gauss-residual diagnostics tests, an end-to-end CLI run
   smoke test, and a `--log-every` / `--write-every` diagnostics test.
+- CPU-only registry-linkage tests for the current-filter and
+  field-solver/pusher/deposit registries (a dropped registration now fails in the
+  standard suite, not only at device-build time), and coil deck-parse tests for
+  the `plane` observation and every geometry type.
+
+### Upcoming changes
+- A `file_grid` field evaluator name is reserved in the registry but not yet
+  implemented (it throws and is intentionally not deck-selectable) pending the
+  file-backed grid loader.
