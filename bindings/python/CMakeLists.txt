@@ -31,6 +31,7 @@ target_link_libraries(quasar_core_py
 set(_quasar_py_sources
   __init__.py
   _paths.py
+  _deck.py
   coil/__init__.py
   coil/io.py
   coil/cli.py
