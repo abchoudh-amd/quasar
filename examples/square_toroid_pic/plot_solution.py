@@ -57,7 +57,8 @@ def plot_final_state(data, deck: dict) -> Path:
     x_lo, x_hi, y_lo, y_hi = _domain_extent(deck)
     nx = int(data["nx"].item())
     ny = int(data["ny"].item())
-    bz = reshape_with_ghost(data["external_bz"], nx, ny)
+    nghost = int(data["nghost"].item()) if "nghost" in data.files else 0
+    bz = reshape_with_ghost(data["external_bz"], nx, ny, nghost)
     species = species_names(data)
 
     fig, axes = plt.subplots(1, len(species), figsize=(6 * len(species), 6),

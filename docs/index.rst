@@ -1,12 +1,16 @@
 Quasar documentation
 ====================
 
-Quasar is a HIP-accelerated numerical simulation framework. The current
-release ships a single physics module - **magnetostatics** - that
-computes magnetic flux density and its analytic Jacobian via the
-Biot-Savart law on arbitrary thin-wire current-carrying conductors,
-backed by per-segment HIP kernels and exposed through a small Python
-front-end (``quasar.coil``).
+Quasar is a HIP-accelerated numerical simulation framework. It currently
+ships two physics vertical slices:
+
+* **magnetostatics** - computes magnetic flux density and its analytic
+  Jacobian via the Biot-Savart law on arbitrary thin-wire current-carrying
+  conductors, backed by per-segment HIP kernels and exposed through the
+  ``quasar.coil`` Python front-end.
+* **electromagnetic PIC** - a 2D3V particle-in-cell module (Yee FDTD fields,
+  charge-conserving current deposition, Boris push) driven from the
+  ``quasar.pic`` front-end.
 
 .. toctree::
    :maxdepth: 2
@@ -33,6 +37,8 @@ front-end (``quasar.coil``).
    dev-guide/adding_a_pusher
    dev-guide/adding_a_boundary
    dev-guide/adding_a_field_evaluator
+   dev-guide/adding_a_field_solver
+   dev-guide/adding_a_deposit_scheme
    dev-guide/adding_a_filter
 
 Indices and tables

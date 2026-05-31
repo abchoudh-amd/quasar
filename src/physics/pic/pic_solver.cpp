@@ -220,11 +220,29 @@ void EmPic2D3V::step(Real dt) {
   // runs never shrink, so skip the work entirely.
   ++step_count_;
   constexpr std::size_t kCompactEvery = 64;
-  if (has_absorbing_boundary() && step_count_ % kCompactEvery == 0) {
+  const bool cadence_hit = step_count_ % kCompactEvery == 0;
+  if (has_absorbing_boundary() && cadence_hit) {
     for (auto& s : species_) {
       ::launch_pic_particle_compact(s, nullptr);
     }
   }
+  // The deposit no longer synchronizes per step; instead it accumulates a
+  // persistent overflow flag that we drain on the same cadence (and at end-of-run
+  // via finalize()). This throws "reduce dt" at most kCompactEvery steps late,
+  // which is acceptable for a fatal stability error.
+  if (cadence_hit) {
+    check_deposit_overflow();
+  }
+}
+
+void EmPic2D3V::check_deposit_overflow() {
+  for (auto& s : species_) {
+    ::launch_pic_deposit_overflow_check(s, nullptr);
+  }
+}
+
+void EmPic2D3V::finalize() {
+  check_deposit_overflow();
 }
 
 void EmPic2D3V::advance(Real t_end, Real dt) {
@@ -234,6 +252,7 @@ void EmPic2D3V::advance(Real t_end, Real dt) {
   for (Real t = 0; t < t_end; t += dt) {
     step(dt);
   }
+  finalize();
 }
 
 }  // namespace quasar::pic

@@ -19,24 +19,22 @@ from typing import Sequence
 
 import numpy as np
 
-from .numerics import infer_nghost
-
 
 def rms(values) -> float:
     arr = np.asarray(values, dtype=float)
     return float(np.sqrt(np.mean(arr * arr)))
 
 
-def reshape_with_ghost(flat: np.ndarray, nx: int, ny: int) -> np.ndarray:
+def reshape_with_ghost(flat: np.ndarray, nx: int, ny: int, nghost: int) -> np.ndarray:
     """Return the interior ``(ny, nx)`` view of a ghost-padded Yee field buffer.
 
-    The buffer storage is ``(nx + 2g) * (ny + 2g)`` for some ghost width ``g``
-    (1 for 2nd-order FDTD, 2 for 4th-order). The ghost width is recovered from the
-    flat size rather than assumed, then ``g`` cells are stripped from each side. A
-    buffer already sized ``nx * ny`` (no ghosts) is reshaped directly."""
-    g = infer_nghost(nx, ny, flat.size)
-    if flat.size == (nx + 2 * g) * (ny + 2 * g) and g > 0:
-        return flat.reshape(ny + 2 * g, nx + 2 * g)[g:-g, g:-g]
+    The buffer storage is ``(nx + 2*nghost) * (ny + 2*nghost)``; ``nghost`` cells
+    are stripped from each side. ``nghost`` is read from the ``out.npz`` (written
+    by the CLI from the authoritative C++ ``required_nghost``) rather than
+    re-derived from the flat size. A buffer already sized ``nx * ny`` (nghost 0) is
+    reshaped directly."""
+    if nghost > 0 and flat.size == (nx + 2 * nghost) * (ny + 2 * nghost):
+        return flat.reshape(ny + 2 * nghost, nx + 2 * nghost)[nghost:-nghost, nghost:-nghost]
     return flat.reshape(ny, nx)
 
 
@@ -63,9 +61,12 @@ def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     data = np.load(npz_path, allow_pickle=False)
     nx = int(data["nx"][0])
     ny = int(data["ny"][0])
+    # nghost is persisted by quasar.pic.cli; default to 0 for older npz files that
+    # predate it (their buffers were already interior-sized or order-2).
+    nghost = int(data["nghost"][0]) if "nghost" in data.files else 0
     written: list[Path] = []
 
-    ext_bz = reshape_with_ghost(data["external_bz"], nx, ny)
+    ext_bz = reshape_with_ghost(data["external_bz"], nx, ny, nghost)
     fig, ax = plt.subplots(figsize=(6, 5))
     im = ax.imshow(ext_bz, origin="lower", aspect="equal", cmap="RdBu_r")
     ax.set_title("external Bz (T)")
@@ -81,7 +82,7 @@ def plot(npz_path: Path | str, out_dir: Path | str | None = None) -> list[Path]:
     for fname in ("field_bz", "field_ex", "field_ey"):
         if fname not in data.files:
             continue
-        arr = reshape_with_ghost(data[fname], nx, ny)
+        arr = reshape_with_ghost(data[fname], nx, ny, nghost)
         vmax = float(np.max(np.abs(arr))) or 1.0
         fig, ax = plt.subplots(figsize=(6, 5))
         im = ax.imshow(arr, origin="lower", aspect="equal", cmap="RdBu_r",

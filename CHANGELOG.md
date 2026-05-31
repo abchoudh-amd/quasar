@@ -58,8 +58,14 @@ interfaces may still change between entries.
   the standard Yee scheme and leaves periodic results unchanged.
 - Magnetostatics: `helix`/`solenoid` vertex count is computed in `size_t` with an
   upper bound, fixing signed-int overflow on large `n_turns * n_segments_per_turn`.
-- `quasar.pic.postprocess.reshape_with_ghost` infers the ghost width instead of
-  assuming a single ghost layer (4th-order grids use two).
+- PIC: the sampled external field is now node-collocated like the rest of the
+  solver. The external-field sampler previously placed `Ex`/`Ey` on the true
+  Yee-staggered edges while the particle gather reads every component from the
+  cell node, biasing the external electric force on every particle by a half-cell
+  interpolation error; all six components are now sampled at the cell node.
+- `quasar.pic.cli` persists the Yee ghost width (`nghost`) into `out.npz`, and
+  `quasar.pic.postprocess.reshape_with_ghost` strips the halo using that explicit
+  value instead of reverse-engineering it from the flat buffer size.
 - Registry: type-keyed factory registration. Stateless `make_unique` lambdas were
   collapsed by identical-code folding, so `Registry::create(name)` could return
   the wrong concrete type — the root cause of the long-standing PIC field/particle
@@ -91,7 +97,14 @@ interfaces may still change between entries.
 - The numerics `IFieldEvaluator` takes an axis-neutral `core::IFieldSource`
   (implemented by `magnetostatics::ConductorSystem`) instead of naming the
   magnetostatics type directly, so the analytic-field evaluators no longer depend
-  on the magnetostatics module.
+  on the magnetostatics module. The Python `IFieldEvaluator.evaluate_B` /
+  `evaluate_grad_B` binding accepts any `IFieldSource` polymorphically rather than
+  the concrete `ConductorSystem`.
+- `IFieldEvaluator` gains a `configure(params)` seam (a name→flat-float-list
+  parameter map) applied after registry construction, so the PIC driver builds
+  every external-field evaluator purely by registry name and configures it from
+  the deck — the previous per-type `if/elif` ladder in `quasar.pic.cli` that
+  hand-picked a constructor is gone, matching the registry-only coil CLI.
 - Backend headers under `include/quasar/backend/` are now HIP-free: an opaque
   `stream_t` and backend-neutral device-memory free functions, with all HIP calls
   confined to `src/backend/hip/`. The kernel-launch ABIs no longer leak
@@ -123,6 +136,11 @@ interfaces may still change between entries.
   Jx/Jy/Jz loops.
 - PIC: the per-logged-step alive-particle count reuses the species compaction
   counter instead of allocating a per-block reduction buffer each call.
+- PIC: the current deposit no longer synchronizes the device every step. It
+  accumulates a persistent overflow flag that the solver drains on a cadence and
+  at `finalize()`, removing the per-step host-device round-trip that drained the
+  GPU pipeline mid-step (the fatal "reduce dt" overflow is now reported up to one
+  cadence interval late).
 - Magnetostatics: transient Biot–Savart output buffers skip the allocation
   zero-fill (the kernel overwrites them in full), via a new
   `device_alloc_uninit` / `DeviceBuffer(n, uninitialized)` path.

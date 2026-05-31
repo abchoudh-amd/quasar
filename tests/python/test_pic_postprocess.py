@@ -1,7 +1,7 @@
 """Unit tests for the pure-numpy PIC postprocess helpers.
 
-reshape_with_ghost infers the Yee ghost width from a flat buffer size and strips
-the halo; species_names recovers species from the npz key schema; rms is a plain
+reshape_with_ghost strips the Yee halo using the explicit ``nghost`` persisted in
+the npz; species_names recovers species from the npz key schema; rms is a plain
 reduction. None need matplotlib or a GPU, yet the existing suite did not cover
 quasar.pic.postprocess at all. A ghost-width off-by-one would silently corrupt
 every PIC field heatmap, so pin the contract here.
@@ -41,7 +41,7 @@ class ReshapeWithGhostTests(unittest.TestCase):
         nx, ny = 5, 3
         for g in (1, 2):
             flat = self._ghost_padded(nx, ny, g)
-            interior = reshape_with_ghost(flat, nx, ny)
+            interior = reshape_with_ghost(flat, nx, ny, g)
             self.assertEqual(interior.shape, (ny, nx))
             for j in range(ny):
                 for i in range(nx):
@@ -51,7 +51,7 @@ class ReshapeWithGhostTests(unittest.TestCase):
     def test_no_ghost_buffer_reshapes_directly(self):
         nx, ny = 4, 2
         flat = np.arange(nx * ny, dtype=float)
-        interior = reshape_with_ghost(flat, nx, ny)
+        interior = reshape_with_ghost(flat, nx, ny, 0)
         self.assertEqual(interior.shape, (ny, nx))
         np.testing.assert_array_equal(interior, flat.reshape(ny, nx))
 

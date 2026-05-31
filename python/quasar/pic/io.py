@@ -35,6 +35,7 @@ from typing import Sequence, Union
 import yaml
 
 from .._deck import require as _require, triple as _triple
+from .._deck import validate_evaluator_type as _validate_evaluator_type
 
 
 # Sanity ceilings on deck-supplied sizes that flow into device allocations.
@@ -103,11 +104,27 @@ class ExternalField:
                            tuple[float, float, float]] | None = None
     gradient_origin: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
+    def evaluator_params(self) -> dict[str, list[float]]:
+        """Deck parameters as the ``name -> flat float list`` map the C++
+        ``IFieldEvaluator.configure`` seam consumes (Vec3 = 3 elements, Mat3x3 = 9
+        row-major). Every evaluator reads only the keys it knows, so this returns
+        the union for all analytic types; biot_savart ignores all of them.
 
-# Field evaluators selectable from a PIC deck's external_field.evaluator.type.
-# These are registered on the C++ side (QUASAR_REGISTER_FIELD_EVALUATOR) and bound
-# to Python; biot_savart and uniform additionally take deck parameters.
-SUPPORTED_EVALUATORS = ("biot_savart", "uniform", "dipole", "gradient")
+        ``origin`` is shared by the dipole and gradient evaluators (only one is
+        ever active for a given deck), so a single key carries it.
+        """
+        params: dict[str, list[float]] = {
+            "b0": list(self.uniform_b),
+            "e0": list(self.uniform_e),
+            "origin": list(self.dipole_origin),
+        }
+        if self.dipole_moment is not None:
+            params["moment"] = list(self.dipole_moment)
+        if self.gradient_matrix is not None:
+            params["b0"] = list(self.gradient_b0)
+            params["origin"] = list(self.gradient_origin)
+            params["grad"] = [v for row in self.gradient_matrix for v in row]
+        return params
 
 
 @dataclass
@@ -229,10 +246,7 @@ class PicDeck:
                     f"numerics.current_filter[{i}] passes must be >= 1")
         if self.external_field is not None:
             ev = self.external_field.evaluator_type
-            if ev not in SUPPORTED_EVALUATORS:
-                raise ValueError(
-                    f"external_field.evaluator.type {ev!r} must be one of "
-                    f"{list(SUPPORTED_EVALUATORS)}")
+            _validate_evaluator_type(ev, "external_field.evaluator.type")
             # Biot-Savart is driven by conductor geometry; the others are
             # closed-form and need no conductors.
             if ev == "biot_savart" and not self.external_field.conductors:

@@ -71,30 +71,6 @@ struct Grid2D {
     return origin_y + (static_cast<Real>(j) + Real{0.5}) * dy();
   }
 
-  QUASAR_HOST_DEVICE constexpr Real x_at_ex(int i) const noexcept {
-    return origin_x + (static_cast<Real>(i) + Real{0.5}) * dx();
-  }
-
-  QUASAR_HOST_DEVICE constexpr Real y_at_ex(int j) const noexcept {
-    return origin_y + static_cast<Real>(j) * dy();
-  }
-
-  QUASAR_HOST_DEVICE constexpr Real x_at_ey(int i) const noexcept {
-    return origin_x + static_cast<Real>(i) * dx();
-  }
-
-  QUASAR_HOST_DEVICE constexpr Real y_at_ey(int j) const noexcept {
-    return origin_y + (static_cast<Real>(j) + Real{0.5}) * dy();
-  }
-
-  QUASAR_HOST_DEVICE constexpr Real x_at_bz(int i) const noexcept {
-    return origin_x + (static_cast<Real>(i) + Real{0.5}) * dx();
-  }
-
-  QUASAR_HOST_DEVICE constexpr Real y_at_bz(int j) const noexcept {
-    return origin_y + (static_cast<Real>(j) + Real{0.5}) * dy();
-  }
-
   void validate() const {
     if (nx <= 0 || ny <= 0) {
       throw std::invalid_argument{"Grid2D: nx and ny must be positive"};

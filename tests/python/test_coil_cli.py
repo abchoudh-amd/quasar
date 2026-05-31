@@ -254,6 +254,28 @@ class CoilIoErrorPathTest(unittest.TestCase):
             output: {format: npz, path: out.npz}
             """)
 
+    def _evaluator_deck(self, ev_type: str) -> str:
+        return f"""
+            units: SI
+            conductors:
+              - name: loop
+                current_A: 1.0
+                geometry: {{type: circular_loop, radius_m: 0.1,
+                           center_xyz: [0,0,0], axis_xyz: [0,0,1], n_segments: 16}}
+            observation: {{type: points, points_xyz_m: [[0,0,0]]}}
+            output: {{format: npz, path: out.npz}}
+            evaluator: {{type: {ev_type}}}
+            """
+
+    def test_rejects_file_grid_evaluator(self):
+        # file_grid is registered in C++ but not yet implemented, so the deck layer
+        # must reject it (SUPPORTED_EVALUATORS excludes it) before it can reach the
+        # raw C++ std::logic_error.
+        self._expect_value_error(self._evaluator_deck("file_grid"))
+
+    def test_rejects_unknown_evaluator(self):
+        self._expect_value_error(self._evaluator_deck("does_not_exist"))
+
 
 class BuildPayloadTest(unittest.TestCase):
     """CPU-only tests for the output-field assembly (no kernel / GPU needed)."""

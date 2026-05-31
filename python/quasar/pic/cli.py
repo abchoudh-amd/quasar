@@ -125,30 +125,14 @@ def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
     if deck.external_field is None:
         return
     ms = _core.magnetostatics
-    ev_type = deck.external_field.evaluator_type
-    if ev_type == "uniform":
-        b = deck.external_field.uniform_b
-        e = deck.external_field.uniform_e
-        evaluator = ms.UniformEvaluator(
-            b0=_core.Vec3(b[0], b[1], b[2]),
-            e0=_core.Vec3(e[0], e[1], e[2]))
-    elif ev_type == "dipole":
-        m = deck.external_field.dipole_moment
-        o = deck.external_field.dipole_origin
-        evaluator = ms.DipoleEvaluator(
-            moment=_core.Vec3(m[0], m[1], m[2]),
-            origin=_core.Vec3(o[0], o[1], o[2]))
-    elif ev_type == "gradient":
-        b0 = deck.external_field.gradient_b0
-        o = deck.external_field.gradient_origin
-        evaluator = ms.GradientEvaluator(
-            b0=_core.Vec3(b0[0], b0[1], b0[2]),
-            grad=deck.external_field.gradient_matrix,
-            origin=_core.Vec3(o[0], o[1], o[2]))
-    else:
-        # Registry-selected evaluator by name (biot_savart, dipole, gradient, ...).
-        evaluator = ms.create_field_evaluator(ev_type)
-    cs = build_conductor_system(deck.external_field.conductors)
+    ef = deck.external_field
+    # Build the evaluator purely by registry name, then push the deck parameters
+    # through the uniform configure() seam — no per-type branch. Each evaluator
+    # reads the keys it knows (e.g. uniform reads b0/e0); unknown keys are ignored,
+    # so a parameterless evaluator like biot_savart simply gets an empty configure.
+    evaluator = ms.create_field_evaluator(ef.evaluator_type)
+    evaluator.configure(ef.evaluator_params())
+    cs = build_conductor_system(ef.conductors)
     length_scale, e_field_scale, b_field_scale = units.external_scales()
     solver.sample_external_field(
         evaluator, cs, length_scale, e_field_scale, b_field_scale)
@@ -232,6 +216,10 @@ def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
         "external_bz": units.field_component_to_si("bz", external_d["bz"]),
         "nx": fields_d["nx"],
         "ny": fields_d["ny"],
+        # The Yee buffers are ghost-padded; persist the halo width so the offline
+        # reader strips the right number of cells instead of re-deriving it from
+        # the flat size.
+        "nghost": _core.pic.required_nghost(deck.numerics.fdtd_order),
     }
     if deck.diagnostics.per_species:
         per_sp = {}
@@ -249,6 +237,7 @@ def _flatten_for_npz(snapshots: list[dict], final: dict,
         "final_time_s": np.array([final["time_s"]]),
         "nx": np.array([final["nx"]]),
         "ny": np.array([final["ny"]]),
+        "nghost": np.array([final["nghost"]]),
         "external_bx": final["external_bx"],
         "external_by": final["external_by"],
         "external_bz": final["external_bz"],
@@ -357,6 +346,11 @@ def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
                   flush=True)
         if write_every > 0 and step_done % write_every == 0:
             _flush(step_done, sim_time)
+
+    # The deposit defers its overflow check off the per-step hot path, so drain
+    # the accumulated flag once after the last step (raises "reduce dt" if any
+    # deposit spilled the deposition window).
+    solver.finalize()
 
     if log_every == 0 or deck.time.steps % log_every != 0:
         _record_scalars(deck.time.steps, sim_time)

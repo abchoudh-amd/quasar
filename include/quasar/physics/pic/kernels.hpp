@@ -64,6 +64,12 @@ void launch_pic_deposit_shape1(const quasar::Grid2D&, const quasar::pic::Particl
 void launch_pic_deposit_shape2(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
                                quasar::JField2D<double>&, double, int periodic_x,
                                int periodic_y, quasar_stream_t);
+// Reads + clears the species' persistent deposit-overflow flag and throws a
+// std::runtime_error if any deposit since the last check spilled outside the
+// deposition window. Run on a cadence and at end-of-run instead of every step so
+// the per-step deposit no longer forces a host-device synchronize.
+void launch_pic_deposit_overflow_check(const quasar::pic::ParticleSpecies&,
+                                       quasar_stream_t);
 
 // -- Current filtering -------------------------------------------------------
 // `scratch` is caller-owned ping-pong storage of at least grid.storage_size()

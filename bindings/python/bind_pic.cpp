@@ -237,6 +237,7 @@ void bind_pic(py::module_& m) {
       .def("step", &quasar::pic::EmPic2D3V::step, py::arg("dt"))
       .def("advance", &quasar::pic::EmPic2D3V::advance,
            py::arg("t_end"), py::arg("dt"))
+      .def("finalize", &quasar::pic::EmPic2D3V::finalize)
       .def("add_species",
            [](quasar::pic::EmPic2D3V& self,
               const quasar::pic::SpeciesConfig& cfg) {

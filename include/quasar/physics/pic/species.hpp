@@ -82,6 +82,15 @@ class ParticleSpecies {
   // read-only reduction (alive_count) can reuse it without copying the species.
   unsigned int* compact_counter() const noexcept { return c_counter_.device_ptr(); }
 
+  // Persistent device flag the charge-conserving deposit atomically bumps when a
+  // particle's displacement spills outside the fixed deposition window. Kept
+  // separate from compact_counter (which the deposit memsets to 0 each call) so
+  // the host can read it on a cadence instead of synchronizing every step. The
+  // deposit accumulates into it across steps; the solver copies it back
+  // periodically and at end-of-run, then clears it. mutable: device scratch read
+  // by the logically-const consume path.
+  unsigned int* deposit_overflow() const noexcept { return deposit_overflow_.device_ptr(); }
+
  private:
   std::string name_{"species"};
   Real charge_{Real{-1}};
@@ -110,6 +119,9 @@ class ParticleSpecies {
   backend::DeviceBuffer<std::uint8_t> c_alive_{};
   // mutable: device scratch reused by the logically-const alive_count reduction.
   mutable backend::DeviceBuffer<unsigned int> c_counter_{};
+  // mutable: persistent deposit-overflow flag, accumulated by the deposit kernel
+  // and consumed (copied + cleared) by the solver on a cadence.
+  mutable backend::DeviceBuffer<unsigned int> deposit_overflow_{};
 };
 
 }  // namespace quasar::pic

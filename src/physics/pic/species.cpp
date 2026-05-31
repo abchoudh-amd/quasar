@@ -28,7 +28,8 @@ ParticleSpecies::ParticleSpecies(SpeciesConfig cfg)
     c_vz_{capacity_},
     c_weight_{capacity_},
     c_alive_{capacity_},
-    c_counter_{1} {
+    c_counter_{1},
+    deposit_overflow_{1} {
   if (mass_ <= Real{0}) {
     throw std::invalid_argument{"ParticleSpecies: mass must be positive"};
   }

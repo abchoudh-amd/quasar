@@ -30,17 +30,3 @@ def cfl_dt(dx: float, dy: float, c: float = C_LIGHT, fdtd_order: int = 2,
            safety: float = 0.5) -> float:
     """A safe timestep: the CFL limit scaled by ``safety`` (default 0.5)."""
     return safety * cfl_limit(dx, dy, c, fdtd_order)
-
-
-def infer_nghost(nx: int, ny: int, storage: int) -> int:
-    """Recover the Yee ghost width from a ghost-padded buffer size.
-
-    A Yee field component is stored as ``(nx + 2g) * (ny + 2g)`` for ghost width
-    ``g`` (1 for 2nd-order FDTD, 2 for 4th-order). Solve for the largest ``g``
-    whose padded size still fits ``storage``. Used wherever only the flat buffer
-    size is known (the C++ side carries ``required_nghost`` authoritatively).
-    """
-    g = 0
-    while (nx + 2 * (g + 1)) * (ny + 2 * (g + 1)) <= storage:
-        g += 1
-    return g

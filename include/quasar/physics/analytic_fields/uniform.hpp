@@ -9,6 +9,9 @@ class UniformEvaluator final : public numerics::IFieldEvaluator {
   UniformEvaluator() = default;
   explicit UniformEvaluator(Vec3 b0, Vec3 e0 = Vec3{0, 0, 0}) : b0_{b0}, e0_{e0} {}
 
+  // Deck params: "b0" (Vec3 tesla), "e0" (Vec3 V/m). Both default to zero.
+  void configure(const numerics::EvaluatorParams& p) override;
+
   Field<Vec3> evaluate_B(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
   Field<Vec3> evaluate_E(const core::IFieldSource&,

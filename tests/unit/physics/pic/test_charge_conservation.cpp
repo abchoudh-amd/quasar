@@ -125,7 +125,13 @@ TEST(PicChargeConservation, OversizedDisplacementFailsInsteadOfTruncatingCurrent
   sp.set_host_particles({0.5}, {0.5}, {10.0}, {0.0}, {0.0}, {1.0});
   solver.add_species(std::move(sp));
 
-  EXPECT_THROW(solver.step(0.2), std::runtime_error);
+  // The deposit no longer synchronizes per step: it accumulates a persistent
+  // overflow flag that step() drains only on its compaction cadence. A single
+  // step therefore records the overflow without throwing; finalize() (which the
+  // driver calls after the last step) drains the flag and throws the fatal
+  // "reduce dt" error.
+  EXPECT_NO_THROW(solver.step(0.2));
+  EXPECT_THROW(solver.finalize(), std::runtime_error);
 }
 
 TEST(PicChargeConservation, DepositTypesExist) {

@@ -9,6 +9,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "quasar/core/field_source.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/analytic_fields/dipole.hpp"
 #include "quasar/physics/analytic_fields/gradient.hpp"
@@ -144,7 +145,12 @@ PYBIND11_MODULE(_core, m) {
       .def_readwrite("current_A", &Filament::current_A)
       .def_readwrite("points",    &Filament::points);
 
-  py::class_<ConductorSystem>(ms, "ConductorSystem")
+  // Axis-neutral field-source base so the IFieldEvaluator surface can accept any
+  // source polymorphically (the evaluator contract is on core::IFieldSource).
+  // ConductorSystem derives from it; analytic evaluators ignore the source.
+  py::class_<::quasar::core::IFieldSource>(ms, "IFieldSource");
+
+  py::class_<ConductorSystem, ::quasar::core::IFieldSource>(ms, "ConductorSystem")
       .def(py::init<>())
       .def("add",   &ConductorSystem::add, py::arg("filament"))
       .def("size",  &ConductorSystem::size)
@@ -211,18 +217,25 @@ PYBIND11_MODULE(_core, m) {
   // sampler and selected by registry name.
   using ::quasar::numerics::IFieldEvaluator;
   py::class_<IFieldEvaluator>(ms, "IFieldEvaluator")
+      .def("configure",
+           [](IFieldEvaluator& self, const ::quasar::numerics::EvaluatorParams& params) {
+             self.configure(params);
+           },
+           py::arg("params"),
+           "Apply deck parameters (name -> flat float list; Vec3=3, Mat3x3=9 "
+           "row-major) after registry construction. Unknown keys are ignored.")
       .def("evaluate_B",
            [](const IFieldEvaluator& self,
-              const ConductorSystem& cs, const PointCloud& obs) {
-             return field_to_numpy(self.evaluate_B(cs, obs));
+              const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
+             return field_to_numpy(self.evaluate_B(src, obs));
            },
-           py::arg("conductors"), py::arg("observations"))
+           py::arg("source"), py::arg("observations"))
       .def("evaluate_grad_B",
            [](const IFieldEvaluator& self,
-              const ConductorSystem& cs, const PointCloud& obs) {
-             return grad_field_to_numpy(self.evaluate_grad_B(cs, obs));
+              const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
+             return grad_field_to_numpy(self.evaluate_grad_B(src, obs));
            },
-           py::arg("conductors"), py::arg("observations"));
+           py::arg("source"), py::arg("observations"));
 
   py::class_<BiotSavartEvaluator, IFieldEvaluator>(ms, "BiotSavartEvaluator")
       .def(py::init<>())

@@ -4,6 +4,11 @@
 
 namespace quasar::analytic_fields {
 
+void UniformEvaluator::configure(const numerics::EvaluatorParams& p) {
+  b0_ = numerics::param_vec3(p, "b0", b0_);
+  e0_ = numerics::param_vec3(p, "e0", e0_);
+}
+
 Field<Vec3> UniformEvaluator::evaluate_B(const core::IFieldSource&,
                                          const core::PointCloud& obs) const {
   Field<Vec3> out(obs.size());

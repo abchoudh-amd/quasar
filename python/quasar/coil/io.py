@@ -41,6 +41,7 @@ import yaml
 
 from .._core import Vec3
 from .._deck import require as _require, triple as _triple
+from .._deck import validate_evaluator_type as _validate_evaluator_type
 from . import (
     ConductorSystem,
     Filament,
@@ -254,14 +255,6 @@ def _build_observation(spec: dict) -> _ObservationResult:
 # ---------------------------------------------------------------------------
 
 
-# Field evaluators selectable from a coil deck's top-level evaluator.type. These
-# are registered on the C++ side (QUASAR_REGISTER_FIELD_EVALUATOR) and constructed
-# by name via create_field_evaluator. "file_grid" is registered but not yet
-# implemented, so it is intentionally excluded here (a deck selecting it would hit
-# a raw C++ std::logic_error otherwise).
-SUPPORTED_EVALUATORS = ("biot_savart", "uniform", "dipole", "gradient")
-
-
 @dataclass
 class OutputSpec:
     format: str
@@ -287,10 +280,7 @@ class CoilDeck:
             raise ValueError(f"only units: SI is supported, got {self.units!r}")
         if self.conductors.empty():
             raise ValueError("deck.conductors must be non-empty")
-        if self.evaluator_type not in SUPPORTED_EVALUATORS:
-            raise ValueError(
-                f"evaluator.type {self.evaluator_type!r} must be one of "
-                f"{list(SUPPORTED_EVALUATORS)}")
+        _validate_evaluator_type(self.evaluator_type, "evaluator.type")
 
 
 def _parse_output(spec: dict) -> OutputSpec:

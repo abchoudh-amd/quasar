@@ -4,6 +4,11 @@
 
 namespace quasar::analytic_fields {
 
+void DipoleEvaluator::configure(const numerics::EvaluatorParams& p) {
+  moment_ = numerics::param_vec3(p, "moment", moment_);
+  origin_ = numerics::param_vec3(p, "origin", origin_);
+}
+
 Field<Vec3> DipoleEvaluator::evaluate_B(const core::IFieldSource&,
                                         const core::PointCloud& obs) const {
   Field<Vec3> out(obs.size());

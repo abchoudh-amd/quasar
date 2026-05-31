@@ -56,6 +56,12 @@ class EmPic2D3V {
   void add_species(ParticleSpecies s);
   void step(Real dt);
   void advance(Real t_end, Real dt);
+  // Drains each species' persistent deposit-overflow flag and throws if any
+  // deposit spilled outside the deposition window. step() runs this on a cadence;
+  // advance() runs it after the final step. A driver that calls step() directly
+  // (e.g. the Python run loop) must call finalize() once after its last step so a
+  // late-run overflow is not missed.
+  void finalize();
 
   const EmPicConfig& config() const noexcept { return cfg_; }
 
@@ -65,6 +71,7 @@ class EmPic2D3V {
   void correct_field_boundaries_e(Real dt);
   void apply_particle_bcs(ParticleSpecies& s);
   bool has_absorbing_boundary() const noexcept;
+  void check_deposit_overflow();
 
   EmPicConfig cfg_{};
   // Steps taken so far; drives the particle-compaction cadence.
@@ -84,8 +91,9 @@ class EmPic2D3V {
   std::array<std::unique_ptr<boundary::IFieldBoundary>, 4> field_bcs_{};
 };
 
-// Samples the evaluator's E/B at the Yee grid's cell-staggered points and stores
-// them in external_fields. The grid coordinates are multiplied by `length_scale`
+// Samples the evaluator's E/B at the Yee grid's cell-node points (matching the
+// node-collocated convention the particle gather assumes) and stores them in
+// external_fields. The grid coordinates are multiplied by `length_scale`
 // (internal -> SI metres) before the SI evaluator is called, and the returned SI
 // field is divided by `e_field_scale`/`b_field_scale` to land in the solver's
 // internal units. All scales default to 1, i.e. a pure SI pass-through that leaves

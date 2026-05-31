@@ -70,26 +70,23 @@ void launch_impl(
 
 }  // namespace
 
-extern "C" void launch_biot_savart_gradB_f64(
-    const double* ax, const double* ay, const double* az,
-    const double* bx, const double* by, const double* bz,
-    const double* I_, int N,
-    const double* px, const double* py, const double* pz, int M,
-    double* G,
-    ::quasar::backend::stream_t stream) {
-  launch_impl<double>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G,
-                      static_cast<hipStream_t>(stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
-}
+// The f64/f32 entry points differ only in their element type, so generate the
+// extern "C" pair from one macro instead of hand-copying the cast-and-forward
+// body. Both forward to launch_impl<T> and check for a launch error.
+#define QUASAR_BS_DEFINE_GRADB_LAUNCHER(NAME, T)                             \
+  extern "C" void NAME(                                                      \
+      const T* ax, const T* ay, const T* az,                                \
+      const T* bx, const T* by, const T* bz,                                \
+      const T* I_, int N,                                                   \
+      const T* px, const T* py, const T* pz, int M,                         \
+      T* G,                                                                  \
+      ::quasar::backend::stream_t stream) {                                  \
+    launch_impl<T>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G,         \
+                   static_cast<hipStream_t>(stream));                       \
+    QUASAR_HIP_CHECK(::hipGetLastError());                                   \
+  }
 
-extern "C" void launch_biot_savart_gradB_f32(
-    const float* ax, const float* ay, const float* az,
-    const float* bx, const float* by, const float* bz,
-    const float* I_, int N,
-    const float* px, const float* py, const float* pz, int M,
-    float* G,
-    ::quasar::backend::stream_t stream) {
-  launch_impl<float>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, G,
-                     static_cast<hipStream_t>(stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
-}
+QUASAR_BS_DEFINE_GRADB_LAUNCHER(launch_biot_savart_gradB_f64, double)
+QUASAR_BS_DEFINE_GRADB_LAUNCHER(launch_biot_savart_gradB_f32, float)
+
+#undef QUASAR_BS_DEFINE_GRADB_LAUNCHER

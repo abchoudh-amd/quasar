@@ -8,6 +8,7 @@
 #include <hip/hip_runtime.h>
 
 #include <stdexcept>
+#include <string>
 
 // Charge-conserving (Esirkepov density-decomposition) current deposition.
 //
@@ -182,22 +183,19 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
   if (s.size() == 0) return;
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
-  QUASAR_HIP_CHECK(::hipMemsetAsync(s.compact_counter(), 0, sizeof(unsigned int), stream));
+  // The kernel atomically bumps the persistent deposit-overflow flag if any
+  // particle's displacement spills outside the deposition window. The flag is
+  // accumulated across steps and read back by the solver on a cadence (and at
+  // end-of-run), so there is no per-step host synchronize on the hot path — the
+  // old unconditional hipStreamSynchronize here drained the GPU pipeline every
+  // timestep. Overflow is a fatal "reduce dt" condition, so a delayed throw is
+  // acceptable.
   hipLaunchKernelGGL((deposit_kernel<ShapeOrder>), grid, block, 0, stream,
                      g, s.size(), s.charge(), dt, periodic_x, periodic_y,
                      s.x(), s.y(), s.x_prev(), s.y_prev(),
                      s.vz(), s.weight(), s.alive(), j.jx.device_ptr(), j.jy.device_ptr(),
-                     j.jz.device_ptr(), s.compact_counter());
+                     j.jz.device_ptr(), s.deposit_overflow());
   QUASAR_HIP_CHECK(::hipGetLastError());
-  unsigned int overflow = 0;
-  QUASAR_HIP_CHECK(::hipMemcpyAsync(&overflow, s.compact_counter(), sizeof(unsigned int),
-                                    ::hipMemcpyDeviceToHost, stream));
-  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
-  if (overflow != 0) {
-    throw std::runtime_error{
-        "PIC deposit displacement exceeded the fixed current-deposition window; "
-        "reduce dt or subcycle/split the particle step"};
-  }
 }
 
 }  // namespace
@@ -220,4 +218,25 @@ extern "C" void launch_pic_deposit_shape2(const quasar::Grid2D& g,
   launch<2>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
             static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+// Reads back the persistent deposit-overflow flag, clears it, and throws if any
+// overflow accumulated since the last check. Called by the solver on a cadence
+// and at end-of-run rather than every step, keeping the host-device synchronize
+// off the per-step hot path.
+extern "C" void launch_pic_deposit_overflow_check(const quasar::pic::ParticleSpecies& s,
+                                                  quasar_stream_t stream) {
+  auto hip_stream = static_cast<hipStream_t>(stream);
+  unsigned int overflow = 0;
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(&overflow, s.deposit_overflow(), sizeof(unsigned int),
+                                    ::hipMemcpyDeviceToHost, hip_stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(hip_stream));
+  if (overflow != 0) {
+    QUASAR_HIP_CHECK(::hipMemsetAsync(s.deposit_overflow(), 0, sizeof(unsigned int),
+                                      hip_stream));
+    QUASAR_HIP_CHECK(::hipStreamSynchronize(hip_stream));
+    throw std::runtime_error{
+        "PIC deposit displacement exceeded the fixed current-deposition window; "
+        "reduce dt or subcycle/split the particle step"};
+  }
 }
