@@ -25,25 +25,30 @@ __device__ inline std::size_t gather_index(const quasar::Grid2D& g, int i, int j
   return g.index(ii, jj);
 }
 
-template <int ShapeOrder>
-__device__ quasar::Vec3 gather_field(const quasar::Grid2D& g,
-                                     const double* __restrict__ x_comp,
-                                     const double* __restrict__ y_comp,
-                                     const double* __restrict__ z_comp,
-                                     double x, double y,
-                                     bool periodic_x, bool periodic_y) {
-  const auto w = quasar::numerics::shape_weights_2d<ShapeOrder>(x, y, g);
-  quasar::Vec3 out{0, 0, 0};
+// Gathers the self field and the external field of one (vector) quantity in a
+// single sweep over the shape stencil, reusing the precomputed weights `w` and
+// computing each node's wrapped/clamped index exactly once. `out_self` and
+// `out_ext` accumulate the two contributions.
+template <class Weights>
+__device__ void gather_pair(const quasar::Grid2D& g, const Weights& w,
+                            const double* __restrict__ sx, const double* __restrict__ sy,
+                            const double* __restrict__ sz,
+                            const double* __restrict__ ex, const double* __restrict__ ey,
+                            const double* __restrict__ ez,
+                            bool periodic_x, bool periodic_y,
+                            quasar::Vec3& out_self, quasar::Vec3& out_ext) {
   for (int jj = 0; jj < w.ny; ++jj) {
     for (int ii = 0; ii < w.nx; ++ii) {
       const double ww = w.wx[ii] * w.wy[jj];
       const std::size_t k = gather_index(g, w.ix[ii], w.iy[jj], periodic_x, periodic_y);
-      out.x += ww * x_comp[k];
-      out.y += ww * y_comp[k];
-      out.z += ww * z_comp[k];
+      out_self.x += ww * sx[k];
+      out_self.y += ww * sy[k];
+      out_self.z += ww * sz[k];
+      out_ext.x += ww * ex[k];
+      out_ext.y += ww * ey[k];
+      out_ext.z += ww * ez[k];
     }
   }
-  return out;
 }
 
 __device__ quasar::Vec3 boris(double qm, quasar::Vec3 v, quasar::Vec3 e,
@@ -77,13 +82,13 @@ __global__ void gather_push_kernel(quasar::Grid2D g, std::size_t n, double qm,
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
 
-  quasar::Vec3 e = gather_field<ShapeOrder>(g, ex, ey, ez, x[p], y[p], periodic_x, periodic_y);
-  const quasar::Vec3 ee =
-      gather_field<ShapeOrder>(g, ext_ex, ext_ey, ext_ez, x[p], y[p], periodic_x, periodic_y);
+  // The shape weights depend only on the particle position, so compute them once
+  // and reuse them for the self+external E and self+external B gathers.
+  const auto w = quasar::numerics::shape_weights_2d<ShapeOrder>(x[p], y[p], g);
+  quasar::Vec3 e{0, 0, 0}, ee{0, 0, 0}, b{0, 0, 0}, be{0, 0, 0};
+  gather_pair(g, w, ex, ey, ez, ext_ex, ext_ey, ext_ez, periodic_x, periodic_y, e, ee);
+  gather_pair(g, w, bx, by, bz, ext_bx, ext_by, ext_bz, periodic_x, periodic_y, b, be);
   e = e + ee;
-  quasar::Vec3 b = gather_field<ShapeOrder>(g, bx, by, bz, x[p], y[p], periodic_x, periodic_y);
-  const quasar::Vec3 be =
-      gather_field<ShapeOrder>(g, ext_bx, ext_by, ext_bz, x[p], y[p], periodic_x, periodic_y);
   b = b + be;
   quasar::Vec3 v = boris(qm, quasar::Vec3{vx[p], vy[p], vz[p]}, e, b, dt);
   vx[p] = v.x;
