@@ -74,6 +74,10 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
   // diverging field): static_cast<int>(NaN) is UB and would seed a garbage
   // window base. Skip the deposit for such particles.
   if (!isfinite(gx0) || !isfinite(gx1) || !isfinite(gy0) || !isfinite(gy1)) return;
+  // TODO(charge): kWindow is fixed at 6, sized for a sub-CFL displacement. A
+  // non-relativistic pusher places no ceiling on |v|, so a displacement past the
+  // window would silently drop the crossing current and break discrete charge
+  // conservation. Bound the displacement or size the window from the CFL.
   const int bx = static_cast<int>(floor(gx0 < gx1 ? gx0 : gx1)) - 2;
   const int by = static_cast<int>(floor(gy0 < gy1 ? gy0 : gy1)) - 2;
 
@@ -85,6 +89,15 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
     Sx1[a] = weight_1d<ShapeOrder>(gx1 - ix);
     Sy0[a] = weight_1d<ShapeOrder>(gy0 - iy);
     Sy1[a] = weight_1d<ShapeOrder>(gy1 - iy);
+  }
+
+  // The destination index for window node (bx+a, by+b) is identical across the
+  // Jx/Jy/Jz accumulation loops, so compute the wrap/clamp + linear index once.
+  std::size_t off[kWindow][kWindow];
+  for (int a = 0; a < kWindow; ++a) {
+    for (int b = 0; b < kWindow; ++b) {
+      off[a][b] = deposit_index(g, bx + a, by + b, periodic_x, periodic_y);
+    }
   }
 
   // NOTE(perf): current is accumulated with scattered global atomicAdd into a
@@ -106,7 +119,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
       const double dsx = Sx1[a] - Sx0[a];
       run += kx * dsx * sy_mid;
       if (run != 0.0) {
-        atomicAdd(jx + deposit_index(g, bx + a, by + b, periodic_x, periodic_y), run);
+        atomicAdd(jx + off[a][b], run);
       }
     }
   }
@@ -120,7 +133,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
       const double dsy = Sy1[b] - Sy0[b];
       run += ky * dsy * sx_mid;
       if (run != 0.0) {
-        atomicAdd(jy + deposit_index(g, bx + a, by + b, periodic_x, periodic_y), run);
+        atomicAdd(jy + off[a][b], run);
       }
     }
   }
@@ -131,7 +144,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
     for (int a = 0; a < kWindow; ++a) {
       const double smid = 0.5 * (Sx0[a] * Sy0[b] + Sx1[a] * Sy1[b]);
       if (smid != 0.0) {
-        atomicAdd(jz + deposit_index(g, bx + a, by + b, periodic_x, periodic_y), qwz * smid);
+        atomicAdd(jz + off[a][b], qwz * smid);
       }
     }
   }
