@@ -334,6 +334,115 @@ class ResourceCeilingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _deck(diagnostics=Diagnostics(fields=["bz", "pressure"])).validate()
 
+    def test_nonfinite_lengths_rejected(self):
+        for lx, ly in ((float("inf"), 1.0), (1.0, float("nan"))):
+            with self.subTest(lx=lx, ly=ly):
+                with self.assertRaises(ValueError):
+                    _deck(domain=Domain(nx=8, ny=8, lx_m=lx, ly_m=ly)).validate()
+
+    def test_nonfinite_origin_y_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0,
+                                origin_y_m=float("inf"))).validate()
+
+    def test_nonfinite_charge_rejected(self):
+        sp = Species(name="e", charge_C=float("nan"), mass_kg=1.0, n_particles=8,
+                     initial=SpeciesInitial())
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_nonfinite_temperature_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
+                     initial=SpeciesInitial(temperature_eV=float("inf")))
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_nonfinite_drift_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
+                     initial=SpeciesInitial(drift_v=(float("nan"), 0.0, 0.0)))
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_nonfinite_block_region_bound_rejected(self):
+        init = SpeciesInitial(distribution="maxwellian_block",
+                              region_x_min_m=float("nan"), region_x_max_m=1.0,
+                              region_y_min_m=0.0, region_y_max_m=1.0)
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=16,
+                     initial=init)
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_nonfinite_fields_initial_amplitude_rejected(self):
+        from quasar.pic.io import Fields, FieldsInitial
+        seed = FieldsInitial(type="seed_perturbation", amplitude=float("inf"))
+        with self.assertRaises(ValueError):
+            _deck(fields=Fields(initial=seed)).validate()
+
+
+class ExternalFieldFiniteTests(unittest.TestCase):
+
+    def _ext(self, **overrides) -> ExternalField:
+        base = dict(evaluator_type="uniform")
+        base.update(overrides)
+        return ExternalField(**base)
+
+    def test_nonfinite_uniform_b_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                uniform_b=(float("nan"), 0.0, 0.0))).validate()
+
+    def test_nonfinite_uniform_e_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                uniform_e=(0.0, float("inf"), 0.0))).validate()
+
+    def test_nonfinite_dipole_origin_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                dipole_origin=(0.0, 0.0, float("nan")))).validate()
+
+    def test_nonfinite_gradient_b0_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                gradient_b0=(float("inf"), 0.0, 0.0))).validate()
+
+    def test_nonfinite_gradient_origin_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                gradient_origin=(0.0, float("nan"), 0.0))).validate()
+
+    def test_nonfinite_dipole_moment_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                evaluator_type="dipole",
+                dipole_moment=(float("nan"), 0.0, 0.0))).validate()
+
+    def test_nonfinite_gradient_matrix_rejected(self):
+        grad = ((0.0, 0.0, 0.0),
+                (0.0, float("inf"), 0.0),
+                (0.0, 0.0, 0.0))
+        with self.assertRaises(ValueError):
+            _deck(external_field=self._ext(
+                evaluator_type="gradient", gradient_matrix=grad)).validate()
+
+
+class DiagnosticsNormalizationTests(unittest.TestCase):
+
+    def test_direct_construction_lowercases_fields(self):
+        diag = Diagnostics(fields=["BZ", "Ex"])
+        self.assertEqual(diag.fields, ["bz", "ex"])
+        _deck(diagnostics=diag).validate()
+
+    def test_parsed_deck_lowercases_fields(self):
+        deck = parse({
+            "domain": {"nx": 8, "ny": 8, "lx_m": 1.0, "ly_m": 1.0},
+            "species": [{"name": "e", "charge_C": -1.0, "mass_kg": 1.0,
+                         "n_particles": 8}],
+            "time": {"dt_s": 1.0e-12, "steps": 8},
+            "diagnostics": {"fields": ["Bz", "EX"]},
+        })
+        self.assertEqual(deck.diagnostics.fields, ["bz", "ex"])
+
 
 class FieldOnlyDeckTests(unittest.TestCase):
 

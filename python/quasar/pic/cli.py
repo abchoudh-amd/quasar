@@ -215,24 +215,20 @@ def _species_to_si(host: dict, units: Units) -> dict:
 
 def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
               step: int, sim_time: float, units: Units) -> dict:
-    def _field(component: str):
-        if hasattr(solver, "field_component_to_host"):
-            return solver.field_component_to_host(component)
-        return solver.fields_to_host()[component]
-
-    def _external(component: str):
-        if hasattr(solver, "external_field_component_to_host"):
-            return solver.external_field_component_to_host(component)
-        return solver.external_fields_to_host()[component]
-
+    # The solver copies only the requested components host-side, one device->host
+    # transfer per component rather than the whole six-field dict.
     snap = {
         "step": step,
         "time_s": sim_time,
-        "fields": {k: units.field_component_to_si(k, _field(k))
+        "fields": {k: units.field_component_to_si(
+                       k, solver.field_component_to_host(k))
                    for k in deck.diagnostics.fields},
-        "external_bx": units.field_component_to_si("bx", _external("bx")),
-        "external_by": units.field_component_to_si("by", _external("by")),
-        "external_bz": units.field_component_to_si("bz", _external("bz")),
+        "external_bx": units.field_component_to_si(
+            "bx", solver.external_field_component_to_host("bx")),
+        "external_by": units.field_component_to_si(
+            "by", solver.external_field_component_to_host("by")),
+        "external_bz": units.field_component_to_si(
+            "bz", solver.external_field_component_to_host("bz")),
         "nx": deck.domain.nx,
         "ny": deck.domain.ny,
         # The Yee buffers are ghost-padded; persist the halo width so the offline

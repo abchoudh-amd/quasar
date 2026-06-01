@@ -45,23 +45,33 @@ from .._deck import validate_evaluator_type as _validate_evaluator_type
 MAX_GRID_DIM = 1 << 16        # 65536 cells per axis
 MAX_GRID_CELLS = 1 << 30      # ~1.07e9 cells total
 MAX_PARTICLES = 1 << 31       # ~2.1e9 particles per species
+# Canonical list of Yee field component names. The C++ yee_component_buffer in
+# bindings/python/bind_pic.cpp and the E/B split in quasar.pic._units must mirror
+# this set.
 FIELD_COMPONENTS = ("ex", "ey", "ez", "bx", "by", "bz")
 
 
-def _require_finite(value: float, context: str) -> None:
-    if not math.isfinite(float(value)):
+def _as_finite(value: float, context: str) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{context} must be a finite number") from None
+    if not math.isfinite(v):
         raise ValueError(f"{context} must be finite")
+    return v
+
+
+def _require_finite(value: float, context: str) -> None:
+    _as_finite(value, context)
 
 
 def _require_positive_finite(value: float, context: str) -> None:
-    _require_finite(value, context)
-    if float(value) <= 0:
+    if _as_finite(value, context) <= 0:
         raise ValueError(f"{context} must be positive")
 
 
 def _require_nonnegative_finite(value: float, context: str) -> None:
-    _require_finite(value, context)
-    if float(value) < 0:
+    if _as_finite(value, context) < 0:
         raise ValueError(f"{context} must be >= 0")
 
 
@@ -219,6 +229,11 @@ class Diagnostics:
     fields: list[str] = field(default_factory=lambda: ["bz"])
     per_species: bool = True
 
+    def __post_init__(self) -> None:
+        # Normalize component names once, so YAML-parsed and directly-constructed
+        # decks agree before validate() checks membership in FIELD_COMPONENTS.
+        self.fields = [str(name).lower() for name in self.fields]
+
 
 @dataclass
 class PicDeck:
@@ -237,6 +252,25 @@ class PicDeck:
     def validate(self) -> None:
         if self.units not in ("SI", "normalized"):
             raise ValueError("units must be 'SI' or 'normalized'")
+        self._validate_domain()
+        self._validate_numerics()
+        self._validate_external_field()
+        # A deck must drive *something*: particles, an external field, or an
+        # initial field seed. Field-only decks (e.g. EM-wave propagation, coil
+        # confinement) legitimately have no species.
+        if (not self.species and self.external_field is None
+                and self.fields.initial is None):
+            raise ValueError(
+                "deck must define at least one of: species, external_field, "
+                "or fields.initial")
+        self._validate_species()
+        if self.fields.initial is not None:
+            _require_finite(self.fields.initial.amplitude, "fields.initial.amplitude")
+        self._validate_time()
+        self._validate_diagnostics()
+        self._validate_boundary()
+
+    def _validate_domain(self) -> None:
         if self.domain.nx <= 0 or self.domain.ny <= 0:
             raise ValueError("domain.nx and domain.ny must be positive")
         # Upper-bound grid and particle counts so a typo (or hostile deck) cannot
@@ -256,6 +290,8 @@ class PicDeck:
         _require_positive_finite(
             self.normalization.reference_density_per_m3,
             "normalization.reference_density_per_m3")
+
+    def _validate_numerics(self) -> None:
         if self.numerics.fdtd_order not in (2, 4):
             raise ValueError("numerics.fdtd_order must be 2 or 4")
         if self.numerics.shape not in ("cic", "tsc"):
@@ -273,48 +309,45 @@ class PicDeck:
             if passes < 1:
                 raise ValueError(
                     f"numerics.current_filter[{i}] passes must be >= 1")
-        if self.external_field is not None:
-            ev = self.external_field.evaluator_type
-            _validate_evaluator_type(ev, "external_field.evaluator.type")
+
+    def _validate_external_field(self) -> None:
+        if self.external_field is None:
+            return
+        ev = self.external_field.evaluator_type
+        _validate_evaluator_type(ev, "external_field.evaluator.type")
+        _require_vec_finite(
+            self.external_field.uniform_b, "external_field.evaluator.B")
+        _require_vec_finite(
+            self.external_field.uniform_e, "external_field.evaluator.E")
+        _require_vec_finite(
+            self.external_field.dipole_origin,
+            "external_field.evaluator.origin")
+        _require_vec_finite(
+            self.external_field.gradient_b0,
+            "external_field.evaluator.B0")
+        _require_vec_finite(
+            self.external_field.gradient_origin,
+            "external_field.evaluator.gradient_origin")
+        if self.external_field.dipole_moment is not None:
             _require_vec_finite(
-                self.external_field.uniform_b, "external_field.evaluator.B")
-            _require_vec_finite(
-                self.external_field.uniform_e, "external_field.evaluator.E")
-            _require_vec_finite(
-                self.external_field.dipole_origin,
-                "external_field.evaluator.origin")
-            _require_vec_finite(
-                self.external_field.gradient_b0,
-                "external_field.evaluator.B0")
-            _require_vec_finite(
-                self.external_field.gradient_origin,
-                "external_field.evaluator.gradient_origin")
-            if self.external_field.dipole_moment is not None:
+                self.external_field.dipole_moment,
+                "external_field.evaluator.moment")
+        if self.external_field.gradient_matrix is not None:
+            for r, row in enumerate(self.external_field.gradient_matrix):
                 _require_vec_finite(
-                    self.external_field.dipole_moment,
-                    "external_field.evaluator.moment")
-            if self.external_field.gradient_matrix is not None:
-                for r, row in enumerate(self.external_field.gradient_matrix):
-                    _require_vec_finite(
-                        row, f"external_field.evaluator.grad[{r}]")
-            # Biot-Savart is driven by conductor geometry; the others are
-            # closed-form and need no conductors.
-            if ev == "biot_savart" and not self.external_field.conductors:
-                raise ValueError("external_field.evaluator.conductors must be non-empty")
-            if ev == "dipole" and self.external_field.dipole_moment is None:
-                raise ValueError(
-                    "external_field.evaluator.moment_Am2 is required for type 'dipole'")
-            if ev == "gradient" and self.external_field.gradient_matrix is None:
-                raise ValueError(
-                    "external_field.evaluator.grad_T_per_m is required for type 'gradient'")
-        # A deck must drive *something*: particles, an external field, or an
-        # initial field seed. Field-only decks (e.g. EM-wave propagation, coil
-        # confinement) legitimately have no species.
-        if (not self.species and self.external_field is None
-                and self.fields.initial is None):
+                    row, f"external_field.evaluator.grad[{r}]")
+        # Biot-Savart is driven by conductor geometry; the others are
+        # closed-form and need no conductors.
+        if ev == "biot_savart" and not self.external_field.conductors:
+            raise ValueError("external_field.evaluator.conductors must be non-empty")
+        if ev == "dipole" and self.external_field.dipole_moment is None:
             raise ValueError(
-                "deck must define at least one of: species, external_field, "
-                "or fields.initial")
+                "external_field.evaluator.moment_Am2 is required for type 'dipole'")
+        if ev == "gradient" and self.external_field.gradient_matrix is None:
+            raise ValueError(
+                "external_field.evaluator.grad_T_per_m is required for type 'gradient'")
+
+    def _validate_species(self) -> None:
         for sp in self.species:
             _require_finite(sp.charge_C, f"species {sp.name!r}: charge_C")
             _require_positive_finite(sp.mass_kg, f"species {sp.name!r}: mass_kg")
@@ -356,14 +389,16 @@ class PicDeck:
                 sp.initial.temperature_eV,
                 f"species {sp.name!r}: temperature_eV")
             _require_vec_finite(sp.initial.drift_v, f"species {sp.name!r}: drift_v")
-        if self.fields.initial is not None:
-            _require_finite(self.fields.initial.amplitude, "fields.initial.amplitude")
+
+    def _validate_time(self) -> None:
         if isinstance(self.time.dt_s, str) and self.time.dt_s != "auto":
             raise ValueError("time.dt_s must be a float or the string 'auto'")
         if not isinstance(self.time.dt_s, str):
-            _require_positive_finite(float(self.time.dt_s), "time.dt_s")
+            _require_positive_finite(self.time.dt_s, "time.dt_s")
         if self.time.steps <= 0:
             raise ValueError("time.steps must be positive")
+
+    def _validate_diagnostics(self) -> None:
         if self.diagnostics.cadence < 0:
             raise ValueError("diagnostics.cadence must be >= 0")
         for field_name in self.diagnostics.fields:
@@ -371,6 +406,8 @@ class PicDeck:
                 raise ValueError(
                     f"diagnostics.fields entry {field_name!r} must be one of "
                     f"{list(FIELD_COMPONENTS)}")
+
+    def _validate_boundary(self) -> None:
         allowed_pbc = {"periodic", "specular", "absorbing"}
         for i, bc in enumerate(self.boundary.particle):
             if bc not in allowed_pbc:
@@ -483,7 +520,7 @@ def _parse_diagnostics(d: dict | None) -> Diagnostics:
     return Diagnostics(
         output_path=str(d.get("output_path", "out.npz")),
         cadence=int(d.get("cadence", 0)),
-        fields=[str(name).lower() for name in d.get("fields", ["bz"])],
+        fields=list(d.get("fields", ["bz"])),
         per_species=bool(d.get("per_species", True)),
     )
 

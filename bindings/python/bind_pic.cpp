@@ -52,9 +52,11 @@ py::array_t<Real> buffer_to_numpy(const quasar::backend::DeviceBuffer<Real>& buf
   return arr;
 }
 
-const quasar::backend::DeviceBuffer<Real>&
-yee_component_buffer(const quasar::YeeField2D<Real>& f,
-                     const std::string& component) {
+// Single source of truth for the component-name -> Yee buffer mapping. Works
+// for const and mutable field refs alike; keep the accepted names in sync with
+// FIELD_COMPONENTS in python/quasar/pic/io.py.
+template <typename FieldRef>
+auto& yee_component_buffer(FieldRef& f, const std::string& component) {
   if (component == "ex") return f.ex;
   if (component == "ey") return f.ey;
   if (component == "ez") return f.ez;
@@ -302,16 +304,7 @@ void bind_pic(py::module_& m) {
              // the solver's internal (normalized) units and full ghost-padded
              // storage layout (matches fields_to_host()).
              auto& f = self.fields();
-             auto pick = [&]() -> quasar::backend::DeviceBuffer<Real>& {
-               if (component == "ex") return f.ex;
-               if (component == "ey") return f.ey;
-               if (component == "ez") return f.ez;
-               if (component == "bx") return f.bx;
-               if (component == "by") return f.by;
-               if (component == "bz") return f.bz;
-               throw std::invalid_argument("seed_field: unknown component '" + component + "'");
-             };
-             auto& buf = pick();
+             auto& buf = yee_component_buffer(f, component);
              const auto vec = numpy_to_real_vector(values, "values");
              if (vec.size() != buf.size()) {
                throw std::invalid_argument("seed_field: array size does not match field storage");

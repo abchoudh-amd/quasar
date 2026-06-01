@@ -38,6 +38,10 @@ interfaces may still change between entries.
   field-solver/pusher/deposit registries (a dropped registration now fails in the
   standard suite, not only at device-build time), and coil deck-parse tests for
   the `plane` observation and every geometry type.
+- PIC: per-component field-to-host accessors on the solver
+  (`field_component_to_host`, `external_field_component_to_host`) so diagnostics
+  copy only the requested Yee components from the device instead of the whole
+  six-field dict every snapshot.
 
 ### Fixed
 - PIC: quiet-start macro-particle weighting no longer biases the initial number
@@ -84,6 +88,15 @@ interfaces may still change between entries.
   instead of silently truncating the current-deposition window.
 - PIC: `dipole` and `gradient` external-field deck evaluators now require and use
   their evaluator parameters rather than default-constructing zero/trivial fields.
+- PIC: `PicDeck.validate()` now rejects non-finite (`NaN`/`inf`) and out-of-range
+  deck values up front — domain lengths/origin, normalization reference density,
+  `dt_s`, species charge/mass/density/temperature/drift, external-field vectors,
+  initial-field amplitude, diagnostics cadence, and unknown `diagnostics.fields`
+  names — instead of letting them propagate into the solver. `diagnostics.fields`
+  names are normalized to lowercase on every construction path, and
+  `--steps-override` only accepts a positive integer.
+- Coil: `observation.points` decks are now bounded by `MAX_OBSERVATION_POINTS`
+  like the grid/plane/line observation kinds.
 
 ### Changed
 - PIC field boundaries are now imposed by one-sided / characteristic node

@@ -8,6 +8,7 @@ from quasar.pic.cli import (
     _apply_external_field,
     _build_parser,
     _flatten_for_npz,
+    _make_solver,
     _seed_fields,
     _seed_species,
     _snapshot,
@@ -182,6 +183,63 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snap["nx"], 2)
         self.assertEqual(snap["ny"], 2)
         self.assertEqual(set(snap["fields"]), {"bz"})
+
+    def test_snapshot_applies_si_conversion_per_component(self):
+        # An SI deck has non-unit field scales, so the snapshot must multiply each
+        # raw component by the matching E- or B-field scale (ez uses E, bz uses B).
+        deck = PicDeck(
+            domain=Domain(nx=2, ny=2, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            diagnostics=Diagnostics(fields=["ez", "bz"], per_species=False),
+            units="SI",
+        )
+        units = Units(deck)
+        solver = _ComponentRecordingSolver()
+        snap = _snapshot(solver, deck, [], step=0, sim_time=0.0, units=units)
+
+        # field_calls records ez then bz -> raw arrays full of 1 then 2.
+        np.testing.assert_allclose(
+            snap["fields"]["ez"], units.field_component_to_si("ez", np.full(4, 1.0)))
+        np.testing.assert_allclose(
+            snap["fields"]["bz"], units.field_component_to_si("bz", np.full(4, 2.0)))
+        # external_calls records bx, by, bz -> raw 1, 2, 3.
+        np.testing.assert_allclose(
+            snap["external_bz"], units.field_component_to_si("bz", np.full(4, 3.0)))
+
+
+class RealBindingAccessorTests(unittest.TestCase):
+    """Exercise the C++ field_component_to_host accessor on a real solver so a
+    binding/layout regression or the unknown-component error path is caught."""
+
+    def _solver(self):
+        deck = PicDeck(
+            domain=Domain(nx=4, ny=4, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            species=[Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
+                             initial=SpeciesInitial())],
+            units="normalized",
+        )
+        return _make_solver(deck, Units(deck)), deck
+
+    def test_component_to_host_matches_storage_size(self):
+        solver, _ = self._solver()
+        arr = solver.field_component_to_host("bz")
+        self.assertEqual(arr.shape, (solver.storage_size(),))
+
+    def test_component_matches_whole_dict_fetch(self):
+        solver, _ = self._solver()
+        np.testing.assert_array_equal(
+            solver.field_component_to_host("ez"), solver.fields_to_host()["ez"])
+        np.testing.assert_array_equal(
+            solver.external_field_component_to_host("bx"),
+            solver.external_fields_to_host()["bx"])
+
+    def test_unknown_component_raises(self):
+        solver, _ = self._solver()
+        with self.assertRaises(ValueError):
+            solver.field_component_to_host("pressure")
+        with self.assertRaises(ValueError):
+            solver.external_field_component_to_host("nope")
 
 
 class _RecordingSpecies:
