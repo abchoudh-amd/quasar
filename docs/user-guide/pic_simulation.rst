@@ -13,7 +13,7 @@ Deck schema (``quasar.pic.io``)
 
    units: SI                # 'SI' or 'normalized'
 
-   normalization:           # optional; required when units == normalized
+   normalization:           # optional SI -> internal-unit reference scales
      reference_density_per_m3: 1.0e15
      reference_species: electron
 
@@ -92,7 +92,7 @@ Deck schema (``quasar.pic.io``)
 Conductor specs in ``external_field.evaluator.conductors`` are passed
 through ``quasar.coil.io._build_geometry`` and therefore accept any
 geometry the coil pipeline supports (``circular_loop``, ``helix``,
-``solenoid``, ``polygon``, ``generic_polyline``, ``racetrack``).
+``solenoid``, ``polygon``, ``polyline``, ``racetrack``).
 
 CLI
 ---

@@ -10,8 +10,10 @@ from quasar.pic.cli import (
     _flatten_for_npz,
     _seed_fields,
     _seed_species,
+    _snapshot,
 )
 from quasar.pic.io import (
+    Diagnostics,
     Domain,
     ExternalField,
     Fields,
@@ -98,6 +100,14 @@ class BuildParserTests(unittest.TestCase):
             _build_parser().parse_args([])
         self.assertNotEqual(ctx.exception.code, 0)
 
+    def test_steps_override_must_be_positive(self):
+        for value in ("0", "-3"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit) as ctx:
+                    _build_parser().parse_args(
+                        ["run", "deck.yaml", "--steps-override", value])
+                self.assertNotEqual(ctx.exception.code, 0)
+
 
 class FlattenForNpzTests(unittest.TestCase):
 
@@ -139,6 +149,39 @@ class FlattenForNpzTests(unittest.TestCase):
         flat = _flatten_for_npz(snaps, self._final(), None)
         self.assertEqual(flat["snapshot_field_bz"].shape, (2, 16))
         np.testing.assert_array_equal(flat["snapshot_steps"], np.array([5, 10]))
+
+
+class _ComponentRecordingSolver:
+    def __init__(self):
+        self.field_calls = []
+        self.external_calls = []
+
+    def field_component_to_host(self, component):
+        self.field_calls.append(component)
+        return np.full(4, len(self.field_calls), dtype=float)
+
+    def external_field_component_to_host(self, component):
+        self.external_calls.append(component)
+        return np.full(4, len(self.external_calls), dtype=float)
+
+
+class SnapshotTests(unittest.TestCase):
+
+    def test_snapshot_reads_only_requested_field_components(self):
+        deck = PicDeck(
+            domain=Domain(nx=2, ny=2, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            diagnostics=Diagnostics(fields=["bz"], per_species=False),
+            units="normalized",
+        )
+        solver = _ComponentRecordingSolver()
+        snap = _snapshot(solver, deck, [], step=3, sim_time=1.5, units=Units(deck))
+
+        self.assertEqual(solver.field_calls, ["bz"])
+        self.assertEqual(solver.external_calls, ["bx", "by", "bz"])
+        self.assertEqual(snap["nx"], 2)
+        self.assertEqual(snap["ny"], 2)
+        self.assertEqual(set(snap["fields"]), {"bz"})
 
 
 class _RecordingSpecies:

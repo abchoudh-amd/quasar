@@ -241,6 +241,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
 
     if ot == "points":
         raw_pts = _require(spec, "points_xyz_m", "observation.points")
+        _check_point_count("points", len(raw_pts))
         pc = PointCloud()
         for p in raw_pts:
             pc.add(_vec3(p))

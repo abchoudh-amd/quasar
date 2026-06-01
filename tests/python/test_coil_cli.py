@@ -254,6 +254,23 @@ class CoilIoErrorPathTest(unittest.TestCase):
             output: {format: npz, path: out.npz}
             """)
 
+    def test_rejects_oversized_observation_points(self):
+        old_limit = coil_io.MAX_OBSERVATION_POINTS
+        coil_io.MAX_OBSERVATION_POINTS = 1
+        try:
+            self._expect_value_error("""
+                units: SI
+                conductors:
+                  - name: loop
+                    current_A: 1.0
+                    geometry: {type: circular_loop, radius_m: 0.1,
+                               center_xyz: [0,0,0], axis_xyz: [0,0,1], n_segments: 16}
+                observation: {type: points, points_xyz_m: [[0,0,0], [0,0,0.1]]}
+                output: {format: npz, path: out.npz}
+                """)
+        finally:
+            coil_io.MAX_OBSERVATION_POINTS = old_limit
+
     def _evaluator_deck(self, ev_type: str) -> str:
         return f"""
             units: SI

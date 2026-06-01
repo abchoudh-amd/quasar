@@ -2,8 +2,10 @@ import unittest
 
 from quasar.pic.io import (
     BoundaryConfig,
+    Diagnostics,
     Domain,
     ExternalField,
+    Normalization,
     Numerics,
     PicDeck,
     Species,
@@ -148,6 +150,11 @@ class DomainValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _deck(domain=Domain(nx=8, ny=8, lx_m=0.0, ly_m=1.0)).validate()
 
+    def test_nonfinite_origin_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0,
+                                origin_x_m=float("nan"))).validate()
+
 
 class ParseBoundaryTests(unittest.TestCase):
 
@@ -277,6 +284,18 @@ class ResourceCeilingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _deck(species=[sp]).validate()
 
+    def test_nonfinite_mass_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=float("nan"), n_particles=8,
+                     initial=SpeciesInitial())
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
+    def test_negative_density_rejected(self):
+        sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
+                     initial=SpeciesInitial(density_per_m3=-1.0))
+        with self.assertRaises(ValueError):
+            _deck(species=[sp]).validate()
+
     def test_invalid_fdtd_order_rejected(self):
         with self.assertRaises(ValueError):
             _deck(numerics=Numerics(fdtd_order=3)).validate()
@@ -294,6 +313,26 @@ class ResourceCeilingTests(unittest.TestCase):
     def test_bad_dt_string_rejected(self):
         with self.assertRaises(ValueError):
             _deck(time=Time(dt_s="fast", steps=8)).validate()
+
+    def test_nonpositive_dt_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(time=Time(dt_s=-1.0e-12, steps=8)).validate()
+
+    def test_nonfinite_dt_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(time=Time(dt_s=float("nan"), steps=8)).validate()
+
+    def test_nonpositive_reference_density_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(normalization=Normalization(reference_density_per_m3=0.0)).validate()
+
+    def test_negative_diagnostic_cadence_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(diagnostics=Diagnostics(cadence=-1)).validate()
+
+    def test_unknown_diagnostic_field_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(diagnostics=Diagnostics(fields=["bz", "pressure"])).validate()
 
 
 class FieldOnlyDeckTests(unittest.TestCase):

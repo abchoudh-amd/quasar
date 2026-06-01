@@ -28,6 +28,7 @@ intentionally distinct (see ``quasar.coil.io``).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence, Union
@@ -44,6 +45,29 @@ from .._deck import validate_evaluator_type as _validate_evaluator_type
 MAX_GRID_DIM = 1 << 16        # 65536 cells per axis
 MAX_GRID_CELLS = 1 << 30      # ~1.07e9 cells total
 MAX_PARTICLES = 1 << 31       # ~2.1e9 particles per species
+FIELD_COMPONENTS = ("ex", "ey", "ez", "bx", "by", "bz")
+
+
+def _require_finite(value: float, context: str) -> None:
+    if not math.isfinite(float(value)):
+        raise ValueError(f"{context} must be finite")
+
+
+def _require_positive_finite(value: float, context: str) -> None:
+    _require_finite(value, context)
+    if float(value) <= 0:
+        raise ValueError(f"{context} must be positive")
+
+
+def _require_nonnegative_finite(value: float, context: str) -> None:
+    _require_finite(value, context)
+    if float(value) < 0:
+        raise ValueError(f"{context} must be >= 0")
+
+
+def _require_vec_finite(values: Sequence[float], context: str) -> None:
+    for i, value in enumerate(values):
+        _require_finite(value, f"{context}[{i}]")
 
 
 def _vec3(xyz: Sequence[float] | None,
@@ -225,8 +249,13 @@ class PicDeck:
         if self.domain.nx * self.domain.ny > MAX_GRID_CELLS:
             raise ValueError(
                 f"domain.nx*ny must be <= {MAX_GRID_CELLS} cells")
-        if self.domain.lx_m <= 0 or self.domain.ly_m <= 0:
-            raise ValueError("domain.lx_m and domain.ly_m must be positive")
+        _require_positive_finite(self.domain.lx_m, "domain.lx_m")
+        _require_positive_finite(self.domain.ly_m, "domain.ly_m")
+        _require_finite(self.domain.origin_x_m, "domain.origin_x_m")
+        _require_finite(self.domain.origin_y_m, "domain.origin_y_m")
+        _require_positive_finite(
+            self.normalization.reference_density_per_m3,
+            "normalization.reference_density_per_m3")
         if self.numerics.fdtd_order not in (2, 4):
             raise ValueError("numerics.fdtd_order must be 2 or 4")
         if self.numerics.shape not in ("cic", "tsc"):
@@ -247,6 +276,27 @@ class PicDeck:
         if self.external_field is not None:
             ev = self.external_field.evaluator_type
             _validate_evaluator_type(ev, "external_field.evaluator.type")
+            _require_vec_finite(
+                self.external_field.uniform_b, "external_field.evaluator.B")
+            _require_vec_finite(
+                self.external_field.uniform_e, "external_field.evaluator.E")
+            _require_vec_finite(
+                self.external_field.dipole_origin,
+                "external_field.evaluator.origin")
+            _require_vec_finite(
+                self.external_field.gradient_b0,
+                "external_field.evaluator.B0")
+            _require_vec_finite(
+                self.external_field.gradient_origin,
+                "external_field.evaluator.gradient_origin")
+            if self.external_field.dipole_moment is not None:
+                _require_vec_finite(
+                    self.external_field.dipole_moment,
+                    "external_field.evaluator.moment")
+            if self.external_field.gradient_matrix is not None:
+                for r, row in enumerate(self.external_field.gradient_matrix):
+                    _require_vec_finite(
+                        row, f"external_field.evaluator.grad[{r}]")
             # Biot-Savart is driven by conductor geometry; the others are
             # closed-form and need no conductors.
             if ev == "biot_savart" and not self.external_field.conductors:
@@ -266,8 +316,8 @@ class PicDeck:
                 "deck must define at least one of: species, external_field, "
                 "or fields.initial")
         for sp in self.species:
-            if sp.mass_kg <= 0:
-                raise ValueError(f"species {sp.name!r}: mass_kg must be positive")
+            _require_finite(sp.charge_C, f"species {sp.name!r}: charge_C")
+            _require_positive_finite(sp.mass_kg, f"species {sp.name!r}: mass_kg")
             if sp.n_particles <= 0:
                 raise ValueError(f"species {sp.name!r}: n_particles must be positive")
             if sp.n_particles > MAX_PARTICLES:
@@ -295,12 +345,32 @@ class PicDeck:
                 if sp.initial.region_y_min_m >= sp.initial.region_y_max_m:
                     raise ValueError(
                         f"species {sp.name!r}: region y_min_m must be < y_max_m")
-            if sp.initial.temperature_eV < 0:
-                raise ValueError(f"species {sp.name!r}: temperature_eV must be >= 0")
+                for label, value in zip(
+                    ("x_min_m", "x_max_m", "y_min_m", "y_max_m"), bounds):
+                    _require_finite(
+                        value, f"species {sp.name!r}: region {label}")
+            _require_nonnegative_finite(
+                sp.initial.density_per_m3,
+                f"species {sp.name!r}: density_per_m3")
+            _require_nonnegative_finite(
+                sp.initial.temperature_eV,
+                f"species {sp.name!r}: temperature_eV")
+            _require_vec_finite(sp.initial.drift_v, f"species {sp.name!r}: drift_v")
+        if self.fields.initial is not None:
+            _require_finite(self.fields.initial.amplitude, "fields.initial.amplitude")
         if isinstance(self.time.dt_s, str) and self.time.dt_s != "auto":
             raise ValueError("time.dt_s must be a float or the string 'auto'")
+        if not isinstance(self.time.dt_s, str):
+            _require_positive_finite(float(self.time.dt_s), "time.dt_s")
         if self.time.steps <= 0:
             raise ValueError("time.steps must be positive")
+        if self.diagnostics.cadence < 0:
+            raise ValueError("diagnostics.cadence must be >= 0")
+        for field_name in self.diagnostics.fields:
+            if field_name not in FIELD_COMPONENTS:
+                raise ValueError(
+                    f"diagnostics.fields entry {field_name!r} must be one of "
+                    f"{list(FIELD_COMPONENTS)}")
         allowed_pbc = {"periodic", "specular", "absorbing"}
         for i, bc in enumerate(self.boundary.particle):
             if bc not in allowed_pbc:
@@ -413,7 +483,7 @@ def _parse_diagnostics(d: dict | None) -> Diagnostics:
     return Diagnostics(
         output_path=str(d.get("output_path", "out.npz")),
         cadence=int(d.get("cadence", 0)),
-        fields=list(d.get("fields", ["bz"])),
+        fields=[str(name).lower() for name in d.get("fields", ["bz"])],
         per_species=bool(d.get("per_species", True)),
     )
 

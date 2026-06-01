@@ -52,6 +52,23 @@ py::array_t<Real> buffer_to_numpy(const quasar::backend::DeviceBuffer<Real>& buf
   return arr;
 }
 
+const quasar::backend::DeviceBuffer<Real>&
+yee_component_buffer(const quasar::YeeField2D<Real>& f,
+                     const std::string& component) {
+  if (component == "ex") return f.ex;
+  if (component == "ey") return f.ey;
+  if (component == "ez") return f.ez;
+  if (component == "bx") return f.bx;
+  if (component == "by") return f.by;
+  if (component == "bz") return f.bz;
+  throw std::invalid_argument("unknown Yee field component '" + component + "'");
+}
+
+py::array_t<Real> yee_component_to_numpy(const quasar::YeeField2D<Real>& f,
+                                         const std::string& component) {
+  return buffer_to_numpy(yee_component_buffer(f, component));
+}
+
 py::dict yee_field_to_dict(const quasar::YeeField2D<Real>& f) {
   py::dict d;
   d["ex"] = buffer_to_numpy(f.ex);
@@ -308,10 +325,20 @@ void bind_pic(py::module_& m) {
            [](quasar::pic::EmPic2D3V& self) {
              return yee_field_to_dict(self.fields());
            })
+      .def("field_component_to_host",
+           [](quasar::pic::EmPic2D3V& self, const std::string& component) {
+             return yee_component_to_numpy(self.fields(), component);
+           },
+           py::arg("component"))
       .def("external_fields_to_host",
            [](quasar::pic::EmPic2D3V& self) {
              return yee_field_to_dict(self.external_fields());
-           });
+           })
+      .def("external_field_component_to_host",
+           [](quasar::pic::EmPic2D3V& self, const std::string& component) {
+             return yee_component_to_numpy(self.external_fields(), component);
+           },
+           py::arg("component"));
 
   // -- Diagnostics ----------------------------------------------------------
 

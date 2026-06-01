@@ -28,6 +28,13 @@ from ._units import Units
 from .numerics import cfl_dt
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _cfl_dt_internal(domain, units: Units, fdtd_order: int = 2) -> float:
     # The solver runs in internal units where c = 1, so the CFL is evaluated on
     # the internal grid spacing with c = 1 (for a normalized deck the lengths are
@@ -208,18 +215,26 @@ def _species_to_si(host: dict, units: Units) -> dict:
 
 def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
               step: int, sim_time: float, units: Units) -> dict:
-    fields_d = solver.fields_to_host()
-    external_d = solver.external_fields_to_host()
+    def _field(component: str):
+        if hasattr(solver, "field_component_to_host"):
+            return solver.field_component_to_host(component)
+        return solver.fields_to_host()[component]
+
+    def _external(component: str):
+        if hasattr(solver, "external_field_component_to_host"):
+            return solver.external_field_component_to_host(component)
+        return solver.external_fields_to_host()[component]
+
     snap = {
         "step": step,
         "time_s": sim_time,
-        "fields": {k: units.field_component_to_si(k, fields_d[k])
-                   for k in deck.diagnostics.fields if k in fields_d},
-        "external_bx": units.field_component_to_si("bx", external_d["bx"]),
-        "external_by": units.field_component_to_si("by", external_d["by"]),
-        "external_bz": units.field_component_to_si("bz", external_d["bz"]),
-        "nx": fields_d["nx"],
-        "ny": fields_d["ny"],
+        "fields": {k: units.field_component_to_si(k, _field(k))
+                   for k in deck.diagnostics.fields},
+        "external_bx": units.field_component_to_si("bx", _external("bx")),
+        "external_by": units.field_component_to_si("by", _external("by")),
+        "external_bz": units.field_component_to_si("bz", _external("bz")),
+        "nx": deck.domain.nx,
+        "ny": deck.domain.ny,
         # The Yee buffers are ghost-padded; persist the halo width so the offline
         # reader strips the right number of cells instead of re-deriving it from
         # the flat size.
@@ -269,6 +284,7 @@ def _do_run(args: argparse.Namespace) -> int:
     deck = pic_io.load(deck_path)
     if args.steps_override is not None:
         deck.time = pic_io.Time(dt_s=deck.time.dt_s, steps=args.steps_override)
+        deck.validate()
 
     units = Units(deck)
     solver = _make_solver(deck, units)
@@ -373,7 +389,7 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="print informational output (default: quiet)")
     run.add_argument("--print-config", action="store_true",
                      help="Print resolved deck + dt before running.")
-    run.add_argument("--steps-override", type=int, default=None,
+    run.add_argument("--steps-override", type=_positive_int, default=None,
                      help="Override deck.time.steps (useful for smoke tests).")
     run.add_argument("--log-every", type=int, default=0,
                      help="Print progress + record scalar diagnostics every N steps (0 = off).")
