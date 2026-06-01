@@ -9,6 +9,11 @@ class ParticleSpecies;
 
 namespace quasar::numerics {
 
+// EM-PIC-specific by design: this interface (and Esirkepov2D) is phrased in the
+// concrete JField2D / pic::ParticleSpecies types and its definitions +
+// registrations live in src/physics/pic/pic_solver.cpp. With EM-PIC the only
+// consumer, it is not yet templated over field/particle types; see the
+// axis-orthogonality note in CLAUDE.md.
 class IDepositScheme {
  public:
   virtual ~IDepositScheme() = default;

@@ -4,10 +4,11 @@
 
 namespace quasar::boundary {
 
-// Perfect-electric-conductor (reflecting) field wall. At 2nd order it uses the
-// one-sided characteristic closure (no ghost fill; boundary nodes corrected
-// after each curl). At 4th order it currently falls back to the mirror ghost
-// fill until the 4th-order closure lands.
+// Perfect-electric-conductor (reflecting) field wall. It uses a one-sided
+// characteristic closure at both orders: fill_ghosts is always a no-op and the
+// boundary nodes are corrected after each curl. The 4th-order closure reduces
+// the outer two boundary layers to the 2nd-order stencil before applying the
+// wall pin.
 class PecFieldBC final : public IFieldBoundary {
  public:
   void configure(int fdtd_order) override { order_ = fdtd_order; }

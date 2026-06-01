@@ -86,20 +86,24 @@ def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
             y_max = units.length(sp.initial.region_y_max_m)
             positions = ic.quiet_positions_2d_block(
                 sp.n_particles, x_min, x_max, y_min, y_max)
-            occupied_area = (x_max - x_min) * (y_max - y_min)
+            cell_area = ic.quiet_block_cell_area(
+                sp.n_particles, x_min, x_max, y_min, y_max)
         else:
             lx = units.length(deck.domain.lx_m)
             ly = units.length(deck.domain.ly_m)
             positions = ic.quiet_positions_2d(sp.n_particles, lx, ly)
             positions = positions + np.array([units.length(deck.domain.origin_x_m),
                                               units.length(deck.domain.origin_y_m)])
-            occupied_area = lx * ly
+            cell_area = ic.quiet_block_cell_area(sp.n_particles, 0.0, lx, 0.0, ly)
         velocities = ic.maxwellian(sp.n_particles, v_thermal,
                                    drift=drift,
                                    seed=int(rng.integers(0, 2**31 - 1)))
 
-        macro_weight = (units.density(sp.initial.density_per_m3) * occupied_area
-                        / sp.n_particles)
+        # Each quiet-start particle represents one layout cell, so the macro-weight
+        # is density * cell_area. This keeps the local number density exactly
+        # `density` even when n_particles is not a perfect square (the truncated
+        # last row would otherwise bias density by side**2 / n_particles).
+        macro_weight = units.density(sp.initial.density_per_m3) * cell_area
         weights = np.full(sp.n_particles, macro_weight)
 
         cfg = pic.SpeciesConfig(name=sp.name,

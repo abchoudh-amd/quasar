@@ -4,6 +4,7 @@ import numpy as np
 
 from quasar.pic.initial_conditions import (
     maxwellian,
+    quiet_block_cell_area,
     quiet_positions_2d,
     quiet_positions_2d_block,
 )
@@ -26,6 +27,26 @@ class QuietPositionsBlockTests(unittest.TestCase):
     def test_perfect_square_count(self):
         pts = quiet_positions_2d_block(25, 0.0, 1.0, 0.0, 1.0)
         self.assertEqual(pts.shape[0], 25)
+
+
+class QuietBlockCellAreaTests(unittest.TestCase):
+
+    def test_perfect_square_tiles_exactly(self):
+        # 25 = 5*5: cell area is block area / 25 and density*cell_area*N == density*area.
+        area = (1.0 - 0.0) * (2.0 - 0.0)
+        cell = quiet_block_cell_area(25, 0.0, 1.0, 0.0, 2.0)
+        self.assertAlmostEqual(cell * 25, area)
+
+    def test_non_square_uses_layout_cell_not_block_over_n(self):
+        # 50 particles -> side = ceil(sqrt(50)) = 8, so each particle represents
+        # one 8x8 layout cell, NOT block_area/50. Using density*cell_area keeps the
+        # local number density exact despite the truncated last layout row.
+        x_min, x_max, y_min, y_max = 0.0, 4.0, 0.0, 2.0
+        block_area = (x_max - x_min) * (y_max - y_min)
+        cell = quiet_block_cell_area(50, x_min, x_max, y_min, y_max)
+        self.assertAlmostEqual(cell, block_area / (8 * 8))
+        # The naive block_area / n would over-count density by 64/50.
+        self.assertNotAlmostEqual(cell, block_area / 50)
 
 
 class QuietPositionsUniformTests(unittest.TestCase):

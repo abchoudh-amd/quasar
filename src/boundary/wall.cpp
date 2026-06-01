@@ -4,6 +4,8 @@
 
 #include "quasar/physics/pic/kernels.hpp"
 
+#include "order_dispatch.hpp"
+
 namespace quasar::boundary {
 
 void PecFieldBC::fill_ghosts(YeeField2D<Real>& /*field*/, Side /*side*/) const {
@@ -12,22 +14,19 @@ void PecFieldBC::fill_ghosts(YeeField2D<Real>& /*field*/, Side /*side*/) const {
 }
 
 void PecFieldBC::correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const {
-  if (order_ == 4) {
-    ::launch_pic_boundary_wall_correct_b_order4(field.grid, field,
-                                                static_cast<int>(side), dt, nullptr);
-  } else {
-    ::launch_pic_boundary_wall_correct_b_order2(field.grid, field,
-                                                static_cast<int>(side), dt, nullptr);
-  }
+  const int s = static_cast<int>(side);
+  detail::select_order(
+      order_,
+      [&] { ::launch_pic_boundary_wall_correct_b_order2(field.grid, field, s, dt, nullptr); },
+      [&] { ::launch_pic_boundary_wall_correct_b_order4(field.grid, field, s, dt, nullptr); });
 }
 
 void PecFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const {
-  if (order_ == 4) {
-    ::launch_pic_boundary_wall_correct_e_order4(field.grid, field,
-                                                static_cast<int>(side), dt, nullptr);
-  } else {
-    ::launch_pic_boundary_wall_correct_e(field.grid, field, static_cast<int>(side), nullptr);
-  }
+  const int s = static_cast<int>(side);
+  detail::select_order(
+      order_,
+      [&] { ::launch_pic_boundary_wall_correct_e(field.grid, field, s, nullptr); },
+      [&] { ::launch_pic_boundary_wall_correct_e_order4(field.grid, field, s, dt, nullptr); });
 }
 
 void SpecularParticleBC::apply(pic::ParticleSpecies& species, Side side) const {

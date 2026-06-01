@@ -6,12 +6,13 @@ namespace quasar::numerics {
 
 // Staggered finite differences read neighbours through ghost cells via
 // Grid2D::index. The per-side ghost fill (fill_field_ghosts in pic_solver.cpp::step)
-// runs before every curl and populates the halo: a periodic side copies the
+// runs before every curl and populates the halo: only a periodic side copies the
 // opposite interior edge (so the stencil is bit-for-bit identical to the old
-// implicit Grid2D::periodic_index wrap), while a PEC side writes the mirror image
-// (enabling reflecting field walls). Order 4 reads i-1..i+2, so it needs
-// nghost >= 2 (enforced by the EmPic2D3V constructor). The Yee curl reads only
-// along-axis neighbours, so corner ghosts are never touched and need no fill.
+// implicit Grid2D::periodic_index wrap), while pec/outflow sides leave the halo
+// untouched and correct the boundary nodes after each curl instead. Order 4 reads
+// i-1..i+2, so it needs nghost >= 2 (enforced by the EmPic2D3V constructor). The
+// Yee curl reads only along-axis neighbours, so corner ghosts are never touched
+// and need no fill.
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddx_staggered(const Real* f, const Grid2D& g,
                                              int i, int j) noexcept {

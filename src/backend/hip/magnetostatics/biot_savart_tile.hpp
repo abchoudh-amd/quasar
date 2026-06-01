@@ -2,7 +2,7 @@
 
 #include "quasar/core/types.hpp"
 
-#include "physics/magnetostatics/detail/biot_savart_segment.hpp"
+#include "backend/hip/magnetostatics/biot_savart_segment.hpp"
 
 #include <hip/hip_runtime.h>
 

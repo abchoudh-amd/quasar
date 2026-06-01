@@ -1,6 +1,7 @@
 #pragma once
 
 #include "quasar/boundary/boundary_condition.hpp"
+#include "quasar/core/field_source.hpp"
 #include "quasar/core/normalization.hpp"
 #include "quasar/core/yee_field.hpp"
 #include "quasar/numerics/deposit.hpp"
@@ -14,10 +15,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-namespace quasar::magnetostatics {
-class ConductorSystem;
-}
 
 namespace quasar::pic {
 
@@ -99,8 +96,13 @@ class EmPic2D3V {
 // internal units. All scales default to 1, i.e. a pure SI pass-through that leaves
 // the existing (SI) behaviour unchanged; pass a plasma normalization's scales to
 // drive an SI field source from a normalized solver.
+//
+// The source is the axis-neutral core::IFieldSource the evaluator contract
+// already consumes: a magnetostatics::ConductorSystem for Biot-Savart, or an
+// ignored placeholder for the analytic evaluators. This keeps the PIC external-
+// field path off any concrete magnetostatics type.
 void sample_external_field(numerics::IFieldEvaluator& evaluator,
-                           const magnetostatics::ConductorSystem& conductors,
+                           const core::IFieldSource& source,
                            YeeField2D<Real>& external_fields,
                            Real length_scale = Real{1},
                            Real e_field_scale = Real{1},

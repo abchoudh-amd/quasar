@@ -35,6 +35,7 @@ set(_quasar_magnetostatics_hip_tests
   test_solenoid_inside
   test_polyline_convergence
   test_fp32_vs_fp64
+  test_singular_and_empty
 )
 
 foreach(_test_name IN LISTS _quasar_magnetostatics_hip_tests)

@@ -85,6 +85,37 @@ class SiConversionTests(unittest.TestCase):
         )
 
 
+class FieldComponentToSiTests(unittest.TestCase):
+    """field_component_to_si routes ex/ey/ez through the E-field scale and every
+    other component (bx/by/bz, external_b*) through the B-field scale; an E/B swap
+    would silently mis-scale every output field, so pin the mapping on a genuine
+    (non-identity) SI normalization where the two scales differ."""
+
+    def setUp(self):
+        self.u = Units(_deck("SI", species="electron", density=1.0e18))
+
+    def test_e_components_use_e_field_scale(self):
+        for name in ("ex", "ey", "ez"):
+            self.assertEqual(
+                self.u.field_component_to_si(name, 1.0),
+                self.u.e_field_to_si(1.0),
+            )
+
+    def test_b_components_use_b_field_scale(self):
+        for name in ("bx", "by", "bz", "external_bx", "external_bz"):
+            self.assertEqual(
+                self.u.field_component_to_si(name, 1.0),
+                self.u.b_field_to_si(1.0),
+            )
+
+    def test_e_and_b_scales_actually_differ(self):
+        # Guards against a degenerate normalization where the test would pass
+        # even if E and B routing were swapped.
+        self.assertNotAlmostEqual(
+            self.u.e_field_to_si(1.0), self.u.b_field_to_si(1.0)
+        )
+
+
 class ReferenceSpeciesTests(unittest.TestCase):
 
     def test_proton_and_ion_accepted(self):

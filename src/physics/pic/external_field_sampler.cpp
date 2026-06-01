@@ -1,8 +1,7 @@
 #include "quasar/physics/pic/pic_solver.hpp"
 
 #include "quasar/backend/device.hpp"
-#include "quasar/physics/magnetostatics/conductor.hpp"
-#include "quasar/physics/magnetostatics/observation.hpp"
+#include "quasar/core/observations.hpp"
 
 #include <vector>
 
@@ -22,8 +21,8 @@ namespace {
 // the external E at a true Yee-staggered edge instead would place the value half a
 // cell from where the gather reads it, biasing the external electric force on
 // every particle.
-magnetostatics::PointCloud node_points(const Grid2D& g, Real length_scale) {
-  magnetostatics::PointCloud pts;
+core::PointCloud node_points(const Grid2D& g, Real length_scale) {
+  core::PointCloud pts;
   for (int j = 0; j < g.ny; ++j) {
     for (int i = 0; i < g.nx; ++i) {
       const Real x = g.x_at_cell_center(i);
@@ -65,7 +64,7 @@ void copy_component(const Grid2D& g, const Field<Vec3>& values, int axis,
 }  // namespace
 
 void sample_external_field(numerics::IFieldEvaluator& evaluator,
-                           const magnetostatics::ConductorSystem& conductors,
+                           const core::IFieldSource& source,
                            YeeField2D<Real>& external_fields,
                            Real length_scale, Real e_field_scale,
                            Real b_field_scale) {
@@ -74,8 +73,8 @@ void sample_external_field(numerics::IFieldEvaluator& evaluator,
   // evaluate. The E and B evaluations are kept separate because IFieldEvaluator
   // exposes evaluate_E / evaluate_B as distinct calls.
   const auto pts = node_points(g, length_scale);
-  const auto e = evaluator.evaluate_E(conductors, pts);
-  const auto b = evaluator.evaluate_B(conductors, pts);
+  const auto e = evaluator.evaluate_E(source, pts);
+  const auto b = evaluator.evaluate_B(source, pts);
 
   copy_component(g, e, 0, e_field_scale, external_fields.ex);
   copy_component(g, e, 1, e_field_scale, external_fields.ey);

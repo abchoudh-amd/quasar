@@ -40,6 +40,12 @@ interfaces may still change between entries.
   the `plane` observation and every geometry type.
 
 ### Fixed
+- PIC: quiet-start macro-particle weighting no longer biases the initial number
+  density when `n_particles` is not a perfect square. The block layout uses
+  `side = ceil(sqrt(N))` points per axis and truncates to `N`; the weight is now
+  `density * cell_area` (one layout cell per particle) instead of
+  `density * block_area / N`, so the seeded density matches the deck value
+  regardless of `N`.
 - PIC: the particle field gather now honors per-axis boundaries. It previously
   wrapped the interpolation stencil periodically on every axis; on a non-periodic
   (wall) axis it now clamps into the boundary ghost layer (matching the deposit),

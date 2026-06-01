@@ -2,16 +2,16 @@
 
 #include "quasar/physics/pic/kernels.hpp"
 
+#include "order_dispatch.hpp"
+
 namespace quasar::boundary {
 
 void OutflowFieldBC::correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const {
-  if (order_ == 4) {
-    ::launch_pic_boundary_outflow_correct_b_order4(field.grid, field,
-                                                   static_cast<int>(side), dt, nullptr);
-  } else {
-    ::launch_pic_boundary_outflow_correct_b_order2(field.grid, field,
-                                                   static_cast<int>(side), dt, nullptr);
-  }
+  const int s = static_cast<int>(side);
+  detail::select_order(
+      order_,
+      [&] { ::launch_pic_boundary_outflow_correct_b_order2(field.grid, field, s, dt, nullptr); },
+      [&] { ::launch_pic_boundary_outflow_correct_b_order4(field.grid, field, s, dt, nullptr); });
 }
 
 void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const {
@@ -29,15 +29,19 @@ void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt
   }
   const int slo = skip_lo_ ? 1 : 0;
   const int shi = skip_hi_ ? 1 : 0;
-  if (order_ == 4) {
-    ::launch_pic_boundary_outflow_correct_e_order4(
-        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0,
-        slo, shi, nullptr);
-  } else {
-    ::launch_pic_boundary_outflow_correct_e_order2(
-        g, field, static_cast<int>(side), dt, mur_.device_ptr(), init ? 1 : 0,
-        slo, shi, nullptr);
-  }
+  const int s = static_cast<int>(side);
+  double* strips = mur_.device_ptr();
+  const int init_flag = init ? 1 : 0;
+  detail::select_order(
+      order_,
+      [&] {
+        ::launch_pic_boundary_outflow_correct_e_order2(
+            g, field, s, dt, strips, init_flag, slo, shi, nullptr);
+      },
+      [&] {
+        ::launch_pic_boundary_outflow_correct_e_order4(
+            g, field, s, dt, strips, init_flag, slo, shi, nullptr);
+      });
 }
 
 QUASAR_REGISTER_FIELD_BOUNDARY("outflow", OutflowFieldBC)

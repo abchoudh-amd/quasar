@@ -78,6 +78,20 @@ QUASAR_REGISTER_DEPOSIT("esirkepov_tsc", ::quasar::numerics::Esirkepov2D<2>)
 
 namespace quasar::pic {
 
+namespace {
+
+// Translates the deck's order/shape vocabulary to the registry names registered
+// just above. Kept adjacent to the QUASAR_REGISTER_* lines so a new scheme's
+// name appears in exactly one place: register it, then add its vocabulary entry
+// here. The driver constructor never builds these strings itself.
+std::string field_solver_name(int fdtd_order) {
+  return "yee_o" + std::to_string(fdtd_order);
+}
+std::string pusher_name(const std::string& shape) { return "boris_" + shape; }
+std::string deposit_name(const std::string& shape) { return "esirkepov_" + shape; }
+
+}  // namespace
+
 EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   : cfg_{cfg},
     grid_{cfg.grid},
@@ -111,14 +125,15 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
     throw std::invalid_argument{"EmPic2D3V: fdtd_order 4 requires grid nghost >= 2"};
   }
   // Build the order/shape-templated schemes through the registry (same pluggable
-  // path as the BCs/filters) by deriving the registry name from the deck-facing
-  // order/shape vocabulary; Registry::create throws on an unregistered name.
+  // path as the BCs/filters). The vocabulary->name mapping lives next to the
+  // registrations above, so the driver passes a resolved name through verbatim;
+  // Registry::create throws on an unregistered name.
   field_solver_ = Registry<numerics::IFieldSolver>::instance().create(
-      "yee_o" + std::to_string(cfg_.fdtd_order));
+      field_solver_name(cfg_.fdtd_order));
   pusher_ = Registry<numerics::IParticlePusher>::instance().create(
-      "boris_" + cfg_.shape);
+      pusher_name(cfg_.shape));
   deposit_ = Registry<numerics::IDepositScheme>::instance().create(
-      "esirkepov_" + cfg_.shape);
+      deposit_name(cfg_.shape));
   // The deposit/gather wrap an axis only when both of its sides are periodic; a
   // wall on either side switches that axis to ghost-cell deposition + specular
   // fold-back (deposit) and ghost-clamped interpolation (gather), so neither
@@ -187,9 +202,10 @@ void EmPic2D3V::step(Real dt) {
   backend::device_memset(current_.jz.device_ptr(), 0, current_.jz.bytes());
 
   // The FDTD stencil reads neighbours through ghost cells, so the per-side ghost
-  // fill must run before each curl. A periodic side copies the opposite interior
-  // edge (reproducing the implicit wrap bit-for-bit); a PEC side writes the mirror
-  // image so reflecting field walls are physical.
+  // fill must run before each curl. Only a periodic side fills ghosts (copying the
+  // opposite interior edge, reproducing the implicit wrap bit-for-bit); pec and
+  // outflow leave fill_ghosts a no-op and instead correct the boundary nodes after
+  // each curl (see correct_field_boundaries_b/e below).
   fill_field_ghosts();
   field_solver_->advance_b(fields_, dt);
   // One-sided / characteristic field BCs (pec, outflow) overwrite the boundary

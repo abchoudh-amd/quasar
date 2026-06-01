@@ -41,6 +41,8 @@ Key conventions:
 - **Public vs private** — only headers under `include/quasar/` are installed. Anything in `src/` (including `src/**/detail/`) is implementation-private; do not include from `src/` outside its own translation unit.
 - **Apps are thin** — any future `apps/*/main.cpp` should only parse input and call the library. Today both vertical slices are driven from Python (`quasar.coil.cli`, `quasar.pic.cli`) and `apps/` holds only a placeholder.
 
+> **Axis orthogonality is aspirational where the numerics axis is concerned.** The `numerics` solver/pusher/deposit interfaces (`IFieldSolver`, `IParticlePusher`, `IDepositScheme`) are currently phrased in the EM-PIC concrete types (`YeeField2D`/`JField2D`, `pic::ParticleSpecies`) and their out-of-line definitions + registrations live in `src/physics/pic/pic_solver.cpp` (see `docs/dev-guide/adding_a_field_solver.rst`, `adding_a_pusher.rst`, `adding_a_deposit_scheme.rst`). This is deliberate: with EM-PIC as the only consumer, templating these over field/particle types would add abstraction for a second physics module that does not yet exist. When a non-PIC consumer of these schemes appears, that is the point to template them and split the implementations into `src/numerics/`.
+
 Concrete physics modules currently present:
 
 - `physics/magnetostatics` — Biot–Savart field evaluator over conductor geometries with observation point sets. Exposed to Python as `quasar.coil` with a CLI at `python -m quasar.coil.cli run <input.yaml>` that writes `out.npz`.
@@ -55,4 +57,4 @@ CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target 
 
 C++ unit tests under `tests/unit/<axis>/` mirror the public header tree. Python tests under `tests/python/` cover bindings, deck I/O, CLI, and post-processing.
 
-Dev-guide RST under `docs/dev-guide/` (`adding_a_boundary`, `adding_a_field_evaluator`, `adding_a_filter`, `adding_a_geometry`, `adding_a_pusher`) is the source of truth for the steps to add a new pluggable component — consult these before adding a new scheme.
+Dev-guide RST under `docs/dev-guide/` (`adding_a_boundary`, `adding_a_deposit_scheme`, `adding_a_field_evaluator`, `adding_a_field_solver`, `adding_a_filter`, `adding_a_geometry`, `adding_a_pusher`) is the source of truth for the steps to add a new pluggable component — consult these before adding a new scheme.

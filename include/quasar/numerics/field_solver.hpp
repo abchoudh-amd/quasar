@@ -5,6 +5,10 @@
 
 namespace quasar::numerics {
 
+// EM-PIC-specific by design: this interface (and YeeFdtd2D) is phrased in the
+// concrete YeeField2D/JField2D types and its definitions + registrations live in
+// src/physics/pic/pic_solver.cpp. With EM-PIC the only consumer, it is not yet
+// templated over field types; see the axis-orthogonality note in CLAUDE.md.
 class IFieldSolver {
  public:
   virtual ~IFieldSolver() = default;
