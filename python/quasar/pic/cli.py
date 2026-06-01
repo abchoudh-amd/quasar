@@ -275,18 +275,18 @@ def _flatten_for_npz(snapshots: list[dict], final: dict,
     return flat
 
 
-def _do_run(args: argparse.Namespace) -> int:
-    deck_path = Path(args.input).resolve()
-    deck = pic_io.load(deck_path)
-    if args.steps_override is not None:
-        deck.time = pic_io.Time(dt_s=deck.time.dt_s, steps=args.steps_override)
-        deck.validate()
+def prepare_run(deck: pic_io.PicDeck, units: Units, *, seed: int = 0):
+    """Build a fully seeded solver from a parsed deck, ready to ``step(dt)``.
 
-    units = Units(deck)
+    Constructs the solver, applies the external field and any field seed, seeds
+    all species, and resolves the internal/SI timestep. Returns
+    ``(solver, species_indices, dt, dt_si)``. This is the shared build path for
+    the ``run`` subcommand and for offline drivers (e.g. example plot scripts)
+    so the solver-construction + seeding logic lives in one place."""
     solver = _make_solver(deck, units)
     _apply_external_field(solver, deck, units)
     _seed_fields(solver, deck)
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
     species_indices = _seed_species(solver, deck, units, rng)
 
     # The solver steps in internal time units; an explicit deck dt_s is SI and is
@@ -296,6 +296,18 @@ def _do_run(args: argparse.Namespace) -> int:
     else:
         dt = units.time(float(deck.time.dt_s))
     dt_si = units.time_to_si(dt)
+    return solver, species_indices, dt, dt_si
+
+
+def _do_run(args: argparse.Namespace) -> int:
+    deck_path = Path(args.input).resolve()
+    deck = pic_io.load(deck_path)
+    if args.steps_override is not None:
+        deck.time = pic_io.Time(dt_s=deck.time.dt_s, steps=args.steps_override)
+        deck.validate()
+
+    units = Units(deck)
+    solver, species_indices, dt, dt_si = prepare_run(deck, units, seed=args.seed)
     if args.print_config:
         print(f"deck   : {deck_path}")
         print(f"grid   : {deck.domain.nx}x{deck.domain.ny}  "

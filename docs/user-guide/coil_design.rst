@@ -146,8 +146,9 @@ The :mod:`quasar.coil` package mirrors the C++ surface one-to-one:
    B    = eval_.evaluate_B(cs, obs)            # numpy (M, 3)
    gB   = eval_.evaluate_grad_B(cs, obs)       # numpy (M, 3, 3)
 
-``BiotSavartConfig`` carries a ``hipStream_t`` slot for users who need
-to chain the evaluator onto a pre-existing HIP stream.
+``BiotSavartConfig`` carries an opaque ``quasar::backend::stream_t``
+device-stream slot for users who need to chain the evaluator onto a
+pre-existing device stream.
 
 Plotting and post-processing
 ----------------------------
@@ -174,7 +175,7 @@ machines without it.
 Worked examples
 ---------------
 
-The ``examples/`` directory ships four runnable decks:
+The ``examples/`` directory ships five runnable decks:
 
 * ``single_loop`` - on-axis profile of one circular loop.
 * ``helmholtz_pair`` - quasi-uniform region between two coaxial loops.
@@ -182,6 +183,8 @@ The ``examples/`` directory ships four runnable decks:
   axial profile.
 * ``saddle_coil`` - non-planar polyline ring and a C2-symmetry sanity
   check at the origin.
+* ``square_toroid`` - square-cross-section toroidal magnet built from
+  four current sheets.
 
 Each example has a ``README.md`` with the analytical reference values
 the integration tests check against.

@@ -349,7 +349,7 @@ class BuildPayloadTest(unittest.TestCase):
         deck = self._grid_deck("[B_xyz_grid]")
         # resolution [4,3,2] => 24 points, x-fastest ordering as the kernel emits.
         B = np.arange(24 * 3, dtype=np.float64).reshape(24, 3)
-        payload = _build_payload(deck, B)
+        payload, _ = _build_payload(deck, B)
         self.assertEqual(payload["B_xyz_grid"].shape, (2, 3, 4, 3))
 
     def test_b_xyz_grid_rejected_for_non_grid_observation(self):

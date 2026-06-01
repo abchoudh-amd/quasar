@@ -20,7 +20,6 @@ from .. import _core
 # QE is the single source of truth for the elementary charge; it doubles as the
 # eV->Joule conversion factor (1 eV = QE J) used by the CLI's thermal-speed calc.
 QE = 1.602176634e-19           # elementary charge (C)
-_QE = QE                       # internal alias (reference charge)
 _ME = 9.1093837015e-31         # electron mass (kg)
 _MP = 1.67262192369e-27        # proton mass (kg)
 
@@ -51,7 +50,7 @@ class Units:
                     f"(expected one of {sorted(_SPECIES_MASS)})")
             self._norm = self._pic.Normalization.plasma(
                 n_ref=deck.normalization.reference_density_per_m3,
-                q_ref=_QE, m_ref=m_ref)
+                q_ref=QE, m_ref=m_ref)
 
     @property
     def identity(self) -> bool:

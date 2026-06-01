@@ -130,8 +130,8 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
                                 const PointCloud&         obs) {
   using ::quasar::backend::DeviceBuffer;
 
-  const SegmentSoA seg = cs.to_segments_soa();
-  const PointSoA   pts = obs.to_point_soa();
+  const SegmentSoA& seg = cs.segments_soa();
+  const PointSoA    pts = obs.to_point_soa();
   const int N = static_cast<int>(seg.n_segments());
   const int M = static_cast<int>(pts.n_points());
 
@@ -180,8 +180,8 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
                                        const PointCloud&        obs) {
   using ::quasar::backend::DeviceBuffer;
 
-  const SegmentSoA seg = cs.to_segments_soa();
-  const PointSoA   pts = obs.to_point_soa();
+  const SegmentSoA& seg = cs.segments_soa();
+  const PointSoA    pts = obs.to_point_soa();
   const int N = static_cast<int>(seg.n_segments());
   const int M = static_cast<int>(pts.n_points());
 

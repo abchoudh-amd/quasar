@@ -24,6 +24,15 @@ _numerics = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_numerics)
 _cfl_dt = _numerics.cfl_dt
 
+# Shared deck-emitting helpers (float formatter + circular-loop block), loaded by
+# file path for the same reason as the numerics helper above.
+_deckgen_path = Path(__file__).resolve().parents[1] / "_deckgen.py"
+_deckgen_spec = importlib.util.spec_from_file_location(
+    "_quasar_example_deckgen", _deckgen_path)
+_deckgen = importlib.util.module_from_spec(_deckgen_spec)
+_deckgen_spec.loader.exec_module(_deckgen)
+_fmt = _deckgen.fmt_float
+
 
 R0_M = 0.10
 SIDE_M = 0.04
@@ -70,10 +79,6 @@ M_PROTON = 1.67262192369e-27
 M_MUON = 1.883531627e-28
 
 
-def _fmt(x: float) -> str:
-    return f"{x:+.8f}"
-
-
 def _fmt_time(t_s: float) -> str:
     if t_s < 1e-6:
         return f"{t_s*1e9:.3f} ns"
@@ -110,17 +115,9 @@ def _tf_coil_block(*, name: str, theta_rad: float,
 
 def _loop_block(*, name: str, current_A: float, center_z_m: float,
                 radius_m: float) -> list[str]:
-    return [
-        f"      - name: {name}",
-        f"        current_A: {_fmt(current_A)}",
-        "        geometry:",
-        "          type: circular_loop",
-        f"          center_xyz: [0.0, 0.0, {_fmt(center_z_m)}]",
-        "          axis_xyz:   [0.0, 0.0, 1.0]",
-        f"          radius_m: {_fmt(radius_m)}",
-        f"          n_segments: {N_SEGMENTS}",
-        "",
-    ]
+    return _deckgen.loop_block(
+        indent=6, name=name, current_A=current_A,
+        center_z_m=center_z_m, radius_m=radius_m, n_segments=N_SEGMENTS)
 
 
 def build_yaml() -> str:

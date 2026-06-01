@@ -233,8 +233,8 @@ __global__ void wall_correct_e_y_kernel_o4(quasar::Grid2D g, int side, double dt
 }  // namespace
 
 extern "C" void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D& g,
-                                                          quasar::YeeField2D<double>& f,
-                                                          int side, double dt,
+                                                          quasar::YeeField2D<quasar::Real>& f,
+                                                          int side, quasar::Real dt,
                                                           quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   quasar::backend::pic::launch_along_side(g, side,
@@ -252,7 +252,7 @@ extern "C" void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D& 
 }
 
 extern "C" void launch_pic_boundary_wall_correct_e(const quasar::Grid2D& g,
-                                                   quasar::YeeField2D<double>& f,
+                                                   quasar::YeeField2D<quasar::Real>& f,
                                                    int side, quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   quasar::backend::pic::launch_along_side(g, side,
@@ -268,8 +268,8 @@ extern "C" void launch_pic_boundary_wall_correct_e(const quasar::Grid2D& g,
 }
 
 extern "C" void launch_pic_boundary_wall_correct_b_order4(const quasar::Grid2D& g,
-                                                          quasar::YeeField2D<double>& f,
-                                                          int side, double dt,
+                                                          quasar::YeeField2D<quasar::Real>& f,
+                                                          int side, quasar::Real dt,
                                                           quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   quasar::backend::pic::launch_along_side(g, side,
@@ -287,8 +287,8 @@ extern "C" void launch_pic_boundary_wall_correct_b_order4(const quasar::Grid2D& 
 }
 
 extern "C" void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D& g,
-                                                          quasar::YeeField2D<double>& f,
-                                                          int side, double dt,
+                                                          quasar::YeeField2D<quasar::Real>& f,
+                                                          int side, quasar::Real dt,
                                                           quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   quasar::backend::pic::launch_along_side(g, side,

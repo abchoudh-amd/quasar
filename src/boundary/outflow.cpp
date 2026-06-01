@@ -30,7 +30,7 @@ void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt
   const int slo = skip_lo_ ? 1 : 0;
   const int shi = skip_hi_ ? 1 : 0;
   const int s = static_cast<int>(side);
-  double* strips = mur_.device_ptr();
+  Real* strips = mur_.device_ptr();
   const int init_flag = init ? 1 : 0;
   detail::select_order(
       order_,

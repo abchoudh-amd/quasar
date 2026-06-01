@@ -9,14 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
+from quasar._plotting import require_pyplot
 from quasar.pic.postprocess import reshape_with_ghost, species_names
+
+plt = require_pyplot(agg=True)
 
 HERE = Path(__file__).resolve().parent
 NPZ = HERE / "out.npz"

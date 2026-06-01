@@ -119,10 +119,14 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
 
   // The destination index for window node (bx+a, by+b) is identical across the
   // Jx/Jy/Jz accumulation loops, so compute the wrap/clamp + linear index once.
-  std::size_t off[kWindow][kWindow];
+  // storage_size is bounded (MAX_GRID_CELLS = 1<<30 interior + ghost margin stays
+  // well under INT_MAX), so a 4-byte index halves this per-thread table's local-
+  // memory footprint versus size_t on the register-heavy deposit kernel.
+  int off[kWindow][kWindow];
   for (int a = 0; a < kWindow; ++a) {
     for (int b = 0; b < kWindow; ++b) {
-      off[a][b] = deposit_index(g, bx + a, by + b, periodic_x, periodic_y);
+      off[a][b] = static_cast<int>(
+          deposit_index(g, bx + a, by + b, periodic_x, periodic_y));
     }
   }
 
@@ -202,8 +206,8 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
 
 extern "C" void launch_pic_deposit_shape1(const quasar::Grid2D& g,
                                           const quasar::pic::ParticleSpecies& s,
-                                          quasar::JField2D<double>& j,
-                                          double dt, int periodic_x, int periodic_y,
+                                          quasar::JField2D<quasar::Real>& j,
+                                          quasar::Real dt, int periodic_x, int periodic_y,
                                           quasar_stream_t stream) {
   launch<1>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
             static_cast<hipStream_t>(stream));
@@ -212,8 +216,8 @@ extern "C" void launch_pic_deposit_shape1(const quasar::Grid2D& g,
 
 extern "C" void launch_pic_deposit_shape2(const quasar::Grid2D& g,
                                           const quasar::pic::ParticleSpecies& s,
-                                          quasar::JField2D<double>& j,
-                                          double dt, int periodic_x, int periodic_y,
+                                          quasar::JField2D<quasar::Real>& j,
+                                          quasar::Real dt, int periodic_x, int periodic_y,
                                           quasar_stream_t stream) {
   launch<2>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
             static_cast<hipStream_t>(stream));

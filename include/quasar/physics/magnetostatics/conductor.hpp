@@ -41,8 +41,16 @@ class ConductorSystem : public core::IFieldSource {
   // of length below kEps.
   SegmentSoA to_segments_soa() const;
 
+  // Cached view of to_segments_soa(): the geometry is invariant between add()
+  // calls, so repeated evaluations (e.g. evaluate_B then evaluate_grad_B, or an
+  // observation-set sweep) reuse one flatten+validate instead of redoing it each
+  // call. Invalidated by add(). Same throw conditions as to_segments_soa().
+  const SegmentSoA& segments_soa() const;
+
  private:
   std::vector<Filament> filaments_{};
+  mutable SegmentSoA    soa_cache_{};
+  mutable bool          soa_cache_valid_{false};
 };
 
 }  // namespace quasar::magnetostatics

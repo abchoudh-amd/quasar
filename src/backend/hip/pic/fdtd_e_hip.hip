@@ -43,19 +43,23 @@ void launch(quasar::Grid2D g, double* ex, double* ey, double* ez,
 }  // namespace
 
 extern "C" void launch_pic_fdtd_e_order2(const quasar::Grid2D& g,
-                                         double* ex, double* ey, double* ez,
-                                         const double* bx, const double* by, const double* bz,
-                                         const double* jx, const double* jy, const double* jz,
-                                         double dt, quasar_stream_t stream) {
+                                         quasar::Real* ex, quasar::Real* ey, quasar::Real* ez,
+                                         const quasar::Real* bx, const quasar::Real* by,
+                                         const quasar::Real* bz,
+                                         const quasar::Real* jx, const quasar::Real* jy,
+                                         const quasar::Real* jz,
+                                         quasar::Real dt, quasar_stream_t stream) {
   launch<2>(g, ex, ey, ez, bx, by, bz, jx, jy, jz, dt, static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_fdtd_e_order4(const quasar::Grid2D& g,
-                                         double* ex, double* ey, double* ez,
-                                         const double* bx, const double* by, const double* bz,
-                                         const double* jx, const double* jy, const double* jz,
-                                         double dt, quasar_stream_t stream) {
+                                         quasar::Real* ex, quasar::Real* ey, quasar::Real* ez,
+                                         const quasar::Real* bx, const quasar::Real* by,
+                                         const quasar::Real* bz,
+                                         const quasar::Real* jx, const quasar::Real* jy,
+                                         const quasar::Real* jz,
+                                         quasar::Real dt, quasar_stream_t stream) {
   launch<4>(g, ex, ey, ez, bx, by, bz, jx, jy, jz, dt, static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 }

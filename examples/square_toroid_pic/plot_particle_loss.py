@@ -3,6 +3,11 @@
 Loads the deck, seeds species (recording initial positions), runs the PIC
 solver, and renders a 2x2 figure: initial vs final positions for H+ and mu-.
 Titles report start / alive / lost counts per species.
+
+This view needs the *initial* positions, which the rolling ``out.npz`` does not
+store, so it builds and steps a solver via the public ``quasar.pic.prepare_run``
+seam (it is not a duplicate of ``plot_solution.py``, which reads ``out.npz``).
+The figure is written to ``initial_vs_final.png``.
 """
 
 from __future__ import annotations
@@ -12,26 +17,18 @@ from pathlib import Path
 
 import numpy as np
 
+from quasar._plotting import require_pyplot
+from quasar.pic import Units, prepare_run
+from quasar.pic import io as pic_io
+
 HERE = Path(__file__).resolve().parent
 DECK = HERE / "input.yaml"
 
 
 def main() -> int:
-    from quasar.pic import cli as pic_cli
-    from quasar.pic import io as pic_io
-
     deck = pic_io.load(DECK)
-    units = pic_cli.Units(deck)
-    solver = pic_cli._make_solver(deck, units)
-    pic_cli._apply_external_field(solver, deck, units)
-    rng = np.random.default_rng(0)
-    indices = pic_cli._seed_species(solver, deck, units, rng)
-    # The solver steps in internal time units; convert for display via dt_si.
-    if deck.time.dt_s == "auto":
-        dt = pic_cli._cfl_dt_internal(deck.domain, units, deck.numerics.fdtd_order)
-    else:
-        dt = units.time(float(deck.time.dt_s))
-    dt_si = units.time_to_si(dt)
+    units = Units(deck)
+    solver, indices, dt, dt_si = prepare_run(deck, units, seed=0)
 
     initial = []
     for idx in indices:
@@ -61,9 +58,7 @@ def main() -> int:
             "alive": np.array(host["alive"], copy=True).astype(bool),
         })
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = require_pyplot(agg=True)
 
     domain = deck.domain
     x_lo, x_hi = domain.origin_x_m, domain.origin_x_m + domain.lx_m
@@ -108,7 +103,7 @@ def main() -> int:
     fig.suptitle(f"square_toroid_pic: {steps} steps, "
                  f"t_final = {steps * dt_si:.3e} s")
     fig.tight_layout()
-    out = HERE / "particle_loss.png"
+    out = HERE / "initial_vs_final.png"
     fig.savefig(out, dpi=130)
     print(f"wrote {out}")
     return 0

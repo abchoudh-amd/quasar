@@ -94,7 +94,7 @@ extern "C" void launch_pic_boundary_specular_particles(const quasar::Grid2D& g,
 }
 
 extern "C" void launch_pic_boundary_specular_foldback(const quasar::Grid2D& g,
-                                                      quasar::JField2D<double>& j,
+                                                      quasar::JField2D<quasar::Real>& j,
                                                       int side, quasar_stream_t stream) {
   const int len = (side < 2) ? g.ny : g.nx;
   const int total = g.nghost * len;

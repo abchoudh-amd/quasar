@@ -188,8 +188,8 @@ __global__ void outflow_reclose_e_y_kernel_o4(quasar::Grid2D g, int side, double
 }  // namespace
 
 extern "C" void launch_pic_boundary_outflow_correct_b_order2(const quasar::Grid2D& g,
-                                                             quasar::YeeField2D<double>& f,
-                                                             int side, double dt,
+                                                             quasar::YeeField2D<quasar::Real>& f,
+                                                             int side, quasar::Real dt,
                                                              quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   quasar::backend::pic::launch_along_side(g, side,
@@ -207,9 +207,9 @@ extern "C" void launch_pic_boundary_outflow_correct_b_order2(const quasar::Grid2
 }
 
 extern "C" void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2D& g,
-                                                             quasar::YeeField2D<double>& f,
-                                                             int side, double dt,
-                                                             double* mur_strips, int init,
+                                                             quasar::YeeField2D<quasar::Real>& f,
+                                                             int side, quasar::Real dt,
+                                                             quasar::Real* mur_strips, int init,
                                                              int skip_lo, int skip_hi,
                                                              quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
@@ -227,8 +227,8 @@ extern "C" void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2
 }
 
 extern "C" void launch_pic_boundary_outflow_correct_b_order4(const quasar::Grid2D& g,
-                                                             quasar::YeeField2D<double>& f,
-                                                             int side, double dt,
+                                                             quasar::YeeField2D<quasar::Real>& f,
+                                                             int side, quasar::Real dt,
                                                              quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);
   quasar::backend::pic::launch_along_side(g, side,
@@ -246,9 +246,9 @@ extern "C" void launch_pic_boundary_outflow_correct_b_order4(const quasar::Grid2
 }
 
 extern "C" void launch_pic_boundary_outflow_correct_e_order4(const quasar::Grid2D& g,
-                                                             quasar::YeeField2D<double>& f,
-                                                             int side, double dt,
-                                                             double* mur_strips, int init,
+                                                             quasar::YeeField2D<quasar::Real>& f,
+                                                             int side, quasar::Real dt,
+                                                             quasar::Real* mur_strips, int init,
                                                              int skip_lo, int skip_hi,
                                                              quasar_stream_t stream) {
   const auto hip_stream = static_cast<hipStream_t>(stream);

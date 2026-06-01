@@ -74,6 +74,35 @@ class SeedFieldsTests(unittest.TestCase):
         seeded = {c for c, _ in solver.calls}
         self.assertEqual(seeded, {"ez", "by"})
 
+    def test_seed_perturbation_writes_single_component_sinusoid(self):
+        amp, mx = 3.0e-3, 2
+        deck = _fields_deck(FieldsInitial(type="seed_perturbation", component="Ex",
+                                          amplitude=amp, mode=(mx, 0)))
+        solver = _RecordingSolver()
+        _seed_fields(solver, deck)
+
+        # Exactly one component is seeded, lowercased from the deck's "Ex".
+        self.assertEqual(len(solver.calls), 1)
+        comp, values = solver.calls[0]
+        self.assertEqual(comp, "ex")
+
+        # Reshape the flat ghost-padded buffer and check the interior against the
+        # x-only sinusoid amp*sin(2*pi*mx*(i+0.5)/nx); ghost cells stay zero.
+        nx = ny = 8
+        g = _core.pic.required_nghost(deck.numerics.fdtd_order)
+        pitch, height = nx + 2 * g, ny + 2 * g
+        buf = values.reshape(height, pitch)
+        i = np.arange(nx)
+        expected_row = amp * np.sin(2 * np.pi * mx * (i + 0.5) / nx)
+        interior = buf[g:g + ny, g:g + nx]
+        for row in interior:
+            np.testing.assert_allclose(row, expected_row, rtol=0, atol=1e-12)
+        # Ghost border is untouched (all zero).
+        self.assertEqual(buf[:g].sum(), 0.0)
+        self.assertEqual(buf[g + ny:].sum(), 0.0)
+        self.assertEqual(buf[:, :g].sum(), 0.0)
+        self.assertEqual(buf[:, g + nx:].sum(), 0.0)
+
 
 class BuildParserTests(unittest.TestCase):
 

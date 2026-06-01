@@ -35,6 +35,7 @@ from typing import Sequence, Union
 
 import yaml
 
+from .. import _core
 from .._deck import require as _require, triple as _triple
 from .._deck import validate_evaluator_type as _validate_evaluator_type
 
@@ -296,7 +297,7 @@ class PicDeck:
             raise ValueError("numerics.fdtd_order must be 2 or 4")
         if self.numerics.shape not in ("cic", "tsc"):
             raise ValueError("numerics.shape must be 'cic' or 'tsc'")
-        allowed_filters = {"binomial", "compensated_binomial"}
+        allowed_filters = set(_core.pic.registered_current_filters())
         for i, spec in enumerate(self.numerics.current_filter):
             if not isinstance(spec, dict):
                 raise ValueError(f"numerics.current_filter[{i}] must be a mapping")
@@ -408,12 +409,14 @@ class PicDeck:
                     f"{list(FIELD_COMPONENTS)}")
 
     def _validate_boundary(self) -> None:
-        allowed_pbc = {"periodic", "specular", "absorbing"}
+        # Validate against the live C++ registry so a newly-registered boundary
+        # needs no Python edit (the registry is the single source of truth).
+        allowed_pbc = set(_core.pic.registered_particle_boundaries())
         for i, bc in enumerate(self.boundary.particle):
             if bc not in allowed_pbc:
                 raise ValueError(
                     f"boundary.particle[{i}] = {bc!r} must be one of {sorted(allowed_pbc)}")
-        allowed_fbc = {"periodic", "pec", "outflow"}
+        allowed_fbc = set(_core.pic.registered_field_boundaries())
         for i, bc in enumerate(self.boundary.field):
             if bc not in allowed_fbc:
                 raise ValueError(

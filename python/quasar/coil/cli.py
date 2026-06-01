@@ -23,9 +23,12 @@ from .._paths import confine_output_path
 from . import io as coil_io
 
 
-def _build_payload(deck: coil_io.CoilDeck, B: np.ndarray) -> dict[str, np.ndarray]:
+def _build_payload(
+    deck: coil_io.CoilDeck, B: np.ndarray
+) -> tuple[dict[str, np.ndarray], set[str]]:
     """Assemble the .npz payload from the evaluated B field (shape (M, 3)) and the
-    deck's requested output fields. Pure (no I/O, no kernel) so the field-shaping
+    deck's requested output fields. Returns the payload plus the resolved field set
+    (so callers don't recompute it). Pure (no I/O, no kernel) so the field-shaping
     and the B_xyz_grid/observation-kind guard are unit-testable without a GPU."""
     payload: dict[str, np.ndarray] = {}
     fields = set(deck.output.fields)
@@ -44,7 +47,7 @@ def _build_payload(deck: coil_io.CoilDeck, B: np.ndarray) -> dict[str, np.ndarra
     payload["dims"] = np.asarray(deck.observation.dims, dtype=np.int64)
     payload["observation_kind"] = np.asarray(
         deck.observation.kind, dtype="<U16")
-    return payload
+    return payload, fields
 
 
 def _do_run(args: argparse.Namespace) -> int:
@@ -59,8 +62,7 @@ def _do_run(args: argparse.Namespace) -> int:
     B = evaluator.evaluate_B(deck.conductors, deck.observation.points)
     # B is shape (M, 3).
 
-    payload = _build_payload(deck, B)
-    fields = set(deck.output.fields)
+    payload, fields = _build_payload(deck, B)
 
     # Confine the deck-supplied output path to the input deck's directory so a
     # stray absolute path or "../" cannot write outside it.

@@ -21,23 +21,27 @@
 // definitions cast it back to quasar_stream_t internally.
 using quasar_stream_t = ::quasar::backend::stream_t;
 
+// The field-data ABI is phrased in quasar::Real (and YeeField2D<Real> /
+// JField2D<Real>), not literal double, so the kernel boundary tracks the same
+// precision typedef as the rest of the PIC stack: if Real ever changes, the
+// solver's Real* device pointers cannot silently mismatch a double* ABI slot.
 extern "C" {
 
 // -- FDTD field updates ------------------------------------------------------
-void launch_pic_fdtd_b_order2(const quasar::Grid2D&, double*, double*, double*,
-                              const double*, const double*, const double*, double,
-                              quasar_stream_t);
-void launch_pic_fdtd_b_order4(const quasar::Grid2D&, double*, double*, double*,
-                              const double*, const double*, const double*, double,
-                              quasar_stream_t);
-void launch_pic_fdtd_e_order2(const quasar::Grid2D&, double*, double*, double*,
-                              const double*, const double*, const double*,
-                              const double*, const double*, const double*, double,
-                              quasar_stream_t);
-void launch_pic_fdtd_e_order4(const quasar::Grid2D&, double*, double*, double*,
-                              const double*, const double*, const double*,
-                              const double*, const double*, const double*, double,
-                              quasar_stream_t);
+void launch_pic_fdtd_b_order2(const quasar::Grid2D&, quasar::Real*, quasar::Real*,
+                              quasar::Real*, const quasar::Real*, const quasar::Real*,
+                              const quasar::Real*, quasar::Real, quasar_stream_t);
+void launch_pic_fdtd_b_order4(const quasar::Grid2D&, quasar::Real*, quasar::Real*,
+                              quasar::Real*, const quasar::Real*, const quasar::Real*,
+                              const quasar::Real*, quasar::Real, quasar_stream_t);
+void launch_pic_fdtd_e_order2(const quasar::Grid2D&, quasar::Real*, quasar::Real*,
+                              quasar::Real*, const quasar::Real*, const quasar::Real*,
+                              const quasar::Real*, const quasar::Real*, const quasar::Real*,
+                              const quasar::Real*, quasar::Real, quasar_stream_t);
+void launch_pic_fdtd_e_order4(const quasar::Grid2D&, quasar::Real*, quasar::Real*,
+                              quasar::Real*, const quasar::Real*, const quasar::Real*,
+                              const quasar::Real*, const quasar::Real*, const quasar::Real*,
+                              const quasar::Real*, quasar::Real, quasar_stream_t);
 
 // -- Particle gather + push --------------------------------------------------
 // `periodic_x`/`periodic_y` (0/1) select per-axis field-gather indexing: a
@@ -45,13 +49,13 @@ void launch_pic_fdtd_e_order4(const quasar::Grid2D&, double*, double*, double*,
 // stencil into the ghost layer (reading the field-boundary closure / replicated
 // external field) instead of wrapping to the far edge. Mirrors the deposit.
 void launch_pic_gather_push_shape1(const quasar::Grid2D&, quasar::pic::ParticleSpecies&,
-                                   const quasar::YeeField2D<double>&,
-                                   const quasar::YeeField2D<double>&, int periodic_x,
-                                   int periodic_y, double, quasar_stream_t);
+                                   const quasar::YeeField2D<quasar::Real>&,
+                                   const quasar::YeeField2D<quasar::Real>&, int periodic_x,
+                                   int periodic_y, quasar::Real, quasar_stream_t);
 void launch_pic_gather_push_shape2(const quasar::Grid2D&, quasar::pic::ParticleSpecies&,
-                                   const quasar::YeeField2D<double>&,
-                                   const quasar::YeeField2D<double>&, int periodic_x,
-                                   int periodic_y, double, quasar_stream_t);
+                                   const quasar::YeeField2D<quasar::Real>&,
+                                   const quasar::YeeField2D<quasar::Real>&, int periodic_x,
+                                   int periodic_y, quasar::Real, quasar_stream_t);
 
 // -- Current deposition ------------------------------------------------------
 // `periodic_x`/`periodic_y` (0/1) select per-axis node indexing: a periodic axis
@@ -59,10 +63,10 @@ void launch_pic_gather_push_shape2(const quasar::Grid2D&, quasar::pic::ParticleS
 // cells without wrapping so launch_pic_boundary_specular_foldback can reflect the
 // boundary-crossing current back into the interior.
 void launch_pic_deposit_shape1(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
-                               quasar::JField2D<double>&, double, int periodic_x,
+                               quasar::JField2D<quasar::Real>&, quasar::Real, int periodic_x,
                                int periodic_y, quasar_stream_t);
 void launch_pic_deposit_shape2(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
-                               quasar::JField2D<double>&, double, int periodic_x,
+                               quasar::JField2D<quasar::Real>&, quasar::Real, int periodic_x,
                                int periodic_y, quasar_stream_t);
 // Reads + clears the species' persistent deposit-overflow flag and throws a
 // std::runtime_error if any deposit since the last check spilled outside the
@@ -73,14 +77,14 @@ void launch_pic_deposit_overflow_check(const quasar::pic::ParticleSpecies&,
 
 // -- Current filtering -------------------------------------------------------
 // `scratch` is caller-owned ping-pong storage of at least grid.storage_size()
-// doubles (hoisted out of the per-step path). `periodic_x`/`periodic_y` select
-// whether the smoothing stencil wraps on that axis; non-periodic axes clamp at
-// the edge so a filter cannot couple current across a wall.
-void launch_pic_filter_binomial(const quasar::Grid2D&, quasar::JField2D<double>&,
-                                double* scratch, int, int periodic_x, int periodic_y,
+// Real values (hoisted out of the per-step path). `periodic_x`/`periodic_y`
+// select whether the smoothing stencil wraps on that axis; non-periodic axes
+// clamp at the edge so a filter cannot couple current across a wall.
+void launch_pic_filter_binomial(const quasar::Grid2D&, quasar::JField2D<quasar::Real>&,
+                                quasar::Real* scratch, int, int periodic_x, int periodic_y,
                                 quasar_stream_t);
-void launch_pic_filter_compensated(const quasar::Grid2D&, quasar::JField2D<double>&,
-                                   double* scratch, int, int periodic_x, int periodic_y,
+void launch_pic_filter_compensated(const quasar::Grid2D&, quasar::JField2D<quasar::Real>&,
+                                   quasar::Real* scratch, int, int periodic_x, int periodic_y,
                                    quasar_stream_t);
 
 // -- Particle boundary conditions --------------------------------------------
@@ -92,7 +96,7 @@ void launch_pic_boundary_specular_particles(const quasar::Grid2D&,
 // interior (image-charge fold) and zeroes those ghosts. Run after the deposit and
 // before the current filter / E-update on every specular side.
 void launch_pic_boundary_specular_foldback(const quasar::Grid2D&,
-                                           quasar::JField2D<double>&, int side,
+                                           quasar::JField2D<quasar::Real>&, int side,
                                            quasar_stream_t);
 // `side` is the Side enum (0=x_lo,1=x_hi,2=y_lo,3=y_hi). A per-side periodic BC
 // wraps only particles that cross that side, so a one-sided periodic wall does
@@ -102,7 +106,8 @@ void launch_pic_boundary_periodic_particles(const quasar::Grid2D&,
                                             quasar_stream_t);
 
 // -- Field boundary conditions -----------------------------------------------
-void launch_pic_boundary_periodic_fields(const quasar::Grid2D&, quasar::YeeField2D<double>&,
+void launch_pic_boundary_periodic_fields(const quasar::Grid2D&,
+                                         quasar::YeeField2D<quasar::Real>&,
                                          int, quasar_stream_t);
 
 // Characteristic-wall (PEC) one-sided closures, run after the interior curl.
@@ -112,21 +117,21 @@ void launch_pic_boundary_periodic_fields(const quasar::Grid2D&, quasar::YeeField
 // is the Side enum (0=x_lo,1=x_hi,2=y_lo,3=y_hi). The order-4 variant
 // (outer-two-layer closure) is added with the 4th-order PEC commit.
 void launch_pic_boundary_wall_correct_b_order2(const quasar::Grid2D&,
-                                               quasar::YeeField2D<double>&, int side,
-                                               double dt, quasar_stream_t);
+                                               quasar::YeeField2D<quasar::Real>&, int side,
+                                               quasar::Real dt, quasar_stream_t);
 void launch_pic_boundary_wall_correct_e(const quasar::Grid2D&,
-                                        quasar::YeeField2D<double>&, int side,
+                                        quasar::YeeField2D<quasar::Real>&, int side,
                                         quasar_stream_t);
 // 4th-order variants: the outer two boundary layers are reduced to the 2nd-order
 // staggered scheme (interior-only) on the normal-axis derivative, then the wall
 // closure / pin is applied. correct_e_order4 additionally re-closes the second
 // interior layer the forward E-curl overran on the high wall.
 void launch_pic_boundary_wall_correct_b_order4(const quasar::Grid2D&,
-                                               quasar::YeeField2D<double>&, int side,
-                                               double dt, quasar_stream_t);
+                                               quasar::YeeField2D<quasar::Real>&, int side,
+                                               quasar::Real dt, quasar_stream_t);
 void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D&,
-                                               quasar::YeeField2D<double>&, int side,
-                                               double dt, quasar_stream_t);
+                                               quasar::YeeField2D<quasar::Real>&, int side,
+                                               quasar::Real dt, quasar_stream_t);
 
 // First-order Mur outflow (open boundary). correct_b applies the same one-sided
 // B closure as the wall but pins nothing; correct_e advances the tangential-E
@@ -134,23 +139,25 @@ void launch_pic_boundary_wall_correct_e_order4(const quasar::Grid2D&,
 // history buffer of 4*len doubles: [a_u0, a_u1, b_u0, b_u1]). `init` non-zero
 // seeds the strips from the current field (first step) without advancing.
 void launch_pic_boundary_outflow_correct_b_order2(const quasar::Grid2D&,
-                                                  quasar::YeeField2D<double>&, int side,
-                                                  double dt, quasar_stream_t);
+                                                  quasar::YeeField2D<quasar::Real>&, int side,
+                                                  quasar::Real dt, quasar_stream_t);
 void launch_pic_boundary_outflow_correct_e_order2(const quasar::Grid2D&,
-                                                  quasar::YeeField2D<double>&, int side,
-                                                  double dt, double* mur_strips, int init,
-                                                  int skip_lo, int skip_hi, quasar_stream_t);
+                                                  quasar::YeeField2D<quasar::Real>&, int side,
+                                                  quasar::Real dt, quasar::Real* mur_strips,
+                                                  int init, int skip_lo, int skip_hi,
+                                                  quasar_stream_t);
 // 4th-order variants: B closure reduces the outer two boundary layers to the
 // interior-only stencil (no pin); E re-closes the second interior layer the
 // forward curl overran (high wall) and then Mur-advances the wall node (Mur
 // itself stays first order regardless of FDTD order).
 void launch_pic_boundary_outflow_correct_b_order4(const quasar::Grid2D&,
-                                                  quasar::YeeField2D<double>&, int side,
-                                                  double dt, quasar_stream_t);
+                                                  quasar::YeeField2D<quasar::Real>&, int side,
+                                                  quasar::Real dt, quasar_stream_t);
 void launch_pic_boundary_outflow_correct_e_order4(const quasar::Grid2D&,
-                                                  quasar::YeeField2D<double>&, int side,
-                                                  double dt, double* mur_strips, int init,
-                                                  int skip_lo, int skip_hi, quasar_stream_t);
+                                                  quasar::YeeField2D<quasar::Real>&, int side,
+                                                  quasar::Real dt, quasar::Real* mur_strips,
+                                                  int init, int skip_lo, int skip_hi,
+                                                  quasar_stream_t);
 
 // -- Particle array compaction -----------------------------------------------
 // Compacts alive particles to the front of every species array (order is not

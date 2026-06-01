@@ -24,6 +24,15 @@ bool is_finite(Vec3 v) noexcept {
 
 void ConductorSystem::add(Filament f) {
   filaments_.push_back(std::move(f));
+  soa_cache_valid_ = false;  // geometry changed; drop the stale flattened SoA
+}
+
+const SegmentSoA& ConductorSystem::segments_soa() const {
+  if (!soa_cache_valid_) {
+    soa_cache_ = to_segments_soa();
+    soa_cache_valid_ = true;
+  }
+  return soa_cache_;
 }
 
 SegmentSoA ConductorSystem::to_segments_soa() const {

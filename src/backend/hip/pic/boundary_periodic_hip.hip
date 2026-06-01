@@ -93,7 +93,7 @@ extern "C" void launch_pic_boundary_periodic_particles(const quasar::Grid2D& g,
 }
 
 extern "C" void launch_pic_boundary_periodic_fields(const quasar::Grid2D& g,
-                                                    quasar::YeeField2D<double>& f,
+                                                    quasar::YeeField2D<quasar::Real>& f,
                                                     int side, quasar_stream_t stream) {
   if (g.nghost <= 0) return;
   const int len = (side == 0 || side == 1) ? g.ny : g.nx;

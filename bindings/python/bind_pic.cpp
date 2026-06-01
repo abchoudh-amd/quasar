@@ -14,13 +14,16 @@
 #include "quasar/boundary/boundary_condition.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/normalization.hpp"
+#include "quasar/core/registry.hpp"
 #include "quasar/core/yee_field.hpp"
+#include "quasar/numerics/filter.hpp"
 #include "quasar/physics/magnetostatics/biot_savart.hpp"
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/pic/diagnostics.hpp"
 #include "quasar/physics/pic/pic_solver.hpp"
 #include "quasar/physics/pic/species.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -118,6 +121,33 @@ void bind_pic(py::module_& m) {
   pic.def("required_nghost", &quasar::required_nghost, py::arg("fdtd_order"),
           "Minimum ghost-cell halo for the given FDTD order (1 for order 2, 2 for order 4).");
 
+  // Registry introspection: expose the registered plugin names so the Python
+  // deck validators select against the live C++ registry instead of a hardcoded
+  // mirror. Adding a boundary/filter via QUASAR_REGISTER_* then needs no Python
+  // edit. Sorted for stable error messages.
+  auto sorted_names = [](std::vector<std::string> v) {
+    std::sort(v.begin(), v.end());
+    return v;
+  };
+  pic.def("registered_particle_boundaries",
+          [sorted_names]() {
+            return sorted_names(
+                quasar::Registry<quasar::boundary::IParticleBoundary>::instance().names());
+          },
+          "Names of registered particle boundary conditions.");
+  pic.def("registered_field_boundaries",
+          [sorted_names]() {
+            return sorted_names(
+                quasar::Registry<quasar::boundary::IFieldBoundary>::instance().names());
+          },
+          "Names of registered field boundary conditions.");
+  pic.def("registered_current_filters",
+          [sorted_names]() {
+            return sorted_names(
+                quasar::Registry<quasar::numerics::ICurrentFilter>::instance().names());
+          },
+          "Names of registered current-smoothing filters.");
+
   py::enum_<quasar::UnitTag>(pic, "UnitTag")
       .value("time", quasar::UnitTag::time)
       .value("length", quasar::UnitTag::length)
@@ -147,8 +177,10 @@ void bind_pic(py::module_& m) {
       .def_readonly("omega_p_ref", &quasar::Normalization::omega_p_ref);
 
   // Boundaries are selected by registry name (no enum): the string is passed
-  // straight through to Registry<I*Boundary>::create(), so adding a boundary is a
-  // single QUASAR_REGISTER_*_BOUNDARY with nothing to update here.
+  // straight through to Registry<I*Boundary>::create(). Adding a boundary is a
+  // single QUASAR_REGISTER_*_BOUNDARY with nothing to update here — the Python
+  // deck validator queries registered_*_boundaries() above rather than mirroring
+  // the name list, so it stays in sync automatically.
   py::class_<quasar::boundary::BoundarySpec>(pic, "BoundarySpec")
       .def(py::init<>())
       .def("set_particle_all",

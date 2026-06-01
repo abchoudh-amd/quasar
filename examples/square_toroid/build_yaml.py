@@ -3,7 +3,16 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+
+# Shared deck-emitting helpers, loaded by file path so this standalone generator
+# does not import the quasar package (which would require the compiled _core).
+_deckgen_path = Path(__file__).resolve().parents[1] / "_deckgen.py"
+_spec = importlib.util.spec_from_file_location("_quasar_example_deckgen", _deckgen_path)
+_deckgen = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_deckgen)
+_fmt = _deckgen.fmt_float
 
 
 R0_M = 0.10
@@ -20,10 +29,6 @@ OBS_NX = 257
 OBS_NZ = 257
 
 
-def _fmt(x: float) -> str:
-    return f"{x:+.8f}"
-
-
 def _loop_block(
     *,
     name: str,
@@ -31,17 +36,9 @@ def _loop_block(
     center_z_m: float,
     radius_m: float,
 ) -> list[str]:
-    return [
-        f"  - name: {name}",
-        f"    current_A: {_fmt(current_A)}",
-        "    geometry:",
-        "      type: circular_loop",
-        f"      center_xyz: [0.0, 0.0, {_fmt(center_z_m)}]",
-        "      axis_xyz:   [0.0, 0.0, 1.0]",
-        f"      radius_m: {_fmt(radius_m)}",
-        f"      n_segments: {N_SEGMENTS}",
-        "",
-    ]
+    return _deckgen.loop_block(
+        indent=2, name=name, current_A=current_A,
+        center_z_m=center_z_m, radius_m=radius_m, n_segments=N_SEGMENTS)
 
 
 def build_yaml() -> str:

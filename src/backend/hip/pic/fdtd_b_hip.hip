@@ -40,17 +40,19 @@ void launch(quasar::Grid2D g, double* bx, double* by, double* bz,
 }  // namespace
 
 extern "C" void launch_pic_fdtd_b_order2(const quasar::Grid2D& g,
-                                         double* bx, double* by, double* bz,
-                                         const double* ex, const double* ey, const double* ez,
-                                         double dt, quasar_stream_t stream) {
+                                         quasar::Real* bx, quasar::Real* by, quasar::Real* bz,
+                                         const quasar::Real* ex, const quasar::Real* ey,
+                                         const quasar::Real* ez,
+                                         quasar::Real dt, quasar_stream_t stream) {
   launch<2>(g, bx, by, bz, ex, ey, ez, dt, static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 extern "C" void launch_pic_fdtd_b_order4(const quasar::Grid2D& g,
-                                         double* bx, double* by, double* bz,
-                                         const double* ex, const double* ey, const double* ez,
-                                         double dt, quasar_stream_t stream) {
+                                         quasar::Real* bx, quasar::Real* by, quasar::Real* bz,
+                                         const quasar::Real* ex, const quasar::Real* ey,
+                                         const quasar::Real* ez,
+                                         quasar::Real dt, quasar_stream_t stream) {
   launch<4>(g, bx, by, bz, ex, ey, ez, dt, static_cast<hipStream_t>(stream));
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
