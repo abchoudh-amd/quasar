@@ -13,25 +13,30 @@ namespace quasar::numerics {
 // i-1..i+2, so it needs nghost >= 2 (enforced by the EmPic2D3V constructor). The
 // Yee curl reads only along-axis neighbours, so corner ghosts are never touched
 // and need no fill.
+// All derivative stencils multiply by a precomputed reciprocal spacing rather
+// than dividing per term: g.dx()/g.dy() are themselves divisions (lx/nx), so a
+// naive form pays several divisions per cell per step across the whole grid.
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddx_staggered(const Real* f, const Grid2D& g,
                                              int i, int j) noexcept {
+  const Real inv_dx = Real{1} / g.dx();
   if constexpr (Order == 4) {
-    return (Real{9} / Real{8}) * (f[g.index(i + 1, j)] - f[g.index(i, j)]) / g.dx()
-         - (Real{1} / Real{24}) * (f[g.index(i + 2, j)] - f[g.index(i - 1, j)]) / g.dx();
+    return ((Real{9} / Real{8}) * (f[g.index(i + 1, j)] - f[g.index(i, j)])
+         - (Real{1} / Real{24}) * (f[g.index(i + 2, j)] - f[g.index(i - 1, j)])) * inv_dx;
   } else {
-    return (f[g.index(i + 1, j)] - f[g.index(i, j)]) / g.dx();
+    return (f[g.index(i + 1, j)] - f[g.index(i, j)]) * inv_dx;
   }
 }
 
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddy_staggered(const Real* f, const Grid2D& g,
                                              int i, int j) noexcept {
+  const Real inv_dy = Real{1} / g.dy();
   if constexpr (Order == 4) {
-    return (Real{9} / Real{8}) * (f[g.index(i, j + 1)] - f[g.index(i, j)]) / g.dy()
-         - (Real{1} / Real{24}) * (f[g.index(i, j + 2)] - f[g.index(i, j - 1)]) / g.dy();
+    return ((Real{9} / Real{8}) * (f[g.index(i, j + 1)] - f[g.index(i, j)])
+         - (Real{1} / Real{24}) * (f[g.index(i, j + 2)] - f[g.index(i, j - 1)])) * inv_dy;
   } else {
-    return (f[g.index(i, j + 1)] - f[g.index(i, j)]) / g.dy();
+    return (f[g.index(i, j + 1)] - f[g.index(i, j)]) * inv_dy;
   }
 }
 
@@ -44,22 +49,24 @@ QUASAR_HOST_DEVICE inline Real ddy_staggered(const Real* f, const Grid2D& g,
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddx_staggered_bwd(const Real* f, const Grid2D& g,
                                                  int i, int j) noexcept {
+  const Real inv_dx = Real{1} / g.dx();
   if constexpr (Order == 4) {
-    return (Real{9} / Real{8}) * (f[g.index(i, j)] - f[g.index(i - 1, j)]) / g.dx()
-         - (Real{1} / Real{24}) * (f[g.index(i + 1, j)] - f[g.index(i - 2, j)]) / g.dx();
+    return ((Real{9} / Real{8}) * (f[g.index(i, j)] - f[g.index(i - 1, j)])
+         - (Real{1} / Real{24}) * (f[g.index(i + 1, j)] - f[g.index(i - 2, j)])) * inv_dx;
   } else {
-    return (f[g.index(i, j)] - f[g.index(i - 1, j)]) / g.dx();
+    return (f[g.index(i, j)] - f[g.index(i - 1, j)]) * inv_dx;
   }
 }
 
 template <int Order>
 QUASAR_HOST_DEVICE inline Real ddy_staggered_bwd(const Real* f, const Grid2D& g,
                                                  int i, int j) noexcept {
+  const Real inv_dy = Real{1} / g.dy();
   if constexpr (Order == 4) {
-    return (Real{9} / Real{8}) * (f[g.index(i, j)] - f[g.index(i, j - 1)]) / g.dy()
-         - (Real{1} / Real{24}) * (f[g.index(i, j + 1)] - f[g.index(i, j - 2)]) / g.dy();
+    return ((Real{9} / Real{8}) * (f[g.index(i, j)] - f[g.index(i, j - 1)])
+         - (Real{1} / Real{24}) * (f[g.index(i, j + 1)] - f[g.index(i, j - 2)])) * inv_dy;
   } else {
-    return (f[g.index(i, j)] - f[g.index(i, j - 1)]) / g.dy();
+    return (f[g.index(i, j)] - f[g.index(i, j - 1)]) * inv_dy;
   }
 }
 

@@ -42,6 +42,10 @@ void* device_alloc(std::size_t bytes);
 void* device_alloc_uninit(std::size_t bytes);
 void  device_free(void* ptr) noexcept;
 void  device_memset(void* ptr, int value, std::size_t bytes);
+// Asynchronous fill queued on `stream` (nullptr = default stream). Unlike
+// device_memset (synchronous hipMemset), this does not block the host, so a
+// per-step buffer clear stays off the critical path.
+void  device_memset_async(void* ptr, int value, std::size_t bytes, stream_t stream);
 void  device_memcpy_h2d(void* dst, const void* src, std::size_t bytes);
 void  device_memcpy_d2h(void* dst, const void* src, std::size_t bytes);
 void  device_memcpy_h2d_async(void* dst, const void* src, std::size_t bytes, stream_t stream);

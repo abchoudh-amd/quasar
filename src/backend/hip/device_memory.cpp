@@ -35,6 +35,10 @@ void device_memset(void* ptr, int value, std::size_t bytes) {
   QUASAR_HIP_CHECK(::hipMemset(ptr, value, bytes));
 }
 
+void device_memset_async(void* ptr, int value, std::size_t bytes, stream_t stream) {
+  QUASAR_HIP_CHECK(::hipMemsetAsync(ptr, value, bytes, as_hip(stream)));
+}
+
 void device_synchronize(stream_t stream) {
   QUASAR_HIP_CHECK(::hipStreamSynchronize(as_hip(stream)));
 }

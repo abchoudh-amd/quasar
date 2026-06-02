@@ -197,9 +197,13 @@ void EmPic2D3V::apply_particle_bcs(ParticleSpecies& s) {
 }
 
 void EmPic2D3V::step(Real dt) {
-  backend::device_memset(current_.jx.device_ptr(), 0, current_.jx.bytes());
-  backend::device_memset(current_.jy.device_ptr(), 0, current_.jy.bytes());
-  backend::device_memset(current_.jz.device_ptr(), 0, current_.jz.bytes());
+  // Clear the current accumulators asynchronously on the default stream. The
+  // deposit and every downstream kernel also run on the default stream, so the
+  // clear is correctly ordered before them without a host-side block (the old
+  // synchronous hipMemset stalled the host every step).
+  backend::device_memset_async(current_.jx.device_ptr(), 0, current_.jx.bytes(), nullptr);
+  backend::device_memset_async(current_.jy.device_ptr(), 0, current_.jy.bytes(), nullptr);
+  backend::device_memset_async(current_.jz.device_ptr(), 0, current_.jz.bytes(), nullptr);
 
   // The FDTD stencil reads neighbours through ghost cells, so the per-side ghost
   // fill must run before each curl. Only a periodic side fills ghosts (copying the

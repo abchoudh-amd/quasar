@@ -76,8 +76,9 @@ void launch_pic_deposit_overflow_check(const quasar::pic::ParticleSpecies&,
                                        quasar_stream_t);
 
 // -- Current filtering -------------------------------------------------------
-// `scratch` is caller-owned ping-pong storage of at least grid.storage_size()
-// Real values (hoisted out of the per-step path). `periodic_x`/`periodic_y`
+// `scratch` is caller-owned ping-pong storage of at least 3*grid.storage_size()
+// Real values (one strip per current component; the three are filtered in one
+// fused launch), hoisted out of the per-step path. `periodic_x`/`periodic_y`
 // select whether the smoothing stencil wraps on that axis; non-periodic axes
 // clamp at the edge so a filter cannot couple current across a wall.
 void launch_pic_filter_binomial(const quasar::Grid2D&, quasar::JField2D<quasar::Real>&,

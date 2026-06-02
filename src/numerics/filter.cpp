@@ -23,7 +23,9 @@ bool is_axis_periodic(const boundary::BoundarySpec& bc, int lo, int hi) {
 }  // namespace
 
 void BinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const {
-  Real* scratch = ensure_scratch(scratch_, current.grid.storage_size());
+  // Three contiguous storage_size() strips: the filter kernel now smooths jx/jy/jz
+  // in a single fused launch and needs ping-pong scratch for all three at once.
+  Real* scratch = ensure_scratch(scratch_, 3 * current.grid.storage_size());
   ::launch_pic_filter_binomial(current.grid, current, scratch, n_passes_,
                                is_axis_periodic(bc, 0, 1) ? 1 : 0,
                                is_axis_periodic(bc, 2, 3) ? 1 : 0, nullptr);
@@ -31,7 +33,9 @@ void BinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec
 
 void CompensatedBinomialFilter::apply(JField2D<Real>& current,
                                       const boundary::BoundarySpec& bc) const {
-  Real* scratch = ensure_scratch(scratch_, current.grid.storage_size());
+  // Three contiguous storage_size() strips: the filter kernel now smooths jx/jy/jz
+  // in a single fused launch and needs ping-pong scratch for all three at once.
+  Real* scratch = ensure_scratch(scratch_, 3 * current.grid.storage_size());
   ::launch_pic_filter_compensated(current.grid, current, scratch, n_passes_,
                                   is_axis_periodic(bc, 0, 1) ? 1 : 0,
                                   is_axis_periodic(bc, 2, 3) ? 1 : 0, nullptr);

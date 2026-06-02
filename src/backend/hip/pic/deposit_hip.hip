@@ -43,11 +43,17 @@ __device__ inline int clamp_axis(int i, int lo, int hi) {
   return i < lo ? lo : (i > hi ? hi : i);
 }
 
+__device__ inline int deposit_axis_x(const quasar::Grid2D& g, int i, bool periodic_x) {
+  return periodic_x ? g.wrap_i(i) : clamp_axis(i, -g.nghost, g.nx - 1 + g.nghost);
+}
+
+__device__ inline int deposit_axis_y(const quasar::Grid2D& g, int j, bool periodic_y) {
+  return periodic_y ? g.wrap_j(j) : clamp_axis(j, -g.nghost, g.ny - 1 + g.nghost);
+}
+
 __device__ inline std::size_t deposit_index(const quasar::Grid2D& g, int i, int j,
                                             bool periodic_x, bool periodic_y) {
-  const int ii = periodic_x ? g.wrap_i(i) : clamp_axis(i, -g.nghost, g.nx - 1 + g.nghost);
-  const int jj = periodic_y ? g.wrap_j(j) : clamp_axis(j, -g.nghost, g.ny - 1 + g.nghost);
-  return g.index(ii, jj);
+  return g.index(deposit_axis_x(g, i, periodic_x), deposit_axis_y(g, j, periodic_y));
 }
 
 template <int ShapeOrder>
@@ -73,11 +79,17 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
 
+  // Reciprocal spacings computed once: g.dx()/g.dy() are themselves divisions
+  // (lx/nx), and the reduced coords plus the kx/ky/inv_area scales below would
+  // otherwise each re-divide by them per particle.
+  const double inv_dx = 1.0 / g.dx();
+  const double inv_dy = 1.0 / g.dy();
+
   // Reduced (cell-centred) coordinates, consistent with shape_weights_2d.
-  const double gx0 = (x_prev[p] - g.origin_x) / g.dx() - 0.5;
-  const double gy0 = (y_prev[p] - g.origin_y) / g.dy() - 0.5;
-  const double gx1 = (x[p] - g.origin_x) / g.dx() - 0.5;
-  const double gy1 = (y[p] - g.origin_y) / g.dy() - 0.5;
+  const double gx0 = (x_prev[p] - g.origin_x) * inv_dx - 0.5;
+  const double gy0 = (y_prev[p] - g.origin_y) * inv_dy - 0.5;
+  const double gx1 = (x[p] - g.origin_x) * inv_dx - 0.5;
+  const double gy1 = (y[p] - g.origin_y) * inv_dy - 0.5;
 
   // Guard against non-finite reduced coords (e.g. a particle pushed to NaN by a
   // diverging field): static_cast<int>(NaN) is UB and would seed a garbage
@@ -118,30 +130,37 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
   }
 
   // The destination index for window node (bx+a, by+b) is identical across the
-  // Jx/Jy/Jz accumulation loops, so compute the wrap/clamp + linear index once.
-  // storage_size is bounded (MAX_GRID_CELLS = 1<<30 interior + ghost margin stays
-  // well under INT_MAX), so a 4-byte index halves this per-thread table's local-
-  // memory footprint versus size_t on the register-heavy deposit kernel.
-  int off[kWindow][kWindow];
+  // Jx/Jy/Jz accumulation loops. The 2D storage index separates exactly into a
+  // per-column term and a per-row term:
+  //   index(ii, jj) = (ii + nghost) + pitch * (jj + nghost),
+  // so precompute the wrap/clamp once per axis (2*kWindow calls, not kWindow^2)
+  // and form each node index as colx[a] + rowy[b]. This shrinks the per-thread
+  // table from kWindow^2 to 2*kWindow ints and removes the kWindow^2 wrap/clamp
+  // recomputation, while reproducing deposit_index() bit-for-bit on both periodic
+  // and wall axes. storage_size stays well under INT_MAX, so int offsets are safe.
+  const int pitch = g.pitch();
+  int colx[kWindow];
+  int rowy[kWindow];
   for (int a = 0; a < kWindow; ++a) {
-    for (int b = 0; b < kWindow; ++b) {
-      off[a][b] = static_cast<int>(
-          deposit_index(g, bx + a, by + b, periodic_x, periodic_y));
-    }
+    colx[a] = deposit_axis_x(g, bx + a, periodic_x) + g.nghost;
+    rowy[a] = pitch * (deposit_axis_y(g, by + a, periodic_y) + g.nghost);
   }
 
   // NOTE(perf): current is accumulated with scattered global atomicAdd into a
   // 6x6 window per particle (~100 atomics/particle). Particles sharing a cell
   // collide on the same addresses, so this is the typical PIC bottleneck. The
-  // `run != 0.0` / `smid != 0.0` guards skip zero writes, which helps; a future
-  // optimization is per-block shared-memory partial accumulation or cell-binning
-  // to reduce cross-thread address contention. Left as a follow-up.
+  // `run != 0.0` / `smid != 0.0` guards skip zero writes, which helps. Cutting the
+  // contention itself needs per-block LDS partial accumulation or cell-binning so
+  // co-located particles reduce in shared memory first — both require a
+  // particle-sort/bin pass this module does not yet have, so that remains a
+  // follow-up (separate from the per-axis index decomposition above, applied).
   const double qw = q * weight[p];
-  const double inv_area = 1.0 / (g.dx() * g.dy());
+  const double inv_area = inv_dx * inv_dy;
+  const double inv_dt = 1.0 / dt;
 
   // Jx: prefix sum along x for each row j. Increment per node uses the
   // x-shape change weighted by the time-centred y-shape.
-  const double kx = -qw / (g.dy() * dt);
+  const double kx = -qw * inv_dy * inv_dt;
   for (int b = 0; b < kWindow; ++b) {
     const double sy_mid = Sy0[b] + 0.5 * (Sy1[b] - Sy0[b]);
     double run = 0.0;
@@ -149,13 +168,13 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
       const double dsx = Sx1[a] - Sx0[a];
       run += kx * dsx * sy_mid;
       if (run != 0.0) {
-        atomicAdd(jx + off[a][b], run);
+        atomicAdd(jx + colx[a] + rowy[b], run);
       }
     }
   }
 
   // Jy: prefix sum along y for each column i.
-  const double ky = -qw / (g.dx() * dt);
+  const double ky = -qw * inv_dx * inv_dt;
   for (int a = 0; a < kWindow; ++a) {
     const double sx_mid = Sx0[a] + 0.5 * (Sx1[a] - Sx0[a]);
     double run = 0.0;
@@ -163,7 +182,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
       const double dsy = Sy1[b] - Sy0[b];
       run += ky * dsy * sx_mid;
       if (run != 0.0) {
-        atomicAdd(jy + off[a][b], run);
+        atomicAdd(jy + colx[a] + rowy[b], run);
       }
     }
   }
@@ -174,7 +193,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
     for (int a = 0; a < kWindow; ++a) {
       const double smid = 0.5 * (Sx0[a] * Sy0[b] + Sx1[a] * Sy1[b]);
       if (smid != 0.0) {
-        atomicAdd(jz + off[a][b], qwz * smid);
+        atomicAdd(jz + colx[a] + rowy[b], qwz * smid);
       }
     }
   }
