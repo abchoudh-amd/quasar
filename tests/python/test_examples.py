@@ -276,6 +276,41 @@ class SquareToroidPicExampleTest(unittest.TestCase):
                                    msg=f"{sp!r}: vx remained zero")
 
 
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class SquareToroidPic1mExampleTest(unittest.TestCase):
+    """The 1 m square-toroid deck runs on the poloidal cross-section (plane: xz):
+    the out-of-plane toroidal field lands in external_bz and confines the
+    species inside the 90%-width domain."""
+
+    def test_end_to_end_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("square_toroid_pic_1m", Path(tmp))
+            _run_pic_cli(workdir / "input.yaml", steps=20)
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+
+            for key in data.files:
+                arr = data[key]
+                if np.issubdtype(arr.dtype, np.floating):
+                    self.assertFalse(np.isnan(arr).any(),
+                                     msg=f"NaNs in {key!r}")
+
+            # plane is recorded and the out-of-plane B_phi lands in external_bz.
+            self.assertEqual(str(data["plane"][0]), "xz")
+            ext_bz = data["external_bz"]
+            self.assertGreater(float(np.max(np.abs(ext_bz))), 1.0e-3,
+                               msg=f"external Bz too small: "
+                                   f"|max|={np.max(np.abs(ext_bz))}")
+
+            for sp in ("H+", "mu-"):
+                vx = data[f"species_{sp}_vx"]
+                alive = data[f"species_{sp}_alive"].astype(bool)
+                self.assertGreater(int(alive.sum()), 0,
+                                   msg=f"no alive particles in {sp!r}")
+                self.assertGreater(float(np.max(np.abs(vx[alive]))), 0.0,
+                                   msg=f"{sp!r}: vx remained zero")
+
+
 # A minimal, self-contained SI PIC deck. The PIC example decks under examples/
 # are runnable through the CLI and covered by PicAspirationalExampleTests below;
 # this inline deck is kept as a fast, deterministic SI smoke case that exercises

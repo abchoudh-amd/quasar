@@ -14,6 +14,7 @@ set(_quasar_pic_tests
   test_mixed_bc
   test_external_uniform_b
   test_external_biot_savart
+  test_external_plane_mapping
   test_multi_species_external
   test_filter_charge_conservation
   test_filter_through_solver

@@ -14,6 +14,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace quasar::pic {
@@ -34,6 +35,11 @@ struct EmPicConfig {
   // Particle shape, carried as the deck vocabulary ("cic" / "tsc"). The pusher and
   // deposit registry names are derived from it ("boris_{shape}", "esirkepov_{shape}").
   std::string shape{"cic"};
+  // Which lab plane the 2D grid represents, used only by sample_external_field to
+  // place sample points and map the returned 3-vector into the PIC frame:
+  // "xy" (default) = lab z=0 slice, grid axes (x,y); "xz" = lab y=0 meridional
+  // slice, grid axes (x,z) with the out-of-plane component along lab y.
+  std::string plane{"xy"};
   boundary::BoundarySpec boundary{};
   Normalization normalization{};
   std::vector<FilterSpec> filters{};
@@ -101,11 +107,18 @@ class EmPic2D3V {
 // already consumes: a magnetostatics::ConductorSystem for Biot-Savart, or an
 // ignored placeholder for the analytic evaluators. This keeps the PIC external-
 // field path off any concrete magnetostatics type.
+//
+// `plane` selects which lab plane the grid represents. "xy" (default) samples at
+// lab (x, y, 0) and maps components identity. "xz" samples at lab (x, 0, z) and
+// maps the returned vector through a right-handed 90-degree rotation about lab x
+// so the grid frame (i=x, j=z, out-of-plane=-y) stays right-handed for the Boris
+// cross products: bx<-B.x, by<-B.z, bz<--B.y (and likewise for E).
 void sample_external_field(numerics::IFieldEvaluator& evaluator,
                            const core::IFieldSource& source,
                            YeeField2D<Real>& external_fields,
                            Real length_scale = Real{1},
                            Real e_field_scale = Real{1},
-                           Real b_field_scale = Real{1});
+                           Real b_field_scale = Real{1},
+                           std::string_view plane = "xy");
 
 }  // namespace quasar::pic

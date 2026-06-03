@@ -248,11 +248,17 @@ class PicDeck:
     boundary: BoundaryConfig = field(default_factory=BoundaryConfig)
     fields: Fields = field(default_factory=Fields)
     units: str = "SI"
+    # Which lab plane the 2D grid represents. "xy" (default) samples the external
+    # field at lab z=0 with grid axes (x,y); "xz" samples the lab y=0 meridional
+    # plane with grid axes (x,z) and the out-of-plane component along lab y.
+    plane: str = "xy"
     raw: dict = field(default_factory=dict)
 
     def validate(self) -> None:
         if self.units not in ("SI", "normalized"):
             raise ValueError("units must be 'SI' or 'normalized'")
+        if self.plane not in ("xy", "xz"):
+            raise ValueError("plane must be 'xy' or 'xz'")
         self._validate_domain()
         self._validate_numerics()
         self._validate_external_field()
@@ -585,6 +591,7 @@ def parse(data: dict) -> PicDeck:
         boundary=_parse_boundary(data.get("boundary")),
         fields=_parse_fields(data.get("fields")),
         units=str(data.get("units", "SI")),
+        plane=str(data.get("plane", "xy")),
         raw=data,
     )
     deck.validate()

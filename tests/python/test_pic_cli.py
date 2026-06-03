@@ -362,12 +362,14 @@ class _ExternalRecordingSolver:
         self.evaluator = None
         self.conductors = None
         self.scales = None
+        self.plane = None
 
     def sample_external_field(self, evaluator, conductors, length_scale,
-                              e_field_scale, b_field_scale):
+                              e_field_scale, b_field_scale, plane="xy"):
         self.evaluator = evaluator
         self.conductors = conductors
         self.scales = (length_scale, e_field_scale, b_field_scale)
+        self.plane = plane
 
 
 def _external_deck(ef: ExternalField) -> PicDeck:
@@ -418,6 +420,21 @@ class ApplyExternalFieldTests(unittest.TestCase):
         ev = self._eval_for(ExternalField(evaluator_type="biot_savart",
                                           conductors=[]))
         self.assertEqual(type(ev).__name__, "BiotSavartEvaluator")
+
+    def test_plane_passed_through_default_xy(self):
+        deck = _external_deck(ExternalField(evaluator_type="uniform",
+                                            uniform_b=(0.0, 0.0, 1.0)))
+        solver = _ExternalRecordingSolver()
+        _apply_external_field(solver, deck, Units(deck))
+        self.assertEqual(solver.plane, "xy")
+
+    def test_plane_xz_passed_through(self):
+        deck = _external_deck(ExternalField(evaluator_type="uniform",
+                                            uniform_b=(0.0, 0.0, 1.0)))
+        deck.plane = "xz"
+        solver = _ExternalRecordingSolver()
+        _apply_external_field(solver, deck, Units(deck))
+        self.assertEqual(solver.plane, "xz")
 
 
 if __name__ == "__main__":

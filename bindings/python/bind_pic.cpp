@@ -228,6 +228,7 @@ void bind_pic(py::module_& m) {
       .def_readwrite("grid", &quasar::pic::EmPicConfig::grid)
       .def_readwrite("fdtd_order", &quasar::pic::EmPicConfig::fdtd_order)
       .def_readwrite("shape", &quasar::pic::EmPicConfig::shape)
+      .def_readwrite("plane", &quasar::pic::EmPicConfig::plane)
       .def_readwrite("boundary", &quasar::pic::EmPicConfig::boundary)
       .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization)
       .def_readwrite("filters", &quasar::pic::EmPicConfig::filters);
@@ -319,15 +320,16 @@ void bind_pic(py::module_& m) {
            [](quasar::pic::EmPic2D3V& self,
               quasar::numerics::IFieldEvaluator& evaluator,
               const quasar::magnetostatics::ConductorSystem& conductors,
-              Real length_scale, Real e_field_scale, Real b_field_scale) {
+              Real length_scale, Real e_field_scale, Real b_field_scale,
+              const std::string& plane) {
              quasar::pic::sample_external_field(evaluator, conductors,
                                                 self.external_fields(),
                                                 length_scale, e_field_scale,
-                                                b_field_scale);
+                                                b_field_scale, plane);
            },
            py::arg("evaluator"), py::arg("conductors"),
            py::arg("length_scale") = 1.0, py::arg("e_field_scale") = 1.0,
-           py::arg("b_field_scale") = 1.0)
+           py::arg("b_field_scale") = 1.0, py::arg("plane") = "xy")
       .def("seed_field",
            [](quasar::pic::EmPic2D3V& self, const std::string& component,
               const RealArray& values) {

@@ -43,6 +43,39 @@ class PicIoTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _deck(numerics=Numerics(shape="bad")).validate()
 
+    def test_plane_defaults_to_xy(self):
+        self.assertEqual(_deck().plane, "xy")
+
+    def test_plane_xz_accepted(self):
+        _deck(plane="xz").validate()
+
+    def test_invalid_plane_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(plane="yz").validate()
+
+    def test_parse_plane_from_yaml(self):
+        deck = parse({
+            "units": "SI",
+            "plane": "xz",
+            "domain": {"nx": 4, "ny": 4, "lx_m": 1.0, "ly_m": 1.0},
+            "species": [],
+            "external_field": {
+                "evaluator": {"type": "uniform", "B_T": [0.0, 0.0, 1.0]}},
+            "time": {"dt_s": "auto", "steps": 1},
+        })
+        self.assertEqual(deck.plane, "xz")
+
+    def test_parse_plane_defaults_when_absent(self):
+        deck = parse({
+            "units": "SI",
+            "domain": {"nx": 4, "ny": 4, "lx_m": 1.0, "ly_m": 1.0},
+            "species": [],
+            "external_field": {
+                "evaluator": {"type": "uniform", "B_T": [0.0, 0.0, 1.0]}},
+            "time": {"dt_s": "auto", "steps": 1},
+        })
+        self.assertEqual(deck.plane, "xy")
+
     def test_requires_species(self):
         with self.assertRaises(ValueError):
             _deck(species=[]).validate()

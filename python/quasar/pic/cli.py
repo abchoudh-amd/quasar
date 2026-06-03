@@ -25,7 +25,7 @@ from . import initial_conditions as ic
 from . import io as pic_io
 from ._units import QE as EV_TO_J  # elementary charge in C == eV->J factor
 from ._units import Units
-from .numerics import cfl_dt
+from .numerics import cfl_dt, cfl_limit
 
 
 def _positive_int(value: str) -> int:
@@ -35,13 +35,21 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _internal_spacing(domain, units: Units) -> tuple[float, float]:
+    # The solver runs in internal units where c = 1; grid spacing enters the CFL
+    # in those same internal lengths (the identity for a normalized deck).
+    return (units.length(domain.lx_m) / domain.nx,
+            units.length(domain.ly_m) / domain.ny)
+
+
 def _cfl_dt_internal(domain, units: Units, fdtd_order: int = 2) -> float:
-    # The solver runs in internal units where c = 1, so the CFL is evaluated on
-    # the internal grid spacing with c = 1 (for a normalized deck the lengths are
-    # already internal and this is the identity).
-    dx = units.length(domain.lx_m) / domain.nx
-    dy = units.length(domain.ly_m) / domain.ny
+    dx, dy = _internal_spacing(domain, units)
     return cfl_dt(dx, dy, c=1.0, fdtd_order=fdtd_order)
+
+
+def _cfl_limit_internal(domain, units: Units, fdtd_order: int = 2) -> float:
+    dx, dy = _internal_spacing(domain, units)
+    return cfl_limit(dx, dy, c=1.0, fdtd_order=fdtd_order)
 
 
 def _make_solver(deck: pic_io.PicDeck, units: Units):
@@ -58,6 +66,7 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     cfg.grid = grid
     cfg.fdtd_order = deck.numerics.fdtd_order
     cfg.shape = deck.numerics.shape
+    cfg.plane = deck.plane
     if units.normalization is not None:
         cfg.normalization = units.normalization
     # Boundaries are selected by registry name; the deck strings (already
@@ -146,7 +155,8 @@ def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
     cs = build_conductor_system(ef.conductors)
     length_scale, e_field_scale, b_field_scale = units.external_scales()
     solver.sample_external_field(
-        evaluator, cs, length_scale, e_field_scale, b_field_scale)
+        evaluator, cs, length_scale, e_field_scale, b_field_scale,
+        plane=deck.plane)
 
 
 def _seed_fields(solver, deck: pic_io.PicDeck) -> None:
@@ -235,6 +245,10 @@ def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
         # reader strips the right number of cells instead of re-deriving it from
         # the flat size.
         "nghost": _core.pic.required_nghost(deck.numerics.fdtd_order),
+        # Which lab plane the grid represents, so offline readers can label the
+        # in-plane axes and know that external_b{x,y,z} are PIC-frame components
+        # (in "xz" mode the out-of-plane B_phi lands in external_bz).
+        "plane": deck.plane,
     }
     if deck.diagnostics.per_species:
         per_sp = {}
@@ -253,6 +267,7 @@ def _flatten_for_npz(snapshots: list[dict], final: dict,
         "nx": np.array([final["nx"]]),
         "ny": np.array([final["ny"]]),
         "nghost": np.array([final["nghost"]]),
+        "plane": np.array([final.get("plane", "xy")]),
         "external_bx": final["external_bx"],
         "external_by": final["external_by"],
         "external_bz": final["external_bz"],
@@ -295,6 +310,17 @@ def prepare_run(deck: pic_io.PicDeck, units: Units, *, seed: int = 0):
         dt = _cfl_dt_internal(deck.domain, units, deck.numerics.fdtd_order)
     else:
         dt = units.time(float(deck.time.dt_s))
+        # An explicit dt above the Yee CFL limit makes the FDTD update diverge
+        # exponentially; the 'auto' path is CFL-safe by construction but a
+        # user-supplied dt must be checked against the same limit.
+        cfl = _cfl_limit_internal(deck.domain, units, deck.numerics.fdtd_order)
+        if dt > cfl:
+            raise ValueError(
+                f"time.dt_s ({units.time_to_si(dt):.6e} s) exceeds the CFL "
+                f"stability limit ({units.time_to_si(cfl):.6e} s) for this grid "
+                f"and fdtd_order={deck.numerics.fdtd_order}; reduce dt_s or use "
+                f"'auto'."
+            )
     dt_si = units.time_to_si(dt)
     return solver, species_indices, dt, dt_si
 
@@ -314,6 +340,7 @@ def _do_run(args: argparse.Namespace) -> int:
               f"({deck.domain.lx_m}x{deck.domain.ly_m}) m  "
               f"origin=({deck.domain.origin_x_m}, {deck.domain.origin_y_m})")
         print(f"units  : {deck.units}")
+        print(f"plane  : {deck.plane}")
         print(f"species: {[sp.name for sp in deck.species]}")
         print(f"dt     : {dt_si:.6e} s    steps: {deck.time.steps}")
 
