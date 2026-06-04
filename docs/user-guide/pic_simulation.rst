@@ -114,8 +114,11 @@ Flags:
   (step, time, step-rate, ETA, per-species alive count) and append a row to the
   scalar ``series_*`` diagnostics. ``0`` (default) disables periodic logging;
   a final row is still recorded at the end of the run.
-* ``--write-every N``     — flush a rolling checkpoint of ``out.npz`` every
-  ``N`` steps. ``0`` (default) writes only once at the end of the run.
+* ``--write-every N``     — every ``N`` completed steps, write a self-contained,
+  step-indexed snapshot ``out_<step>.npz`` (10-digit zero-padded step, e.g.
+  ``out_0000000010.npz``) into the deck's output directory. ``0`` (default)
+  writes only the end-of-run ``out.npz``. The end-of-run ``out.npz`` (accumulated
+  snapshot and scalar series) is always written.
 
 Output (``out.npz``)
 --------------------
@@ -136,6 +139,9 @@ Top-level keys:
   series recorded at each ``--log-every`` tick (plus a final row). The
   per-species ``series_alive_<name>`` is the live-particle count, computed by a
   device-side reduction so logging does not copy the full particle arrays.
+
+With ``--write-every N`` the same per-step arrays are also emitted as
+self-contained ``out_<step>.npz`` files alongside the end-of-run ``out.npz``.
 
 Worked example
 --------------

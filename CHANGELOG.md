@@ -34,6 +34,10 @@ interfaces may still change between entries.
 - PIC test coverage: a real FDTD plane-wave dispersion check, a behavioral
   mixed-boundary test, Gauss-residual diagnostics tests, an end-to-end CLI run
   smoke test, and a `--log-every` / `--write-every` diagnostics test.
+- PIC `quasar pic run --write-every N` writes a distinct, step-indexed,
+  self-contained snapshot (`out_<step>.npz`, 10-digit zero-padded step) every N
+  steps; the end-of-run aggregate `out.npz` (accumulated snapshot and scalar
+  series) is always written as well.
 - CPU-only registry-linkage tests for the current-filter and
   field-solver/pusher/deposit registries (a dropped registration now fails in the
   standard suite, not only at device-build time), and coil deck-parse tests for

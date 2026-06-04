@@ -290,6 +290,16 @@ def _flatten_for_npz(snapshots: list[dict], final: dict,
     return flat
 
 
+def _indexed_output_path(base: Path, step: int, *, width: int = 10) -> Path:
+    """Per-step output path: insert a zero-padded step index before the suffix.
+
+    ``out.npz`` at step 10 -> ``out_0000000010.npz``. Only the stem is
+    rewritten, so the parent directory and suffix (and thus the deck-directory
+    confinement of ``base``) are preserved.
+    """
+    return base.with_name(f"{base.stem}_{step:0{width}d}{base.suffix}")
+
+
 def prepare_run(deck: pic_io.PicDeck, units: Units, *, seed: int = 0):
     """Build a fully seeded solver from a parsed deck, ready to ``step(dt)``.
 
@@ -400,7 +410,9 @@ def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
                   f"eta={remaining:.0f}s  alive: {alive_str}",
                   flush=True)
         if write_every > 0 and step_done % write_every == 0:
-            _flush(step_done, sim_time)
+            final = _snapshot(solver, deck, species_indices, step_done, sim_time, units)
+            per_path = _indexed_output_path(out_path, step_done)
+            np.savez(per_path, **_flatten_for_npz([], final, None))
 
     # The deposit defers its overflow check off the per-step hot path, so drain
     # the accumulated flag once after the last step (raises "reduce dt" if any
@@ -429,7 +441,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--log-every", type=int, default=0,
                      help="Print progress + record scalar diagnostics every N steps (0 = off).")
     run.add_argument("--write-every", type=int, default=0,
-                     help="Flush rolling checkpoint to out.npz every N steps (0 = end-of-run only).")
+                     help="Write a self-contained per-step snapshot to <out>_<step>.npz every N steps (0 = end-of-run out.npz only).")
     run.set_defaults(func=_do_run)
     return p
 
