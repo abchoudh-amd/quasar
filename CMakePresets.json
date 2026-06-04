@@ -29,11 +29,41 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "hip-gfx950-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "QUASAR_ENABLE_HIP": "ON",
+        "CMAKE_HIP_ARCHITECTURES": "gfx950",
+        "QUASAR_BUILD_TESTING": "ON",
+        "QUASAR_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "hip-gfx950-release",
+      "displayName": "HIP gfx950 Release",
+      "inherits": "hip-gfx950-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "hip-gfx950-debug",
+      "displayName": "HIP gfx950 Debug",
+      "inherits": "hip-gfx950-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     }
   ],
   "buildPresets": [
     { "name": "hip-gfx942-release", "configurePreset": "hip-gfx942-release" },
-    { "name": "hip-gfx942-debug",   "configurePreset": "hip-gfx942-debug"   }
+    { "name": "hip-gfx942-debug",   "configurePreset": "hip-gfx942-debug"   },
+    { "name": "hip-gfx950-release", "configurePreset": "hip-gfx950-release" },
+    { "name": "hip-gfx950-debug",   "configurePreset": "hip-gfx950-debug"   }
   ],
   "testPresets": [
     {
@@ -44,6 +74,16 @@
     {
       "name": "hip-gfx942-debug",
       "configurePreset": "hip-gfx942-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "hip-gfx950-release",
+      "configurePreset": "hip-gfx950-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "hip-gfx950-debug",
+      "configurePreset": "hip-gfx950-debug",
       "output": { "outputOnFailure": true }
     }
   ]

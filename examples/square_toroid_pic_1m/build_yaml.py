@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import importlib.util
 import math
-import sys
 from pathlib import Path
 
 # Load the package's single CFL helper directly from its file (without importing
@@ -70,10 +69,22 @@ PIC_ORIGIN_X_M = R0_M - PIC_LX_M / 2.0
 PIC_ORIGIN_Y_M = -PIC_LY_M / 2.0
 
 TOTAL_TIME_S = 5.0e-6
-_DX = PIC_LX_M / PIC_NX
-_DY = PIC_LY_M / PIC_NY
-DT_CFL_S = _cfl_dt(_DX, _DY)  # fdtd_order=2 default; matches the CLI's auto dt
-STEPS = int(math.ceil(TOTAL_TIME_S / DT_CFL_S))
+OUTPUT_PATH = "out.npz"
+
+
+def _recompute_derived() -> None:
+    """Recompute resolution-dependent globals (cell size, CFL dt, step count) from
+    the current PIC_NX/PIC_NY. STEPS is resolution-dependent (dt shrinks as the
+    grid refines), so this must run after any --nx override so the emitted deck's
+    `steps` still encodes TOTAL_TIME_S."""
+    global _DX, _DY, DT_CFL_S, STEPS
+    _DX = PIC_LX_M / PIC_NX
+    _DY = PIC_LY_M / PIC_NY
+    DT_CFL_S = _cfl_dt(_DX, _DY)  # fdtd_order=2 default; matches the CLI's auto dt
+    STEPS = int(math.ceil(TOTAL_TIME_S / DT_CFL_S))
+
+
+_recompute_derived()
 CADENCE = 0  # In-memory field snapshots disabled; use --write-every for rolling out.npz checkpoint.
 
 N_PARTICLES = 20000
@@ -262,7 +273,7 @@ def build_yaml() -> str:
         f"  steps: {STEPS}",
         "",
         "diagnostics:",
-        "  output_path: out.npz",
+        f"  output_path: {OUTPUT_PATH}",
         f"  cadence: {CADENCE}",
         "  fields: [bz, ex, ey]",
         "  per_species: true",
@@ -317,10 +328,32 @@ def build_field_check_yaml() -> str:
 
 
 def main() -> None:
-    out = Path(__file__).with_name("input.yaml")
+    import argparse
+    global PIC_NX, PIC_NY, OUTPUT_PATH
+    p = argparse.ArgumentParser(description="Generate the square_toroid_pic_1m deck.")
+    p.add_argument("--nx", type=int, default=None,
+                   help="Grid resolution (sets both nx and ny); default 128. "
+                        "STEPS is recomputed so the deck still targets 5 us.")
+    p.add_argument("--out", default="input.yaml",
+                   help="Output deck filename (written next to this script).")
+    p.add_argument("--output-path", default=None,
+                   help="diagnostics.output_path written into the deck "
+                        "(default: out.npz).")
+    p.add_argument("--field-check", action="store_true",
+                   help="Also emit field_check.yaml (coil eval deck).")
+    args = p.parse_args()
+
+    if args.nx is not None:
+        PIC_NX = args.nx
+        PIC_NY = args.nx
+        _recompute_derived()
+    if args.output_path is not None:
+        OUTPUT_PATH = args.output_path
+
+    out = Path(__file__).with_name(args.out)
     out.write_text(build_yaml(), encoding="utf-8")
-    print(f"wrote {out}")
-    if "--field-check" in sys.argv[1:]:
+    print(f"wrote {out}  (nx=ny={PIC_NX}, steps={STEPS}, output_path={OUTPUT_PATH})")
+    if args.field_check:
         fc = Path(__file__).with_name("field_check.yaml")
         fc.write_text(build_field_check_yaml(), encoding="utf-8")
         print(f"wrote {fc}")
