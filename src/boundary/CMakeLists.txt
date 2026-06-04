@@ -2,6 +2,7 @@ set(_quasar_boundary_sources
   periodic.cpp
   wall.cpp
   outflow.cpp
+  axis.cpp
 )
 
 set_source_files_properties(${_quasar_boundary_sources} PROPERTIES LANGUAGE HIP)

@@ -1,0 +1,41 @@
+units: SI
+# TM010 mode of a cylindrical (pillbox) cavity, solved in the axisymmetric
+# meridional (r, z) plane. geometry: cylindrical makes the grid axes
+# i = r (from nx / lx_m / origin_x_m) and j = z; the C++ solver applies the
+# on-axis closure at the inner-radius (x_lo) boundary, so x_lo is auto-axis.
+#
+# Cavity radius R = lx_m = 0.10 m, axial height H = ly_m = 0.10 m.
+# Analytic TM010 eigenfrequency: f_010 = j01 * c / (2 pi R) with j01 = 2.40483,
+# giving f_010 ~ 1.1473 GHz. The Ez seed below is a broadband single-mode
+# perturbation -- NOT the exact J0 eigenmode -- so the resonance is recovered
+# as the dominant FFT peak of the on-axis Ez time series.
+geometry: cylindrical
+domain:
+  nx: 128
+  ny: 128
+  lx_m: 0.10
+  ly_m: 0.10
+  origin_x_m: 0.0
+  origin_y_m: 0.0
+numerics: {fdtd_order: 2, shape: cic, current_filter: []}
+# x_lo is the symmetry axis (auto-replaced by the on-axis closure); the outer
+# radial wall (x_hi) and both axial walls (y_lo, y_hi) are PEC. Periodic x_hi
+# would be rejected for a cylindrical deck.
+boundary:
+  field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
+  particle: {x_lo: specular, x_hi: specular, y_lo: specular, y_hi: specular}
+# Excite the cavity with an axial-E perturbation. The seed component is spelled
+# with the PHYSICAL cylindrical name `Ez` (axial E). In cylindrical mode the deck
+# loader reinterprets Er/Ez/Ephi as physical axes and maps them to storage slots
+# in one place (io._resolve_seed_component): Er->ex, Ez->ey, Ephi->ez. So
+# `component: Ez` resolves to the "ey" slot -- the same axial slot the verified
+# cyl_gyro_orbit example uses for its axial B (by) and axial velocity (vy) -- and
+# the user does not need to know that convention. (The raw slot name `Ey` is still
+# accepted and equivalent.) The TM010 mode is (Ez_axial, Bphi); the eigenfrequency
+# is measured from the FFT / J0 projection of the axial-E series, not assumed.
+fields:
+  initial: {type: seed_perturbation, component: Ez, mode: [1, 0], amplitude: 1.0}
+# Enough steps to resolve several TM010 periods; cadence 4 records an axial-E
+# (snapshot_field_ey) series dense enough to FFT.
+time: {dt_s: auto, steps: 1024}
+diagnostics: {output_path: out.npz, cadence: 4, fields: [ey], per_species: false}

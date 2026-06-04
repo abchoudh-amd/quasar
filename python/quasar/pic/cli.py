@@ -25,7 +25,8 @@ from . import initial_conditions as ic
 from . import io as pic_io
 from ._units import QE as EV_TO_J  # elementary charge in C == eV->J factor
 from ._units import Units
-from .numerics import cfl_dt, cfl_limit
+from .numerics import (besselj0, cfl_dt, cfl_limit, cyl_cfl_dt, cyl_cfl_limit,
+                       j0_zero)
 
 
 def _positive_int(value: str) -> int:
@@ -52,6 +53,25 @@ def _cfl_limit_internal(domain, units: Units, fdtd_order: int = 2) -> float:
     return cfl_limit(dx, dy, c=1.0, fdtd_order=fdtd_order)
 
 
+def _cyl_r_min_internal(domain, units: Units, dr: float) -> float:
+    # Inner radius in internal length units; floor to half a cell when the domain
+    # touches the axis (origin 0) so near-axis logic never divides by r_min == 0.
+    r_min = units.length(domain.origin_x_m)
+    if r_min <= 0.0:
+        return 0.5 * dr
+    return r_min
+
+
+def _cyl_cfl_dt_internal(domain, units: Units) -> float:
+    dr, dz = _internal_spacing(domain, units)
+    return cyl_cfl_dt(dr, dz, _cyl_r_min_internal(domain, units, dr), c=1.0)
+
+
+def _cyl_cfl_limit_internal(domain, units: Units) -> float:
+    dr, dz = _internal_spacing(domain, units)
+    return cyl_cfl_limit(dr, dz, _cyl_r_min_internal(domain, units, dr), c=1.0)
+
+
 def _make_solver(deck: pic_io.PicDeck, units: Units):
     pic = _core.pic
     # Grid coordinates enter the solver in internal length units. The ghost halo
@@ -67,6 +87,7 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
     cfg.fdtd_order = deck.numerics.fdtd_order
     cfg.shape = deck.numerics.shape
     cfg.plane = deck.plane
+    cfg.geometry = deck.geometry
     if units.normalization is not None:
         cfg.normalization = units.normalization
     # Boundaries are selected by registry name; the deck strings (already
@@ -187,7 +208,20 @@ def _seed_fields(solver, deck: pic_io.PicDeck) -> None:
     if init.type == "seed_perturbation":
         mx = max(1, init.mode[0])
         amp = init.amplitude
-        _seed(comp, amp * np.sin(2 * np.pi * mx * (ii + 0.5) / nx))
+        if deck.geometry == "cylindrical":
+            # On a cylindrical (r,z) grid the radial axis is not a plain Cartesian
+            # interval: a sin(2 pi r/R) perturbation is dominated by higher radial
+            # Bessel modes (it has ~90% overlap with TM020, only ~3% with TM010),
+            # so the cavity would ring at the wrong line. Seed the physically
+            # appropriate axisymmetric radial eigenmode J0(j_{0,mx} r/R) instead,
+            # which excites the TM0,mx,0 mode cleanly (mx=1 -> TM010). Uniform in z.
+            # j0_zero / besselj0 are dependency-free (numpy only) so a cylindrical
+            # deck does not pull in scipy.
+            j0n = j0_zero(mx)
+            r_over_R = (ii + 0.5) / nx  # r/R for cell-centred radius, R = lx
+            _seed(comp, amp * besselj0(j0n * r_over_R))
+        else:
+            _seed(comp, amp * np.sin(2 * np.pi * mx * (ii + 0.5) / nx))
     elif init.type == "seed_em_wave":
         mx, my = init.mode
         amp = init.amplitude
@@ -249,6 +283,9 @@ def _snapshot(solver, deck: pic_io.PicDeck, species_indices: list[int],
         # in-plane axes and know that external_b{x,y,z} are PIC-frame components
         # (in "xz" mode the out-of-plane B_phi lands in external_bz).
         "plane": deck.plane,
+        # Coordinate system of the grid so offline readers know whether to treat
+        # the in-plane axes as (x,y) or axisymmetric r-z.
+        "geometry": deck.geometry,
     }
     if deck.diagnostics.per_species:
         per_sp = {}
@@ -268,6 +305,7 @@ def _flatten_for_npz(snapshots: list[dict], final: dict,
         "ny": np.array([final["ny"]]),
         "nghost": np.array([final["nghost"]]),
         "plane": np.array([final.get("plane", "xy")]),
+        "geometry": np.array([final.get("geometry", "cartesian")]),
         "external_bx": final["external_bx"],
         "external_by": final["external_by"],
         "external_bz": final["external_bz"],
@@ -316,21 +354,35 @@ def prepare_run(deck: pic_io.PicDeck, units: Units, *, seed: int = 0):
 
     # The solver steps in internal time units; an explicit deck dt_s is SI and is
     # converted, while "auto" is derived directly on the internal grid (c = 1).
+    cylindrical = deck.geometry == "cylindrical"
     if deck.time.dt_s == "auto":
-        dt = _cfl_dt_internal(deck.domain, units, deck.numerics.fdtd_order)
+        if cylindrical:
+            dt = _cyl_cfl_dt_internal(deck.domain, units)
+        else:
+            dt = _cfl_dt_internal(deck.domain, units, deck.numerics.fdtd_order)
     else:
         dt = units.time(float(deck.time.dt_s))
         # An explicit dt above the Yee CFL limit makes the FDTD update diverge
         # exponentially; the 'auto' path is CFL-safe by construction but a
         # user-supplied dt must be checked against the same limit.
-        cfl = _cfl_limit_internal(deck.domain, units, deck.numerics.fdtd_order)
-        if dt > cfl:
-            raise ValueError(
-                f"time.dt_s ({units.time_to_si(dt):.6e} s) exceeds the CFL "
-                f"stability limit ({units.time_to_si(cfl):.6e} s) for this grid "
-                f"and fdtd_order={deck.numerics.fdtd_order}; reduce dt_s or use "
-                f"'auto'."
-            )
+        if cylindrical:
+            cfl = _cyl_cfl_limit_internal(deck.domain, units)
+            if dt > cfl:
+                raise ValueError(
+                    f"time.dt_s ({units.time_to_si(dt):.6e} s) exceeds the "
+                    f"cylindrical (r-z) CFL stability limit "
+                    f"({units.time_to_si(cfl):.6e} s) for this grid; reduce "
+                    f"dt_s or use 'auto'."
+                )
+        else:
+            cfl = _cfl_limit_internal(deck.domain, units, deck.numerics.fdtd_order)
+            if dt > cfl:
+                raise ValueError(
+                    f"time.dt_s ({units.time_to_si(dt):.6e} s) exceeds the CFL "
+                    f"stability limit ({units.time_to_si(cfl):.6e} s) for this grid "
+                    f"and fdtd_order={deck.numerics.fdtd_order}; reduce dt_s or use "
+                    f"'auto'."
+                )
     dt_si = units.time_to_si(dt)
     return solver, species_indices, dt, dt_si
 
@@ -351,6 +403,7 @@ def _do_run(args: argparse.Namespace) -> int:
               f"origin=({deck.domain.origin_x_m}, {deck.domain.origin_y_m})")
         print(f"units  : {deck.units}")
         print(f"plane  : {deck.plane}")
+        print(f"geometry: {deck.geometry}")
         print(f"species: {[sp.name for sp in deck.species]}")
         print(f"dt     : {dt_si:.6e} s    steps: {deck.time.steps}")
 

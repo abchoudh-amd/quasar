@@ -28,6 +28,7 @@ ships two physics vertical slices:
 
    user-guide/coil_design
    user-guide/pic_simulation
+   user-guide/pic_cylindrical
 
 .. toctree::
    :maxdepth: 2

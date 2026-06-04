@@ -5,6 +5,7 @@
 
 #include "quasar/physics/pic/kernels.hpp"
 
+#include <iostream>
 #include <stdexcept>
 #include <string>
 
@@ -62,6 +63,89 @@ void Esirkepov2D<2>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, R
                               periodic_y_ ? 1 : 0, nullptr);
 }
 
+// -- Cylindrical (r,z) m=0 schemes -------------------------------------------
+//
+// These are the axisymmetric counterparts of YeeFdtd2D<2> / BorisPusher<S> /
+// Esirkepov2D<S>. They derive the SAME IFieldSolver / IParticlePusher /
+// IDepositScheme interfaces and forward to the cylindrical launch ABI. They are
+// defined and registered in THIS translation unit (alongside the Cartesian
+// schemes and the externally-referenced EmPic2D3V symbols) so their static
+// registration initializers are not dropped by the plain (non-WHOLE_ARCHIVE)
+// link — see the registration note below. Only the 2nd-order field solver
+// ships; order-4 cylindrical axis closures are out of scope for this delivery.
+
+class YeeFdtdCyl2D final : public IFieldSolver {
+ public:
+  void advance_b(YeeField2D<Real>& f, Real dt) const override {
+    ::launch_pic_fdtd_b_cyl_order2(f.grid, f.bx.device_ptr(), f.by.device_ptr(),
+                                   f.bz.device_ptr(), f.ex.device_ptr(), f.ey.device_ptr(),
+                                   f.ez.device_ptr(), dt, nullptr);
+  }
+  void advance_e(YeeField2D<Real>& f, const JField2D<Real>& j, Real dt) const override {
+    ::launch_pic_fdtd_e_cyl_order2(f.grid, f.ex.device_ptr(), f.ey.device_ptr(),
+                                   f.ez.device_ptr(), f.bx.device_ptr(), f.by.device_ptr(),
+                                   f.bz.device_ptr(), j.jx.device_ptr(), j.jy.device_ptr(),
+                                   j.jz.device_ptr(), dt, nullptr);
+  }
+};
+
+template <int ShapeOrder>
+class BorisCylPusher final : public IParticlePusher {
+ public:
+  void push(pic::ParticleSpecies& s, const YeeField2D<Real>& f, const YeeField2D<Real>& ext,
+            Real dt) const override;
+  void set_periodic_axes(bool periodic_x, bool periodic_y) override {
+    periodic_x_ = periodic_x;
+    periodic_y_ = periodic_y;
+  }
+
+ private:
+  bool periodic_x_{true};
+  bool periodic_y_{true};
+};
+
+template <>
+void BorisCylPusher<1>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
+                             const YeeField2D<Real>& ext, Real dt) const {
+  ::launch_pic_gather_push_cyl_shape1(f.grid, s, f, ext, periodic_x_ ? 1 : 0,
+                                      periodic_y_ ? 1 : 0, dt, nullptr);
+}
+
+template <>
+void BorisCylPusher<2>::push(pic::ParticleSpecies& s, const YeeField2D<Real>& f,
+                             const YeeField2D<Real>& ext, Real dt) const {
+  ::launch_pic_gather_push_cyl_shape2(f.grid, s, f, ext, periodic_x_ ? 1 : 0,
+                                      periodic_y_ ? 1 : 0, dt, nullptr);
+}
+
+template <int ShapeOrder>
+class EsirkepovCyl2D final : public IDepositScheme {
+ public:
+  void deposit(const pic::ParticleSpecies& s, JField2D<Real>& j, Real dt) const override;
+  void set_periodic_axes(bool periodic_x, bool periodic_y) override {
+    periodic_x_ = periodic_x;
+    periodic_y_ = periodic_y;
+  }
+
+ private:
+  bool periodic_x_{true};
+  bool periodic_y_{true};
+};
+
+template <>
+void EsirkepovCyl2D<1>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j,
+                                Real dt) const {
+  ::launch_pic_deposit_cyl_shape1(j.grid, s, j, dt, periodic_x_ ? 1 : 0,
+                                  periodic_y_ ? 1 : 0, nullptr);
+}
+
+template <>
+void EsirkepovCyl2D<2>::deposit(const pic::ParticleSpecies& s, JField2D<Real>& j,
+                                Real dt) const {
+  ::launch_pic_deposit_cyl_shape2(j.grid, s, j, dt, periodic_x_ ? 1 : 0,
+                                  periodic_y_ ? 1 : 0, nullptr);
+}
+
 }  // namespace quasar::numerics
 
 // Register the concrete field-solver / pusher / deposit schemes under deck-facing
@@ -76,6 +160,14 @@ QUASAR_REGISTER_PUSHER("boris_tsc", ::quasar::numerics::BorisPusher<2>)
 QUASAR_REGISTER_DEPOSIT("esirkepov_cic", ::quasar::numerics::Esirkepov2D<1>)
 QUASAR_REGISTER_DEPOSIT("esirkepov_tsc", ::quasar::numerics::Esirkepov2D<2>)
 
+// Cylindrical (r,z) m=0 schemes, registered in the same TU for the same
+// linker-survival reason. Additive: the Cartesian names above are untouched.
+QUASAR_REGISTER_FIELD_SOLVER("yee_cyl_o2", ::quasar::numerics::YeeFdtdCyl2D)
+QUASAR_REGISTER_PUSHER("boris_cyl_cic", ::quasar::numerics::BorisCylPusher<1>)
+QUASAR_REGISTER_PUSHER("boris_cyl_tsc", ::quasar::numerics::BorisCylPusher<2>)
+QUASAR_REGISTER_DEPOSIT("esirkepov_cyl_cic", ::quasar::numerics::EsirkepovCyl2D<1>)
+QUASAR_REGISTER_DEPOSIT("esirkepov_cyl_tsc", ::quasar::numerics::EsirkepovCyl2D<2>)
+
 namespace quasar::pic {
 
 namespace {
@@ -84,11 +176,29 @@ namespace {
 // just above. Kept adjacent to the QUASAR_REGISTER_* lines so a new scheme's
 // name appears in exactly one place: register it, then add its vocabulary entry
 // here. The driver constructor never builds these strings itself.
-std::string field_solver_name(int fdtd_order) {
+// Geometry-aware: a cylindrical run resolves to the "_cyl_" scheme family
+// (yee_cyl_o2 only — order 4 is not provided for cylindrical), a cartesian run
+// keeps the existing names verbatim.
+bool is_cylindrical(const std::string& geometry) { return geometry == "cylindrical"; }
+
+std::string field_solver_name(const std::string& geometry, int fdtd_order) {
+  if (is_cylindrical(geometry)) {
+    return "yee_cyl_o2";
+  }
   return "yee_o" + std::to_string(fdtd_order);
 }
-std::string pusher_name(const std::string& shape) { return "boris_" + shape; }
-std::string deposit_name(const std::string& shape) { return "esirkepov_" + shape; }
+std::string pusher_name(const std::string& geometry, const std::string& shape) {
+  if (is_cylindrical(geometry)) {
+    return "boris_cyl_" + shape;
+  }
+  return "boris_" + shape;
+}
+std::string deposit_name(const std::string& geometry, const std::string& shape) {
+  if (is_cylindrical(geometry)) {
+    return "esirkepov_cyl_" + shape;
+  }
+  return "esirkepov_" + shape;
+}
 
 }  // namespace
 
@@ -98,6 +208,30 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
     fields_{grid_},
     external_fields_{grid_},
     current_{grid_} {
+  // In cylindrical (r,z) mode the r=0 side (x_lo, side 0) is always the on-axis
+  // boundary, regardless of what the deck set there: override both the field and
+  // particle BC for that side to the registered "axis" condition. If the deck
+  // had set a non-default x_lo, warn that it is being replaced (a default
+  // periodic x_lo is the no-op normal case for a cylindrical deck and is
+  // replaced silently). All other sides stay deck-driven.
+  if (is_cylindrical(cfg_.geometry)) {
+    constexpr int x_lo = static_cast<int>(Side::x_lo);
+    const boundary::BoundarySpec defaults{};
+    if (cfg_.boundary.field[x_lo] != defaults.field[x_lo] &&
+        cfg_.boundary.field[x_lo] != "axis") {
+      std::cerr << "EmPic2D3V: cylindrical geometry overrides the x_lo (r=0) field "
+                   "boundary '"
+                << cfg_.boundary.field[x_lo] << "' with the on-axis condition\n";
+    }
+    if (cfg_.boundary.particle[x_lo] != defaults.particle[x_lo] &&
+        cfg_.boundary.particle[x_lo] != "axis") {
+      std::cerr << "EmPic2D3V: cylindrical geometry overrides the x_lo (r=0) particle "
+                   "boundary '"
+                << cfg_.boundary.particle[x_lo] << "' with the on-axis condition\n";
+    }
+    cfg_.boundary.field[x_lo] = "axis";
+    cfg_.boundary.particle[x_lo] = "axis";
+  }
   // Build per-side boundary conditions through the registry (the documented
   // pluggable construction path); concrete BCs self-register in src/boundary.
   // The FDTD stencil is ghost-aware, so these field BCs run every step (see step).
@@ -129,11 +263,11 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   // registrations above, so the driver passes a resolved name through verbatim;
   // Registry::create throws on an unregistered name.
   field_solver_ = Registry<numerics::IFieldSolver>::instance().create(
-      field_solver_name(cfg_.fdtd_order));
+      field_solver_name(cfg_.geometry, cfg_.fdtd_order));
   pusher_ = Registry<numerics::IParticlePusher>::instance().create(
-      pusher_name(cfg_.shape));
+      pusher_name(cfg_.geometry, cfg_.shape));
   deposit_ = Registry<numerics::IDepositScheme>::instance().create(
-      deposit_name(cfg_.shape));
+      deposit_name(cfg_.geometry, cfg_.shape));
   // The deposit/gather wrap an axis only when both of its sides are periodic; a
   // wall on either side switches that axis to ghost-cell deposition + specular
   // fold-back (deposit) and ghost-clamped interpolation (gather), so neither

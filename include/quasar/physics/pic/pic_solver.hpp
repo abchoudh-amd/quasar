@@ -40,6 +40,12 @@ struct EmPicConfig {
   // "xy" (default) = lab z=0 slice, grid axes (x,y); "xz" = lab y=0 meridional
   // slice, grid axes (x,z) with the out-of-plane component along lab y.
   std::string plane{"xy"};
+  // Coordinate geometry: "cartesian" (default) keeps the existing (x,y) Yee
+  // scheme; "cylindrical" selects the axisymmetric m=0 (r,z) schemes
+  // (yee_cyl_o2 / boris_cyl_{shape} / esirkepov_cyl_{shape}) and auto-wires the
+  // r=0 (x_lo) side to the on-axis BC. In cylindrical mode the x-axis is the
+  // radius r and the y-axis is the axial coordinate z.
+  std::string geometry{"cartesian"};
   boundary::BoundarySpec boundary{};
   Normalization normalization{};
   std::vector<FilterSpec> filters{};

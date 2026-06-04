@@ -229,6 +229,7 @@ void bind_pic(py::module_& m) {
       .def_readwrite("fdtd_order", &quasar::pic::EmPicConfig::fdtd_order)
       .def_readwrite("shape", &quasar::pic::EmPicConfig::shape)
       .def_readwrite("plane", &quasar::pic::EmPicConfig::plane)
+      .def_readwrite("geometry", &quasar::pic::EmPicConfig::geometry)
       .def_readwrite("boundary", &quasar::pic::EmPicConfig::boundary)
       .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization)
       .def_readwrite("filters", &quasar::pic::EmPicConfig::filters);

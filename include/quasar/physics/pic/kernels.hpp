@@ -43,6 +43,56 @@ void launch_pic_fdtd_e_order4(const quasar::Grid2D&, quasar::Real*, quasar::Real
                               const quasar::Real*, const quasar::Real*, const quasar::Real*,
                               const quasar::Real*, quasar::Real, quasar_stream_t);
 
+// -- Cylindrical (r,z) m=0 FDTD field updates --------------------------------
+// Axisymmetric counterparts of launch_pic_fdtd_{b,e}_order2: the curls use the
+// 1/r and (1/r) d(r .)/dr radial operators with the on-axis (i=0) regularized
+// closure, reading the radius from Grid2D's r_at_* helpers. Same pointer/stream
+// ABI as the Cartesian order-2 entries; order 4 is not provided for cylindrical.
+void launch_pic_fdtd_b_cyl_order2(const quasar::Grid2D&, quasar::Real*, quasar::Real*,
+                                  quasar::Real*, const quasar::Real*, const quasar::Real*,
+                                  const quasar::Real*, quasar::Real, quasar_stream_t);
+void launch_pic_fdtd_e_cyl_order2(const quasar::Grid2D&, quasar::Real*, quasar::Real*,
+                                  quasar::Real*, const quasar::Real*, const quasar::Real*,
+                                  const quasar::Real*, const quasar::Real*, const quasar::Real*,
+                                  const quasar::Real*, quasar::Real, quasar_stream_t);
+
+// -- Cylindrical (r,z) particle gather + push --------------------------------
+// Boris push in (r,z) with the vz ABI slot carrying v_phi and the coordinate
+// (centrifugal/azimuthal) terms applied across r. `periodic_x`/`periodic_y`
+// mirror the Cartesian gather flags: the axial (y) axis can still be periodic
+// while the radial axis at i=0 is on-axis (never periodic).
+void launch_pic_gather_push_cyl_shape1(const quasar::Grid2D&, quasar::pic::ParticleSpecies&,
+                                       const quasar::YeeField2D<quasar::Real>&,
+                                       const quasar::YeeField2D<quasar::Real>&, int periodic_x,
+                                       int periodic_y, quasar::Real, quasar_stream_t);
+void launch_pic_gather_push_cyl_shape2(const quasar::Grid2D&, quasar::pic::ParticleSpecies&,
+                                       const quasar::YeeField2D<quasar::Real>&,
+                                       const quasar::YeeField2D<quasar::Real>&, int periodic_x,
+                                       int periodic_y, quasar::Real, quasar_stream_t);
+
+// -- Cylindrical (r,z) current deposition ------------------------------------
+// Charge-conserving Esirkepov deposit with ring/volume weights proportional to
+// the radius (cell_volume(i)), so the discrete cylindrical continuity residual
+// stays within tolerance. `periodic_x`/`periodic_y` mirror the Cartesian flags.
+void launch_pic_deposit_cyl_shape1(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
+                                   quasar::JField2D<quasar::Real>&, quasar::Real, int periodic_x,
+                                   int periodic_y, quasar_stream_t);
+void launch_pic_deposit_cyl_shape2(const quasar::Grid2D&, const quasar::pic::ParticleSpecies&,
+                                   quasar::JField2D<quasar::Real>&, quasar::Real, int periodic_x,
+                                   int periodic_y, quasar_stream_t);
+
+// -- Cylindrical on-axis (r=0) boundary --------------------------------------
+// Field closure: enforces the r=0 parity of the field components in the i=0
+// ghost/edge so the 1/r curls stay regular on the axis. Run after each curl
+// (and as a ghost fill) on the x_lo side only.
+void launch_pic_boundary_axis_fields(const quasar::Grid2D&,
+                                     quasar::YeeField2D<quasar::Real>&, quasar_stream_t);
+// Particle closure: folds particles that cross r=0 back into the domain
+// (r -> -r, vr -> -vr), keeping the on-axis approach reflectionless. Run on the
+// x_lo side only.
+void launch_pic_boundary_axis_particles(const quasar::Grid2D&,
+                                        quasar::pic::ParticleSpecies&, quasar_stream_t);
+
 // -- Particle gather + push --------------------------------------------------
 // `periodic_x`/`periodic_y` (0/1) select per-axis field-gather indexing: a
 // periodic axis wraps; a non-periodic (wall) axis clamps the interpolation

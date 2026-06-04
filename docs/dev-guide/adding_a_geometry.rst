@@ -1,168 +1,256 @@
-Adding a new conductor-geometry generator
-==========================================
+Adding a new grid geometry
+==========================
 
-The magnetostatics module ships six geometry generators
-(``circular_loop``, ``helix``, ``solenoid``, ``racetrack``, ``polygon``,
-``generic_polyline``). This page is a recipe for adding a seventh.
+The EM-PIC module ships two grid geometries: the default Cartesian ``(x, y)``
+grid and an axisymmetric cylindrical ``(r, z)`` (``m = 0``) grid. This page uses
+the cylindrical mode as a worked example so a developer can add a third geometry
+by following the same path end-to-end.
+
+A geometry is selected by the deck's top-level ``geometry`` key
+(``cartesian`` | ``cylindrical``; see ``python/quasar/pic/io.py``). Unlike the
+conductor-geometry generators of the magnetostatics module (which are plain C++
+free functions discovered only at the YAML boundary), a PIC grid geometry cuts
+across all four architectural axes — ``physics × numerics × boundary ×
+backend`` — because it changes the discrete curl operators, the deposit/gather
+weights, the on-axis boundary closure, and the CFL bound. The walk-through tracks
+each axis in turn.
 
 .. note::
 
-   The C++ free function ``generic_polyline`` is the one generator whose YAML
-   ``type`` discriminator differs from its C++ name: decks select it with
-   ``type: polyline`` (see ``python/quasar/coil/io.py``), not
-   ``generic_polyline``. The other five share one name across both layers.
+   Cylindrical ships at ``fdtd_order: 2`` only. The on-axis regularised closure
+   is derived for the 2nd-order staggered Yee curl; an order-4 cylindrical axis
+   closure is out of scope. ``PicDeck._validate_cylindrical`` rejects
+   ``fdtd_order`` 4, and the field-solver name builder hard-codes
+   ``"yee_cyl_o2"`` (see Steps 2 and 3 below).
 
-The walk-through tracks three layers that have to stay in lock-step:
+Where each piece lives
+----------------------
 
-1. the C++ free function (host-side polyline construction),
-2. the pybind11 export,
-3. the YAML schema dispatch.
+A geometry touches one tree per axis:
 
-We will use a hypothetical ``arc_segment`` generator (a single
-circular arc between two angles, sitting in the plane perpendicular to
-some axis) as the running example. The implementation idiom carries
-over to any geometry whose parametric form can be written as host C++.
+* **backend** — the device kernels under ``src/backend/hip/pic/``. Cylindrical
+  adds ``fdtd_b_cyl_hip.hip``, ``fdtd_e_cyl_hip.hip``, ``deposit_cyl_hip.hip``,
+  ``gather_push_cyl_hip.hip`` and ``boundary_axis_hip.hip``, exposing five new
+  ``launch_pic_*_cyl_*`` / ``launch_pic_boundary_axis_*`` entry points declared
+  once in ``include/quasar/physics/pic/kernels.hpp``.
+* **numerics** — the concrete scheme classes and their registry registrations in
+  ``src/physics/pic/pic_solver.cpp`` (the field solver, pusher, and deposit).
+* **boundary** — the on-axis ``r = 0`` boundary condition in
+  ``src/boundary/axis.{hpp,cpp}``.
+* **core** — the geometry-aware grid accessors in
+  ``include/quasar/core/grid.hpp`` (radius/volume helpers and the cylindrical
+  CFL bound).
+* **deck/CLI** — the ``geometry`` key, validation, CFL selection, and npz
+  metadata in ``python/quasar/pic/io.py`` and ``python/quasar/pic/cli.py``.
 
-Step 1 - C++ header and implementation
---------------------------------------
+Step 1 - Grid accessors in ``core/grid.hpp``
+--------------------------------------------
 
-Add the declaration to
-``include/quasar/physics/magnetostatics/geometry.hpp``:
+A new geometry typically reinterprets the existing ``Grid2D`` axes rather than
+introducing a new grid type. In cylindrical mode the x-axis *is* the radius
+``r`` (``origin_x`` is the inner radius, ``dx()`` is ``dr``) and the y-axis is
+the axial coordinate ``z``. ``Grid2D`` gains ``QUASAR_HOST_DEVICE`` helpers that
+mirror the Cartesian ``x_at_*`` accessors so device kernels read the radius with
+no new type:
 
-.. code-block:: c++
+* ``r_at_cell_center(i)`` — node radius ``origin_x + (i + 0.5) * dr``.
+* ``r_at_edge(i)`` — lower-face radius ``origin_x + i * dr`` (so the ``i = 0``
+  edge sits at ``r = 0`` when the domain starts on the axis).
+* ``cell_volume(i)`` — the ``m = 0`` ring volume ``2*pi * r_at_cell_center(i) *
+  dr * dz`` used by the deposit's radius-weighted current.
 
-   // Open circular arc of `n_segments` chords in the plane perpendicular
-   // to `axis`, centered at `center`, from angle phi_start to phi_end.
-   Filament arc_segment(Vec3 center, Vec3 axis, Real radius_m,
-                        Real phi_start_rad, Real phi_end_rad,
-                        int  n_segments, Real current_A,
-                        std::string name = "arc");
+These are harmless (but meaningless) on a Cartesian run, which never calls them.
 
-Implement it in
-``src/physics/magnetostatics/geometry_generators.cpp`` using the
-``make_basis`` helper that is already present in that translation unit:
+The stability bound also belongs here. ``cyl_cfl_dt(g, c)`` is phrased
+separately from ``cfl_dt(g, fdtd_order, c)`` so callers select it explicitly in
+cylindrical mode; for the on-axis-regularised 2nd-order scheme the bound is the
+Cartesian 2nd-order Courant limit over ``(dr, dz)`` (the ``1/r`` curl terms do
+not tighten it), and the separate entry point gives a future radius-dependent
+refinement one home.
 
-.. code-block:: c++
+Step 2 - Backend kernels and the ABI
+------------------------------------
 
-   Filament arc_segment(Vec3 center, Vec3 axis, Real radius_m,
-                        Real phi0, Real phi1, int n_segments,
-                        Real current_A, std::string name) {
-     check_segment_count("arc_segment", n_segments);
-     check_radius("arc_segment", radius_m);
-     check_finite("arc_segment", "current_A", current_A);
-     const Basis b = make_basis(axis, "arc_segment");
+Each ``launch_pic_*`` entry point is declared exactly once in
+``include/quasar/physics/pic/kernels.hpp`` and included both by its ``.hip``
+definition (so a signature drift is a compile error) and by every caller in the
+physics/numerics/boundary layers. The cylindrical kernels reuse the Cartesian
+pointer/stream ABI verbatim; only the discretisation differs.
 
-     Filament f{std::move(name), current_A, {}};
-     f.points.reserve(static_cast<std::size_t>(n_segments) + 1u);
-     for (int k = 0; k <= n_segments; ++k) {
-       const Real theta = phi0 + (phi1 - phi0)
-                                 * static_cast<Real>(k)
-                                 / static_cast<Real>(n_segments);
-       f.points.push_back(center + radius_m * (std::cos(theta) * b.u
-                                               + std::sin(theta) * b.v));
-     }
-     return f;
-   }
+**Component slot convention.** The stored Yee vector components map
+``(x, y, z) -> (r, z, phi)``: ``ex -> Er``, ``ey -> Ez``, ``ez -> Ephi`` (and
+likewise ``bx -> Br``, ``by -> Bz``, ``bz -> Bphi``). Particle slots map
+``x -> r``, ``y -> z`` for position and ``vx -> vr``, ``vy -> vz``,
+``vz -> vphi`` for velocity. The axial field and velocity therefore live in the
+``ey`` / ``by`` / ``vy`` slots. Keeping the same six-component storage means the
+gather and the Boris half-rotation are unchanged — the local
+``(e_r, e_z, e_phi)`` frame is orthonormal — and only the position advance picks
+up the azimuthal rotation of the ``(vr, vphi)`` pair across ``r``
+(``gather_push_cyl_hip.hip``).
 
-There is intentionally no registry of geometry generators on the C++
-side - they are plain free functions. Discovery happens at the YAML/
-Python boundary instead (Step 3).
+**On-axis closure (the subtle correctness point).** The axisymmetric ``Ez``/
+``Bz`` curls use the radial-flux operator ``(1/r) d(r A_phi)/dr`` in
+finite-volume form. At node ``i`` the forward flux is::
 
-Step 2 - Pybind11 binding
--------------------------
+   (1 / r_c(i)) * ( r_e(i+1) * Bphi(i+1) - r_e(i) * Bphi(i) ) / dr
 
-Expose the function in
-``bindings/python/bind_magnetostatics.cpp`` alongside the existing
-``ms.def(...)`` entries:
+with ``r_c(i) = r_at_cell_center(i)`` and ``r_e(i) = r_at_edge(i)``. On the axis
+(``i = 0``) the lower face sits at ``r_e(0) = 0``, so the inner-face term
+*vanishes identically* — this **is** the regularised on-axis closure, with no
+l'Hopital ``4*value/dr`` factor. The natural zero-radius flux converges to the
+analytic Bessel (``TM0n0``) spectrum at 2nd order, whereas the earlier
+``4*Bphi(0)/dr`` hack injected a resolution-independent eigenvalue shift that
+broke convergence. The odd components (``Er``, ``Ephi``, ``Br``, ``Bphi``)
+vanish on the axis by parity and are pinned to zero.
 
-.. code-block:: c++
+The deposit and Faraday updates pair a **backward** radial difference with this
+**forward** flux read; the two are discrete adjoints, which is what makes the
+composed operator the correct cylindrical Bessel operator and keeps the deposit
+charge-consistent (``radial_flux_fwd`` / ``ddr_bwd`` in ``fdtd_e_cyl_hip.hip``).
+The deposit weights are proportional to ``cell_volume(i)`` so the discrete
+cylindrical continuity residual stays in tolerance.
 
-   ms.def("arc_segment", &arc_segment,
-          py::arg("center"), py::arg("axis"), py::arg("radius_m"),
-          py::arg("phi_start_rad"), py::arg("phi_end_rad"),
-          py::arg("n_segments"),  py::arg("current_A"),
-          py::arg("name") = std::string{"arc"});
+Step 3 - Schemes and registration in ``pic_solver.cpp``
+-------------------------------------------------------
 
-Then re-export it in ``python/quasar/coil/__init__.py``'s ``__all__``
-list so ``from quasar.coil import arc_segment`` works.
+The cylindrical schemes are the axisymmetric counterparts of the Cartesian
+``YeeFdtd2D<2>`` / ``BorisPusher<S>`` / ``Esirkepov2D<S>``. They implement the
+same ``quasar::numerics::IFieldSolver`` / ``IParticlePusher`` /
+``IDepositScheme`` interfaces and forward to the cylindrical launch ABI:
 
-Step 3 - YAML schema dispatch
------------------------------
+* ``YeeFdtdCyl2D`` (2nd order only),
+* ``BorisCylPusher<1>`` / ``BorisCylPusher<2>``,
+* ``EsirkepovCyl2D<1>`` / ``EsirkepovCyl2D<2>``.
 
-Wire the new ``type`` discriminator into ``_build_geometry`` in
-``python/quasar/coil/io.py``:
+They are registered under deck-facing names next to the Cartesian ones::
 
-.. code-block:: python
+   QUASAR_REGISTER_FIELD_SOLVER("yee_cyl_o2", ::quasar::numerics::YeeFdtdCyl2D)
+   QUASAR_REGISTER_PUSHER("boris_cyl_cic", ::quasar::numerics::BorisCylPusher<1>)
+   QUASAR_REGISTER_PUSHER("boris_cyl_tsc", ::quasar::numerics::BorisCylPusher<2>)
+   QUASAR_REGISTER_DEPOSIT("esirkepov_cyl_cic", ::quasar::numerics::EsirkepovCyl2D<1>)
+   QUASAR_REGISTER_DEPOSIT("esirkepov_cyl_tsc", ::quasar::numerics::EsirkepovCyl2D<2>)
 
-   if gt == "arc_segment":
-       return arc_segment(
-           center=_vec3(_require(spec, "center_xyz", "arc_segment")),
-           axis=_vec3(_require(spec, "axis_xyz", "arc_segment")),
-           radius_m=float(_require(spec, "radius_m", "arc_segment")),
-           phi_start_rad=float(_require(spec, "phi_start_rad", "arc_segment")),
-           phi_end_rad=float(_require(spec, "phi_end_rad", "arc_segment")),
-           n_segments=int(_require(spec, "n_segments", "arc_segment")),
-           current_A=current_A,
-           name=name,
-       )
+**Geometry-aware name builders.** As with the order/shape vocabulary, the
+deck never builds these registry strings itself. The free functions
+``field_solver_name``, ``pusher_name`` and ``deposit_name`` (anonymous namespace
+in ``pic_solver.cpp``) resolve a geometry + order/shape to a registry name:
+``is_cylindrical(geometry)`` switches to the ``"_cyl_"`` family
+(``"yee_cyl_o2"`` regardless of ``fdtd_order``, ``"boris_cyl_" + shape``,
+``"esirkepov_cyl_" + shape``); a Cartesian run keeps the existing names verbatim.
+``EmPic2D3V``'s constructor then calls ``Registry<...>::create(name)`` for each,
+so there is no ``if/else`` ladder over geometry in the driver. A new geometry's
+names appear in exactly one place: register them, then add a branch to these
+three builders.
+
+.. warning::
+
+   **Linker gotcha — keep the registrations in this TU.** The ``pic`` module is
+   plain-linked (``quasar_add_module(pic ...)`` in
+   ``src/physics/pic/CMakeLists.txt``), *not* whole-archived. A namespace-scope
+   static registration carries no externally referenced symbol, so a plain
+   static-archive link would drop a standalone TU's registrations and
+   ``Registry::create`` would throw on the deck name. The cylindrical scheme
+   *definitions and registrations therefore live in*
+   ``src/physics/pic/pic_solver.cpp`` — the same translation unit as the
+   externally-referenced ``EmPic2D3V`` symbols — so the static initializers are
+   pulled in and survive the link. Do **not** split them into a new ``.cpp``.
+   The alternative is the boundary module's approach: it is declared with
+   ``quasar_add_module(boundary REGISTERS ...)``, and the ``REGISTERS`` flag
+   wraps the target in ``$<LINK_LIBRARY:WHOLE_ARCHIVE,...>`` (see
+   ``cmake/QuasarAddModule.cmake``) so every object is forced in. Use one or the
+   other; the axis BC in Step 4 relies on the latter.
+
+Step 4 - On-axis boundary condition
+-----------------------------------
+
+A geometry with a special edge needs a boundary closure. The cylindrical
+``r = 0`` axis is handled by ``AxisFieldBC`` / ``AxisParticleBC`` in
+``src/boundary/axis.{hpp,cpp}``, registered under the name ``"axis"``::
+
+   QUASAR_REGISTER_FIELD_BOUNDARY("axis", AxisFieldBC)
+   QUASAR_REGISTER_PARTICLE_BOUNDARY("axis", AxisParticleBC)
+
+Because ``boundary`` is the ``REGISTERS`` (whole-archived) module, these survive
+the link from their own TU. ``AxisFieldBC`` gates its closure to the
+``Side::x_lo`` (``i = 0``) face and drives ``launch_pic_boundary_axis_fields``
+both as a ghost fill and after each curl; ``AxisParticleBC`` reflects particles
+that cross the axis (``r -> -r``, ``vr -> -vr``) so the approach is
+reflectionless.
+
+**Auto-wiring.** A cylindrical deck does not have to name the ``axis`` BC. The
+``EmPic2D3V`` constructor detects ``is_cylindrical(cfg_.geometry)`` and
+overrides the ``x_lo`` field and particle boundary to ``"axis"`` regardless of
+what the deck set there (warning on a non-default, non-``axis`` override; the
+default periodic ``x_lo`` is replaced silently). All other sides stay
+deck-driven.
+
+Step 5 - Deck schema, validation, CFL, and metadata
+---------------------------------------------------
+
+Wire the geometry into the Python deck layer (``python/quasar/pic``):
+
+* **Schema** — ``PicDeck`` carries ``geometry: str = "cartesian"``, parsed from
+  the top-level ``geometry`` key in ``parse()``. ``EmPicConfig.geometry`` is set
+  from it in ``cli._make_solver``.
+* **Validation** — ``PicDeck.validate`` rejects unknown geometries;
+  ``_validate_cylindrical`` enforces the geometry-specific rules: a
+  non-negative inner radius (``domain.origin_x_m >= 0``), ``fdtd_order == 2``,
+  and a non-periodic outer-radius (``x_hi``) wall for both field and particle
+  boundaries. The inner radius (``x_lo``) is deliberately left alone so the
+  default periodic side can be auto-replaced by the C++ axis condition.
+* **CFL selection** — ``cli.prepare_run`` branches on ``geometry`` to pick
+  ``cyl_cfl_dt`` / ``cyl_cfl_limit`` (from ``python/quasar/pic/numerics.py``)
+  for both the ``"auto"`` timestep and the explicit-``dt`` stability check,
+  flooring the inner radius to half a cell when the domain touches the axis.
+* **Metadata** — the npz snapshot persists ``geometry`` (alongside ``plane``)
+  in ``cli._snapshot`` / ``_flatten_for_npz`` so offline readers know whether to
+  treat the in-plane axes as ``(x, y)`` or axisymmetric ``(r, z)``.
 
 After this, a deck of the form
 
 .. code-block:: yaml
 
-   conductors:
-     - name: half_circle
-       current_A: 1.0
-       geometry:
-         type: arc_segment
-         center_xyz:    [0, 0, 0]
-         axis_xyz:      [0, 0, 1]
-         radius_m:      0.1
-         phi_start_rad: 0.0
-         phi_end_rad:   3.14159265358979
-         n_segments:    64
+   geometry: cylindrical
+   domain:
+     nx: 128          # radial cells (r)
+     ny: 256          # axial cells (z)
+     lx_m: 0.05       # outer radius R
+     ly_m: 0.1        # axial length
+     origin_x_m: 0.0  # inner radius (0 = domain touches the axis)
+   numerics:
+     fdtd_order: 2    # cylindrical ships at order 2 only
+     shape: tsc
+   boundary:
+     field:    [periodic, pec, periodic, periodic]   # x_lo auto-replaced by 'axis'
+     particle: [periodic, specular, periodic, periodic]
 
-is automatically accepted by ``quasar coil run``.
+runs the cylindrical schemes through ``quasar pic run`` with the on-axis closure
+auto-wired on the ``r = 0`` side.
 
-Step 4 - Tests
---------------
+Step 6 - Tests and the worked example
+-------------------------------------
 
-Two tests are usually enough to anchor a new generator. Both go in
-``tests/unit/physics/magnetostatics/test_geometry_generators.cpp``:
-
-* **Geometric invariants** - radius, vertex count, plane, opening
-  angle. For ``arc_segment`` we would check that every vertex lies on
-  the circle of radius ``radius_m`` perpendicular to ``axis``, and that
-  the first/last vertices subtend the expected angle from ``center``.
-* **Bad-argument rejection** - assert that
-  ``EXPECT_THROW(arc_segment(..., n_segments=0, ...),
-  std::invalid_argument)`` (and similar for negative radius, zero
-  axis, non-finite current).
-
-If the new generator is going to be exposed through YAML, add a
-``test_coil_cli`` parser test in ``tests/python/test_coil_cli.py``
-that loads a minimal deck and round-trips it.
-
-Step 5 - Documentation
-----------------------
-
-The schema table in
-``docs/user-guide/coil_design.rst`` enumerates the recognized
-``geometry.type`` values; add the new row there. If the generator is
-worth a worked example, drop a deck into ``examples/<name>/`` with a
-short ``README.md`` and an integration test in
-``tests/python/test_examples.py`` modelled on
-``SingleLoopExampleTest``.
+Anchor a new geometry with both a numerical-convergence check (cylindrical
+converges to the analytic ``TM0n0`` Bessel spectrum at 2nd order, the payoff of
+the natural on-axis closure) and deck round-trip / validation tests in
+``tests/python``. If the geometry is worth a worked example, drop a deck into
+``examples/<name>/`` with a ``README.md`` and an integration test in
+``tests/python/test_examples.py``.
 
 Checklist
 ---------
 
-A merge-ready change to add a generator touches all of:
+A merge-ready change to add a grid geometry touches all of:
 
-#. ``include/quasar/physics/magnetostatics/geometry.hpp``
-#. ``src/physics/magnetostatics/geometry_generators.cpp``
-#. ``bindings/python/bind_magnetostatics.cpp``
-#. ``python/quasar/coil/__init__.py``
-#. ``python/quasar/coil/io.py``
-#. ``tests/unit/physics/magnetostatics/test_geometry_generators.cpp``
-#. ``docs/user-guide/coil_design.rst``
+#. ``include/quasar/core/grid.hpp`` (geometry-aware accessors + CFL bound)
+#. ``src/backend/hip/pic/`` (the device kernels) and
+   ``include/quasar/physics/pic/kernels.hpp`` (their ABI)
+#. ``src/physics/pic/pic_solver.cpp`` (scheme classes, registrations, name
+   builders, and any constructor auto-wiring — keep registrations in this TU)
+#. ``src/boundary/axis.{hpp,cpp}`` or an equivalent edge BC (whole-archived
+   ``REGISTERS`` module)
+#. ``python/quasar/pic/io.py`` (schema + validation)
+#. ``python/quasar/pic/cli.py`` and ``python/quasar/pic/numerics.py``
+   (CFL selection + npz metadata)
+#. ``tests/python`` (and ``examples/<name>/`` + ``test_examples.py`` for a
+   worked example)

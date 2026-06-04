@@ -252,6 +252,11 @@ class PicDeck:
     # field at lab z=0 with grid axes (x,y); "xz" samples the lab y=0 meridional
     # plane with grid axes (x,z) and the out-of-plane component along lab y.
     plane: str = "xy"
+    # Coordinate system of the 2D grid. "cartesian" (default) treats axes as
+    # (x, y) in the chosen plane; "cylindrical" treats them as axisymmetric r-z
+    # with i=r (from nx / lx_m / origin_x_m) and j=z. The C++ solver applies the
+    # on-axis closure for the inner-radius (x_lo) boundary.
+    geometry: str = "cartesian"
     raw: dict = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -259,6 +264,9 @@ class PicDeck:
             raise ValueError("units must be 'SI' or 'normalized'")
         if self.plane not in ("xy", "xz"):
             raise ValueError("plane must be 'xy' or 'xz'")
+        if self.geometry not in ("cartesian", "cylindrical"):
+            raise ValueError(
+                "geometry must be 'cartesian' or 'cylindrical'")
         self._validate_domain()
         self._validate_numerics()
         self._validate_external_field()
@@ -276,6 +284,40 @@ class PicDeck:
         self._validate_time()
         self._validate_diagnostics()
         self._validate_boundary()
+        # Run cylindrical cross-cutting checks last: they read already-validated
+        # numerics/boundary fields, so any structural error in those surfaces its
+        # own (more fundamental) message first.
+        if self.geometry == "cylindrical":
+            self._validate_cylindrical()
+
+    def _validate_cylindrical(self) -> None:
+        # i=r runs from origin_x_m. The m=0 on-axis scheme (axis BC auto-wiring,
+        # the i==0 Er/Ephi pin in the FDTD curls, and the J0(j0n r/R) seed) all
+        # assume the radial domain starts exactly at r=0, so require origin_x_m==0.
+        # Finite inner radius / annular domains are not yet supported.
+        if self.domain.origin_x_m != 0.0:
+            raise ValueError(
+                "geometry 'cylindrical': domain.origin_x_m must be 0 (the m=0 "
+                "on-axis scheme requires the radial domain to start at r=0; "
+                "finite inner radius / annular domains are not supported yet)")
+        # The on-axis closure is only derived for the 2nd-order Yee curl.
+        if self.numerics.fdtd_order != 2:
+            raise ValueError(
+                "geometry 'cylindrical': numerics.fdtd_order must be 2 "
+                "(order-4 cylindrical axis closure is not supported yet)")
+        # A periodic OUTER-radius (x_hi, side index 1) wall is unphysical for an
+        # axisymmetric domain. x_lo (inner radius) is deliberately left alone:
+        # BoundaryConfig defaults all sides to 'periodic' and the C++ solver
+        # auto-replaces x_lo with the axis condition, so rejecting periodic x_lo
+        # would break every normal cylindrical deck.
+        if self.boundary.field[1] == "periodic":
+            raise ValueError(
+                "geometry 'cylindrical': boundary.field x_hi (outer radius) "
+                "must not be 'periodic'")
+        if self.boundary.particle[1] == "periodic":
+            raise ValueError(
+                "geometry 'cylindrical': boundary.particle x_hi (outer radius) "
+                "must not be 'periodic'")
 
     def _validate_domain(self) -> None:
         if self.domain.nx <= 0 or self.domain.ny <= 0:
@@ -459,7 +501,41 @@ def _parse_normalization(d: dict | None) -> Normalization:
     )
 
 
-def _parse_external_field(d: dict | None) -> Union[ExternalField, None]:
+# --- Physical-component -> storage-slot translation (cylindrical decks) -------
+#
+# In cylindrical (r, z) mode the solver stores fields in Cartesian-named slots by
+# an IMPLICIT convention that is a silent-wrong-result footgun if a user spells a
+# raw lab/slot vector by hand: the grid triad is (i=r, j=z, out-of-plane=phi), so
+# physically  B_r -> bx slot,  B_z (axial) -> by slot,  B_phi -> bz slot  (and the
+# same for E and the velocity triad vx->vr, vy->vz, vz->vphi).
+#
+# The external-field sampler (src/physics/pic/external_field_sampler.cpp) consumes
+# `uniform_b` as a LAB-AXIS vector and then applies a plane-dependent lab->slot map
+# when it writes the six field slots:
+#   plane "xy":  slot bx<-lab x,  by<-lab y,       bz<-lab z
+#   plane "xz":  slot bx<-lab x,  by<-lab z,       bz<- -lab y
+#
+# So to make a physical `B_rzphi = [B_r, B_z, B_phi]` land in the (bx, by, bz)
+# slots as (B_r, B_z, B_phi), we must hand the sampler the LAB vector that the
+# plane map turns into those slots. Inverting the map above:
+#   plane "xy":  uniform_b(lab) = [B_r, B_z,  B_phi]   (identity)
+#   plane "xz":  uniform_b(lab) = [B_r, -B_phi, B_z]
+#
+# THIS FUNCTION IS THE ONE PLACE the physical (r,z,phi) ordering is converted to
+# the lab-vector slot ordering for external uniform fields. Do not re-encode the
+# permutation at any call site.
+def _rzphi_to_uniform_lab(rzphi: Sequence[float], plane: str,
+                          context: str) -> tuple[float, float, float]:
+    br, bz, bphi = _triple(rzphi)
+    if plane == "xz":
+        return (br, -bphi, bz)
+    # plane "xy" (default): the lab->slot map is the identity, so physical
+    # (r, z, phi) already lines up with (bx, by, bz).
+    return (br, bz, bphi)
+
+
+def _parse_external_field(d: dict | None, geometry: str = "cartesian",
+                          plane: str = "xy") -> Union[ExternalField, None]:
     if d is None:
         return None
     ev = _require(d, "evaluator", "external_field")
@@ -467,6 +543,25 @@ def _parse_external_field(d: dict | None) -> Union[ExternalField, None]:
     # Uniform external fields may use either terse or unit-explicit names.
     b = ev.get("B_T", ev.get("b_tesla", ev.get("B")))
     e = ev.get("E_V_per_m", ev.get("e_v_per_m", ev.get("E")))
+    # Cylindrical decks may instead spell the uniform B by PHYSICAL axis,
+    # `B_rzphi: [B_r, B_z, B_phi]`, which is translated to the lab/slot ordering
+    # the sampler expects in exactly one place (_rzphi_to_uniform_lab). This is
+    # the recommended spelling for cylindrical mode: it removes the need to know
+    # the implicit "axial B goes in the second (by) slot" convention. The raw
+    # `B_T` slot spelling still works (backward compatible); supplying both is an
+    # error so a deck cannot silently disagree with itself.
+    b_rzphi = ev.get("B_rzphi")
+    if b_rzphi is not None:
+        if geometry != "cylindrical":
+            raise ValueError(
+                "external_field.evaluator.B_rzphi (physical r,z,phi axes) is only "
+                "valid for geometry 'cylindrical'; use B_T for cartesian decks")
+        if b is not None:
+            raise ValueError(
+                "external_field.evaluator: give either B_rzphi (physical axes) or "
+                "B_T (storage slots), not both")
+        b = list(_rzphi_to_uniform_lab(b_rzphi, plane,
+                                       "external_field.evaluator.B_rzphi"))
     # Dipole/gradient parameter names keep the SI unit in the key; shorter aliases
     # are accepted for normalized decks and for hand-written tests.
     moment = ev.get("moment_Am2", ev.get("moment_A_m2", ev.get("moment")))
@@ -560,7 +655,49 @@ def _parse_boundary(d: dict | None) -> BoundaryConfig:
     )
 
 
-def _parse_fields(d: dict | None) -> Fields:
+# --- fields.initial physical-component -> storage-slot translation ------------
+#
+# THIS IS THE ONE PLACE the cylindrical physical seed-component names are mapped
+# to Cartesian storage slots. Using the same grid triad as the external-field
+# translation above (i=r, j=z, out-of-plane=phi):
+#   E_r -> ex,  E_z (axial) -> ey,  E_phi (azimuthal) -> ez   (and B analogously)
+# In cylindrical mode the names Er/Ez/Ephi/Br/Bz/Bphi are REINTERPRETED as these
+# physical axes, so `component: Ez` means the AXIAL field and resolves to the `ey`
+# slot (NOT the literal `ez` storage slot). To seed the azimuthal field, spell it
+# `Ephi`. Raw slot names (ex/ey/ez/bx/by/bz) are still accepted unchanged for
+# backward compatibility, but the physical spelling is recommended for clarity.
+# In CARTESIAN mode no reinterpretation happens: a slot name is taken literally.
+_CYL_PHYSICAL_COMPONENT = {
+    "er": "ex", "ez": "ey", "ephi": "ez",
+    "br": "bx", "bz": "by", "bphi": "bz",
+}
+# Raw storage-slot names, accepted verbatim in either geometry.
+_FIELD_SLOTS = ("ex", "ey", "ez", "bx", "by", "bz")
+
+
+def _resolve_seed_component(name: str, geometry: str) -> str:
+    """Map a deck seed-component name to a storage slot (ex/ey/.../bz).
+
+    Cylindrical: physical Er/Ez/Ephi/Br/Bz/Bphi -> slot via the triad map above;
+    a raw slot name passes through. Cartesian: slot names pass through verbatim.
+    """
+    if geometry == "cylindrical":
+        key = name.strip().lower()
+        if key in _CYL_PHYSICAL_COMPONENT:
+            return _CYL_PHYSICAL_COMPONENT[key]
+        if key in _FIELD_SLOTS:
+            return key  # explicit slot name, backward-compatible passthrough
+        raise ValueError(
+            f"fields.initial.component {name!r} is not a recognized cylindrical "
+            f"physical component (Er/Ez/Ephi/Br/Bz/Bphi) or storage slot "
+            f"({list(_FIELD_SLOTS)})")
+    # cartesian: return the name VERBATIM (original case preserved, as before the
+    # physical-component refactor). The cli seeder lowercases at use-time, so case
+    # here is purely the parsed-value contract that existing decks/tests rely on.
+    return name.strip()
+
+
+def _parse_fields(d: dict | None, geometry: str = "cartesian") -> Fields:
     if d is None:
         return Fields()
     init = d.get("initial")
@@ -571,27 +708,37 @@ def _parse_fields(d: dict | None) -> Fields:
         mode = (int(mode_raw), 0)
     else:
         mode = (int(mode_raw[0]), int(mode_raw[1]) if len(mode_raw) > 1 else 0)
+    raw_component = str(init.get("component", "Ex"))
     return Fields(initial=FieldsInitial(
+        # Resolve the physical/slot name to a storage slot here, once, so every
+        # downstream consumer (cli._seed_fields) sees a plain slot name.
         type=str(_require(init, "type", "fields.initial")),
-        component=str(init.get("component", "Ex")),
+        component=_resolve_seed_component(raw_component, geometry),
         amplitude=float(init.get("amplitude", 1.0e-4)),
         mode=mode,
     ))
 
 
 def parse(data: dict) -> PicDeck:
+    # Geometry/plane are needed by the external-field and fields.initial parsers so
+    # they can translate the physical-axis spellings to storage slots, so resolve
+    # them before constructing the deck.
+    geometry = str(data.get("geometry", "cartesian"))
+    plane = str(data.get("plane", "xy"))
     deck = PicDeck(
         domain=_parse_domain(_require(data, "domain", "deck")),
         numerics=_parse_numerics(data.get("numerics")),
         normalization=_parse_normalization(data.get("normalization")),
-        external_field=_parse_external_field(data.get("external_field")),
+        external_field=_parse_external_field(data.get("external_field"),
+                                             geometry, plane),
         species=_parse_species(data.get("species")),
         time=_parse_time(data.get("time")),
         diagnostics=_parse_diagnostics(data.get("diagnostics")),
         boundary=_parse_boundary(data.get("boundary")),
-        fields=_parse_fields(data.get("fields")),
+        fields=_parse_fields(data.get("fields"), geometry),
         units=str(data.get("units", "SI")),
-        plane=str(data.get("plane", "xy")),
+        plane=plane,
+        geometry=geometry,
         raw=data,
     )
     deck.validate()

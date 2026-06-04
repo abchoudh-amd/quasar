@@ -7,6 +7,15 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
+- PIC: axisymmetric cylindrical `(r, z)` mode (`geometry: cylindrical`) — a full
+  `m = 0` EM-PIC scheme family (`yee_cyl_o2`, `boris_cyl_*`, `esirkepov_cyl_*`)
+  with `1/r` / `(1/r) d(r·)/dr` Yee curls, a finite-volume on-axis closure at
+  `r = 0`, ring-volume-weighted charge-conserving deposition, and a cylindrical
+  Boris push. Validated by the `cyl_cavity_tm010` (TM010 pillbox resonance,
+  dominant FFT peak within a few percent of `j01 c / (2 pi R)` with a clean
+  `J0(j01 r/R)` radial profile) and `cyl_gyro_orbit` examples. The axial field
+  `Ez` / `Bz` and axial velocity use the `ey` / `by` / `vy` slots; the azimuthal
+  `Ephi` / `Bphi` use the `ez` / `bz` slots.
 - PIC: `outflow` field boundary kind (`boundary.field: outflow`) — a first-order
   characteristic (Mur) open wall that lets outgoing radiation leave with little
   reflection, at both 2nd- and 4th-order FDTD. Stable as an outflow channel

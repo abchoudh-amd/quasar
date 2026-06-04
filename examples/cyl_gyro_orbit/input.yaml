@@ -1,0 +1,59 @@
+units: SI
+normalization: {reference_density_per_m3: 1.0e18, reference_species: electron}
+# Single-/few-particle electron gyro-orbit in a uniform axial magnetic field,
+# in axisymmetric cylindrical (r, z) coordinates. geometry: cylindrical makes
+# the grid axes i = r and j = z, and the velocity triad maps as
+#   vx -> vr,  vy -> vz,  vz -> vphi.
+#
+# The external B is spelled with the PHYSICAL cylindrical axes via `B_rzphi`,
+# ordered [B_r, B_z, B_phi] (matching the velocity triad). A pure AXIAL field is
+# B_z, so B_rzphi = [0, B, 0] with B = 1.0 T. The deck loader translates this in
+# one place (io._rzphi_to_uniform_lab) into the storage-slot vector the sampler
+# expects, so the user never needs to know the implicit "axial B lives in the by
+# slot" convention. (The older raw `B_T: [0, 1.0, 0]` slot spelling is equivalent
+# for plane xy and still accepted, but B_rzphi is the recommended cylindrical form.)
+plane: xy
+geometry: cylindrical
+domain:
+  nx: 128
+  ny: 128
+  # r in [0.0, 0.10] m, z in [-0.05, 0.05] m. The axisymmetric m=0 scheme
+  # requires the radial domain to start at r=0 (the on-axis closure), so
+  # origin_x_m is 0. The Larmor radius (~3.4e-5 m for 100 eV electrons) is tiny
+  # compared to the cell size, so each particle's guiding center stays in its
+  # cell; the on-axis condition is reflectionless for any orbit that approaches
+  # r=0 and absorbing walls remove particles that wander out.
+  lx_m: 0.10
+  ly_m: 0.10
+  origin_x_m: 0.0
+  origin_y_m: -0.05
+numerics: {fdtd_order: 2, shape: cic, current_filter: []}
+# A cylindrical deck must NOT use a periodic outer radius (x_hi); BoundaryConfig
+# defaults all sides to periodic, so set them explicitly. x_lo is the symmetry
+# axis (auto-replaced by the on-axis closure in C++, so its value is don't-care,
+# but set for clarity). Outer radius and axial walls are PEC for the field;
+# particles that wander out are absorbed (marked dead) rather than wrapped.
+boundary:
+  field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
+  particle: {x_lo: absorbing, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
+external_field:
+  evaluator: {type: uniform, B_rzphi: [0.0, 1.0, 0.0]}   # [B_r, B_z, B_phi]; axial B_z = 1.0 T
+species:
+  - name: electron
+    charge_C: -1.602176634e-19
+    mass_kg: 9.1093837015e-31
+    n_particles: 64
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.0e18
+      # Perpendicular (r/phi-plane) drift gives a well-defined v_perp so the
+      # Larmor radius is deterministic; a small temperature adds a thermal
+      # spread. drift_v is (vx, vy, vz) -> (vr, vz, vphi); the in-plane
+      # components vx (=vr) and vz (=vphi) are perpendicular to the axial B.
+      temperature_eV: 1.0
+      drift_v: [5.93e5, 0.0, 0.0]
+# dt auto (CFL); several gyro-periods. T_c = 2*pi/omega_c ~ 3.57e-11 s.
+time: {dt_s: auto, steps: 512}
+# per_species output records the final particle state (positions + velocities)
+# so the trajectory / energy can be checked.
+diagnostics: {output_path: out.npz, cadence: 8, fields: [by], per_species: true}

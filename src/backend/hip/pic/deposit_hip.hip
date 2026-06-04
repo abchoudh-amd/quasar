@@ -3,6 +3,7 @@
 #include "quasar/physics/pic/species.hpp"
 
 #include "backend/hip/hip_check.hpp"
+#include "backend/hip/pic/deposit_common.hpp"
 #include "backend/hip/pic/launch.hpp"
 
 #include <hip/hip_runtime.h>
@@ -23,47 +24,15 @@
 
 namespace {
 
-// Local stencil window sized per shape order. CFL keeps |displacement| < ~1 cell,
-// so the window must span the lowest support node of the min endpoint to the
-// highest support node of the max endpoint, plus a one-node margin each side.
-// CIC (support 2) needs a 5-node window with base floor(min)-1; TSC (support 3)
-// needs a 6-node window with base floor(min)-2. Both follow from:
-//   window = ShapeOrder + 4,  base margin = ShapeOrder.
-// (The TSC values match the historical fixed 6 / -2, so that path is unchanged.)
-template <int ShapeOrder>
-inline constexpr int kWindowFor = ShapeOrder + 4;
+// kWindowFor, deposit_axis_x/y, weight_1d, and the sum-to-1 deposition-window
+// guard are shared with the cylindrical deposit and live in deposit_common.hpp.
+using namespace quasar::backend::pic;
 
-// Per-axis deposit indexing. On a periodic axis (both sides periodic) the node is
-// wrapped exactly as before (bit-identical to the historical behaviour). On a
-// non-periodic (wall) axis the node is NOT wrapped: out-of-domain shape tails land
-// in the ghost layer via Grid2D::index, and are later reflected into the interior
-// by the specular fold-back kernel. The clamp keeps a rare deep overshoot inside
-// allocated ghost storage instead of wrapping it to the far edge.
-__device__ inline int clamp_axis(int i, int lo, int hi) {
-  return i < lo ? lo : (i > hi ? hi : i);
-}
-
-__device__ inline int deposit_axis_x(const quasar::Grid2D& g, int i, bool periodic_x) {
-  return periodic_x ? g.wrap_i(i) : clamp_axis(i, -g.nghost, g.nx - 1 + g.nghost);
-}
-
-__device__ inline int deposit_axis_y(const quasar::Grid2D& g, int j, bool periodic_y) {
-  return periodic_y ? g.wrap_j(j) : clamp_axis(j, -g.nghost, g.ny - 1 + g.nghost);
-}
-
+// Cartesian-only fused node index (the cylindrical deposit uses the per-axis
+// decomposition directly and does not need this).
 __device__ inline std::size_t deposit_index(const quasar::Grid2D& g, int i, int j,
                                             bool periodic_x, bool periodic_y) {
   return g.index(deposit_axis_x(g, i, periodic_x), deposit_axis_y(g, j, periodic_y));
-}
-
-template <int ShapeOrder>
-__device__ inline double weight_1d(double r) {
-  if constexpr (ShapeOrder == 1) {
-    const double a = r < 0.0 ? -r : r;
-    return a < 1.0 ? 1.0 - a : 0.0;
-  } else {
-    return quasar::numerics::tsc_weight_1d(r);
-  }
 }
 
 template <int ShapeOrder>
@@ -115,16 +84,8 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
   // outside the window, continuing would silently truncate the current path and
   // violate discrete continuity. Flag it and let the host throw a clear
   // "reduce dt / split the step" error instead of returning corrupt current.
-  double sx0_sum = 0.0, sx1_sum = 0.0, sy0_sum = 0.0, sy1_sum = 0.0;
-  for (int a = 0; a < kWindow; ++a) {
-    sx0_sum += Sx0[a];
-    sx1_sum += Sx1[a];
-    sy0_sum += Sy0[a];
-    sy1_sum += Sy1[a];
-  }
-  constexpr double kWeightTol = 1.0e-10;
-  if (fabs(sx0_sum - 1.0) > kWeightTol || fabs(sx1_sum - 1.0) > kWeightTol ||
-      fabs(sy0_sum - 1.0) > kWeightTol || fabs(sy1_sum - 1.0) > kWeightTol) {
+  if (!shape_strip_sums_to_one(Sx0, kWindow) || !shape_strip_sums_to_one(Sx1, kWindow) ||
+      !shape_strip_sums_to_one(Sy0, kWindow) || !shape_strip_sums_to_one(Sy1, kWindow)) {
     atomicAdd(overflow, 1u);
     return;
   }

@@ -71,6 +71,29 @@ struct Grid2D {
     return origin_y + (static_cast<Real>(j) + Real{0.5}) * dy();
   }
 
+  // -- Cylindrical (r,z) accessors -------------------------------------------
+  // In cylindrical mode the x-axis is the radius r (origin_x is r_min, dx() is
+  // dr) and the y-axis is the axial coordinate z. These mirror the Cartesian
+  // x_at_* helpers so device kernels read the radius with no new type; they are
+  // meaningless (but harmless) on a Cartesian run, which never calls them.
+
+  // Radius at the cell center of column i: r = origin_x + (i + 0.5)*dr.
+  QUASAR_HOST_DEVICE constexpr Real r_at_cell_center(int i) const noexcept {
+    return origin_x + (static_cast<Real>(i) + Real{0.5}) * dx();
+  }
+
+  // Radius at the cell edge (left face) of column i: r = origin_x + i*dr. The
+  // i=0 edge sits at origin_x, i.e. r=0 when the domain starts on the axis.
+  QUASAR_HOST_DEVICE constexpr Real r_at_edge(int i) const noexcept {
+    return origin_x + static_cast<Real>(i) * dx();
+  }
+
+  // Cell volume for column i under the azimuthal 2*pi convention (the axisymmetric
+  // m=0 ring of one cell): V_i = 2*pi * r_at_cell_center(i) * dr * dz.
+  QUASAR_HOST_DEVICE constexpr Real cell_volume(int i) const noexcept {
+    return Real{2} * pi_v<Real> * r_at_cell_center(i) * dx() * dy();
+  }
+
   void validate() const {
     if (nx <= 0 || ny <= 0) {
       throw std::invalid_argument{"Grid2D: nx and ny must be positive"};
@@ -107,6 +130,16 @@ inline Real cfl_dt(const Grid2D& g, int fdtd_order, Real c = Real{1}) {
   const Real sx = Real{1} / (g.dx() * g.dx());
   const Real sy = Real{1} / (g.dy() * g.dy());
   return Real{1} / (c * factor * std::sqrt(sx + sy));
+}
+
+// Cylindrical (r,z) CFL limit for the 2nd-order m=0 FDTD curl. The radial and
+// axial stencils are the same 2nd-order staggered differences as the Cartesian
+// case, so the stability bound is the Cartesian 2nd-order Courant limit using
+// (dr, dz); the 1/r curl terms do not tighten it for the on-axis-regularized
+// scheme. Phrased separately from cfl_dt so callers select it explicitly in
+// cylindrical mode and so a future radius-dependent refinement has one home.
+inline Real cyl_cfl_dt(const Grid2D& g, Real c = Real{1}) {
+  return cfl_dt(g, 2, c);
 }
 
 }  // namespace quasar
