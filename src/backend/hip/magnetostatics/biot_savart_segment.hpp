@@ -20,8 +20,13 @@ namespace quasar::magnetostatics::detail {
 //                                    / ( Ra * Rb * (Ra*Rb + ra . rb) )
 // with ra = p - a, rb = p - b, L = b - a, Ra = |ra|, Rb = |rb|.
 //
-// The (Ra*Rb + ra.rb) denominator vanishes only when p lies on the segment
-// itself (singular); we guard with kEps_v<T> and return zero in that case.
+// The (Ra*Rb + ra.rb) factor of the denominator vanishes only when p lies on
+// the segment line (the physical singularity). `denom = RaRb * (RaRb + ra.rb)`
+// scales as length^4, so a fixed absolute cutoff is dimensionally wrong and (in
+// fp32) lets near-line points through after catastrophic cancellation in the
+// sum. Guard each factor on its own scale instead: RaRb (length^2) against an
+// absolute floor for the endpoint-coincident case, and the cancellation-prone
+// sum relative to its RaRb magnitude.
 template <class T>
 __device__ __forceinline__
 Vec3T<T> segment_B(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
@@ -31,11 +36,11 @@ Vec3T<T> segment_B(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
   const T        Rb   = length(rb);
   const Vec3T<T> L    = b - a;
   const T        RaRb = Ra * Rb;
-  const T denom = RaRb * (RaRb + dot(ra, rb));
-  if (denom < kEps_v<T>) {
+  const T        sum  = RaRb + dot(ra, rb);  // >= 0 by Cauchy-Schwarz
+  if (RaRb < kEps_v<T> || sum < kRelEps_v<T> * RaRb) {
     return Vec3T<T>{T{0}, T{0}, T{0}};
   }
-  const T coeff = mu0_over_4pi_v<T> * I * (Ra + Rb) / denom;
+  const T coeff = mu0_over_4pi_v<T> * I * (Ra + Rb) / (RaRb * sum);
   return coeff * cross(L, ra);
 }
 
@@ -67,10 +72,13 @@ Mat3x3T<T> segment_gradB(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
   const Vec3T<T> L     = b - a;
   const T        RaRb  = Ra * Rb;
   const T        rarb  = dot(ra, rb);
-  const T        D     = RaRb * (RaRb + rarb);
-  if (D < kEps_v<T>) {
+  const T        sum   = RaRb + rarb;  // >= 0 by Cauchy-Schwarz
+  // Geometry-scaled singularity guard, matching segment_B: RaRb (length^2)
+  // against an absolute floor, and the cancellation-prone sum relative to RaRb.
+  if (RaRb < kEps_v<T> || sum < kRelEps_v<T> * RaRb) {
     return Mat3x3T<T>{};
   }
+  const T        D     = RaRb * sum;
 
   const T        s      = Ra + Rb;
   const T        f      = s / D;

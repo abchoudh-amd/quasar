@@ -157,19 +157,18 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
       d_Bx.device_ptr(), d_By.device_ptr(), d_Bz.device_ptr(),
       cfg.stream);
 
-  std::vector<T> hBx(static_cast<std::size_t>(M));
-  std::vector<T> hBy(static_cast<std::size_t>(M));
-  std::vector<T> hBz(static_cast<std::size_t>(M));
-  d_Bx.copy_to_host_async(hBx.data(), M, cfg.stream);
-  d_By.copy_to_host_async(hBy.data(), M, cfg.stream);
-  d_Bz.copy_to_host_async(hBz.data(), M, cfg.stream);
+  // One host staging buffer (SoA, three M-length component planes) instead of
+  // three separate allocations; the device outputs are SoA and Field is AoS, so
+  // a single transpose pass into the result is still required.
+  const std::size_t MM = static_cast<std::size_t>(M);
+  std::vector<T> hB(std::size_t{3} * MM);
+  d_Bx.copy_to_host_async(hB.data(),           M, cfg.stream);
+  d_By.copy_to_host_async(hB.data() + MM,      M, cfg.stream);
+  d_Bz.copy_to_host_async(hB.data() + 2 * MM,  M, cfg.stream);
   ::quasar::backend::device_synchronize(cfg.stream);
 
-  for (int i = 0; i < M; ++i) {
-    result[static_cast<std::size_t>(i)] =
-        Vec3T<T>{hBx[static_cast<std::size_t>(i)],
-                 hBy[static_cast<std::size_t>(i)],
-                 hBz[static_cast<std::size_t>(i)]};
+  for (std::size_t i = 0; i < MM; ++i) {
+    result[i] = Vec3T<T>{hB[i], hB[MM + i], hB[2 * MM + i]};
   }
   return result;
 }

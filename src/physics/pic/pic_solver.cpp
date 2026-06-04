@@ -269,6 +269,15 @@ void EmPic2D3V::advance(Real t_end, Real dt) {
   if (dt <= Real{0}) {
     throw std::invalid_argument{"EmPic2D3V::advance: dt must be positive"};
   }
+  // The solver integrates in internal units (c = 1); a dt above the Yee CFL
+  // limit makes the FDTD update diverge, so reject it rather than stepping into
+  // an unstable run.
+  const Real cfl = cfl_dt(grid_, cfg_.fdtd_order, Real{1});
+  if (dt > cfl) {
+    throw std::invalid_argument{
+        "EmPic2D3V::advance: dt exceeds the CFL stability limit for this grid "
+        "and fdtd_order"};
+  }
   for (Real t = 0; t < t_end; t += dt) {
     step(dt);
   }

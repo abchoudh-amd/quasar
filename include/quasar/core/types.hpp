@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 #if defined(__HIPCC__) || defined(__CUDACC__)
   #define QUASAR_HOST_DEVICE __host__ __device__
@@ -37,10 +38,17 @@ inline constexpr T mu0_over_4pi_v = static_cast<T>(1e-7);
 template <class T>
 inline constexpr T kEps_v = static_cast<T>(1e-30);
 
+// Relative tolerance for geometry-scaled singularity guards: a few ulp of the
+// working precision, so the cutoff tracks the magnitude of the quantity being
+// tested rather than a fixed absolute floor (see segment_B / segment_gradB).
+template <class T>
+inline constexpr T kRelEps_v = static_cast<T>(8) * std::numeric_limits<T>::epsilon();
+
 inline constexpr Real pi           = pi_v<Real>;
 inline constexpr Real mu0          = mu0_v<Real>;
 inline constexpr Real mu0_over_4pi = mu0_over_4pi_v<Real>;
 inline constexpr Real kEps         = kEps_v<Real>;
+inline constexpr Real kRelEps      = kRelEps_v<Real>;
 
 // -- Vec3T -----------------------------------------------------------------
 
