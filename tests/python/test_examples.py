@@ -654,8 +654,11 @@ class CylGyroOrbitExampleTest(unittest.TestCase):
                 vz.append(a["species_electron_vz"])
                 alive.append(a["species_electron_alive"].astype(bool))
                 ts.append(float(a["final_time_s"][0]))
-            vx = np.asarray(vx); vy = np.asarray(vy); vz = np.asarray(vz)
-            alive = np.asarray(alive); ts = np.asarray(ts)
+            vx = np.asarray(vx)
+            vy = np.asarray(vy)
+            vz = np.asarray(vz)
+            alive = np.asarray(alive)
+            ts = np.asarray(ts)
 
             # Particles alive and moving: the orbit sits well inside r>0 with a tiny
             # Larmor radius, so the absorbing walls must not eat any particle.

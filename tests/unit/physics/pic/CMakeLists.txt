@@ -26,6 +26,8 @@ set(_quasar_pic_tests
   test_fp32_vs_fp64
   test_scheme_registry_linkage
   test_cyl_schemes_registry
+  test_cyl_diagnostics
+  test_cyl_charge_conservation
 )
 
 foreach(_test_name IN LISTS _quasar_pic_tests)

@@ -193,11 +193,13 @@ Wire the geometry into the Python deck layer (``python/quasar/pic``):
   the top-level ``geometry`` key in ``parse()``. ``EmPicConfig.geometry`` is set
   from it in ``cli._make_solver``.
 * **Validation** — ``PicDeck.validate`` rejects unknown geometries;
-  ``_validate_cylindrical`` enforces the geometry-specific rules: a
-  non-negative inner radius (``domain.origin_x_m >= 0``), ``fdtd_order == 2``,
-  and a non-periodic outer-radius (``x_hi``) wall for both field and particle
-  boundaries. The inner radius (``x_lo``) is deliberately left alone so the
-  default periodic side can be auto-replaced by the C++ axis condition.
+  ``_validate_cylindrical`` enforces the geometry-specific rules: an inner radius
+  of exactly zero (``domain.origin_x_m == 0``; finite-inner-radius / annular
+  domains are not supported yet), ``fdtd_order == 2``, and a non-periodic
+  outer-radius (``x_hi``) wall for both field and particle boundaries. The inner
+  radius (``x_lo``) is deliberately left alone so the default periodic side can
+  be auto-replaced by the C++ axis condition. The ``'axis'`` boundary name is
+  only valid on ``x_lo`` (``_validate_boundary`` rejects it on any other side).
 * **CFL selection** — ``cli.prepare_run`` branches on ``geometry`` to pick
   ``cyl_cfl_dt`` / ``cyl_cfl_limit`` (from ``python/quasar/pic/numerics.py``)
   for both the ``"auto"`` timestep and the explicit-``dt`` stability check,

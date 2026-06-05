@@ -65,6 +65,10 @@ class EmPic2D3V {
   void add_species(ParticleSpecies s);
   void step(Real dt);
   void advance(Real t_end, Real dt);
+  // The CFL stability limit (internal units, c = 1) for the scheme actually
+  // running: the cylindrical 2nd-order limit in cylindrical mode, else the
+  // Cartesian limit for cfg_.fdtd_order. step()/advance() reject any dt above it.
+  Real cfl_limit() const;
   // Drains each species' persistent deposit-overflow flag and throws if any
   // deposit spilled outside the deposition window. step() runs this on a cadence;
   // advance() runs it after the final step. A driver that calls step() directly
@@ -81,6 +85,8 @@ class EmPic2D3V {
   void apply_particle_bcs(ParticleSpecies& s);
   bool has_absorbing_boundary() const noexcept;
   void check_deposit_overflow();
+  // Throws if dt exceeds cfl_limit(); used by step()/advance().
+  void check_cfl(Real dt) const;
 
   EmPicConfig cfg_{};
   // Steps taken so far; drives the particle-compaction cadence.

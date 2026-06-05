@@ -42,11 +42,14 @@ Real total_kinetic_energy(const ParticleSpecies& species) {
   return ke;
 }
 
-Real total_em_energy(const YeeField2D<Real>& fields, const Grid2D& grid) {
+Real total_em_energy(const YeeField2D<Real>& fields, const Grid2D& grid,
+                     bool cylindrical) {
   // Normalized natural units (c = eps0 = mu0 = 1): u = 0.5*(E^2 + B^2),
-  // integrated over the interior cell area dA = dx*dy. Components are colocated
-  // at first order for this scalar energy budget, which is the convention the
-  // magnitude tests pin.
+  // integrated over the interior cell volume. Components are colocated at first
+  // order for this scalar energy budget, which is the convention the magnitude
+  // tests pin. Cartesian uses the flat area dA = dx*dy; cylindrical (r,z) uses
+  // the axisymmetric ring volume cell_volume(i) = 2*pi*r*dr*dz, the same metric
+  // the cylindrical deposit normalizes by, so the field energy is physical.
   // The field may be default-constructed (empty buffers) while the grid still
   // reports a nominal 1x1 extent; never index past the actual storage.
   if (fields.ex.size() < grid.storage_size()) return Real{0};
@@ -65,13 +68,15 @@ Real total_em_energy(const YeeField2D<Real>& fields, const Grid2D& grid) {
       const std::size_t k = grid.index(i, j);
       const Real e2 = ex[k] * ex[k] + ey[k] * ey[k] + ez[k] * ez[k];
       const Real b2 = bx[k] * bx[k] + by[k] * by[k] + bz[k] * bz[k];
-      energy += Real{0.5} * (e2 + b2) * dA;
+      const Real dV = cylindrical ? grid.cell_volume(i) : dA;
+      energy += Real{0.5} * (e2 + b2) * dV;
     }
   }
   return energy;
 }
 
-Real gauss_residual(const YeeField2D<Real>& fields, const JField2D<Real>& current) {
+Real gauss_residual(const YeeField2D<Real>& fields, const JField2D<Real>& current,
+                    bool cylindrical) {
   // Gauss's law residual ‖∇·E − ρ‖_2 over the interior. The solver does not
   // carry a standalone charge-density field (ρ = Σ q·w·S(x) lives on the
   // species, not here), so this reports the vacuum residual ‖∇·E‖_2 — the
@@ -88,13 +93,33 @@ Real gauss_residual(const YeeField2D<Real>& fields, const JField2D<Real>& curren
   Real sum_sq = Real{0};
   for (int j = 0; j < grid.ny; ++j) {
     for (int i = 0; i < grid.nx; ++i) {
-      // Yee divergence at the cell corner: backward differences of the
-      // face-centred E components, wrapped periodically for neighbour access.
-      const Real dExdx =
-          (ex[grid.index(i, j)] - ex[grid.periodic_index(i - 1, j)]) * inv_dx;
-      const Real dEydy =
-          (ey[grid.index(i, j)] - ey[grid.periodic_index(i, j - 1)]) * inv_dy;
-      const Real div = dExdx + dEydy;
+      Real div;
+      if (cylindrical) {
+        // Axisymmetric divergence (1/r) d(r E_r)/dr + d E_z/dz, using the same
+        // backward ring-flux radial operator the deposit's continuity is built
+        // on (E_r = ex maps to the radial face component, E_z = ey to axial).
+        // At i=0 the inner face radius r_at_edge(0)=0 zeroes the inside-axis
+        // term, the natural on-axis closure, so no neighbour past r=0 is read.
+        Real radial = Real{0};
+        if (i > 0) {
+          radial = (grid.r_at_edge(i) * ex[grid.index(i, j)] -
+                    grid.r_at_edge(i - 1) * ex[grid.index(i - 1, j)]) /
+                   (grid.r_at_cell_center(i) * grid.dx());
+        }
+        // z stays a plain (periodic-or-wall) axis; periodic_index wraps it
+        // legitimately and never crosses the radial axis.
+        const Real dEzdz =
+            (ey[grid.index(i, j)] - ey[grid.periodic_index(i, j - 1)]) * inv_dy;
+        div = radial + dEzdz;
+      } else {
+        // Cartesian Yee divergence at the cell corner: backward differences of
+        // the face-centred E components, wrapped periodically for neighbours.
+        const Real dExdx =
+            (ex[grid.index(i, j)] - ex[grid.periodic_index(i - 1, j)]) * inv_dx;
+        const Real dEydy =
+            (ey[grid.index(i, j)] - ey[grid.periodic_index(i, j - 1)]) * inv_dy;
+        div = dExdx + dEydy;
+      }
       sum_sq += div * div;
     }
   }

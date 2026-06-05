@@ -5,6 +5,7 @@
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/gather_common.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -126,24 +127,5 @@ void launch(const quasar::Grid2D& g, quasar::pic::ParticleSpecies& s,
 
 }  // namespace
 
-extern "C" void launch_pic_gather_push_cyl_shape1(const quasar::Grid2D& g,
-                                                  quasar::pic::ParticleSpecies& s,
-                                                  const quasar::YeeField2D<quasar::Real>& self,
-                                                  const quasar::YeeField2D<quasar::Real>& ext,
-                                                  int periodic_x, int periodic_y,
-                                                  quasar::Real dt, quasar_stream_t stream) {
-  launch<1>(g, s, self, ext, periodic_x != 0, periodic_y != 0, dt,
-            static_cast<hipStream_t>(stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
-}
-
-extern "C" void launch_pic_gather_push_cyl_shape2(const quasar::Grid2D& g,
-                                                  quasar::pic::ParticleSpecies& s,
-                                                  const quasar::YeeField2D<quasar::Real>& self,
-                                                  const quasar::YeeField2D<quasar::Real>& ext,
-                                                  int periodic_x, int periodic_y,
-                                                  quasar::Real dt, quasar_stream_t stream) {
-  launch<2>(g, s, self, ext, periodic_x != 0, periodic_y != 0, dt,
-            static_cast<hipStream_t>(stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
-}
+QUASAR_PIC_GATHER_PUSH_ABI(launch_pic_gather_push_cyl_shape1, 1)
+QUASAR_PIC_GATHER_PUSH_ABI(launch_pic_gather_push_cyl_shape2, 2)

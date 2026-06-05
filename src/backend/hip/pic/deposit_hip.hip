@@ -5,6 +5,7 @@
 #include "backend/hip/hip_check.hpp"
 #include "backend/hip/pic/deposit_common.hpp"
 #include "backend/hip/pic/launch.hpp"
+#include "backend/hip/pic/launch_helpers.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -179,30 +180,14 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
                      s.x(), s.y(), s.x_prev(), s.y_prev(),
                      s.vz(), s.weight(), s.alive(), j.jx.device_ptr(), j.jy.device_ptr(),
                      j.jz.device_ptr(), s.deposit_overflow());
-  QUASAR_HIP_CHECK(::hipGetLastError());
+  // The launch error is checked once in the extern-C wrapper below, matching the
+  // single-check convention of the fdtd_b / gather_push launchers.
 }
 
 }  // namespace
 
-extern "C" void launch_pic_deposit_shape1(const quasar::Grid2D& g,
-                                          const quasar::pic::ParticleSpecies& s,
-                                          quasar::JField2D<quasar::Real>& j,
-                                          quasar::Real dt, int periodic_x, int periodic_y,
-                                          quasar_stream_t stream) {
-  launch<1>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
-            static_cast<hipStream_t>(stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
-}
-
-extern "C" void launch_pic_deposit_shape2(const quasar::Grid2D& g,
-                                          const quasar::pic::ParticleSpecies& s,
-                                          quasar::JField2D<quasar::Real>& j,
-                                          quasar::Real dt, int periodic_x, int periodic_y,
-                                          quasar_stream_t stream) {
-  launch<2>(g, s, j, dt, periodic_x != 0, periodic_y != 0,
-            static_cast<hipStream_t>(stream));
-  QUASAR_HIP_CHECK(::hipGetLastError());
-}
+QUASAR_PIC_DEPOSIT_ABI(launch_pic_deposit_shape1, 1)
+QUASAR_PIC_DEPOSIT_ABI(launch_pic_deposit_shape2, 2)
 
 // Reads back the persistent deposit-overflow flag, clears it, and throws if any
 // overflow accumulated since the last check. Called by the solver on a cadence

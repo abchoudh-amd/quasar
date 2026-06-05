@@ -172,32 +172,35 @@ namespace quasar::pic {
 
 namespace {
 
-// Translates the deck's order/shape vocabulary to the registry names registered
-// just above. Kept adjacent to the QUASAR_REGISTER_* lines so a new scheme's
-// name appears in exactly one place: register it, then add its vocabulary entry
-// here. The driver constructor never builds these strings itself.
-// Geometry-aware: a cylindrical run resolves to the "_cyl_" scheme family
-// (yee_cyl_o2 only — order 4 is not provided for cylindrical), a cartesian run
-// keeps the existing names verbatim.
 bool is_cylindrical(const std::string& geometry) { return geometry == "cylindrical"; }
 
-std::string field_solver_name(const std::string& geometry, int fdtd_order) {
+// The full set of geometry-dependent choices the driver makes: the resolved
+// field-solver / pusher / deposit registry names and whether the geometry needs
+// the on-axis (x_lo, r=0) boundary override. Resolving all of them in one
+// function means a new geometry is a single branch added here — the driver below
+// never branches on the geometry string itself, so it stays free of the
+// per-geometry if/else ladder (the plugin-selection convention in CLAUDE.md).
+struct SchemeFamily {
+  bool on_axis_x_lo{false};
+  std::string field_solver{};
+  std::string pusher{};
+  std::string deposit{};
+};
+
+// Maps the deck's geometry/order/shape vocabulary to the registry names
+// registered just above. Kept adjacent to the QUASAR_REGISTER_* lines so a new
+// scheme's name appears in exactly one place: register it, then add its
+// vocabulary here. A cylindrical run resolves to the "_cyl_" family (yee_cyl_o2
+// only — order 4 is not provided for cylindrical) and flags the r=0 axis BC; a
+// cartesian run keeps the existing names verbatim and needs no axis override.
+SchemeFamily resolve_scheme_family(const std::string& geometry, int fdtd_order,
+                                   const std::string& shape) {
   if (is_cylindrical(geometry)) {
-    return "yee_cyl_o2";
+    return SchemeFamily{/*on_axis_x_lo=*/true, "yee_cyl_o2",
+                        "boris_cyl_" + shape, "esirkepov_cyl_" + shape};
   }
-  return "yee_o" + std::to_string(fdtd_order);
-}
-std::string pusher_name(const std::string& geometry, const std::string& shape) {
-  if (is_cylindrical(geometry)) {
-    return "boris_cyl_" + shape;
-  }
-  return "boris_" + shape;
-}
-std::string deposit_name(const std::string& geometry, const std::string& shape) {
-  if (is_cylindrical(geometry)) {
-    return "esirkepov_cyl_" + shape;
-  }
-  return "esirkepov_" + shape;
+  return SchemeFamily{/*on_axis_x_lo=*/false, "yee_o" + std::to_string(fdtd_order),
+                      "boris_" + shape, "esirkepov_" + shape};
 }
 
 }  // namespace
@@ -208,13 +211,25 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
     fields_{grid_},
     external_fields_{grid_},
     current_{grid_} {
+  // Resolve every geometry-dependent choice (scheme names + axis BC) in one
+  // place so the driver below never branches on the geometry string itself.
+  const auto family = resolve_scheme_family(cfg_.geometry, cfg_.fdtd_order, cfg_.shape);
+  // A cylindrical run is only implemented for the 2nd-order axis closure; reject
+  // an order-4 cylindrical config here (matching the deck-layer check) so a
+  // direct C++ caller cannot select the order-4 Courant factor for a scheme that
+  // runs at order 2.
+  if (family.on_axis_x_lo && cfg_.fdtd_order != 2) {
+    throw std::invalid_argument{
+        "EmPic2D3V: cylindrical geometry requires fdtd_order == 2 "
+        "(order-4 cylindrical axis closure is not implemented)"};
+  }
   // In cylindrical (r,z) mode the r=0 side (x_lo, side 0) is always the on-axis
   // boundary, regardless of what the deck set there: override both the field and
   // particle BC for that side to the registered "axis" condition. If the deck
   // had set a non-default x_lo, warn that it is being replaced (a default
   // periodic x_lo is the no-op normal case for a cylindrical deck and is
   // replaced silently). All other sides stay deck-driven.
-  if (is_cylindrical(cfg_.geometry)) {
+  if (family.on_axis_x_lo) {
     constexpr int x_lo = static_cast<int>(Side::x_lo);
     const boundary::BoundarySpec defaults{};
     if (cfg_.boundary.field[x_lo] != defaults.field[x_lo] &&
@@ -262,12 +277,9 @@ EmPic2D3V::EmPic2D3V(EmPicConfig cfg)
   // path as the BCs/filters). The vocabulary->name mapping lives next to the
   // registrations above, so the driver passes a resolved name through verbatim;
   // Registry::create throws on an unregistered name.
-  field_solver_ = Registry<numerics::IFieldSolver>::instance().create(
-      field_solver_name(cfg_.geometry, cfg_.fdtd_order));
-  pusher_ = Registry<numerics::IParticlePusher>::instance().create(
-      pusher_name(cfg_.geometry, cfg_.shape));
-  deposit_ = Registry<numerics::IDepositScheme>::instance().create(
-      deposit_name(cfg_.geometry, cfg_.shape));
+  field_solver_ = Registry<numerics::IFieldSolver>::instance().create(family.field_solver);
+  pusher_ = Registry<numerics::IParticlePusher>::instance().create(family.pusher);
+  deposit_ = Registry<numerics::IDepositScheme>::instance().create(family.deposit);
   // The deposit/gather wrap an axis only when both of its sides are periodic; a
   // wall on either side switches that axis to ghost-cell deposition + specular
   // fold-back (deposit) and ghost-clamped interpolation (gather), so neither
@@ -331,6 +343,13 @@ void EmPic2D3V::apply_particle_bcs(ParticleSpecies& s) {
 }
 
 void EmPic2D3V::step(Real dt) {
+  // step() is the low-level primitive and does NOT enforce the CFL limit: it is
+  // the unit deposit/particle tests use with a deliberately over-CFL dt, and the
+  // particle path has its own "dt too big" guard (the deposit-overflow flag
+  // drained by finalize()). A driver that loops step() for field evolution owns
+  // the field-stability check — use advance() (which rejects an over-CFL dt) or
+  // query cfl_limit() first. The deck-driven Python run loop already gets a
+  // CFL-safe dt from prepare_run.
   // Clear the current accumulators asynchronously on the default stream. The
   // deposit and every downstream kernel also run on the default stream, so the
   // clear is correctly ordered before them without a host-side block (the old
@@ -403,19 +422,31 @@ void EmPic2D3V::advance(Real t_end, Real dt) {
   if (dt <= Real{0}) {
     throw std::invalid_argument{"EmPic2D3V::advance: dt must be positive"};
   }
-  // The solver integrates in internal units (c = 1); a dt above the Yee CFL
-  // limit makes the FDTD update diverge, so reject it rather than stepping into
-  // an unstable run.
-  const Real cfl = cfl_dt(grid_, cfg_.fdtd_order, Real{1});
-  if (dt > cfl) {
-    throw std::invalid_argument{
-        "EmPic2D3V::advance: dt exceeds the CFL stability limit for this grid "
-        "and fdtd_order"};
-  }
+  check_cfl(dt);
   for (Real t = 0; t < t_end; t += dt) {
     step(dt);
   }
   finalize();
+}
+
+Real EmPic2D3V::cfl_limit() const {
+  // The solver integrates in internal units (c = 1); the stable limit follows
+  // the scheme that actually runs. Cylindrical always runs the 2nd-order axis
+  // closure (the constructor rejects order 4), so use the cylindrical limit
+  // there rather than trusting cfg_.fdtd_order.
+  if (is_cylindrical(cfg_.geometry)) {
+    return cyl_cfl_dt(grid_, Real{1});
+  }
+  return cfl_dt(grid_, cfg_.fdtd_order, Real{1});
+}
+
+void EmPic2D3V::check_cfl(Real dt) const {
+  // A dt above the Yee CFL limit makes the FDTD update diverge exponentially, so
+  // reject it rather than stepping into an unstable run.
+  if (dt > cfl_limit()) {
+    throw std::invalid_argument{
+        "EmPic2D3V: dt exceeds the CFL stability limit for this grid and scheme"};
+  }
 }
 
 }  // namespace quasar::pic

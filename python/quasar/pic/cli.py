@@ -53,23 +53,14 @@ def _cfl_limit_internal(domain, units: Units, fdtd_order: int = 2) -> float:
     return cfl_limit(dx, dy, c=1.0, fdtd_order=fdtd_order)
 
 
-def _cyl_r_min_internal(domain, units: Units, dr: float) -> float:
-    # Inner radius in internal length units; floor to half a cell when the domain
-    # touches the axis (origin 0) so near-axis logic never divides by r_min == 0.
-    r_min = units.length(domain.origin_x_m)
-    if r_min <= 0.0:
-        return 0.5 * dr
-    return r_min
-
-
 def _cyl_cfl_dt_internal(domain, units: Units) -> float:
     dr, dz = _internal_spacing(domain, units)
-    return cyl_cfl_dt(dr, dz, _cyl_r_min_internal(domain, units, dr), c=1.0)
+    return cyl_cfl_dt(dr, dz, c=1.0)
 
 
 def _cyl_cfl_limit_internal(domain, units: Units) -> float:
     dr, dz = _internal_spacing(domain, units)
-    return cyl_cfl_limit(dr, dz, _cyl_r_min_internal(domain, units, dr), c=1.0)
+    return cyl_cfl_limit(dr, dz, c=1.0)
 
 
 def _make_solver(deck: pic_io.PicDeck, units: Units):

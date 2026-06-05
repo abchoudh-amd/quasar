@@ -469,6 +469,21 @@ class PicDeck:
             if bc not in allowed_fbc:
                 raise ValueError(
                     f"boundary.field[{i}] = {bc!r} must be one of {sorted(allowed_fbc)}")
+        # The on-axis 'axis' condition only applies to the inner-radius side
+        # (x_lo, index 0); the C++ BC no-ops on any other side, so selecting it
+        # elsewhere is silent misuse. Reject it rather than letting it do nothing.
+        # (x_lo is auto-wired to 'axis' for cylindrical decks; setting it there
+        # explicitly is still allowed.)
+        for i, bc in enumerate(self.boundary.particle):
+            if bc == "axis" and i != 0:
+                raise ValueError(
+                    f"boundary.particle[{i}] = 'axis' is only valid on x_lo "
+                    "(the inner-radius / r=0 side, index 0)")
+        for i, bc in enumerate(self.boundary.field):
+            if bc == "axis" and i != 0:
+                raise ValueError(
+                    f"boundary.field[{i}] = 'axis' is only valid on x_lo "
+                    "(the inner-radius / r=0 side, index 0)")
 
 
 def _parse_domain(d: dict) -> Domain:

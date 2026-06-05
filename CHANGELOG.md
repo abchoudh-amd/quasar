@@ -57,6 +57,21 @@ interfaces may still change between entries.
   six-field dict every snapshot.
 
 ### Fixed
+- PIC: `total_em_energy` and `gauss_residual` diagnostics now use the
+  axisymmetric metric for cylindrical `(r, z)` runs — the field energy integrates
+  over the ring volume `2 pi r dr dz` (`Grid2D::cell_volume`) instead of a flat
+  `dx dy`, and the Gauss residual uses the `(1/r) d(r E_r)/dr + d E_z/dz`
+  divergence with the natural `r = 0` closure. Both previously reported
+  physically wrong values for a cylindrical run (axis cells over-weighted,
+  large-`r` cells under-weighted).
+- PIC: the explicit-`dt` CFL guard in `EmPic2D3V` now keys off the scheme that
+  actually runs (the 2nd-order cylindrical limit for cylindrical geometry) rather
+  than `fdtd_order`, and `step()` validates `dt` once per distinct value so a
+  driver looping over `step()` directly can no longer silently run an over-CFL
+  (unstable) step. A cylindrical config with `fdtd_order != 2` is now rejected at
+  construction.
+- PIC: the `axis` boundary name is now rejected on any side other than `x_lo`
+  (the `r = 0` inner radius) at deck validation instead of silently doing nothing.
 - PIC: quiet-start macro-particle weighting no longer biases the initial number
   density when `n_particles` is not a perfect square. The block layout uses
   `side = ceil(sqrt(N))` points per axis and truncates to `N`; the weight is now

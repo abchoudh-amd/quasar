@@ -23,6 +23,7 @@ from quasar.pic.io import (
     PicDeck,
     Species,
     SpeciesInitial,
+    Time,
 )
 
 
@@ -435,6 +436,43 @@ class ApplyExternalFieldTests(unittest.TestCase):
         solver = _ExternalRecordingSolver()
         _apply_external_field(solver, deck, Units(deck))
         self.assertEqual(solver.plane, "xz")
+
+
+class CartesianCflGuardTests(unittest.TestCase):
+    """The Cartesian explicit-dt over-CFL rejection in prepare_run mirrors the
+    cylindrical guard (tested in test_pic_io_cylindrical.py). Both branches are
+    near-identical, but only the cylindrical one had coverage; pin the Cartesian
+    (the common) path too. These build the C++ solver, so skip without a device."""
+
+    def _cartesian_deck(self, dt_s):
+        return PicDeck(
+            domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            species=[Species(name="e", charge_C=-1.0, mass_kg=1.0,
+                             n_particles=64, initial=SpeciesInitial())],
+            time=Time(dt_s=dt_s, steps=4),
+            units="normalized",
+        )
+
+    def test_explicit_dt_above_cartesian_cfl_rejected(self):
+        from quasar.pic.cli import prepare_run
+        deck = self._cartesian_deck(1.0)  # 1 s vs a sub-second internal limit
+        deck.validate()
+        try:
+            with self.assertRaisesRegex(ValueError, r"CFL stability limit"):
+                prepare_run(deck, Units(deck))
+        except (ImportError, RuntimeError) as exc:
+            self.skipTest(f"solver build unavailable (no _core/device): {exc}")
+
+    def test_auto_dt_within_cartesian_cfl_limit(self):
+        from quasar.pic.cli import _cfl_limit_internal, prepare_run
+        deck = self._cartesian_deck("auto")
+        deck.validate()
+        try:
+            _solver, _idx, dt, _dt_si = prepare_run(deck, Units(deck))
+        except (ImportError, RuntimeError) as exc:
+            self.skipTest(f"solver build unavailable (no _core/device): {exc}")
+        self.assertLessEqual(dt, _cfl_limit_internal(deck.domain, Units(deck), 2))
 
 
 if __name__ == "__main__":

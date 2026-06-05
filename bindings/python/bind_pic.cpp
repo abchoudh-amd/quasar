@@ -375,12 +375,14 @@ void bind_pic(py::module_& m) {
   pic.def("alive_count", &quasar::pic::alive_count, py::arg("species"));
   pic.def("total_em_energy",
           [](quasar::pic::EmPic2D3V& self) {
-            return quasar::pic::total_em_energy(self.fields(), self.grid());
+            const bool cyl = self.config().geometry == "cylindrical";
+            return quasar::pic::total_em_energy(self.fields(), self.grid(), cyl);
           },
           py::arg("solver"));
   pic.def("gauss_residual",
           [](quasar::pic::EmPic2D3V& self) {
-            return quasar::pic::gauss_residual(self.fields(), self.current());
+            const bool cyl = self.config().geometry == "cylindrical";
+            return quasar::pic::gauss_residual(self.fields(), self.current(), cyl);
           },
           py::arg("solver"));
 }

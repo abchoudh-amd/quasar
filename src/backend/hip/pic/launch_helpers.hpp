@@ -47,3 +47,40 @@ inline void launch_along_side(const quasar::Grid2D& g, int side,
 }
 
 }  // namespace quasar::backend::pic
+
+// -- Shape-templated extern-C ABI thunks -------------------------------------
+//
+// The deposit and gather+push backends each expose two extern-C entry points
+// (shape1 / shape2) that differ only by the shape-order template argument they
+// pass to the file-local `launch<ShapeOrder>` plus the standard launch-error
+// check. The Cartesian and cylindrical variants repeated this boilerplate
+// four-fold; these macros emit the thunk so each .hip writes only its kernel +
+// `launch<>` body and two one-line expansions. `launch` resolves to the
+// anonymous-namespace function in the expanding TU (textual expansion), so the
+// Cartesian and cylindrical files each bind to their own kernel.
+
+// Deposit ABI: (grid, const species, JField, dt, periodic_x, periodic_y, stream).
+#define QUASAR_PIC_DEPOSIT_ABI(fn_name, shape_order)                            \
+  extern "C" void fn_name(const quasar::Grid2D& g,                             \
+                          const quasar::pic::ParticleSpecies& s,              \
+                          quasar::JField2D<quasar::Real>& j, quasar::Real dt,  \
+                          int periodic_x, int periodic_y,                      \
+                          quasar_stream_t stream) {                            \
+    launch<shape_order>(g, s, j, dt, periodic_x != 0, periodic_y != 0,         \
+                        static_cast<hipStream_t>(stream));                     \
+    QUASAR_HIP_CHECK(::hipGetLastError());                                     \
+  }
+
+// Gather+push ABI: (grid, species, self field, ext field, periodic_x,
+// periodic_y, dt, stream).
+#define QUASAR_PIC_GATHER_PUSH_ABI(fn_name, shape_order)                        \
+  extern "C" void fn_name(const quasar::Grid2D& g,                             \
+                          quasar::pic::ParticleSpecies& s,                    \
+                          const quasar::YeeField2D<quasar::Real>& self,        \
+                          const quasar::YeeField2D<quasar::Real>& ext,         \
+                          int periodic_x, int periodic_y, quasar::Real dt,     \
+                          quasar_stream_t stream) {                            \
+    launch<shape_order>(g, s, self, ext, periodic_x != 0, periodic_y != 0, dt, \
+                        static_cast<hipStream_t>(stream));                     \
+    QUASAR_HIP_CHECK(::hipGetLastError());                                     \
+  }

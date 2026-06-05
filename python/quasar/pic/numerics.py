@@ -102,25 +102,20 @@ def cfl_dt(dx: float, dy: float, c: float = C_LIGHT, fdtd_order: int = 2,
     return safety * cfl_limit(dx, dy, c, fdtd_order)
 
 
-def cyl_cfl_limit(dr: float, dz: float, r_min: float, c: float = C_LIGHT) -> float:
+def cyl_cfl_limit(dr: float, dz: float, c: float = C_LIGHT) -> float:
     """The axisymmetric (r-z, m=0) Yee CFL stability limit.
 
-    For the m=0 azimuthal mode the curl operator adds no term tighter than the
-    planar Yee bound, so the limit takes the same form as the Cartesian 2nd-order
-    case with (dx, dy) -> (dr, dz)::
-
-        1 / (c * sqrt(1/dr^2 + 1/dz^2))
-
-    ``r_min`` (the minimum cell-center radius) is accepted for
-    forward-compatibility with a near-axis tightening factor and is currently
-    only used to guard against a degenerate ``r_min == 0`` (no division by it).
+    For the m=0 azimuthal mode the conservative (volume-weighted) curl operator
+    is mimetic: the small on-axis cell volume cancels the apparent 1/r
+    amplification, so the spectral radius — and hence the stability bound — is
+    exactly the planar 2nd-order Yee limit with (dx, dy) -> (dr, dz). This is the
+    geometry-named selector (mirroring C++ ``quasar::cyl_cfl_dt``); it delegates
+    to :func:`cfl_limit` so the formula lives in one place.
     """
-    inv_r2 = 1.0 / (dr * dr)
-    inv_z2 = 1.0 / (dz * dz)
-    return 1.0 / (c * math.sqrt(inv_r2 + inv_z2))
+    return cfl_limit(dr, dz, c, fdtd_order=2)
 
 
-def cyl_cfl_dt(dr: float, dz: float, r_min: float, c: float = C_LIGHT,
+def cyl_cfl_dt(dr: float, dz: float, c: float = C_LIGHT,
                safety: float = 0.5) -> float:
     """A safe axisymmetric timestep: ``cyl_cfl_limit`` scaled by ``safety``."""
-    return safety * cyl_cfl_limit(dr, dz, r_min, c)
+    return safety * cyl_cfl_limit(dr, dz, c)
