@@ -7,6 +7,29 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
+- MHD: static background magnetic-field split `B = B0 + b` — runs can carry a
+  fixed, curl-free external field `B0` while the solver evolves only the
+  perturbation `b`. Enabled via a `background_field:` deck block (`enabled`,
+  `profile`, uniform `bx0/by0/bz0`, or a `file:` npz). `B0` comes from a new
+  pluggable profile kind `IMhdBackgroundProfile` (built-in `"uniform"`, selected
+  by registry name) or an `.npz` file; a file-loaded `B0` is rejected unless it is
+  discretely divergence-free. The total field `B0 + b` enters the fluxes, total
+  magnetic pressure, conserved energy, and the fast-magnetosonic CFL speed (so a
+  nonzero `B0` tightens the stable timestep), while the stored conserved energy
+  stays the perturbation-only `0.5|b|^2` and constrained transport evolves only
+  `b` (`B0` is never updated, so `div(B0+b) = div(b)`). Exposed through the
+  `quasar.mhd` CLI/deck, the `_core.mhd` bindings (`MhdBackgroundSpec`,
+  `MhdSolver2D.seed_background`/`has_background`,
+  `registered_mhd_background_profiles`), and a new `examples/mhd_guide_field`
+  guide-field case.
+- MHD: one-sided non-periodic boundary stencils — at `outflow`/`reflecting`
+  boundaries the boundary-face reconstruction uses an interior-biased one-sided
+  slope (dropping dependence on the ghost gradient) while still reading the
+  ghost values that impose the wall closure; periodic boundaries keep the
+  two-sided wrap stencil unchanged. The conservative flux difference is
+  unchanged, so discrete conservation still telescopes. The per-side periodic
+  classification is owned by the boundary axis
+  (`quasar::boundary::mhd_boundary_is_periodic`).
 - PIC: axisymmetric cylindrical `(r, z)` mode (`geometry: cylindrical`) — a full
   `m = 0` EM-PIC scheme family (`yee_cyl_o2`, `boris_cyl_*`, `esirkepov_cyl_*`)
   with `1/r` / `(1/r) d(r·)/dr` Yee curls, a finite-volume on-axis closure at

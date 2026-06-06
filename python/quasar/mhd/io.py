@@ -139,6 +139,27 @@ class BoundaryConfig:
 
 
 @dataclass
+class BackgroundConfig:
+    """Static background magnetic field B0 for the field-split form B = B0 + b.
+
+    Disabled by default (``enabled=False`` => the solver runs the zero-B0 fast
+    path, bit-identical to the no-background solver). ``profile`` is a registry
+    name validated against the live C++ registry
+    (``_core.mhd.registered_mhd_background_profiles()``); ``bx0/by0/bz0`` are the
+    uniform-vector parameters consumed when ``profile == "uniform"`` and no
+    ``file`` is given. ``params`` is a free dict for future named profiles.
+    ``file`` (optional) names an npz holding the staggered B0 arrays directly.
+    """
+    enabled: bool = False
+    profile: str = "uniform"
+    bx0: float = 0.0
+    by0: float = 0.0
+    bz0: float = 0.0
+    params: dict = field(default_factory=dict)
+    file: Union[str, None] = None
+
+
+@dataclass
 class MhdDeck:
     domain: Domain
     numerics: Numerics = field(default_factory=Numerics)
@@ -146,9 +167,15 @@ class MhdDeck:
     time: Time = field(default_factory=Time)
     diagnostics: Diagnostics = field(default_factory=Diagnostics)
     boundary: BoundaryConfig = field(default_factory=BoundaryConfig)
+    background: BackgroundConfig = field(default_factory=BackgroundConfig)
     units: str = "normalized"
     geometry: str = "cartesian"
     raw: dict = field(default_factory=dict)
+    # Directory the deck was loaded from, set by ``load()``; used to resolve and
+    # confine a ``background_field.file`` path. None when the deck was built by
+    # ``parse()`` alone (no source file); a file-mode background then resolves
+    # relative to the current working directory.
+    source_dir: Union[Path, None] = None
 
     def validate(self) -> None:
         if self.units not in ("SI", "normalized"):
@@ -161,6 +188,7 @@ class MhdDeck:
         self._validate_time()
         self._validate_diagnostics()
         self._validate_boundary()
+        self._validate_background()
         if self.geometry == "cylindrical":
             self._validate_cylindrical()
 
@@ -249,6 +277,43 @@ class MhdDeck:
                 raise ValueError(
                     f"boundary.field[{i}] = {bc!r} must be one of "
                     f"{sorted(allowed_field)}")
+
+    def _validate_background(self) -> None:
+        bg = self.background
+        if not bg.enabled:
+            return
+        # The profile must be a live registered background-field profile so a
+        # newly-registered profile needs no Python edit (mirrors the numerics
+        # scheme validation).
+        _check_registered(bg.profile,
+                          _core.mhd.registered_mhd_background_profiles(),
+                          "background_field.profile")
+        if not isinstance(bg.params, dict):
+            raise ValueError("background_field.params must be a mapping")
+        # Uniform-vector parameters must be finite. (They are still parsed/stored
+        # for a non-uniform profile, but only consumed by the uniform profile.)
+        _require_finite(bg.bx0, "background_field.bx0")
+        _require_finite(bg.by0, "background_field.by0")
+        _require_finite(bg.bz0, "background_field.bz0")
+        if bg.file is not None and not str(bg.file).strip():
+            raise ValueError("background_field.file must be a non-empty path")
+        # An ABSOLUTE file path's existence is knowable now (independent of the
+        # deck directory), so reject an enabled background whose only source is a
+        # non-existent absolute file at parse time -- an enabled block must name a
+        # usable source. A RELATIVE file is resolved against the deck directory,
+        # which is only known after load(); its existence + array-shape + div-free
+        # checks happen in build_background_field(deck, nghost) once the solver's
+        # ghost width and storage layout are available.
+        if bg.file is not None:
+            _file_path = Path(str(bg.file))
+            if _file_path.is_absolute():
+                try:
+                    _exists = _file_path.is_file()
+                except OSError:
+                    _exists = False  # unreadable / inaccessible path == not usable
+                if not _exists:
+                    raise ValueError(
+                        f"background_field.file {bg.file!r} does not exist")
 
     def _validate_cylindrical(self) -> None:
         # The on-axis (r=0) closure assumes the radial domain starts exactly at
@@ -353,6 +418,24 @@ def _parse_boundary(d: dict | None) -> BoundaryConfig:
     )
 
 
+def _parse_background(d: dict | None) -> BackgroundConfig:
+    # An absent ``background_field`` block leaves the static B0 disabled (the
+    # solver runs its zero-B0 fast path). A present block defaults profile to
+    # "uniform" and every uniform-vector component to 0.
+    if d is None:
+        return BackgroundConfig()
+    file_raw = d.get("file")
+    return BackgroundConfig(
+        enabled=bool(d.get("enabled", False)),
+        profile=str(d.get("profile", "uniform")),
+        bx0=float(d.get("bx0", 0.0)),
+        by0=float(d.get("by0", 0.0)),
+        bz0=float(d.get("bz0", 0.0)),
+        params=dict(d.get("params", {}) or {}),
+        file=None if file_raw is None else str(file_raw),
+    )
+
+
 def parse(data: dict) -> MhdDeck:
     deck = MhdDeck(
         domain=_parse_domain(_require(data, "domain", "deck")),
@@ -361,6 +444,7 @@ def parse(data: dict) -> MhdDeck:
         time=_parse_time(data.get("time")),
         diagnostics=_parse_diagnostics(data.get("diagnostics")),
         boundary=_parse_boundary(data.get("boundary")),
+        background=_parse_background(data.get("background_field")),
         units=str(data.get("units", "normalized")),
         geometry=str(data.get("geometry", "cartesian")),
         raw=data,
@@ -374,7 +458,11 @@ def load(path: Union[str, Path]) -> MhdDeck:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict):
         raise ValueError(f"{path}: top-level YAML must be a mapping")
-    return parse(data)
+    deck = parse(data)
+    # Record the deck's directory so a background_field.file path resolves and is
+    # confined relative to the deck (mirrors the CLI output-path confinement).
+    deck.source_dir = Path(path).resolve().parent
+    return deck
 
 
 # =============================================================================
@@ -450,6 +538,182 @@ def build_initial_state(deck: MhdDeck, nghost: int) -> dict:
     }
     builder = builders[deck.initial.type]
     return builder(deck, nghost)
+
+
+# =============================================================================
+# Static background magnetic field B0 (field-split form B = B0 + b)
+# =============================================================================
+
+# Round-off tolerance scale for the discrete divergence-free check on a seeded
+# background field. The threshold is `_DIVB_TOL * max(1, |B0|_inf / min(dx,dy))`
+# so a uniform/constant field passes trivially and a malformed (div-B != 0) file
+# is rejected.
+_DIVB_TOL = 1.0e-9
+
+
+def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
+    """Build the static background field B0 for ``deck.background``.
+
+    Returns ``{"b0x": buf, "b0y": buf, "b0z": buf}`` of 1-D ghost-padded host
+    buffers (length ``(nx+2g)*(ny+2g)``, row-major like the IC builders), ready
+    for ``solver.seed_background(component, buf)``; or ``None`` when the
+    background is disabled (the solver then runs its zero-B0 fast path).
+
+    Three construction modes (mutually selected by the deck):
+
+    * **uniform** (``profile == "uniform"``, no ``file``): constant components
+      ``b0x == bx0``, ``b0y == by0``, ``b0z == bz0`` everywhere.
+    * **profile** (named ``profile``, no ``file``): sample the analytic profile
+      over the padded staggered meshes from :func:`_padded_grids` (b0x at the
+      left face ``xf``, b0y at the bottom face ``yf``, b0z at cell centers).
+      Only "uniform" is registered today (so this reduces to the constants), but
+      the sampling is written generically so a future profile slots in.
+    * **file** (``file:`` given): ``np.load`` the npz and read arrays ``b0x``,
+      ``b0y``, ``b0z`` each shaped ``(ny+2g, nx+2g)`` or flat ``(storage,)``;
+      reshape/flatten to the 1-D storage layout.
+
+    In ALL modes the interior discrete face-divergence of the assembled field is
+    checked and a non-divergence-free background raises ``ValueError``.
+    """
+    bg = deck.background
+    if not bg.enabled:
+        return None
+
+    nx, ny = deck.domain.nx, deck.domain.ny
+    g = nghost
+    pitch = nx + 2 * g
+    height = ny + 2 * g
+    storage = pitch * height
+    shape = (height, pitch)
+    dx = deck.domain.lx_m / nx
+    dy = deck.domain.ly_m / ny
+
+    if bg.file is not None:
+        b0x, b0y, b0z = _background_from_file(bg.file, deck.source_dir, shape,
+                                              storage)
+    else:
+        b0x, b0y, b0z = _background_from_profile(deck, nghost, shape)
+
+    # Divergence-free check (interior face divergence). Scale the tolerance by the
+    # field magnitude so it survives a large but smooth uniform field while still
+    # rejecting a genuinely non-solenoidal seed.
+    inv_dmin = 1.0 / min(dx, dy)
+    scale = max(1.0, float(np.max(np.abs(b0x)) + np.max(np.abs(b0y))) * inv_dmin)
+    divb = mhd_num.background_divergence_linf(b0x, b0y, nx, ny, g, dx, dy)
+    if divb > _DIVB_TOL * scale:
+        raise ValueError(
+            f"background_field is not divergence-free: max |div B0| = {divb:.3e} "
+            f"exceeds tolerance {_DIVB_TOL * scale:.3e}. A uniform or staggered "
+            f"solenoidal field is required.")
+
+    # Uniformity check. The static field-split residual uses a conservative-flux-
+    # only bookkeeping (the HLLD energy back-correction f_E_pert = f_E_tot - B0.F_B
+    # and the total-field Maxwell stress). That is exact ONLY for a spatially
+    # CONSTANT B0: a non-uniform background carries a magnetic-pressure gradient
+    # grad(0.5|B0|^2) and tension, plus a grad(B0).F_b energy term, which would
+    # need explicit static source terms in the momentum/energy residual to stay
+    # conservative. Those source terms are not implemented, so a non-uniform B0
+    # would silently break energy/momentum conservation. Reject it here with a
+    # clear error rather than run an unconservative split. (Uniform guide fields,
+    # the supported case, pass trivially.)
+    for name, comp in (("b0x", b0x), ("b0y", b0y), ("b0z", b0z)):
+        cmin = float(np.min(comp))
+        cmax = float(np.max(comp))
+        spread = cmax - cmin
+        tol = 1.0e-12 * max(1.0, abs(cmin), abs(cmax))
+        if spread > tol:
+            raise ValueError(
+                f"background_field component {name} is not spatially uniform "
+                f"(range [{cmin:.3e}, {cmax:.3e}]). Only a spatially-uniform "
+                f"background field is supported: the field-split solver carries no "
+                f"source terms for a non-uniform B0, so a varying background would "
+                f"violate energy/momentum conservation. Supply a constant vector "
+                f"(bx0/by0/bz0) or a file whose arrays are constant per component.")
+
+    return {"b0x": b0x.reshape(-1), "b0y": b0y.reshape(-1), "b0z": b0z.reshape(-1)}
+
+
+def _background_from_profile(deck: MhdDeck, nghost: int, shape):
+    """Sample the analytic background profile over the padded staggered meshes.
+
+    Only the "uniform" profile is registered today, so this reduces to constant
+    components (b0x==bx0, b0y==by0, b0z==bz0). The face/cell mesh plumbing is
+    written generically so a future spatially-varying profile (b0x at xf, b0y at
+    yf, b0z at cell centers) slots in without changing the call site.
+    """
+    bg = deck.background
+    xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
+    _ = (xc, yc, xf, yf)  # staggered meshes for a future spatial profile.
+    if bg.profile == "uniform":
+        b0x = np.full(shape, float(bg.bx0))
+        b0y = np.full(shape, float(bg.by0))
+        b0z = np.full(shape, float(bg.bz0))
+        return b0x, b0y, b0z
+    # The profile name validated against the live C++ registry, but only "uniform"
+    # has a Python-side analytic sampler today. A different registered profile has
+    # no host sampler to fill the staggered B0 buffers, so fail loudly rather than
+    # silently substitute a constant field (which would misrepresent the requested
+    # profile). A future spatial profile adds its sampler here using the xf/yf/xc
+    # meshes above.
+    raise NotImplementedError(
+        f"background_field.profile {bg.profile!r} is registered but has no "
+        f"Python-side sampler yet; only 'uniform' is supported from the deck. "
+        f"Supply uniform components (bx0/by0/bz0) or load B0 from a file.")
+
+
+def _background_from_file(file_rel: str, source_dir, shape, storage):
+    """Load b0x/b0y/b0z from an npz.
+
+    Path resolution: a RELATIVE ``file`` is resolved against (and confined to) the
+    deck's directory ``source_dir`` when the deck was loaded from disk -- this is
+    the security confinement for decks that name a sibling B0 file. An ABSOLUTE
+    ``file`` is honored as given (a deck/program that supplies a full path is
+    trusted to point where it means to; confinement only constrains relative
+    names). When ``source_dir`` is unknown (a deck constructed in memory rather
+    than loaded), a relative path resolves against the current directory.
+
+    Each array must be either the 2-D ghost-padded shape ``(ny+2g, nx+2g)`` or
+    flat ``(storage,)``; anything else is a ``ValueError``. Returns three 2-D
+    ``shape`` arrays.
+    """
+    file_path = Path(file_rel)
+    if file_path.is_absolute():
+        path = file_path.resolve()
+    else:
+        base = Path(source_dir).resolve() if source_dir is not None else Path.cwd()
+        path = (base / file_rel).resolve()
+        if not path.is_relative_to(base):
+            raise ValueError(
+                f"background_field.file {file_rel!r} escapes the deck "
+                f"directory {base}")
+    if not path.is_file():
+        raise ValueError(f"background_field.file {file_rel!r} not found at {path}")
+    try:
+        loaded = np.load(path)
+    except Exception as exc:  # malformed / non-npz file
+        raise ValueError(
+            f"background_field.file {file_rel!r} could not be read as an npz: "
+            f"{exc}") from None
+    out = []
+    for name in ("b0x", "b0y", "b0z"):
+        if name not in loaded:
+            raise ValueError(
+                f"background_field.file {file_rel!r} is missing array {name!r} "
+                f"(needs b0x, b0y, b0z)")
+        arr = np.asarray(loaded[name], dtype=np.float64)
+        if arr.shape == shape:
+            out.append(arr.copy())
+        elif arr.shape == (storage,):
+            out.append(arr.reshape(shape))
+        else:
+            raise ValueError(
+                f"background_field.file {file_rel!r} array {name!r} has shape "
+                f"{arr.shape}; expected {shape} or ({storage},)")
+    if not np.all(np.isfinite(out[0])) or not np.all(np.isfinite(out[1])) \
+            or not np.all(np.isfinite(out[2])):
+        raise ValueError(
+            f"background_field.file {file_rel!r} contains non-finite values")
+    return out[0], out[1], out[2]
 
 
 def _set_primitive(state: dict, rho, vx, vy, vz, p, bx, by, bz, gamma) -> None:

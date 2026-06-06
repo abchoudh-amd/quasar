@@ -29,6 +29,7 @@ ships two physics vertical slices:
    user-guide/coil_design
    user-guide/pic_simulation
    user-guide/pic_cylindrical
+   user-guide/mhd_background_field
 
 .. toctree::
    :maxdepth: 2
@@ -41,6 +42,7 @@ ships two physics vertical slices:
    dev-guide/adding_a_field_solver
    dev-guide/adding_a_deposit_scheme
    dev-guide/adding_a_filter
+   dev-guide/adding_a_background_field
 
 Indices and tables
 ------------------

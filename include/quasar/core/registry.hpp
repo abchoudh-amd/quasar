@@ -117,3 +117,6 @@ class Registry {
 
 #define QUASAR_REGISTER_MHD_FIELD_BOUNDARY(Name, Class) \
   QUASAR_REGISTRY_REGISTER(::quasar::boundary::IMhdFieldBoundary, Name, Class)
+
+#define QUASAR_REGISTER_MHD_BACKGROUND_PROFILE(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IMhdBackgroundProfile, Name, Class)

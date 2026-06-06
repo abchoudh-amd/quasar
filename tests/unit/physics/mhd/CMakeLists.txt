@@ -3,6 +3,8 @@ set(_quasar_mhd_tests
   test_mhd_divergence_free
   test_mhd_cylindrical_source
   test_mhd_scheme_registry_linkage
+  test_mhd_background_field
+  test_mhd_onesided_boundary
 )
 
 foreach(_test_name IN LISTS _quasar_mhd_tests)

@@ -12,6 +12,24 @@
 // not ported to device -- the host MP limiters are not exposed as
 // QUASAR_HOST_DEVICE helpers. All scheme_order values resolve to this 2nd-order
 // MUSCL path on device; the host registry keeps the full high-order schemes.
+//
+// FIELD-SPLIT + ONE-SIDED BOUNDARY EXTENSIONS (B = B0 + b):
+//   * The stored state / reconstructed output carry the PERTURBATION b
+//     (u.bx/by/bz). The split EOS (mhd_state.hpp) keeps the energy as the
+//     perturbation-only 0.5|b|^2, so the gas pressure has NO B0 cross term --
+//     to_primitive()/to_conserved() on the perturbation field remain an exact
+//     inverse pair and the MUSCL limiter still acts on the perturbation
+//     primitives. This kernel computes no sound speed / B0-dependent pressure,
+//     so the B0 buffers are threaded through the ABI (and a per-cell
+//     MhdBackground is sampled) but are mathematically inert here; the wave
+//     speeds that DO see the total field live in the Riemann kernel. With b0
+//     inactive this is bit-identical to the original body.
+//   * `flags` (BoundaryFlags4, [x_lo,x_hi,y_lo,y_hi]) marks non-periodic sides.
+//     At a non-periodic boundary cell along `dir` the limited slope drops the
+//     EXTERIOR (ghost) neighbor so the reconstructed slope does not depend on
+//     the ghost GRADIENT (the ghost VALUE is still read for the wall closure).
+//     On periodic sides (flag 0) the two-sided MUSCL slope is used UNCHANGED, so
+//     an all-zero flags set is bit-identical to the original body.
 
 #include "quasar/core/grid.hpp"
 #include "quasar/numerics/mhd_state.hpp"
@@ -55,27 +73,55 @@ __device__ inline MhdState load_state(const double* rho, const double* mx,
   return s;
 }
 
-// Componentwise minmod-limited interface primitive: given the primitive at the
-// cell (wc), its lower neighbor (wm) and upper neighbor (wp), return the value
+// One-sided slope selector. `drop` encodes which neighbor to discard at a
+// non-periodic boundary so the limited slope never depends on a ghost GRADIENT:
+//   drop =  0  -> two-sided minmod(back, fwd)   (interior / periodic, UNCHANGED)
+//   drop = -1  -> drop the LOWER (exterior) neighbor -> forward slope only
+//   drop = +1  -> drop the UPPER (exterior) neighbor -> backward slope only
+// back = wc - wm (backward difference), fwd = wp - wc (forward difference).
+__device__ inline Real limited_slope(Real back, Real fwd, int drop) {
+  if (drop < 0) return fwd;   // lower neighbor exterior -> interior-biased fwd
+  if (drop > 0) return back;  // upper neighbor exterior -> interior-biased back
+  return minmod(back, fwd);
+}
+
+// Componentwise limited interface primitive: given the primitive at the cell
+// (wc), its lower neighbor (wm) and upper neighbor (wp), return the value
 // extrapolated to the +side (sign=+1, right face of the cell) or -side
-// (sign=-1, left face of the cell): w +/- 0.5 * minmod(wc-wm, wp-wc).
+// (sign=-1, left face of the cell): wc +/- 0.5 * slope, where `slope` is the
+// (possibly one-sided) limited slope selected by `drop`.
 __device__ inline MhdPrim muscl_face(const MhdPrim& wm, const MhdPrim& wc,
-                                     const MhdPrim& wp, Real sign) {
+                                     const MhdPrim& wp, Real sign, int drop) {
   const Real h = Real{0.5} * sign;
   MhdPrim f;
-  f.rho = wc.rho + h * minmod(wc.rho - wm.rho, wp.rho - wc.rho);
-  f.vx  = wc.vx  + h * minmod(wc.vx  - wm.vx,  wp.vx  - wc.vx);
-  f.vy  = wc.vy  + h * minmod(wc.vy  - wm.vy,  wp.vy  - wc.vy);
-  f.vz  = wc.vz  + h * minmod(wc.vz  - wm.vz,  wp.vz  - wc.vz);
-  f.p   = wc.p   + h * minmod(wc.p   - wm.p,   wp.p   - wc.p);
-  f.bx  = wc.bx  + h * minmod(wc.bx  - wm.bx,  wp.bx  - wc.bx);
-  f.by  = wc.by  + h * minmod(wc.by  - wm.by,  wp.by  - wc.by);
-  f.bz  = wc.bz  + h * minmod(wc.bz  - wm.bz,  wp.bz  - wc.bz);
+  f.rho = wc.rho + h * limited_slope(wc.rho - wm.rho, wp.rho - wc.rho, drop);
+  f.vx  = wc.vx  + h * limited_slope(wc.vx  - wm.vx,  wp.vx  - wc.vx,  drop);
+  f.vy  = wc.vy  + h * limited_slope(wc.vy  - wm.vy,  wp.vy  - wc.vy,  drop);
+  f.vz  = wc.vz  + h * limited_slope(wc.vz  - wm.vz,  wp.vz  - wc.vz,  drop);
+  f.p   = wc.p   + h * limited_slope(wc.p   - wm.p,   wp.p   - wc.p,   drop);
+  f.bx  = wc.bx  + h * limited_slope(wc.bx  - wm.bx,  wp.bx  - wc.bx,  drop);
+  f.by  = wc.by  + h * limited_slope(wc.by  - wm.by,  wp.by  - wc.by,  drop);
+  f.bz  = wc.bz  + h * limited_slope(wc.bz  - wm.bz,  wp.bz  - wc.bz,  drop);
   return f;
+}
+
+// Interior-biased "drop" code for the cell whose center index along `dir` is
+// `c` (0..n-1 interior). `lo`/`hi` are the non-periodic flags for the low/high
+// boundary on this axis. A cell on a non-periodic low boundary (c==0) drops its
+// lower (ghost) neighbor; on a non-periodic high boundary (c==n-1) it drops its
+// upper (ghost) neighbor. Everywhere else (and on periodic sides) the slope is
+// two-sided. Interior cells (0 < c < n-1) are never one-sided.
+__device__ inline int slope_drop(int c, int n, int lo, int hi) {
+  if (lo != 0 && c <= 0) return -1;
+  if (hi != 0 && c >= n - 1) return +1;
+  return 0;
 }
 
 __global__ void reconstruct_kernel(
     quasar::Grid2D g, int dir, Real gamma,
+    // Non-periodic boundary flags along this axis: lo/hi correspond to
+    // (x_lo,x_hi) for dir==0 and (y_lo,y_hi) for dir==1.
+    int side_lo, int side_hi,
     const double* __restrict__ rho, const double* __restrict__ mx,
     const double* __restrict__ my, const double* __restrict__ mz,
     const double* __restrict__ energy, const double* __restrict__ bx,
@@ -119,8 +165,19 @@ __global__ void reconstruct_kernel(
   const MhdPrim wm_hi = to_primitive(sm_hi, gamma);
   const MhdPrim wp_hi = to_primitive(sp_hi, gamma);
 
-  const MhdPrim wl = muscl_face(wm_lo, wm_c, wm_hi, Real{+1});  // +side of minus cell
-  const MhdPrim wr = muscl_face(wm_c, wm_hi, wp_hi, Real{-1});  // -side of plus cell
+  // Per-cell interior-biased slope selection along `dir`. The minus cell owns
+  // the L state (center index im/jm); the plus cell owns the R state (center
+  // index i/j). At a non-periodic boundary the exterior neighbor is dropped so
+  // the slope never depends on a ghost gradient; periodic sides keep the
+  // two-sided minmod (drop==0) and are bit-identical to the original body.
+  const int n_dir     = (dir == 0) ? g.nx : g.ny;
+  const int minus_idx = (dir == 0) ? im : jm;
+  const int plus_idx  = (dir == 0) ? i  : j;
+  const int drop_m = slope_drop(minus_idx, n_dir, side_lo, side_hi);
+  const int drop_p = slope_drop(plus_idx,  n_dir, side_lo, side_hi);
+
+  const MhdPrim wl = muscl_face(wm_lo, wm_c, wm_hi, Real{+1}, drop_m);  // +side of minus cell
+  const MhdPrim wr = muscl_face(wm_c, wm_hi, wp_hi, Real{-1}, drop_p);  // -side of plus cell
 
   const MhdState ul = to_conserved(wl, gamma);
   const MhdState ur = to_conserved(wr, gamma);
@@ -136,14 +193,23 @@ __global__ void reconstruct_kernel(
 
 namespace quasar::mhd {
 
-void launch_mhd_reconstruct(const MhdField2D<Real>& u, int dir,
-                            quasar::numerics::MhdInterfaceStates<Real>& out,
-                            int /*scheme_order*/, Real gamma, stream_t stream) {
+void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& /*b0*/,
+                            int dir, quasar::numerics::MhdInterfaceStates<Real>& out,
+                            int /*scheme_order*/, BoundaryFlags4 flags, Real gamma,
+                            stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
+  // Select this axis's non-periodic flags: [x_lo,x_hi] for dir==0, [y_lo,y_hi]
+  // for dir==1. The split EOS makes B0 inert in this kernel (no sound speed /
+  // B0-dependent pressure here), so the background buffers are accepted for ABI
+  // parity but not read; the wave speeds that see the total field live in the
+  // HLLD kernel.
+  const int side_lo = (dir == 0) ? flags.side[0] : flags.side[2];
+  const int side_hi = (dir == 0) ? flags.side[1] : flags.side[3];
   hipLaunchKernelGGL(reconstruct_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), g, dir, gamma,
+                     side_lo, side_hi,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),

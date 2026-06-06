@@ -20,6 +20,14 @@ struct MhdBoundarySpec {
   std::array<std::string, 4> field{"periodic", "periodic", "periodic", "periodic"};
 };
 
+// Classify a boundary name as periodic (two-sided wrap) vs non-periodic
+// (one-sided closure). Returns true iff `name == "periodic"`; every other
+// registered name ("outflow", "reflecting", ...) is non-periodic. The solver
+// uses this to thread per-side one-sided flags into the reconstruction / CT
+// kernels (a non-periodic side drops the ghost-GRADIENT dependence; the ghost
+// VALUES are still filled and read by the existing fill_ghosts closures).
+bool mhd_boundary_is_periodic(const std::string& name);
+
 // Boundary applied to the conserved fluid state (rho, mx, my, mz, energy). The
 // concrete implementations self-register under their string name via
 // QUASAR_REGISTER_MHD_FLUID_BOUNDARY.

@@ -25,6 +25,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/interface_states.hpp"
+#include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 
 namespace quasar::mhd {
@@ -32,6 +33,17 @@ namespace quasar::mhd {
 // The kernel-launch ABI speaks the backend-neutral stream handle so the solver
 // never includes a HIP header; the .hip definitions cast it back internally.
 using stream_t = ::quasar::backend::stream_t;
+
+// Per-side non-periodic boundary flags threaded into the reconstruction and CT
+// EMF kernels. The four entries follow the canonical side order
+// [x_lo, x_hi, y_lo, y_hi]; 1 = non-periodic (the device path drops the ghost
+// GRADIENT dependence and uses a one-sided stencil at that boundary), 0 =
+// periodic (the two-sided wrap stencil). The solver computes these from the
+// per-side field-boundary names; an all-zero flags set is the periodic fast
+// path and is bit-identical to the no-flags behavior.
+struct BoundaryFlags4 {
+  int side[4];  // [x_lo, x_hi, y_lo, y_hi]; 1 = non-periodic, 0 = periodic
+};
 
 // -- Flux reconstruction -----------------------------------------------------
 // Reconstruct the LEFT/RIGHT conserved interface states on every interface
@@ -46,9 +58,20 @@ using stream_t = ::quasar::backend::stream_t;
 // variables) for ALL scheme_order values; scheme_order 5/7 currently resolve to
 // the same 2nd-order device path. The host registry retains the full MP5/MP7
 // schemes. This is a documented build-safety-first simplification.
-void launch_mhd_reconstruct(const MhdField2D<Real>& u, int dir,
-                            quasar::numerics::MhdInterfaceStates<Real>& out,
-                            int scheme_order, Real gamma, stream_t stream);
+//
+// Field-split + one-sided boundary extensions:
+//   `b0` is the static background magnetic field B = B0 + b. When b0.active is
+//   false the kernel takes the zero-background fast path (the stored b IS the
+//   total field) and the result is bit-identical to the original body. When
+//   active, the wave speeds / interface reconstruction see the total field.
+//   `flags` marks per-side non-periodic boundaries (see BoundaryFlags4); at a
+//   non-periodic boundary the reconstruction uses a one-sided stencil that
+//   drops the ghost-GRADIENT dependence (ghost VALUES are still read). With
+//   `flags` all-zero and `b0` inactive this is bit-identical to the periodic
+//   no-background path.
+void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+                            int dir, quasar::numerics::MhdInterfaceStates<Real>& out,
+                            int scheme_order, BoundaryFlags4 flags, Real gamma, stream_t stream);
 
 // -- Riemann flux ------------------------------------------------------------
 // Pointwise numerical flux at every interface normal to `dir` from the L/R
@@ -60,7 +83,11 @@ void launch_mhd_reconstruct(const MhdField2D<Real>& u, int dir,
 // sub-fan (e.g. near-zero normal B or a non-physical intermediate density) is
 // hit, the kernel falls back to the single-intermediate HLL flux for that
 // interface so the build stays divergence-/positivity-safe.
-void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& iface, int dir,
+//
+// `b0` is the static background field (B = B0 + b); inactive => zero-background
+// fast path, bit-identical to the original body.
+void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& iface,
+                          const MhdBackgroundField<Real>& b0, int dir,
                           MhdField2D<Real>& flux_out, Real gamma, stream_t stream);
 
 // -- Conservative flux difference --------------------------------------------
@@ -78,10 +105,16 @@ void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
 // (i,j)) from the conserved field `u` and the dir=0 / dir=1 interface states,
 // via the kinematic E = -(v x B) averaged from the four surrounding interface
 // upwind values. ex_edge / ey_edge are also populated for parity.
-void launch_mhd_ct_emf(const MhdField2D<Real>& u,
+//
+// `b0` is the static background field (B = B0 + b); inactive => zero-background
+// fast path. `flags` marks per-side non-periodic boundaries (see
+// BoundaryFlags4): at a non-periodic boundary the corner-EMF averaging uses a
+// one-sided stencil that drops the ghost-GRADIENT dependence. With `flags`
+// all-zero and `b0` inactive this is bit-identical to the original body.
+void launch_mhd_ct_emf(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                        const quasar::numerics::MhdInterfaceStates<Real>& ifx,
                        const quasar::numerics::MhdInterfaceStates<Real>& ify,
-                       EmfField2D<Real>& emf, Real gamma, stream_t stream);
+                       BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma, stream_t stream);
 
 // -- Face-B update -----------------------------------------------------------
 // Advance the face-staggered in-plane B from the corner Ez by the discrete curl
@@ -123,8 +156,13 @@ void launch_mhd_rk_stage(MhdField2D<Real>& out, const MhdField2D<Real>& un,
 // -- Positivity floors -------------------------------------------------------
 // Clamp density to `rho_floor` and gas pressure to `p_floor` (re-deriving total
 // energy from the floored pressure, holding momentum and B fixed) at every cell.
-void launch_mhd_apply_floors(MhdField2D<Real>& u, Real rho_floor, Real p_floor,
-                             Real gamma, stream_t stream);
+//
+// `b0` is the static background field (B = B0 + b); inactive => zero-background
+// fast path, bit-identical to the original body. With a nonzero B0 the stored
+// magnetic energy is the perturbation-only 0.5|b|^2, so the floor re-derivation
+// is consistent with the field-split EOS.
+void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+                             Real rho_floor, Real p_floor, Real gamma, stream_t stream);
 
 // -- Cylindrical geometric source --------------------------------------------
 // Accumulate the axisymmetric (r,z) geometric source into `dudt`:

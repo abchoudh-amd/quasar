@@ -283,4 +283,6 @@ QUASAR_REGISTER_MHD_FIELD_BOUNDARY("periodic", PeriodicFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("outflow", OutflowFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("reflecting", ReflectingFieldBC)
 
+bool mhd_boundary_is_periodic(const std::string& name) { return name == "periodic"; }
+
 }  // namespace quasar::boundary

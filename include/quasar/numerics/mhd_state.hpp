@@ -49,12 +49,36 @@ struct MhdFlux {
   Real bz{};
 };
 
+// Static background magnetic field B0 for the field-split formulation
+// B = B0 + b. The stored conserved state carries the perturbation b in
+// u.bx/u.by/u.bz and the perturbation-only magnetic energy 0.5|b|^2; this POD
+// carries the (spatially sampled) constant background components passed to the
+// background-aware EOS overloads below. It is a trivial value type so it can be
+// passed by value into HIP device code.
+struct MhdBackground {
+  Real b0x{};
+  Real b0y{};
+  Real b0z{};
+};
+
 // p = (gamma-1)*(E - 0.5*rho|v|^2 - 0.5|B|^2). Total energy convention.
 QUASAR_HOST_DEVICE inline Real pressure(const MhdState& u, Real gamma) {
   const Real inv_rho = Real{1} / u.rho;
   const Real kinetic = Real{0.5} * (u.mx * u.mx + u.my * u.my + u.mz * u.mz) * inv_rho;
   const Real magnetic = Real{0.5} * (u.bx * u.bx + u.by * u.by + u.bz * u.bz);
   return (gamma - Real{1}) * (u.energy - kinetic - magnetic);
+}
+
+// Field-split gas pressure. By construction the stored energy carries only the
+// perturbation magnetic energy 0.5|b|^2 (b = u.bx/by/bz), so the gas pressure
+// has NO B0 cross term and does not depend on the background at all:
+//   p = (gamma-1)*(E - 0.5*rho|v|^2 - 0.5|b|^2).
+// The MhdBackground argument exists only to give the EOS a uniform call surface
+// shared with fast_magnetosonic_speed(); it is intentionally unread here so that
+// pressure(u, {0,0,0}, gamma) is bit-for-bit identical to pressure(u, gamma).
+QUASAR_HOST_DEVICE inline Real pressure(const MhdState& u, const MhdBackground& /*b0*/,
+                                        Real gamma) {
+  return pressure(u, gamma);
 }
 
 // Conserved -> primitive. v = m/rho; p from the gamma law above. Magnetic
@@ -98,12 +122,23 @@ QUASAR_HOST_DEVICE inline MhdState to_conserved(const MhdPrim& w, Real gamma) {
 //   cax  = B_dir/sqrt(rho)                   (directional Alfven speed)
 //   c_f^2 = 0.5*[ (a^2+ca^2) + sqrt((a^2+ca^2)^2 - 4 a^2 cax^2) ]
 // c_f >= a, c_f >= |cax|, and reduces to a when B=0.
-QUASAR_HOST_DEVICE inline Real fast_magnetosonic_speed(const MhdState& u, int dir, Real gamma) {
+//
+// Field-split overload: the wave speeds see the TOTAL magnetic field
+// B = b + B0, where b = u.bx/by/bz is the stored perturbation and B0 is the
+// background. The gas pressure p still comes from the perturbation-only EOS
+// above (no B0 cross term). With b0 == {0,0,0} the total field equals b and this
+// is bit-for-bit identical to the zero-background overload below.
+QUASAR_HOST_DEVICE inline Real fast_magnetosonic_speed(const MhdState& u,
+                                                       const MhdBackground& b0,
+                                                       int dir, Real gamma) {
   const Real inv_rho = Real{1} / u.rho;
-  const Real p  = pressure(u, gamma);
+  const Real p  = pressure(u, b0, gamma);
+  const Real Bx = u.bx + b0.b0x;
+  const Real By = u.by + b0.b0y;
+  const Real Bz = u.bz + b0.b0z;
   const Real a2 = gamma * p * inv_rho;
-  const Real ca2 = (u.bx * u.bx + u.by * u.by + u.bz * u.bz) * inv_rho;
-  const Real bn = (dir == 0) ? u.bx : u.by;
+  const Real ca2 = (Bx * Bx + By * By + Bz * Bz) * inv_rho;
+  const Real bn = (dir == 0) ? Bx : By;
   const Real cax2 = bn * bn * inv_rho;
   const Real sum = a2 + ca2;
   // Guard the discriminant against negative round-off near degeneracy.
@@ -113,6 +148,13 @@ QUASAR_HOST_DEVICE inline Real fast_magnetosonic_speed(const MhdState& u, int di
   }
   const Real cf2 = Real{0.5} * (sum + std::sqrt(disc));
   return std::sqrt(cf2 < Real{0} ? Real{0} : cf2);
+}
+
+// Zero-background overload. Delegates to the field-split overload with
+// B0 == {0,0,0}: the total field reduces to b = u.bx/by/bz and p reduces to
+// pressure(u, gamma), so the result is unchanged from the original body.
+QUASAR_HOST_DEVICE inline Real fast_magnetosonic_speed(const MhdState& u, int dir, Real gamma) {
+  return fast_magnetosonic_speed(u, MhdBackground{}, dir, gamma);
 }
 
 // Translation-unit anchor (defined in src/numerics/mhd_state.cpp) so the

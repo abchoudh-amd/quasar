@@ -60,6 +60,16 @@ def _make_config(deck: mhd_io.MhdDeck):
         cfg.boundary.set_fluid_side(side, name)
     for side, name in enumerate(deck.boundary.field):
         cfg.boundary.set_field_side(side, name)
+    # Static background field B0 (field-split B = B0 + b). When disabled the
+    # solver runs its zero-B0 fast path; the uniform-vector params are still
+    # carried through but only consumed by the "uniform" profile. Mutate the
+    # config's default-constructed MhdBackgroundSpec in place, mirroring how
+    # cfg.boundary is populated above.
+    cfg.background.enabled = deck.background.enabled
+    cfg.background.profile = deck.background.profile
+    cfg.background.bx0 = deck.background.bx0
+    cfg.background.by0 = deck.background.by0
+    cfg.background.bz0 = deck.background.bz0
     return cfg
 
 
@@ -80,6 +90,17 @@ def prepare_run(deck: mhd_io.MhdDeck):
     state = mhd_io.build_initial_state(deck, nghost)
     for component, buf in state.items():
         solver.seed_state(component, buf)
+
+    # Static background field B0 (field-split B = B0 + b). Seed it BEFORE the
+    # cfl_limit() probe so the CFL guard sees the total field B0 + b: the fast
+    # magnetosonic speed uses the total field, so a guide field B0 tightens the
+    # stable dt relative to the B0 = 0 case. build_background_field returns None
+    # when the background is disabled (zero-B0 fast path), in which case nothing
+    # is seeded.
+    background = mhd_io.build_background_field(deck, nghost)
+    if background is not None:
+        for component in ("b0x", "b0y", "b0z"):
+            solver.seed_background(component, background[component])
 
     # cfl_limit() scans the live state for the max fast-magnetosonic signal speed
     # (and already folds in the cfl safety factor), so it is only meaningful AFTER

@@ -24,6 +24,8 @@
 #include "quasar/numerics/positivity_limiter.hpp"
 #include "quasar/numerics/riemann_solver.hpp"
 #include "quasar/numerics/ssprk_integrator.hpp"
+#include "quasar/physics/mhd/kernels.hpp"  // BoundaryFlags4
+#include "quasar/physics/mhd/mhd_background.hpp"  // MhdBackgroundField, MhdBackgroundSpec
 #include "quasar/physics/mhd/mhd_field.hpp"
 
 #include <array>
@@ -52,6 +54,11 @@ struct MhdConfig {
   // stable step by it. Default 0.4 is a conservative MHD multidimensional value.
   Real cfl{Real{0.4}};
   boundary::MhdBoundarySpec boundary{};
+  // Static background magnetic field B0 for the field-split formulation
+  // B = B0 + b. Disabled by default (enabled=false => zero-B0 fast path,
+  // bit-identical to the no-background solver). When enabled the solver
+  // allocates b0_ at the working grid; the B0 values are seeded from Python.
+  MhdBackgroundSpec background{};
 };
 
 class MhdSolver2D {
@@ -66,6 +73,17 @@ class MhdSolver2D {
   // component. Magnetic spellings accept both the staggered name and the short
   // name: "bx"/"bx_face", "by"/"by_face", "bz"/"bz_cell".
   void seed_state(std::string_view component, const std::vector<Real>& host_buf);
+
+  // Stage a host buffer (sized grid.storage_size()) into a named static
+  // background-field component for the field-split formulation B = B0 + b.
+  // Spellings mirror seed_state's magnetic aliases: "b0x"/"b0x_face",
+  // "b0y"/"b0y_face", "b0z"/"b0z_cell". Requires the background to be enabled
+  // (b0_ allocated); throws std::invalid_argument on a size mismatch or unknown
+  // component, and std::logic_error if the background is inactive.
+  void seed_background(std::string_view component, const std::vector<Real>& host_buf);
+
+  // True iff the field-split background B0 is enabled (cfg_.background.enabled).
+  bool has_background() const noexcept;
 
   // One SSP-RK3 step; rejects a dt above cfl_limit() (an over-CFL step diverges).
   void step(Real dt);
@@ -99,6 +117,10 @@ class MhdSolver2D {
   bool is_cylindrical() const noexcept { return cfg_.geometry == "cylindrical"; }
   void fill_ghosts(MhdField2D<Real>& u) const;
   int reconstruction_order() const;
+  // Per-side one-sided boundary flags ([x_lo, x_hi, y_lo, y_hi]) derived from
+  // cfg_.boundary.field via boundary::mhd_boundary_is_periodic (0 = periodic,
+  // 1 = non-periodic). All-zero on an all-periodic deck (fast path).
+  BoundaryFlags4 boundary_flags() const;
 
   static constexpr int kNumRkRegisters = 3;  // live state + 2 SSP-RK3 stage regs
 
@@ -115,6 +137,9 @@ class MhdSolver2D {
   numerics::MhdInterfaceStates<Real> ifx_;  // dir=0 reconstructed interface states
   numerics::MhdInterfaceStates<Real> ify_;  // dir=1 reconstructed interface states
   EmfField2D<Real> emf_{};       // corner-staggered CT EMF
+  // Static background field B0 (field split B = B0 + b). active iff the deck
+  // enabled the background; inactive (default) => zero B0 fast path.
+  MhdBackgroundField<Real> b0_{};
 
   std::unique_ptr<numerics::IRiemannSolver> riemann_{};
   std::unique_ptr<numerics::ICtScheme> ct_{};

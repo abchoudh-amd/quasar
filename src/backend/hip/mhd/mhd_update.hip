@@ -12,6 +12,7 @@
 namespace {
 
 using quasar::Real;
+using quasar::numerics::MhdBackground;
 using quasar::numerics::MhdState;
 using quasar::numerics::pressure;
 
@@ -85,8 +86,19 @@ __global__ void rk_stage_kernel(
 
 // Clamp rho >= rho_floor and gas pressure >= p_floor, re-deriving total energy
 // from the floored pressure (momentum and B held fixed).
+//
+// Field-split convention (B = B0 + b): the stored conserved state carries the
+// perturbation b in bx/by/bz and the perturbation-only magnetic energy 0.5|b|^2.
+// Under this convention the gas pressure has NO B0 cross term -- the background
+// is B0-independent for the floor -- so the floored energy is re-derived with the
+// perturbation-only magnetic energy 0.5|b|^2 and the perturbation-only gas
+// pressure. The `MhdBackground` argument to pressure() exists only to share the
+// EOS call surface; it is intentionally unread (pressure(s, b0, gamma) is
+// bit-for-bit pressure(s, gamma)), so with B0 inactive this is bit-identical to
+// the original body. `b0_active` is accepted for ABI/signature parity; the floor
+// re-derivation does not depend on it.
 __global__ void apply_floors_kernel(
-    quasar::Grid2D g, Real rho_floor, Real p_floor, Real gamma,
+    quasar::Grid2D g, int /*b0_active*/, Real rho_floor, Real p_floor, Real gamma,
     double* __restrict__ rho, double* __restrict__ mx, double* __restrict__ my,
     double* __restrict__ mz, double* __restrict__ energy, double* __restrict__ bx,
     double* __restrict__ by, double* __restrict__ bz) {
@@ -98,10 +110,13 @@ __global__ void apply_floors_kernel(
   MhdState s;
   s.rho = rho[k]; s.mx = mx[k]; s.my = my[k]; s.mz = mz[k];
   s.energy = energy[k]; s.bx = bx[k]; s.by = by[k]; s.bz = bz[k];
-  const Real p = pressure(s, gamma);
+  // Perturbation-only gas pressure via the background-aware overload (B0 is
+  // unread under the field-split EOS, so this equals pressure(s, gamma)).
+  const Real p = pressure(s, MhdBackground{}, gamma);
   if (p < p_floor) {
     const Real inv_rho = Real{1} / s.rho;
     const Real kinetic = Real{0.5} * (s.mx * s.mx + s.my * s.my + s.mz * s.mz) * inv_rho;
+    // Stored magnetic energy stays the perturbation-only 0.5|b|^2 (b = bx/by/bz).
     const Real magnetic = Real{0.5} * (s.bx * s.bx + s.by * s.by + s.bz * s.bz);
     energy[k] = p_floor / (gamma - Real{1}) + kinetic + magnetic;
   }
@@ -192,13 +207,17 @@ void launch_mhd_rk_stage(MhdField2D<Real>& out, const MhdField2D<Real>& un,
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
-void launch_mhd_apply_floors(MhdField2D<Real>& u, Real rho_floor, Real p_floor,
-                             Real gamma, stream_t stream) {
+void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+                             Real rho_floor, Real p_floor, Real gamma, stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
+  // The floor re-derivation is B0-independent under the field-split EOS; the
+  // background-active flag is threaded only for ABI parity with the field-split
+  // kernel family. No B0 buffers are read.
+  const int b0_active = b0.active ? 1 : 0;
   hipLaunchKernelGGL(apply_floors_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, rho_floor, p_floor, gamma,
+                     g, b0_active, rho_floor, p_floor, gamma,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr());

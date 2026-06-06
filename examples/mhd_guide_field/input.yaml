@@ -1,0 +1,48 @@
+# Guide-field (static field-split) demonstration: B = B0 + b.
+#
+# A small-amplitude, circularly-polarized Alfven wave traveling along x in a
+# fully periodic box, evolved on top of a STATIC uniform guide field B0 supplied
+# by the `background_field:` block. The solver carries the guide field as a fixed
+# background and evolves only the perturbation b; the total field B0 + b is what
+# enters the fluxes, the fast-magnetosonic speed (CFL), and the Alfven dynamics.
+#
+# Field split:
+#   * The Alfven-wave IC seeds ONLY the transverse perturbation
+#       dvy = -A sin(k x), dvz = -A cos(k x)
+#       dBy =  A sin(k x), dBz =  A cos(k x)
+#     with its built-in in-plane background set to zero (`b0: 0.0`), so the
+#     evolved (perturbation) state has zero mean in-plane field.
+#   * `background_field:` supplies the uniform guide field B0 = (bx0, 0, 0) along
+#     the propagation axis x. The TOTAL field the solver feels is B0 + b.
+#
+# With vA = bx0 / sqrt(rho) = 1.0, this is the same CP Alfven eigenmode as
+# mhd_linear_wave, but with the guide field carried as a static background. The
+# guide field raises the fast speed, so the CFL-limited dt is TIGHTER than the
+# B0 = 0 case. div(B0 + b) = div(b) stays at round-off (uniform B0 is
+# divergence-free and the seeded perturbation is solenoidal).
+
+units: normalized
+domain: {nx: 32, ny: 32, lx_m: 1.0, ly_m: 1.0, origin_x_m: 0.0, origin_y_m: 0.0}
+geometry: cartesian
+numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
+           ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.3}
+initial:
+  type: alfven_wave
+  params:
+    rho: 1.0
+    p: 0.1
+    b0: 0.0          # IC's own in-plane background OFF; B0 comes from background_field
+    amplitude: 1.0e-6
+    wavenumber: 1    # number of full wavelengths across lx
+    polarization: circular
+background_field:
+  enabled: true
+  profile: uniform
+  bx0: 1.0           # uniform guide field along x (vA = bx0 / sqrt(rho) = 1)
+  by0: 0.0
+  bz0: 0.0
+time: {dt_s: auto, steps: 20, t_end: 0.1}
+diagnostics: {output_path: out.npz, cadence: 0,
+              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
+boundary: {fluid: [periodic, periodic, periodic, periodic],
+           field: [periodic, periodic, periodic, periodic]}

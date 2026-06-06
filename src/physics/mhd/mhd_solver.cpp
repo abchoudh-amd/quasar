@@ -73,6 +73,15 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
     ifx_{grid_, 0},
     ify_{grid_, 1},
     emf_{grid_} {
+  // Field-split background B0: allocate at the working grid and mark active iff
+  // the deck enabled it. Otherwise leave b0_ default-constructed (inactive =>
+  // zero-B0 fast path that is bit-identical to the no-background solver). The
+  // actual B0 values are seeded from Python via seed_background().
+  if (cfg_.background.enabled) {
+    b0_ = MhdBackgroundField<Real>{grid_};
+    b0_.active = true;
+  }
+
   // Resolve the remaining schemes by registry string (no if/else over types).
   riemann_ = make_scheme<numerics::IRiemannSolver>(cfg_.riemann, "Riemann solver");
   ct_ = make_scheme<numerics::ICtScheme>(cfg_.ct, "CT scheme");
@@ -113,6 +122,38 @@ void MhdSolver2D::seed_state(std::string_view component, const std::vector<Real>
   buf.copy_from_host(host_buf.data(), host_buf.size());
 }
 
+void MhdSolver2D::seed_background(std::string_view component,
+                                  const std::vector<Real>& host_buf) {
+  if (!b0_.active) {
+    throw std::logic_error{
+        "MhdSolver2D::seed_background: the field-split background is not enabled "
+        "(set background.enabled in the deck before seeding B0)"};
+  }
+  // Map the deck-facing spelling to its background buffer, mirroring the
+  // magnetic-component aliases accepted by seed_state.
+  backend::DeviceBuffer<Real>* buf = nullptr;
+  if (component == "b0x" || component == "b0x_face") {
+    buf = &b0_.b0x_face;
+  } else if (component == "b0y" || component == "b0y_face") {
+    buf = &b0_.b0y_face;
+  } else if (component == "b0z" || component == "b0z_cell") {
+    buf = &b0_.b0z_cell;
+  } else {
+    throw std::invalid_argument{"MhdSolver2D::seed_background: unknown background "
+                                "component '" + std::string{component} + "'"};
+  }
+  if (host_buf.size() != buf->size()) {
+    throw std::invalid_argument{
+        "MhdSolver2D::seed_background: host buffer size (" +
+        std::to_string(host_buf.size()) +
+        ") does not match the component storage size (" +
+        std::to_string(buf->size()) + ")"};
+  }
+  buf->copy_from_host(host_buf.data(), host_buf.size());
+}
+
+bool MhdSolver2D::has_background() const noexcept { return cfg_.background.enabled; }
+
 std::vector<Real> MhdSolver2D::state_component_to_host(std::string_view component) const {
   // const-correct read: the buffers are only read, but component_buffer returns a
   // mutable ref, so cast away constness on the live state for the staging read.
@@ -140,6 +181,20 @@ void MhdSolver2D::fill_ghosts(MhdField2D<Real>& u) const {
   }
 }
 
+BoundaryFlags4 MhdSolver2D::boundary_flags() const {
+  // Per-side one-sided flag from the field-boundary name: non-periodic => 1
+  // (the device path drops the ghost-gradient dependence at that side),
+  // periodic => 0 (two-sided wrap). cfg_.boundary.field is ordered
+  // [x_lo, x_hi, y_lo, y_hi], matching BoundaryFlags4::side. An all-periodic
+  // deck yields all-zero flags (the periodic fast path).
+  BoundaryFlags4 flags{};
+  for (int side = 0; side < 4; ++side) {
+    flags.side[side] =
+        boundary::mhd_boundary_is_periodic(cfg_.boundary.field[side]) ? 0 : 1;
+  }
+  return flags;
+}
+
 void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& dudt) {
   // The residual is built into dudt = L(u). Zero it, fill ghosts of u (the
   // boundary fill mutates ghost layers only, so a const-ref input is fine to
@@ -158,6 +213,7 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
 
   const int order = reconstruction_order();
   const Real gamma = cfg_.gamma;
+  const BoundaryFlags4 flags = boundary_flags();
 
   // dir = 0 (x faces) then dir = 1 (y faces). Each direction: reconstruct L/R
   // interface states, form the HLLD flux, then accumulate the conservative flux
@@ -166,12 +222,12 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   // poloidal field by the (non-div-free) Godunov flux divergence, so those two
   // slots are OVERWRITTEN below by the pure EMF-curl rate. Only the 5 fluid vars
   // and the cell-centered toroidal bz_cell keep the flux-difference contribution.
-  launch_mhd_reconstruct(u, 0, ifx_, order, gamma, nullptr);
-  launch_mhd_hlld_flux(ifx_, 0, flux_, gamma, nullptr);
+  launch_mhd_reconstruct(u, b0_, 0, ifx_, order, flags, gamma, nullptr);
+  launch_mhd_hlld_flux(ifx_, b0_, 0, flux_, gamma, nullptr);
   launch_mhd_flux_difference(flux_, 0, dudt, nullptr);
 
-  launch_mhd_reconstruct(u, 1, ify_, order, gamma, nullptr);
-  launch_mhd_hlld_flux(ify_, 1, flux_, gamma, nullptr);
+  launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr);
+  launch_mhd_hlld_flux(ify_, b0_, 1, flux_, gamma, nullptr);
   launch_mhd_flux_difference(flux_, 1, dudt, nullptr);
 
   // Build the corner EMF from the two-direction interface states (kinematic
@@ -184,7 +240,7 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   // div-free, div(B) is preserved at round-off through every stage. There is
   // therefore NO separate launch_mhd_face_b_update step (that was the double-count
   // bug: face B advanced by both the flux divergence and the CT curl).
-  launch_mhd_ct_emf(u, ifx_, ify_, emf_, gamma, nullptr);
+  launch_mhd_ct_emf(u, b0_, ifx_, ify_, flags, emf_, gamma, nullptr);
   launch_mhd_emf_curl_rate(emf_, dudt, grid_, nullptr);
 
   // Cylindrical (r,z): add the axisymmetric geometric source S(u) into dudt.
@@ -294,6 +350,16 @@ Real MhdSolver2D::cfl_limit() const {
   field.by_face.copy_to_host(by.data(), n);
   field.bz_cell.copy_to_host(bz.data(), n);
 
+  // Field-split CFL: the wave speeds see the TOTAL field B = B0 + b, so stage
+  // the static background to host too (zeros when inactive => bit-identical to
+  // the no-background scan). A nonzero B0 raises c_fast and tightens dt.
+  std::vector<Real> b0x(n, Real{0}), b0y(n, Real{0}), b0z(n, Real{0});
+  if (b0_.active) {
+    b0_.b0x_face.copy_to_host(b0x.data(), n);
+    b0_.b0y_face.copy_to_host(b0y.data(), n);
+    b0_.b0z_cell.copy_to_host(b0z.data(), n);
+  }
+
   Real max_speed = Real{0};
   for (int j = 0; j < grid_.ny; ++j) {
     for (int i = 0; i < grid_.nx; ++i) {
@@ -313,8 +379,12 @@ Real MhdSolver2D::cfl_limit() const {
       const Real inv_rho = Real{1} / s.rho;
       const Real vx = std::abs(s.mx * inv_rho);
       const Real vy = std::abs(s.my * inv_rho);
-      const Real cfx = numerics::fast_magnetosonic_speed(s, 0, cfg_.gamma);
-      const Real cfy = numerics::fast_magnetosonic_speed(s, 1, cfg_.gamma);
+      numerics::MhdBackground bg;
+      bg.b0x = b0x[idx];
+      bg.b0y = b0y[idx];
+      bg.b0z = b0z[idx];
+      const Real cfx = numerics::fast_magnetosonic_speed(s, bg, 0, cfg_.gamma);
+      const Real cfy = numerics::fast_magnetosonic_speed(s, bg, 1, cfg_.gamma);
       max_speed = std::max(max_speed, std::max(vx + cfx, vy + cfy));
     }
   }

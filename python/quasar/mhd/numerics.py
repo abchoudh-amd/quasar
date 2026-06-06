@@ -31,6 +31,54 @@ def momentum(rho, vx, vy, vz):
     return rho * vx, rho * vy, rho * vz
 
 
+def fast_magnetosonic_speed_split(rho, p, bx, by, bz, b0x, b0y, b0z, gamma):
+    """Fast magnetosonic speed for the field-split form B = B0 + b.
+
+    The signal speed in the field-split ideal-MHD formulation depends on the
+    TOTAL field B = B0 + b (the static background B0 contributes to the Alfven
+    speed exactly as the evolved perturbation b does), so this simply forms the
+    total field and reuses the single-field estimate. Kept here for parity with
+    the C++ ``cfl_limit()`` which scans the total field; works elementwise.
+    """
+    return fast_magnetosonic_speed(
+        rho, p,
+        np.asarray(bx) + np.asarray(b0x),
+        np.asarray(by) + np.asarray(b0y),
+        np.asarray(bz) + np.asarray(b0z),
+        gamma,
+    )
+
+
+def background_divergence_linf(b0x, b0y, nx, ny, nghost, dx, dy):
+    """Max abs interior face-divergence of a staggered background field B0.
+
+    ``b0x``/``b0y`` are 1-D ghost-padded host buffers in the solver storage
+    layout (pitch = nx + 2*nghost, row-major). With b0x on the left face and b0y
+    on the bottom face, the discrete divergence in interior cell (i, j) is::
+
+        (b0x[i+1, j] - b0x[i, j]) / dx + (b0y[i, j+1] - b0y[i, j]) / dy
+
+    A constant/uniform field gives 0 to round-off. Returns the L-inf norm over
+    all interior cells (0.0 when there are no interior cells). This is the single
+    source of truth for ``io.build_background_field``'s divergence-free check, so
+    the Python staging cannot seed a div-B != 0 background past the solver.
+    """
+    g = int(nghost)
+    pitch = int(nx) + 2 * g
+    height = int(ny) + 2 * g
+    bx = np.asarray(b0x, dtype=np.float64).reshape(height, pitch)
+    by = np.asarray(b0y, dtype=np.float64).reshape(height, pitch)
+    if nx <= 0 or ny <= 0:
+        return 0.0
+    # Interior cells span [g, g+nx) in x and [g, g+ny) in y. The x-face flux uses
+    # faces i and i+1 (both valid for interior i); the y-face flux uses faces
+    # j and j+1.
+    dbx = (bx[g:g + ny, g + 1:g + 1 + nx] - bx[g:g + ny, g:g + nx]) / dx
+    dby = (by[g + 1:g + 1 + ny, g:g + nx] - by[g:g + ny, g:g + nx]) / dy
+    div = dbx + dby
+    return float(np.max(np.abs(div))) if div.size else 0.0
+
+
 def fast_magnetosonic_speed(rho, p, bx, by, bz, gamma):
     """Maximum (degenerate-direction) fast magnetosonic speed.
 

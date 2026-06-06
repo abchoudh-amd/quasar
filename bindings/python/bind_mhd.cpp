@@ -22,9 +22,11 @@
 #include "quasar/core/registry.hpp"
 #include "quasar/numerics/ct_scheme.hpp"
 #include "quasar/numerics/flux_reconstruction.hpp"
+#include "quasar/numerics/mhd_background_profile.hpp"
 #include "quasar/numerics/positivity_limiter.hpp"
 #include "quasar/numerics/riemann_solver.hpp"
 #include "quasar/numerics/ssprk_integrator.hpp"
+#include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <algorithm>
@@ -124,6 +126,12 @@ void bind_mhd(py::module_& m) {
                 quasar::Registry<quasar::boundary::IMhdFieldBoundary>::instance().names());
           },
           "Names of registered MHD magnetic-field boundary conditions.");
+  mhd.def("registered_mhd_background_profiles",
+          [sorted_names]() {
+            return sorted_names(
+                quasar::Registry<quasar::numerics::IMhdBackgroundProfile>::instance().names());
+          },
+          "Names of registered static background-field (B0) profiles.");
 
   // -- Boundary spec --------------------------------------------------------
   // Per-side fluid/field boundary kinds (order: x_lo, x_hi, y_lo, y_hi). Names
@@ -169,6 +177,21 @@ void bind_mhd(py::module_& m) {
            },
            py::arg("side"));
 
+  // -- Background-field spec -------------------------------------------------
+  // Deck-facing static background magnetic field B0 for the field-split
+  // formulation B = B0 + b. `profile` is a registry name (default "uniform");
+  // bx0/by0/bz0 are the uniform-vector parameters consumed when profile ==
+  // "uniform". The Python deck validator queries
+  // registered_mhd_background_profiles() above rather than mirroring the name
+  // list, so it stays in sync with the C++ registry automatically.
+  py::class_<quasar::mhd::MhdBackgroundSpec>(mhd, "MhdBackgroundSpec")
+      .def(py::init<>())
+      .def_readwrite("enabled", &quasar::mhd::MhdBackgroundSpec::enabled)
+      .def_readwrite("profile", &quasar::mhd::MhdBackgroundSpec::profile)
+      .def_readwrite("bx0", &quasar::mhd::MhdBackgroundSpec::bx0)
+      .def_readwrite("by0", &quasar::mhd::MhdBackgroundSpec::by0)
+      .def_readwrite("bz0", &quasar::mhd::MhdBackgroundSpec::bz0);
+
   // -- Config ---------------------------------------------------------------
   // Every scheme axis is a registry-name string so a new scheme is selectable
   // from Python without touching this binding (mirrors EmPicConfig).
@@ -185,7 +208,8 @@ void bind_mhd(py::module_& m) {
       .def_readwrite("rho_floor", &quasar::mhd::MhdConfig::rho_floor)
       .def_readwrite("p_floor", &quasar::mhd::MhdConfig::p_floor)
       .def_readwrite("cfl", &quasar::mhd::MhdConfig::cfl)
-      .def_readwrite("boundary", &quasar::mhd::MhdConfig::boundary);
+      .def_readwrite("boundary", &quasar::mhd::MhdConfig::boundary)
+      .def_readwrite("background", &quasar::mhd::MhdConfig::background);
 
   // -- Solver ---------------------------------------------------------------
   py::class_<quasar::mhd::MhdSolver2D>(mhd, "MhdSolver2D")
@@ -210,6 +234,19 @@ void bind_mhd(py::module_& m) {
              self.seed_state(component, numpy_to_real_vector(values, "values"));
            },
            py::arg("component"), py::arg("values"))
+      .def("seed_background",
+           [](quasar::mhd::MhdSolver2D& self, const std::string& component,
+              const RealArray& values) {
+             // Stage a (storage_size,) host array into the named static
+             // background-field component for the field-split B = B0 + b. The
+             // array layout mirrors seed_state exactly (full ghost-padded
+             // storage, solver-internal units). Magnetic spellings accept both
+             // the staggered and the short name (b0x/b0x_face, b0y/b0y_face,
+             // b0z/b0z_cell). Requires the background to be enabled.
+             self.seed_background(component, numpy_to_real_vector(values, "values"));
+           },
+           py::arg("component"), py::arg("values"))
+      .def("has_background", &quasar::mhd::MhdSolver2D::has_background)
       .def("state_component_to_host",
            [](const quasar::mhd::MhdSolver2D& self, const std::string& component) {
              return vector_to_numpy(self.state_component_to_host(component));
