@@ -43,7 +43,9 @@ No separate entry gate phase — classification is step (a) of Phase 1.
 - Resolve repo root via `git rev-parse --show-toplevel`.
 
 (b) **Planner** subagent drafts the plan in the [REFERENCE.md](REFERENCE.md) template:
-ASCII architecture (write-plan style), **behavioral acceptance criteria** (observable,
+Mermaid architecture diagrams (understand-codebase style) — a call-graph `flowchart TD`
+over the feature's new public functions/interfaces and a class diagram of its new
+classes —, **behavioral acceptance criteria** (observable,
 **no test names**), per-task `Files written:` (disjoint within a phase), public
 interface signatures, and — when adding a pluggable scheme — the matching
 `docs/dev-guide/adding_a_*.rst` steps plus registry self-registration via

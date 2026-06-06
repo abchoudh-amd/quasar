@@ -48,8 +48,11 @@ Classification:
 
 Produce a plan in the output template in REFERENCE.md. Requirements:
 - Behavioral acceptance criteria: observable terms ONLY, NO test names/paths.
-- `### Architecture`: at least one ASCII diagram fenced as ```text (write-plan
-  conventions); name each component's responsibility in prose.
+- `### Architecture`: TWO fenced ```mermaid blocks (understand-codebase style) —
+  (a) a `flowchart TD` call graph of caller→callee across the feature's new
+  public functions/interfaces, and (b) a class diagram (`classDiagram` or
+  `graph TD`) of the new classes and their base/interface/registry
+  relationships; name each component's responsibility in prose.
 - Per writer-phase task (Phases 2, 3, 4): a `Files written:` list, DISJOINT within
   the phase.
 - Public interface signatures the tests and the implementer will both target
@@ -78,7 +81,8 @@ Check for:
 - Behavioral acceptance criteria are observable and contain NO test names/paths.
 - Interface signatures are concrete enough that an implementer who CANNOT read the
   tests could satisfy them (this is the crux of blind TDD).
-- `### Architecture` has an ASCII diagram fenced as ```text; components named.
+- `### Architecture` has BOTH a Mermaid call-graph `flowchart TD` and a Mermaid
+  class diagram (each fenced ```mermaid); nodes/classes named and edges present.
 - Per-task `Files written:` populated and DISJOINT within each phase.
 - Axis placement respects the four-axis orthogonality and backend isolation
   (HIP/device code only under src/backend/hip/); pluggable schemes self-register.
@@ -203,10 +207,16 @@ under `python/quasar/**` must be re-copied into `build/hip-gfx942-release/python
 
 ## High-level design
 ### Architecture
-```text
-  +-----------+      +-----------+
-  | Component | ---> | Component |
-  +-----------+      +-----------+
+```mermaid
+flowchart TD
+  cli[pic.cli run] --> solver[EmPicSolver.step]
+  solver --> deposit[NewScheme.deposit]
+  deposit --> field[JField2D]
+```
+```mermaid
+classDiagram
+  IDepositScheme <|-- NewScheme
+  NewScheme : +deposit(species, J)
 ```
 - Components / modules touched (new vs modified):
 - Axis placement & ownership boundaries:
@@ -250,7 +260,7 @@ under `python/quasar/**` must be re-copied into `build/hip-gfx942-release/python
 
 ## Delivery checklist
 - [ ] Acceptance criteria observable, no test names
-- [ ] `### Architecture` has a ```text ASCII diagram
+- [ ] `### Architecture` has BOTH a Mermaid call-graph `flowchart TD` and a Mermaid class diagram
 - [ ] Interface signatures concrete enough for a test-blind implementer
 - [ ] Every writer task has disjoint `Files written:`
 - [ ] Phase 3 `Files written:` contains NO tests/ paths

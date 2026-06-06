@@ -18,6 +18,19 @@ User: "Add a new charge-conserving deposit scheme `vb_deposit` for the PIC modul
   without error". `Files written:` — Phase 2 `tests/unit/numerics/test_vb_deposit.cpp`;
   Phase 3 `include/quasar/numerics/vb_deposit.hpp`, `src/physics/pic/pic_solver.cpp`
   (registration).
+- The plan's `### Architecture` carries the two required Mermaid diagrams — a
+  call graph and a class diagram of the new scheme:
+  ```mermaid
+  flowchart TD
+    cli[pic.cli run] --> step[EmPicSolver.step]
+    step --> deposit[VbDeposit2D.deposit]
+    deposit --> J[JField2D]
+  ```
+  ```mermaid
+  classDiagram
+    IDepositScheme <|-- VbDeposit2D
+    VbDeposit2D : +deposit(species, J)
+  ```
 - **Critic** flags that the criteria don't state the shape order coverage; planner adds
   "holds for CIC and TSC shape orders". Critic returns `approve`.
 - User approves. Plan saved to `plans/vb-deposit-build-plan.md`.
