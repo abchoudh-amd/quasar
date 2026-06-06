@@ -5,6 +5,7 @@ endif()
 set(_quasar_pybind_sources
   bind_magnetostatics.cpp
   bind_pic.cpp
+  bind_mhd.cpp
 )
 
 # The bindings TU includes quasar/backend/* headers, which pull in
@@ -44,6 +45,10 @@ set(_quasar_py_sources
   pic/postprocess.py
   pic/cli.py
   pic/_units.py
+  mhd/__init__.py
+  mhd/io.py
+  mhd/numerics.py
+  mhd/cli.py
 )
 
 foreach(_py IN LISTS _quasar_py_sources)

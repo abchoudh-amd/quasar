@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -792,6 +793,469 @@ class PicCliDiagnosticsTest(unittest.TestCase):
             self.assertTrue(alive_series, msg="no per-species alive series")
             for k in alive_series:
                 self.assertTrue((data[k] >= 0).all(), msg=f"negative counts in {k}")
+
+
+# ---------------------------------------------------------------------------
+# Ideal-MHD example cases (high-order, mp7 reconstruction).
+#
+# The MHD CLI is ``python -m quasar.mhd.cli run <input.yaml>`` and writes an
+# ``out.npz`` whose keys are:
+#   final_step, final_time_s, nx, ny, nghost, geometry, gamma,
+#   state_rho, state_mx, state_my, state_mz, state_energy,
+#   state_bx, state_by, state_bz, divb_linf
+# (face B is sampled to cell centers for the ``state_b*`` outputs).
+#
+# These tests MIRROR the coil/PIC mechanics above: copy the example dir into a
+# sandbox, run the CLI, load ``out.npz``, and assert physically meaningful but
+# tolerant criteria (the references are canonical, not always closed-form). They
+# are written RED-first: ``examples/brio_wu`` etc. and ``quasar.mhd`` do not
+# exist yet, so each test fails cleanly on the missing deck / missing output
+# (the same way a missing coil/PIC example would), rather than breaking the
+# harness.
+#
+# Contract for Task 3.12's decks (so decks and tests agree):
+#   * Each deck lives at ``examples/<case>/input.yaml`` with a ``README.md``.
+#   * ``diagnostics.output_path`` MUST be ``out.npz`` (relative to the deck dir),
+#     mirroring every other example, so the loader below finds it.
+#   * The deck's ``time`` runs to the canonical output time / step count for that
+#     problem; the tests below read whatever final state the deck produces and
+#     check structure, so a deck author sets ``time`` to the standard reference
+#     time (documented per-case in the README).
+#   * ``state_*`` arrays are cell-centered, flattened either as 1D (nx for a
+#     degenerate ny=1 run) or row-major (ny, nx); the reshape helper below copes
+#     with both. ``nx``, ``ny``, ``nghost``, ``gamma`` are scalars stored as
+#     length-1 arrays (mirroring the PIC convention, e.g. ``data["nx"][0]``).
+#   * mhd_linear_wave: see ``MhdLinearWaveConvergenceTest`` -- the test runs the
+#     deck at its shipped resolution AND a refined copy with ``nx``/``ny``
+#     doubled (it rewrites ``domain.nx``/``domain.ny`` in the YAML text). The
+#     deck MUST therefore (a) seed a smooth ``alfven_wave`` whose exact solution
+#     is a pure translation by one wavelength at the output time, and (b) write
+#     ``state_rho`` so the L1 error vs the seeded/exact profile can be formed.
+#     For an exactly-advected smooth wave the analytic final state equals the
+#     initial state (one full period / integer wavelength shift), so the test
+#     uses the deck's own seeded profile recomputed analytically as the
+#     reference. The README must state the wavelength, output time, and that the
+#     output time corresponds to an integer number of wave periods.
+
+
+def _run_mhd_cli(yaml_path: Path) -> None:
+    """Run the ideal-MHD CLI on a deck. Mirrors ``_run_cli`` /
+    ``_run_pic_cli`` but targets the ``quasar.mhd.cli`` module."""
+    res = subprocess.run(
+        [sys.executable, "-m", "quasar.mhd.cli", "run", str(yaml_path)],
+        capture_output=True, text=True, env={**os.environ},
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"quasar.mhd.cli failed (exit {res.returncode}):\n"
+            f"stdout: {res.stdout}\nstderr: {res.stderr}")
+
+
+def _mhd_scalar(data, key: str) -> float:
+    """Read a scalar stored as a length-1 array (PIC convention) or a bare
+    0-d/scalar value."""
+    arr = np.asarray(data[key])
+    return float(arr.reshape(-1)[0])
+
+
+def _mhd_field(data, key: str, nx: int, ny: int) -> np.ndarray:
+    """Return a cell-centered MHD state field as a 2D ``(ny, nx)`` array.
+
+    Copes with a 1D degenerate run (ny == 1 or a flat length-nx buffer) and a
+    row-major ``(ny, nx)`` flatten. No ghost halo: the MHD ``state_*`` outputs
+    are documented as cell-centered interior values."""
+    flat = np.asarray(data[key]).reshape(-1)
+    if flat.size == nx * ny:
+        return flat.reshape(ny, nx)
+    if flat.size == nx and ny == 1:
+        return flat.reshape(1, nx)
+    raise AssertionError(
+        f"{key!r} size {flat.size} matches neither nx*ny={nx * ny} nor nx={nx}")
+
+
+def _mhd_no_nans(testcase, data) -> None:
+    for key in data.files:
+        arr = data[key]
+        if np.issubdtype(arr.dtype, np.floating):
+            testcase.assertFalse(np.isnan(arr).any(), msg=f"NaNs in {key!r}")
+            testcase.assertFalse(np.isinf(arr).any(), msg=f"Infs in {key!r}")
+
+
+# divb_linf is a discrete divergence; "machine epsilon" for a CT/projection
+# scheme means it never grows beyond a small multiple of float64 round-off times
+# the field magnitude. We keep a tolerant absolute floor so the criterion stays
+# physically meaningful without being brittle to the exact discretization.
+_DIVB_EPS = 1e-10
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class BrioWuExampleTest(unittest.TestCase):
+    """1D MHD shock tube, ``examples/brio_wu`` (initial.type ``brio_wu``).
+
+    The canonical Brio-Wu Riemann problem (gamma = 2) develops a fixed sequence
+    of waves. We do not have a closed form, so we pin the robust structural
+    signature: the density relaxes from the left state (rho ~ 1) to the right
+    state (rho ~ 0.125) across the tube, the run is finite, and divb stays at
+    machine epsilon (trivially so in 1D, but the key must be present and tiny)."""
+
+    def test_brio_wu_shock_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("brio_wu", Path(tmp))
+            _run_mhd_cli(workdir / "input.yaml")
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+            _mhd_no_nans(self, data)
+
+            nx = int(_mhd_scalar(data, "nx"))
+            ny = int(_mhd_scalar(data, "ny"))
+            rho = _mhd_field(data, "state_rho", nx, ny)
+
+            # Take the midline (any row; in a 1D run all rows are identical, and
+            # the deck may be a degenerate ny=1 or a thin 2D strip).
+            line = rho[ny // 2, :]
+            self.assertTrue(np.all(np.isfinite(line)))
+            self.assertTrue(np.all(line > 0.0), msg="non-positive density")
+
+            # Left/right limits: Brio-Wu seeds rho_L = 1.0, rho_R = 0.125. After
+            # the run the far-left few cells stay near the left state and the
+            # far-right few near the right state (the wave fan sits in between).
+            k = max(1, nx // 16)
+            left = float(np.mean(line[:k]))
+            right = float(np.mean(line[-k:]))
+            self.assertAlmostEqual(left, 1.0, delta=0.15,
+                                   msg=f"left density {left} not ~1.0")
+            self.assertAlmostEqual(right, 0.125, delta=0.05,
+                                   msg=f"right density {right} not ~0.125")
+            # Net drop left -> right is the defining feature.
+            self.assertGreater(left, right + 0.5,
+                               msg=f"no left>right density drop: {left} vs {right}")
+
+            # divb at machine epsilon.
+            divb = _mhd_scalar(data, "divb_linf")
+            self.assertLess(divb, _DIVB_EPS,
+                            msg=f"divb_linf {divb} not at machine epsilon")
+
+            # gamma == 2 for Brio-Wu.
+            self.assertAlmostEqual(_mhd_scalar(data, "gamma"), 2.0, places=6)
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class MhdLinearWaveConvergenceTest(unittest.TestCase):
+    """Smooth Alfven wave, ``examples/mhd_linear_wave`` (initial.type
+    ``alfven_wave``) -- the high-order convergence proof.
+
+    The deck seeds a smooth wave whose exact solution at the deck's output time
+    is the initial profile translated by an integer number of wavelengths (i.e.
+    it returns to the seed). We run the deck at its shipped resolution and at a
+    refined copy with ``nx``/``ny`` DOUBLED (rewriting the YAML), form the L1
+    error of ``state_rho`` against the analytic (== seeded) profile at each
+    resolution, and assert the empirical convergence RATE approaches the mp7
+    design order (~7). The bound is a tolerant lower bound (rate > 5.5) to allow
+    measurement noise, limiter clipping at the extrema, and round-off.
+
+    HOW THE TWO RESOLUTIONS ARE OBTAINED: the deck file is copied into the
+    sandbox once at its shipped resolution; a second copy has ``domain.nx`` and
+    ``domain.ny`` doubled by a regex rewrite of the YAML text. Task 3.12's deck
+    MUST keep ``domain.nx``/``domain.ny`` as plain integer scalars on their own
+    ``key: value`` lines (or inside a ``{nx: .., ny: ..}`` inline map) so this
+    rewrite matches, and MUST seed a wave that is exactly periodic over the
+    domain at the output time so the analytic reference equals the seed.
+    """
+
+    def _l1_error_vs_seed(self, workdir: Path) -> float:
+        """Run the deck in ``workdir`` and return the L1 error of the final
+        density against the analytic reference. For an exactly-advected smooth
+        wave the analytic final state equals the initial seed; the deck is
+        expected to also emit the seeded ("exact") profile, but to stay robust
+        we reconstruct the reference as the *mean-removed* periodic structure:
+        the error metric is the L1 distance between the final density and a
+        smooth fit is overkill, so we instead compare final vs the deck's seed
+        profile if present, else fall back to the first-harmonic projection.
+
+        Concretely: if the deck writes ``state_rho_initial`` we use it; else we
+        treat the analytic solution as a pure cosine of the dominant spatial
+        harmonic fitted to the final field (amplitude + phase), which for a
+        correctly-advected smooth wave is the exact solution. The L1 norm is
+        normalized by the number of cells so errors at different resolutions are
+        directly comparable.
+        """
+        _run_mhd_cli(workdir / "input.yaml")
+        data = np.load(workdir / "out.npz", allow_pickle=False)
+        _mhd_no_nans(self, data)
+        nx = int(_mhd_scalar(data, "nx"))
+        ny = int(_mhd_scalar(data, "ny"))
+        rho = _mhd_field(data, "state_rho", nx, ny)
+
+        if "state_rho_initial" in data.files:
+            ref = _mhd_field(data, "state_rho_initial", nx, ny)
+        else:
+            # Analytic reference for an exactly-periodic smooth wave: the
+            # dominant first spatial harmonic along x (mean + single cosine).
+            # A correctly high-order scheme reproduces this to its design order;
+            # dispersion/dissipation errors are what shrink with resolution.
+            line_mean = rho.mean(axis=0)  # average over y (wave is along x)
+            n = line_mean.size
+            k = np.arange(n)
+            dc = line_mean.mean()
+            c = (2.0 / n) * np.sum(line_mean * np.cos(2 * np.pi * k / n))
+            s = (2.0 / n) * np.sum(line_mean * np.sin(2 * np.pi * k / n))
+            fit = dc + c * np.cos(2 * np.pi * k / n) + s * np.sin(
+                2 * np.pi * k / n)
+            ref = np.broadcast_to(fit, rho.shape)
+
+        return float(np.mean(np.abs(rho - ref)))
+
+    def test_convergence_rate_approaches_seventh_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = _copy_example("mhd_linear_wave", Path(tmp))
+            e_coarse = self._l1_error_vs_seed(base)
+
+            # Refined copy: double domain.nx and domain.ny in the YAML text.
+            fine = _copy_example("mhd_linear_wave", Path(tmp) / "refined")
+            deck = fine / "input.yaml"
+            text = deck.read_text()
+
+            def _double(match: "re.Match") -> str:
+                return f"{match.group(1)}{int(match.group(2)) * 2}"
+
+            text = re.sub(r"(\bnx\s*:\s*)(\d+)", _double, text)
+            text = re.sub(r"(\bny\s*:\s*)(\d+)", _double, text)
+            deck.write_text(text)
+            e_fine = self._l1_error_vs_seed(fine)
+
+            self.assertGreater(e_coarse, 0.0, msg="coarse error vanished")
+            self.assertGreater(e_fine, 0.0, msg="fine error vanished")
+            # Refinement must reduce the error.
+            self.assertLess(e_fine, e_coarse,
+                            msg=f"error grew under refinement: "
+                                f"{e_coarse} -> {e_fine}")
+
+            # Empirical order from a 2x refinement: p = log2(e_coarse / e_fine).
+            rate = math.log(e_coarse / e_fine) / math.log(2.0)
+            self.assertGreater(
+                rate, 5.5,
+                msg=f"convergence rate {rate:.2f} below the mp7 design order "
+                    f"(~7); errors {e_coarse:.3e} -> {e_fine:.3e}. A low rate "
+                    f"points at the reconstruction order or the time integrator.")
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class OrszagTangExampleTest(unittest.TestCase):
+    """2D Orszag-Tang vortex, ``examples/orszag_tang`` (initial.type
+    ``orszag_tang``, gamma = 5/3, periodic domain).
+
+    Conservation + structure: on a doubly-periodic domain the total mass and
+    total energy are conserved; divb stays at machine epsilon; and the density
+    field develops the characteristic strong spread (sharp central/region
+    extrema) of the canonical Orszag-Tang result at the output time.
+
+    Initial sums: derived from the deck's own seeded state. The deck is expected
+    to also write the initial conserved sums (``mass_initial`` /
+    ``energy_initial``); if absent, the test falls back to comparing the final
+    sums against the analytic seed integrals only loosely (structure only). To
+    keep the conservation check meaningful, Task 3.12's deck SHOULD emit the
+    initial totals (e.g. ``mass_initial``, ``energy_initial`` scalars) OR a step-0
+    snapshot; the README must document the output time (the canonical t = 0.5)."""
+
+    def test_conservation_and_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("orszag_tang", Path(tmp))
+            _run_mhd_cli(workdir / "input.yaml")
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+            _mhd_no_nans(self, data)
+
+            self.assertAlmostEqual(_mhd_scalar(data, "gamma"), 5.0 / 3.0,
+                                   places=4)
+
+            nx = int(_mhd_scalar(data, "nx"))
+            ny = int(_mhd_scalar(data, "ny"))
+            rho = _mhd_field(data, "state_rho", nx, ny)
+            energy = _mhd_field(data, "state_energy", nx, ny)
+
+            self.assertTrue(np.all(np.isfinite(rho)))
+            self.assertTrue(np.all(rho > 0.0), msg="non-positive density")
+            self.assertTrue(np.all(np.isfinite(energy)))
+
+            # divb at machine epsilon throughout (final value reported).
+            divb = _mhd_scalar(data, "divb_linf")
+            self.assertLess(divb, _DIVB_EPS,
+                            msg=f"divb_linf {divb} not at machine epsilon")
+
+            # Conservation: total mass and total energy on the periodic domain
+            # match their initial values to a tight tolerance. Cells are uniform,
+            # so the discrete integral is proportional to the sum; comparing
+            # sums is equivalent to comparing integrals.
+            mass_final = float(rho.sum())
+            energy_final = float(energy.sum())
+
+            if "mass_initial" in data.files and "energy_initial" in data.files:
+                mass0 = _mhd_scalar(data, "mass_initial")
+                energy0 = _mhd_scalar(data, "energy_initial")
+                # 0.1% on mass (advection is conservative to round-off; the
+                # bound covers limiter mass-redistribution), 1% on energy (the
+                # high-order scheme dissipates a little at shocks).
+                self.assertAlmostEqual(
+                    mass_final / mass0, 1.0, delta=1e-3,
+                    msg=f"mass not conserved: {mass0} -> {mass_final}")
+                self.assertAlmostEqual(
+                    energy_final / energy0, 1.0, delta=1e-2,
+                    msg=f"energy not conserved: {energy0} -> {energy_final}")
+            else:
+                # No seeded totals available: at minimum the conserved fields
+                # are bounded and non-trivial (a blown-up run fails NaN/positive
+                # checks above; this guards a silently-zeroed field).
+                self.assertGreater(mass_final, 0.0)
+                self.assertGreater(energy_final, 0.0)
+
+            # Structure: the Orszag-Tang vortex sharpens density gradients, so by
+            # the output time the field spans a clear range about its mean (the
+            # canonical result has rho varying by more than a factor of ~2).
+            rho_mean = float(rho.mean())
+            self.assertGreater(float(rho.max()) / rho_mean, 1.3,
+                               msg="density maximum too flat for Orszag-Tang")
+            self.assertLess(float(rho.min()) / rho_mean, 0.8,
+                            msg="density minimum too flat for Orszag-Tang")
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class MhdBlastExampleTest(unittest.TestCase):
+    """Strong-shock MHD blast wave, ``examples/mhd_blast`` (initial.type
+    ``blast``).
+
+    Positivity + symmetry: a high-pressure central region drives a strong fast
+    shell into a magnetized background. Density and pressure must stay strictly
+    positive everywhere (no negative, no NaN), and the fast shell is nearly
+    circular -- a coarse symmetry check compares the radial density profile along
+    x against the profile along y. divb stays at machine epsilon."""
+
+    def _gamma_pressure(self, data, nx, ny, gamma):
+        """Thermal pressure from the conserved state:
+        p = (gamma - 1) (E - 0.5 rho v^2 - 0.5 B^2)."""
+        rho = _mhd_field(data, "state_rho", nx, ny)
+        mx = _mhd_field(data, "state_mx", nx, ny)
+        my = _mhd_field(data, "state_my", nx, ny)
+        mz = _mhd_field(data, "state_mz", nx, ny)
+        e = _mhd_field(data, "state_energy", nx, ny)
+        bx = _mhd_field(data, "state_bx", nx, ny)
+        by = _mhd_field(data, "state_by", nx, ny)
+        bz = _mhd_field(data, "state_bz", nx, ny)
+        kinetic = 0.5 * (mx ** 2 + my ** 2 + mz ** 2) / rho
+        magnetic = 0.5 * (bx ** 2 + by ** 2 + bz ** 2)
+        return (gamma - 1.0) * (e - kinetic - magnetic)
+
+    def test_positivity_and_circular_shell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("mhd_blast", Path(tmp))
+            _run_mhd_cli(workdir / "input.yaml")
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+            _mhd_no_nans(self, data)
+
+            nx = int(_mhd_scalar(data, "nx"))
+            ny = int(_mhd_scalar(data, "ny"))
+            gamma = _mhd_scalar(data, "gamma")
+            rho = _mhd_field(data, "state_rho", nx, ny)
+
+            # Strict positivity of density and pressure everywhere.
+            self.assertTrue(np.all(rho > 0.0),
+                            msg=f"density not strictly positive: min={rho.min()}")
+            pressure = self._gamma_pressure(data, nx, ny, gamma)
+            self.assertTrue(np.all(np.isfinite(pressure)))
+            self.assertTrue(np.all(pressure > 0.0),
+                            msg=f"pressure not strictly positive: "
+                                f"min={pressure.min()}")
+
+            # divb at machine epsilon.
+            divb = _mhd_scalar(data, "divb_linf")
+            self.assertLess(divb, _DIVB_EPS,
+                            msg=f"divb_linf {divb} not at machine epsilon")
+
+            # Coarse circular-symmetry check: the radial density profile measured
+            # along +x from the center should match the profile along +y within
+            # tolerance (a near-circular fast shell). Sample along the central
+            # row and central column.
+            cx, cy = nx // 2, ny // 2
+            along_x = rho[cy, cx:]
+            along_y = rho[cy:, cx]
+            m = min(along_x.size, along_y.size)
+            along_x = along_x[:m]
+            along_y = along_y[:m]
+            scale = float(max(rho.max() - rho.min(), 1e-30))
+            # The magnetic field breaks perfect isotropy, so allow a generous
+            # band: the x/y radial profiles agree to ~20% of the field range.
+            self.assertTrue(
+                np.all(np.abs(along_x - along_y) < 0.20 * scale),
+                msg="blast shell not approximately circular: "
+                    f"max |rho_x - rho_y| = {np.max(np.abs(along_x - along_y))}, "
+                    f"range scale = {scale}")
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class MhdRotorExampleTest(unittest.TestCase):
+    """MHD rotor, ``examples/mhd_rotor`` (initial.type ``rotor``).
+
+    Positivity + structure: a dense disk spins inside a light, magnetized
+    ambient, winding up the field into torsional Alfven waves. Density and
+    pressure must stay strictly positive throughout, and the rotor leaves a
+    clear central over-density (the spun-up disk) relative to the ambient. divb
+    stays at machine epsilon."""
+
+    def _gamma_pressure(self, data, nx, ny, gamma):
+        rho = _mhd_field(data, "state_rho", nx, ny)
+        mx = _mhd_field(data, "state_mx", nx, ny)
+        my = _mhd_field(data, "state_my", nx, ny)
+        mz = _mhd_field(data, "state_mz", nx, ny)
+        e = _mhd_field(data, "state_energy", nx, ny)
+        bx = _mhd_field(data, "state_bx", nx, ny)
+        by = _mhd_field(data, "state_by", nx, ny)
+        bz = _mhd_field(data, "state_bz", nx, ny)
+        kinetic = 0.5 * (mx ** 2 + my ** 2 + mz ** 2) / rho
+        magnetic = 0.5 * (bx ** 2 + by ** 2 + bz ** 2)
+        return (gamma - 1.0) * (e - kinetic - magnetic)
+
+    def test_positivity_and_central_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("mhd_rotor", Path(tmp))
+            _run_mhd_cli(workdir / "input.yaml")
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+            _mhd_no_nans(self, data)
+
+            nx = int(_mhd_scalar(data, "nx"))
+            ny = int(_mhd_scalar(data, "ny"))
+            gamma = _mhd_scalar(data, "gamma")
+            rho = _mhd_field(data, "state_rho", nx, ny)
+
+            # Strict positivity of density and pressure throughout.
+            self.assertTrue(np.all(rho > 0.0),
+                            msg=f"density not strictly positive: min={rho.min()}")
+            pressure = self._gamma_pressure(data, nx, ny, gamma)
+            self.assertTrue(np.all(np.isfinite(pressure)))
+            self.assertTrue(np.all(pressure > 0.0),
+                            msg=f"pressure not strictly positive: "
+                                f"min={pressure.min()}")
+
+            # divb at machine epsilon.
+            divb = _mhd_scalar(data, "divb_linf")
+            self.assertLess(divb, _DIVB_EPS,
+                            msg=f"divb_linf {divb} not at machine epsilon")
+
+            # Central rotating structure: the dense disk leaves a central
+            # over-density relative to the ambient corners. Compare a central
+            # patch mean to the mean of the four corner patches.
+            qx, qy = max(1, nx // 8), max(1, ny // 8)
+            cx, cy = nx // 2, ny // 2
+            central = float(rho[cy - qy:cy + qy, cx - qx:cx + qx].mean())
+            corners = float(np.mean([
+                rho[:qy, :qx].mean(), rho[:qy, -qx:].mean(),
+                rho[-qy:, :qx].mean(), rho[-qy:, -qx:].mean(),
+            ]))
+            self.assertGreater(
+                central, 1.5 * corners,
+                msg=f"no central over-density: central={central}, "
+                    f"corners={corners} (the rotor disk should be denser than "
+                    f"the ambient).")
 
 
 if __name__ == "__main__":

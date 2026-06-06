@@ -29,6 +29,7 @@
 namespace py = pybind11;
 
 void bind_pic(py::module_& m);
+void bind_mhd(py::module_& m);
 
 using ::quasar::Real;
 using ::quasar::Vec3;
@@ -305,4 +306,6 @@ PYBIND11_MODULE(_core, m) {
   // pic submodule binds last so it can accept ConductorSystem /
   // BiotSavartEvaluator instances bound above.
   bind_pic(m);
+  // mhd submodule (self-contained; binds its own Grid2D at the mhd scope).
+  bind_mhd(m);
 }

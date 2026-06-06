@@ -17,3 +17,4 @@ quasar_add_backend_src_include(backend_hip)
 
 add_subdirectory(magnetostatics)
 add_subdirectory(pic)
+add_subdirectory(mhd)

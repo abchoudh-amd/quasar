@@ -1,0 +1,30 @@
+# Brio-Wu MHD shock tube (Brio & Wu, JCP 1988).
+#
+# The classic 1D Riemann problem for ideal MHD. A discontinuity at x = 0.5 in a
+# (nominally) 1D domain separates two constant states; the evolution produces the
+# canonical compound-wave structure: a fast rarefaction, a compound wave (slow
+# shock + slow rarefaction), a contact discontinuity, and a slow shock, then a
+# fast rarefaction on the right. Run on a thin 2D grid (periodic in y) so the
+# 2D solver's mp7 stencil (nghost = 4) has room.
+#
+# Standard states (gamma = 2):
+#   left  (x < 0.5): rho = 1.000, p = 1.0, Bx = 0.75, By =  1, Bz = 0, v = 0
+#   right (x > 0.5): rho = 0.125, p = 0.1, Bx = 0.75, By = -1, Bz = 0, v = 0
+# Output time t = 0.1 (the standard Brio-Wu comparison time).
+
+units: normalized
+domain: {nx: 512, ny: 8, lx_m: 1.0, ly_m: 0.015625, origin_x_m: 0.0, origin_y_m: 0.0}
+geometry: cartesian
+numerics: {gamma: 2.0, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
+           ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.4}
+initial:
+  type: brio_wu
+  params:
+    interface: 0.5
+    left:  {rho: 1.0,   p: 1.0, vx: 0.0, vy: 0.0, vz: 0.0, bx: 0.75, by:  1.0, bz: 0.0}
+    right: {rho: 0.125, p: 0.1, vx: 0.0, vy: 0.0, vz: 0.0, bx: 0.75, by: -1.0, bz: 0.0}
+time: {dt_s: auto, steps: 2000, t_end: 0.1}
+diagnostics: {output_path: out.npz, cadence: 0,
+              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
+boundary: {fluid: [outflow, outflow, periodic, periodic],
+           field: [outflow, outflow, periodic, periodic]}

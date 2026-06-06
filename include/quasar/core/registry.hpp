@@ -91,3 +91,29 @@ class Registry {
   const bool QUASAR_REGISTRY_DETAIL_PASTE(_quasar_reg_, __LINE__) =                     \
       ::quasar::Registry<Base>::instance().template register_type<Class>((Name));       \
   }
+
+// MHD-axis registration sugar. Each macro only pastes a fully-qualified interface
+// name into the generic QUASAR_REGISTRY_REGISTER expansion above; it does not
+// include or forward-declare the interface type, so this header compiles even
+// before those interface headers exist. The macros are expanded later in each
+// scheme's own .cpp (which includes its interface header).
+#define QUASAR_REGISTER_RIEMANN_SOLVER(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IRiemannSolver, Name, Class)
+
+#define QUASAR_REGISTER_FLUX_RECONSTRUCTION(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IFluxReconstruction, Name, Class)
+
+#define QUASAR_REGISTER_INTEGRATOR(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::ISsprkIntegrator, Name, Class)
+
+#define QUASAR_REGISTER_CT_SCHEME(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::ICtScheme, Name, Class)
+
+#define QUASAR_REGISTER_POSITIVITY_LIMITER(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::numerics::IPositivityLimiter, Name, Class)
+
+#define QUASAR_REGISTER_MHD_FLUID_BOUNDARY(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::boundary::IMhdFluidBoundary, Name, Class)
+
+#define QUASAR_REGISTER_MHD_FIELD_BOUNDARY(Name, Class) \
+  QUASAR_REGISTRY_REGISTER(::quasar::boundary::IMhdFieldBoundary, Name, Class)

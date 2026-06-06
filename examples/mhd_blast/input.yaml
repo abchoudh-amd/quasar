@@ -1,0 +1,35 @@
+# Magnetized MHD blast wave (strong-shock / positivity stress test).
+#
+# A high-pressure circular region at the center of a low-pressure, strongly
+# magnetized ambient medium. The over-pressured core drives a strong
+# fast-magnetosonic shock that expands ANISOTROPICALLY: faster along the field
+# lines than across them. This is the standard test for a scheme's robustness to
+# very low plasma-beta and strong rarefactions (the positivity / floor machinery
+# must keep rho, p > 0 in the rapidly-evacuated core).
+#
+# Standard setup (gamma = 5/3), on [-0.5, 0.5] x [-0.5, 0.5]:
+#   ambient: rho = 1, p = 0.1
+#   core (r < r_in): p = 10   (over-pressured by 100x)
+#   threaded field:  B = (1/sqrt(2), 1/sqrt(2), 0)   (|B| = 1, diagonal)
+
+units: normalized
+domain: {nx: 128, ny: 128, lx_m: 1.0, ly_m: 1.0, origin_x_m: -0.5, origin_y_m: -0.5}
+geometry: cartesian
+numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
+           ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.3}
+initial:
+  type: blast
+  params:
+    rho_ambient: 1.0
+    p_ambient: 0.1
+    p_core: 10.0
+    r_in: 0.1          # radius of the over-pressured core
+    center: [0.0, 0.0]
+    bx: 0.7071067812    # 1/sqrt(2)
+    by: 0.7071067812    # 1/sqrt(2)
+    bz: 0.0
+time: {dt_s: auto, steps: 4000, t_end: 0.2}
+diagnostics: {output_path: out.npz, cadence: 0,
+              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
+boundary: {fluid: [outflow, outflow, outflow, outflow],
+           field: [outflow, outflow, outflow, outflow]}

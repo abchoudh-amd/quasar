@@ -1,0 +1,39 @@
+# Circularly-polarized Alfven wave (smooth) for measuring convergence order.
+#
+# A small-amplitude, circularly-polarized Alfven wave traveling along x in a
+# fully periodic box. The wave is an exact nonlinear solution of ideal MHD: after
+# an integer number of wave periods the profile returns EXACTLY to its initial
+# state, so the L1 error against the initial condition measures the scheme's
+# spatial convergence order (~7 for mp7 reconstruction).
+#
+# nx / ny are deliberately PLAIN small integers; a convergence test doubles them
+# programmatically (32 -> 64 -> 128 -> ...) and checks the error ratio.
+#
+# Setup (standard CP Alfven wave, B0 along the propagation axis x):
+#   rho = 1, p = 0.1, B0x = 1 (background along x)
+#   transverse perturbations: dvy = -A sin(k x), dvz = -A cos(k x)
+#                             dBy =  A sin(k x), dBz =  A cos(k x)   (vA = 1)
+# with k = 2*pi / lx and amplitude A = 1e-6 (linear regime).
+#
+# Wave speed vA = B0 / sqrt(rho) = 1, so one period T = lx / vA = 1.0; t_end is
+# set to one full period.
+
+units: normalized
+domain: {nx: 32, ny: 32, lx_m: 1.0, ly_m: 1.0, origin_x_m: 0.0, origin_y_m: 0.0}
+geometry: cartesian
+numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
+           ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.3}
+initial:
+  type: alfven_wave
+  params:
+    rho: 1.0
+    p: 0.1
+    b0: 1.0          # background field magnitude along the propagation axis (x)
+    amplitude: 1.0e-6
+    wavenumber: 1    # number of full wavelengths across lx
+    polarization: circular
+time: {dt_s: auto, steps: 1000, t_end: 1.0}
+diagnostics: {output_path: out.npz, cadence: 0,
+              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
+boundary: {fluid: [periodic, periodic, periodic, periodic],
+           field: [periodic, periodic, periodic, periodic]}
