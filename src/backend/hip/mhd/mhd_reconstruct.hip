@@ -134,7 +134,14 @@ __global__ void reconstruct_kernel(
     double* __restrict__ Rby, double* __restrict__ Rbz) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= g.nx || j >= g.ny) return;
+  // Produce interface states over the interior PLUS the high-edge face layer
+  // (i==nx / j==ny). flux_difference at the last interior cell (i==nx-1) reads
+  // the flux at face index nx, so the reconstruction that feeds that flux must
+  // exist there too; computing only [0,nx) would leave face nx holding stale
+  // buffer data and break the conservative telescoping. Face index nx/ny is an
+  // in-bounds ghost slot (valid i in [-nghost, nx-1+nghost], nghost>=2), and the
+  // stencil cells (imm..ip) it reads are all within the padded storage.
+  if (i > g.nx || j > g.ny) return;
 
   // Neighbor offsets along the reconstruction direction.
   const int di = (dir == 0) ? 1 : 0;
@@ -199,7 +206,10 @@ void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<
                             stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
-  const dim3 grid = mhd_grid_2d(g, block);
+  // Launch over nx+1 x ny+1: the kernel also writes the high-edge face layer
+  // (index nx/ny) that flux_difference consumes at the last interior cell.
+  const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
+                  (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   // Select this axis's non-periodic flags: [x_lo,x_hi] for dir==0, [y_lo,y_hi]
   // for dir==1. The split EOS makes B0 inert in this kernel (no sound speed /
   // B0-dependent pressure here), so the background buffers are accepted for ABI

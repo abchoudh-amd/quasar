@@ -183,7 +183,12 @@ def _do_run(args: argparse.Namespace) -> int:
 
 
 def _snapshot_fields(solver, deck: mhd_io.MhdDeck) -> dict:
-    return {name: np.asarray(solver.state_component_to_host(name))
+    # Interior (ny, nx) cell-centered fields, matching the final state_* layout
+    # written by _flatten_for_npz (the ghost halo is stripped here too).
+    nx, ny, nghost = deck.domain.nx, deck.domain.ny, solver.grid().nghost
+    return {name: _interior_slice(
+                np.asarray(solver.state_component_to_host(name)).reshape(
+                    ny + 2 * nghost, nx + 2 * nghost), nx, ny, nghost)
             for name in deck.diagnostics.fields}
 
 
@@ -200,9 +205,17 @@ def _flatten_for_npz(solver, deck: mhd_io.MhdDeck, final_step: int,
         "geometry": np.array([deck.geometry]),
         "gamma": np.array([deck.numerics.gamma]),
     }
-    # Final conserved state: full set of components (cell-centered B sampled).
+    # Final conserved state: full set of components (cell-centered B sampled),
+    # written as the INTERIOR (nx*ny) field, row-major (ny, nx). The solver hands
+    # back the full ghost-padded storage ((ny+2g)*(nx+2g)); the .npz contract
+    # (and every state_* reader in the tests/post-processing) is the cell-centered
+    # interior only, so strip the ghost halo here rather than leak the padding.
+    nx, ny = deck.domain.nx, deck.domain.ny
     for name in mhd_io.STATE_COMPONENTS:
-        flat[f"state_{name}"] = np.asarray(solver.state_component_to_host(name))
+        padded = np.asarray(
+            solver.state_component_to_host(name)).reshape(ny + 2 * nghost,
+                                                          nx + 2 * nghost)
+        flat[f"state_{name}"] = _interior_slice(padded, nx, ny, nghost)
     # div B diagnostic: per-snapshot series plus the final scalar.
     flat["divb_linf"] = np.asarray(divb_series, dtype=np.float64)
     flat["divb_linf_final"] = np.array(

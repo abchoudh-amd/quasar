@@ -83,7 +83,15 @@ __global__ void ct_emf_kernel(
     double* __restrict__ ey_edge) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= g.nx || j >= g.ny) return;
+  // Compute corner EMFs over the interior PLUS the high-edge corner layer
+  // (i==nx / j==ny). The face-B curl-rate stencil at the last interior cell
+  // (i==nx-1) reads the corner at index nx (emf_curl_rate: ez(i+1,j)); on a
+  // periodic grid that corner is the wrap of the low edge, on a non-periodic
+  // grid it is the one-sided x_hi closure. Computing only [0,nx) would leave
+  // corner nx holding stale buffer data, which is what made div(B) grow after a
+  // step even though the seed was divergence-free. Corner index nx/ny is an
+  // in-bounds ghost slot (nghost>=2) and its 2x2 cell stencil stays in storage.
+  if (i > g.nx || j > g.ny) return;
   const std::size_t k = g.index(i, j);
 
   // Decide which side columns/rows of the 2x2 corner stencil are valid. By
@@ -94,24 +102,18 @@ __global__ void ct_emf_kernel(
   bool use_right = true;   // include the (i,*)   column
   bool use_below = true;   // include the (*,j-1) row
   bool use_above = true;   // include the (*,j)   row
-  // One-sided corner closure at the LOW non-periodic edges (i==0 / j==0): drop
-  // the column/row that reaches across the boundary into a ghost cell, so the
-  // corner EMF is built from interior cells only and does not depend on the
-  // ghost gradient.
-  //
-  // High-edge scope note: this kernel computes corner EMFs only over the interior
-  // index range i in [0,nx), j in [0,ny) (the guard above). The x_hi / y_hi
-  // *domain-edge* corner lives at index nx / ny and is NOT produced here; the
-  // emf_curl_rate stencil reads that corner from the ghost slot, exactly as the
-  // pre-existing periodic/halo path does. We deliberately do not special-case a
-  // high-edge corner: there is no reachable interior corner whose 2x2 stencil
-  // reaches a ghost on the high side (the last computed corner, i==nx-1, sits
-  // between interior cells nx-2 and nx-1), so a one-sided drop there would
-  // wrongly discard an interior cell. The high-edge corner handling is part of
-  // the constrained-transport halo, shared with the periodic path, and is left
-  // unchanged by this feature; only the low-edge one-sided closure is added.
-  if (flags.side[0] && i == 0) use_left  = false;  // x_lo non-periodic
-  if (flags.side[2] && j == 0) use_below = false;  // y_lo non-periodic
+  // One-sided corner closure at a NON-PERIODIC edge: drop the column/row that
+  // reaches across the boundary into a ghost cell, so the corner EMF is built
+  // from interior cells only and does not depend on the ghost gradient. The
+  // lower-left corner of cell (i,j) sits on the x_lo edge when i==0 (its (i-1)
+  // column is the ghost) and on the x_hi edge when i==nx (its (i) column is the
+  // ghost past the domain); likewise j==0 / j==ny for y. On periodic sides every
+  // flag is 0 so both sides are kept and the wrap average is bit-identical to the
+  // original two-sided path.
+  if (flags.side[0] && i == 0)    use_left  = false;  // x_lo non-periodic
+  if (flags.side[1] && i == g.nx) use_right = false;  // x_hi non-periodic
+  if (flags.side[2] && j == 0)    use_below = false;  // y_lo non-periodic
+  if (flags.side[3] && j == g.ny) use_above = false;  // y_hi non-periodic
 
   const bool active = (b0_active != 0);
   Real sum = Real{0};
@@ -190,7 +192,10 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u,
                        stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
-  const dim3 grid = mhd_grid_2d(g, block);
+  // Launch over nx+1 x ny+1 so the high-edge corner EMF (index nx/ny) read by
+  // the face-B curl-rate stencil at the last interior cell is produced too.
+  const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
+                  (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   // When the background is inactive pass null device pointers; the kernel takes
   // the zero-background fast path and never dereferences them.
   const int b0_active = b0.active ? 1 : 0;

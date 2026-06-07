@@ -23,12 +23,29 @@ inline env vars need `/usr/bin/env` (a stray `~/.local/bin/env` shadows it);
 | `numerics_test_ssprk3_integrator` | PASS | |
 | `numerics_test_positivity_limiter` | PASS | |
 | `mhd_test_mhd_scheme_registry_linkage` | PASS | all 7 registries populated |
-| `mhd_test_mhd_solver_conservation` | **FAIL** | mass/mom/energy drift (open bug #5) |
-| `mhd_test_mhd_divergence_free` | **FAIL** | div(B) ~1.73 after one step (open bug #4) |
-| `mhd_test_mhd_cylindrical_source` | **FAIL** | equilibrium drift + cyl div(B) (open bug #6) |
+| `mhd_test_mhd_solver_conservation` | PASS | mass/mom/energy conserved (was bug #5) |
+| `mhd_test_mhd_divergence_free` | PASS | div(B) ~1.5e-14 after 6 steps (was bug #4) |
+| `mhd_test_mhd_cylindrical_source` | PASS | equilibrium stationary + cyl div(B) ~0 (was bug #6) |
 
-Python: `test_mhd_io` + `test_mhd_bindings` pass (49); non-stepping CLI/over-CFL
-pass (5). Stepping CLI cases depend on the open numerics bugs below.
+**All 10 `-R mhd` ctests pass.** Bugs #4, #5, #6 are RESOLVED — they were a single
+structural defect (see "ROOT CAUSE" below), not three independent numerics bugs.
+The earlier "open bug" diagnoses (stale-ghost / missing geometric-source terms)
+were WRONG: the proposed ghost-refill fix had already been applied and made div(B)
+*worse* (1.73 → 2.45), and the cylindrical equilibrium seed has v=0, B_phi=0 so its
+geometric source is identically zero — the drift was the same structural defect.
+
+Python: `test_mhd_io` + `test_mhd_bindings` + `test_mhd_cli` pass (47). MHD example
+integration tests (`test_examples.py`) now RUN to completion (the CLI no longer
+aborts mid-step); `state_*` npz arrays are written interior-only per contract.
+Three example assertions remain RED, all traceable to the documented v1
+"device reconstruction is MUSCL-only" simplification, NOT to the gate bugs:
+  * `MhdLinearWaveConvergenceTest` — ill-posed: the Alfven seed holds rho exactly
+    uniform, so the rho-L1 error is round-off (6.7e-14 → 5.0e-14) and the
+    "convergence rate" is meaningless noise.
+  * `OrszagTangExampleTest` / `BrioWuExampleTest` — strong-gradient flows where the
+    2nd-order device MUSCL path underperforms the mp7 design order (energy/shock
+    structure outside tolerance). These need MP5/MP7 ported to the device kernel
+    (Known simplification #2), out of scope for the GREEN gate.
 
 ---
 
@@ -118,69 +135,60 @@ pass (5). Stepping CLI cases depend on the open numerics bugs below.
 
 ---
 
-## OPEN bugs (numerics — not yet fixed)
+## ROOT CAUSE (bugs #4, #5, #6 — one defect, now FIXED)
 
-These are the highest-risk coupled-numerics items called out in the build plan
-(FD-CT boundary consistency, conservative-FD telescoping, cylindrical geometric
-source). Diagnosed but **fix not applied** (work paused at user request).
+All three "open" failures were a single structural defect: **the high-edge
+face/corner layer at index `nx` / `ny` was consumed but never produced.**
 
-### Bug #4 — Residual div(B) growth from boundary/ghost inconsistency
-- **Test:** `mhd_test_mhd_divergence_free.SeedIsDivergenceFreeAndStaysSo`
-  (div1 = **1.73**, want < 1e-9).
-- **Diagnosed cause (two coupled defects):**
-  1. **Stale ghosts at measurement.** `MhdSolver2D::divergence_b_max()` calls
-     `ct_->divergence_b_linf(state())` with **no ghost refill**. The divergence
-     stencil at the last interior cell reads `bx_face(i+1,j)`/`by_face(i,j+1)` —
-     ghost faces last filled at the *previous* `compute_residual` top, i.e. before
-     the stage updates. Boundary ring sees post-step interior vs pre-step ghost.
-  2. **Contaminated ghost-face residual.** `launch_mhd_emf_curl_rate` overwrites
-     only the **interior** `dudt` face slots `[0,nx)×[0,ny)`. The **ghost** face
-     `dudt` slots still hold the `flux_difference` contamination, and `rk_stage`
-     runs over the whole storage (incl. ghosts), so it advances ghost faces by the
-     wrong (non-CT) rate. Those wrong ghost faces feed both the next stage's
-     reconstruction and the divergence measure.
-- **Proposed fix (host orchestration in `mhd_solver.cpp`):** re-fill ghosts on the
-  stage **output** inside `combine_stage` (after `rk_stage`) so ghost faces are
-  re-derived from the BC each stage; and make `divergence_b_max()` measure a
-  ghost-consistent field (fill ghosts before measuring). Currently `fill_ghosts` is
-  called only at the *top* of `compute_residual` on the *input*.
+The device producer kernels all guarded with `if (i >= g.nx || j >= g.ny) return;`,
+writing outputs only over the interior index range `[0,nx) × [0,ny)`:
+  * `reconstruct_kernel` (mhd_reconstruct.hip) — L/R interface states.
+  * `hlld_kernel`        (mhd_riemann.hip)     — the numerical flux.
+  * `ct_emf_kernel`      (mhd_ct.hip)          — the corner EMF `ez_edge`.
 
-### Bug #5 — Fluid conservation drift on a periodic grid
-- **Test:** `mhd_test_mhd_solver_conservation.PeriodicConservesMassMomentumEnergy`
-  (mass 1067.36 → 1083.77, **+16.4 ≈ 1.5%**; momentum/energy similarly), and
-  `AdvanceConservesMass` (+6.05).
-- **Diagnosed cause:** likely the same boundary/ghost inconsistency as Bug #4. On a
-  periodic domain, `Σ_interior −(F_{i+1/2}−F_{i−1/2})/dx` telescopes to
-  `−(F_{nx−1/2} − F_{−1/2})/dx = 0` **only if** the boundary-face fluxes match across
-  the period — which requires the reconstruction at face 0 and face nx to read
-  periodic-consistent ghost **cells** at every stage. With ghosts only filled on the
-  first stage's input, later stages reconstruct from stale/contaminated ghosts and
-  the flux no longer telescopes.
-- **Proposed verification:** after the ghost fix, instrument a one-`compute_residual`
-  call on a periodic uniform state and assert `Σ_interior dudt.rho ≈ 0`. If it is not
-  ~0, the residual is in the `flux_difference` periodic wrap or the reconstruction
-  ghost read (route to kernels/reconstruction owner), not the host orchestration.
+But the consumers read the slot at index `nx` / `ny` (the high-edge face of the
+last interior cell):
+  * `flux_difference_kernel` at cell `i = nx-1` reads the flux at face
+    `index(nx, j)` (`F_{i+1/2}`). That slot was never written by `hlld_kernel`, so
+    it held stale device-buffer data → the conservative sum did NOT telescope →
+    **mass/momentum/energy drift (was bug #5)** and the **cylindrical equilibrium
+    drift (was bug #6)** — the cyl seed's geometric source is identically zero
+    (v=0, B_phi=0), so the drift was this stale flux, not a missing source term.
+  * `emf_curl_rate_kernel` at cell `i = nx-1` reads `ez_edge(i+1=nx, j)`. That
+    corner was never written by `ct_emf_kernel`, so the face-B residual at the
+    seam was wrong → **div(B) growth (was bug #4, and the cyl div(B) failure)**.
 
-### Bug #6 — Cylindrical (r,z) equilibrium drift + cyl div(B)
-- **Test:** `mhd_test_mhd_cylindrical_source` —
-  `BalancedEquilibriumStaysStationary` (rho drift 0.209, energy drift 0.244, want
-  < 1e-8) and `DivergenceStaysAtMachineEpsilon` (0.55, want < 1e-9).
-- **Diagnosed cause(s):**
-  1. **Incomplete geometric source.** The geometric-source *kernel*
-     (`src/backend/hip/mhd/mhd_update.hip :: geometric_source_kernel`) implements
-     only `S_{m_r} = (ρ v_φ² − B_φ²)/r` and `S_{B_φ} = −(v_r B_φ − v_φ B_r)/r`. The
-     kernel's own comment also describes a pressure-curvature term and an `m_φ`
-     angular-momentum term, **but neither is implemented**. Whether a balanced state
-     stays stationary depends on the exact split between the Cartesian-style radial
-     `flux_difference` and the geometric source; with terms missing, the seeded
-     equilibrium is not discretely balanced and drifts. (Flagged by the source
-     implementer at delivery — kernel comment vs code mismatch.)
-  2. The cyl div(B) failure shares the boundary/ghost root cause in Bug #4 (plus the
-     cylindrical metric in the divergence/curl operators must be verified consistent).
-- **Proposed fix:** complete the geometric-source terms to be discretely consistent
-  with the radial `flux_difference` convention (so a documented equilibrium is a
-  fixed point), in `src/physics/mhd/mhd_geometric_source.*` and the
-  `geometric_source_kernel`; re-check after Bug #4's ghost fix lands.
+### Fix (applied)
+1. **Extend the three producers to the high-edge layer.** Change each guard to
+   `if (i > g.nx || j > g.ny) return;` and launch over `(nx+1) × (ny+1)` so the
+   `index(nx, ·)` / `index(·, ny)` slots are produced. Index `nx`/`ny` is an
+   in-bounds ghost slot (valid `i ∈ [-nghost, nx-1+nghost]`, `nghost ≥ 2`) and the
+   stencils these kernels read stay within the padded storage.
+   Files: `src/backend/hip/mhd/{mhd_reconstruct,mhd_riemann,mhd_ct}.hip`.
+2. **High-edge one-sided CT closure.** `ct_emf_kernel` now also drops the exterior
+   column/row at a NON-periodic `x_hi` (`i == nx`) / `y_hi` (`j == ny`) edge
+   (`flags.side[1]` / `flags.side[3]`), mirroring the existing low-edge closure.
+   Periodic sides keep the two-sided wrap average (bit-identical).
+3. **Fill the four CORNER ghost blocks in the boundary BC.** The extended
+   `ct_emf_kernel` reads the high-edge corner whose 2×2 cell stencil includes a
+   *corner* ghost (both `i` and `j` in the ghost range). `fill_cell` / the y-branch
+   of `fill_normal_face` (mhd_boundary.cpp) filled y-side ghosts only over the
+   interior width `[0,nx)`, leaving the corners stale. They now span the FULL
+   storage width `[-nghost, nx+nghost)`; since the solver fills x-sides before
+   y-sides, the already-populated x-ghost columns get copied into the y-ghost rows,
+   filling the corners. Without this, div(B) plateaued at ~0.026 localized at the
+   `(nx-1, ny-1)` corner; with it, div(B) drops to ~1.5e-14.
+   File: `src/physics/mhd/mhd_boundary.cpp`.
+4. **Interior-only `state_*` npz output.** Once stepping ran to completion, the CLI
+   was found to write `state_*` as the full ghost-padded storage; the .npz contract
+   (and every `state_*` reader) is interior-only `nx*ny`. `_flatten_for_npz` /
+   `_snapshot_fields` now strip the ghost halo via `_interior_slice`.
+   File: `python/quasar/mhd/cli.py`.
+
+The ghost-refill code the earlier report *proposed* for bug #4 (refill ghosts on the
+stage output in `combine_stage`, and before measuring in `divergence_b_max`) was
+ALREADY present and is correct/load-bearing — it just was not the root cause and on
+its own left div(B) at 2.45. It is retained.
 
 ---
 
@@ -212,10 +220,10 @@ considered feature-complete to the approved plan.
 | #1 | `tests/unit/numerics/test_flux_reconstruction.cpp` | test (fixed) |
 | #2, #3 | `tests/python/test_mhd_{io,bindings,cli}.py` | test (fixed) |
 | #4a | `src/physics/mhd/mhd_boundary.cpp` | source (fixed) |
-| #4b | `src/physics/mhd/mhd_solver.cpp` + `src/backend/hip/mhd/mhd_ct.hip` | source (partial) |
-| #4 (open) | `src/physics/mhd/mhd_solver.cpp` (ghost refills) | source (open) |
-| #5 (open) | `mhd_solver.cpp`; possibly `mhd_*.hip` flux/reconstruction | source (open) |
-| #6 (open) | `src/physics/mhd/mhd_geometric_source.*` + `mhd_update.hip` | source (open) |
+| #4b | `src/physics/mhd/mhd_solver.cpp` + `src/backend/hip/mhd/mhd_ct.hip` | source (fixed) |
+| #4, #5, #6 | `src/backend/hip/mhd/{mhd_reconstruct,mhd_riemann,mhd_ct}.hip` (high-edge producer range + hi one-sided CT closure) | source (FIXED) |
+| #4, #5, #6 | `src/physics/mhd/mhd_boundary.cpp` (corner-ghost fill) | source (FIXED) |
+| npz shape | `python/quasar/mhd/cli.py` (interior-only `state_*`) | source (FIXED) |
 
 ## Reproduce
 

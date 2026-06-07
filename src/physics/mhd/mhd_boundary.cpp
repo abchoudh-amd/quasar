@@ -89,7 +89,16 @@ void fill_cell(StagedComponent& c, const Grid2D& g, Side side, Real sign,
       } else {
         sj = (side == Side::y_lo) ? (layer - 1) : (ny - layer);
       }
-      for (int i = 0; i < nx; ++i) {
+      // Span the FULL storage width (including the x-ghost columns), not just
+      // the interior [0,nx). The solver fills x-sides before y-sides, so by the
+      // time a y-side runs the x-ghost columns are already populated; copying
+      // them down/up into the y-ghost rows fills the four CORNER ghost blocks
+      // (both i and j in the ghost range). Those corners are read by the CT
+      // corner-EMF stencil at the high-edge seam (ez_edge at index nx/ny averages
+      // cells that include a corner ghost); leaving them stale injected a div(B)
+      // leak localized at the (nx-1,ny-1) corner. Interior-only fills left the
+      // corners undefined.
+      for (int i = -ng; i < nx + ng; ++i) {
         c.at(g, i, gj) = sign * c.at(g, i, sj);
       }
     }
@@ -143,7 +152,11 @@ void fill_normal_face(StagedComponent& c, const Grid2D& g, Side side, Real sign,
       } else {
         sj = (side == Side::y_lo) ? (layer - 1) : (ny - layer);
       }
-      for (int i = 0; i < nx; ++i) {
+      // Full storage width incl. x-ghost columns, so the corner ghost blocks are
+      // filled (see the matching note in fill_cell): the y-side fill copies the
+      // already-populated x-ghost columns into the y-ghost rows. The high-edge CT
+      // corner-EMF reads these; an interior-only span left them stale.
+      for (int i = -ng; i < nx + ng; ++i) {
         c.at(g, i, gj) = sign * c.at(g, i, sj);
       }
     }

@@ -341,7 +341,12 @@ __global__ void hlld_kernel(
     double* __restrict__ Fby, double* __restrict__ Fbz) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i >= g.nx || j >= g.ny) return;
+  // Compute the flux over the interior PLUS the high-edge face layer (index
+  // nx/ny): flux_difference at the last interior cell (i==nx-1) reads the flux
+  // at face nx, so it must be a real HLLD flux, not stale buffer data. The
+  // reconstruction kernel writes its L/R interface states over the same extended
+  // range, and index nx/ny is an in-bounds ghost slot (nghost>=2).
+  if (i > g.nx || j > g.ny) return;
   const std::size_t k = g.index(i, j);
 
   MhdState L = load_state(Lrho, Lmx, Lmy, Lmz, Lenergy, Lbx, Lby, Lbz, k);
@@ -384,7 +389,10 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
                           MhdField2D<Real>& flux_out, Real gamma, stream_t stream) {
   const Grid2D g = iface.grid;
   const dim3 block(kBlock2D, kBlock2D);
-  const dim3 grid = mhd_grid_2d(g, block);
+  // Launch over nx+1 x ny+1 so the high-edge face flux (index nx/ny) consumed by
+  // flux_difference at the last interior cell is produced, not left stale.
+  const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
+                  (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   // Zero-background fast path: pass null b0 pointers and bg_active=0 so the
   // kernel never dereferences them and the flux is bit-identical to the
   // perturbation-only body.
