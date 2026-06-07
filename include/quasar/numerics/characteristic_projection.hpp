@@ -23,14 +23,19 @@
 #include "quasar/numerics/mhd_eigensystem.hpp"
 #include "quasar/numerics/mhd_state.hpp"
 
-#include <array>
-
 namespace quasar::numerics {
+
+// POD carrier for the 7 characteristic-wave amplitudes. Replaces
+// std::array<Real,7> as the to_char/from_char wire type so the projection is
+// trivially passable into HIP device code (no <array>, no host-only machinery).
+struct CharVec7 {
+  Real w[7];
+};
 
 class CharacteristicProjector {
  public:
   // w_k = sum_var L[k][var] * delta_rotated[var]   (k = 0..6)
-  static std::array<Real, 7> to_char(const MhdState& delta, const MhdEigensystem& eig) {
+  QUASAR_HOST_DEVICE static CharVec7 to_char(const MhdState& delta, const MhdEigensystem& eig) {
     const Real u7[7] = {
       delta.rho,
       (eig.dir() == 0) ? delta.mx : delta.my,                       // m_n
@@ -40,14 +45,14 @@ class CharacteristicProjector {
       (eig.dir() == 0) ? delta.by : delta.bz,                       // b_t1
       (eig.dir() == 0) ? delta.bz : delta.bx,                       // b_t2
     };
-    std::array<Real, 7> w{};
+    CharVec7 w{};
     for (int k = 0; k < 7; ++k) {
       const Real* lrow = eig.left_row(k);
       Real acc = Real{0};
       for (int var = 0; var < 7; ++var) {
         acc += lrow[var] * u7[var];
       }
-      w[k] = acc;
+      w.w[k] = acc;
     }
     return w;
   }
@@ -56,12 +61,12 @@ class CharacteristicProjector {
   // zero here (it is not a wave); callers that need to preserve a nonzero normal-B
   // delta restore it separately. With a zero normal-B input this is the exact
   // inverse of to_char.
-  static MhdState from_char(const std::array<Real, 7>& w, const MhdEigensystem& eig) {
+  QUASAR_HOST_DEVICE static MhdState from_char(const CharVec7& w, const MhdEigensystem& eig) {
     Real u7[7] = {0, 0, 0, 0, 0, 0, 0};
     for (int k = 0; k < 7; ++k) {
       const Real* rcol = eig.right_col(k);   // length-7, indexed by var
       for (int var = 0; var < 7; ++var) {
-        u7[var] += rcol[var] * w[k];
+        u7[var] += rcol[var] * w.w[k];
       }
     }
     MhdState d{};

@@ -333,61 +333,20 @@ MhdField2D<Real>& MhdSolver2D::rk_register(int k) {
 }
 
 Real MhdSolver2D::cfl_limit() const {
-  // Stage the live state to host and scan every interior cell for the maximum
-  // signal speed |v_dir| + c_fast,dir over both directions, then return
-  // cfl * min(spacing) / max_speed. Cylindrical uses (dr, dz) = (dx, dy) on the
-  // (r,z) grid, which the Grid2D dx()/dy() already report.
+  // Reduce the maximum interior signal speed |v_dir| + c_fast,dir over both
+  // directions on device, then return cfl * min(spacing) / max_speed. The device
+  // reduction is b0-aware (it folds the total field B = B0 + b) and skips cells
+  // with non-positive / non-finite rho, matching the former host scan exactly.
+  // Cylindrical uses (dr, dz) = (dx, dy) on the (r,z) grid, which the Grid2D
+  // dx()/dy() already report.
+  //
+  // launch_mhd_cfl_max_speed takes the field by const ref; state() is a mutable
+  // accessor, so reuse the established const_cast pattern to obtain the live
+  // field reference without mutating it.
   auto& self = const_cast<MhdSolver2D&>(*this);
-  const auto& field = self.state();
-  const std::size_t n = field.rho.size();
-  std::vector<Real> rho(n), mx(n), my(n), mz(n), energy(n), bx(n), by(n), bz(n);
-  field.rho.copy_to_host(rho.data(), n);
-  field.mx.copy_to_host(mx.data(), n);
-  field.my.copy_to_host(my.data(), n);
-  field.mz.copy_to_host(mz.data(), n);
-  field.energy.copy_to_host(energy.data(), n);
-  field.bx_face.copy_to_host(bx.data(), n);
-  field.by_face.copy_to_host(by.data(), n);
-  field.bz_cell.copy_to_host(bz.data(), n);
-
-  // Field-split CFL: the wave speeds see the TOTAL field B = B0 + b, so stage
-  // the static background to host too (zeros when inactive => bit-identical to
-  // the no-background scan). A nonzero B0 raises c_fast and tightens dt.
-  std::vector<Real> b0x(n, Real{0}), b0y(n, Real{0}), b0z(n, Real{0});
-  if (b0_.active) {
-    b0_.b0x_face.copy_to_host(b0x.data(), n);
-    b0_.b0y_face.copy_to_host(b0y.data(), n);
-    b0_.b0z_cell.copy_to_host(b0z.data(), n);
-  }
-
   Real max_speed = Real{0};
-  for (int j = 0; j < grid_.ny; ++j) {
-    for (int i = 0; i < grid_.nx; ++i) {
-      const std::size_t idx = grid_.index(i, j);
-      numerics::MhdState s;
-      s.rho = rho[idx];
-      s.mx = mx[idx];
-      s.my = my[idx];
-      s.mz = mz[idx];
-      s.energy = energy[idx];
-      s.bx = bx[idx];
-      s.by = by[idx];
-      s.bz = bz[idx];
-      if (!(s.rho > Real{0}) || !std::isfinite(s.rho)) {
-        continue;  // skip uninitialized / non-physical cells in the speed scan
-      }
-      const Real inv_rho = Real{1} / s.rho;
-      const Real vx = std::abs(s.mx * inv_rho);
-      const Real vy = std::abs(s.my * inv_rho);
-      numerics::MhdBackground bg;
-      bg.b0x = b0x[idx];
-      bg.b0y = b0y[idx];
-      bg.b0z = b0z[idx];
-      const Real cfx = numerics::fast_magnetosonic_speed(s, bg, 0, cfg_.gamma);
-      const Real cfy = numerics::fast_magnetosonic_speed(s, bg, 1, cfg_.gamma);
-      max_speed = std::max(max_speed, std::max(vx + cfx, vy + cfy));
-    }
-  }
+  launch_mhd_cfl_max_speed(self.state(), b0_, cfg_.gamma, &max_speed, nullptr);
+
   const Real min_spacing = std::min(grid_.dx(), grid_.dy());
   if (!(max_speed > Real{0}) || !std::isfinite(max_speed)) {
     // A quiescent / zero-velocity field has no finite signal speed cap; fall back

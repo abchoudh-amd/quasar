@@ -80,6 +80,10 @@ interfaces may still change between entries.
   six-field dict every snapshot.
 
 ### Fixed
+- MHD: corrected the MP5/MP7 device interpolation coefficients. They were the
+  finite-volume cell-average coefficients, but the scheme reconstructs point
+  values at the faces, so the point-value Lagrange coefficients are now used —
+  this is what restores 5th-/7th-order convergence on device.
 - PIC: `total_em_energy` and `gauss_residual` diagnostics now use the
   axisymmetric metric for cylindrical `(r, z)` runs — the field energy integrates
   over the ring volume `2 pi r dr dz` (`Grid2D::cell_volume`) instead of a flat
@@ -150,6 +154,33 @@ interfaces may still change between entries.
   like the grid/plane/line observation kinds.
 
 ### Changed
+- MHD: the ideal-MHD solver hot path now runs entirely on device (HIP, gfx942).
+  Previously several pieces staged device buffers back to the host each step and
+  computed there; those are now device kernels:
+  * High-order flux reconstruction — the characteristic monotonicity-preserving
+    MP5 (5th-order) and MP7 (7th-order) schemes now run in the device
+    reconstruction kernel, and the device path honors the selected scheme order.
+    Previously the device kernel silently ran 2nd-order MUSCL-minmod for *all*
+    orders, so `mp5`/`mp7` decks were not actually high-order on device; they now
+    achieve their design order. This required making the MHD characteristic
+    eigensystem and characteristic projection device-callable
+    (`QUASAR_HOST_DEVICE`) and extracting the scalar Suresh–Huynh MP limiter
+    helpers into a shared `QUASAR_HOST_DEVICE` header
+    (`include/quasar/numerics/mp_limiter.hpp`).
+  * MHD boundary ghost fills (fluid and magnetic-field; `periodic` / `outflow` /
+    `reflecting`) now run as device kernels instead of host-staged fills.
+  * The positivity floor (`troubled_cell`) now runs through the device floors
+    kernel.
+  * The CFL stable-timestep scan and the `div(B)` L-infinity diagnostic now run
+    as device reductions instead of staging the whole field to the host.
+  The registry-facing scheme/boundary classes are now thin launchers over the
+  per-physics device launch ABI; behavior is selected by deck string exactly as
+  before (registry names unchanged: `muscl_minmod` / `mp5` / `mp7`,
+  `troubled_cell`, `fd_ct_christlieb`, `periodic` / `outflow` / `reflecting`).
+- MHD: the device characteristic MP reconstruction falls back to 2nd-order MUSCL
+  for any single interface whose high-order reconstructed state is non-finite or
+  non-positive (a per-interface positivity guard), so a few troubled interfaces
+  cannot poison the whole sweep.
 - PIC field boundaries are now imposed by one-sided / characteristic node
   corrections after each curl rather than by filling a ghost halo. `pec` keeps
   its reflecting, energy-conserving behavior (tangential E / normal B pinned;
@@ -197,6 +228,9 @@ interfaces may still change between entries.
   in the solver step.
 
 ### Optimized
+- MHD: the per-step CFL stable-timestep scan and the `div(B)` L-infinity
+  diagnostic are now device reductions, removing the per-step copy of the whole
+  field back to the host that those host-side scans required.
 - PIC: per-step full-grid scratch allocations hoisted out of the current filter
   and particle compaction; the Biot–Savart double-precision path uploads the host
   SoA directly instead of an element-by-element copy.
@@ -214,6 +248,12 @@ interfaces may still change between entries.
 - Magnetostatics: transient Biot–Savart output buffers skip the allocation
   zero-fill (the kernel overwrites them in full), via a new
   `device_alloc_uninit` / `DeviceBuffer(n, uninitialized)` path.
+
+### Known issues
+- MHD: on under-resolved turbulent / low-beta decks (Orszag–Tang vortex, rotor)
+  genuine high-order MP7 can drive cells to the pressure floor. The floor
+  re-derives energy and is not yet energy-conserving; a floor-aware
+  positivity-preserving limiter is a planned follow-up.
 
 ### Upcoming changes
 - A `file_grid` field evaluator name is reserved in the registry but not yet

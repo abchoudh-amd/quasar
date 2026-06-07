@@ -48,16 +48,20 @@ struct BoundaryFlags4 {
 // -- Flux reconstruction -----------------------------------------------------
 // Reconstruct the LEFT/RIGHT conserved interface states on every interface
 // normal to `dir` (0=x, 1=y) into `out` (out.dir must equal dir). `scheme_order`
-// selects the spatial order: 2 = MUSCL-minmod.
-//
-// NOTE (device-path simplification, flagged for review): the high-order host
-// schemes "mp5"/"mp7" (Suresh-Huynh monotonicity-preserving in characteristic
-// variables) are NOT yet ported to device -- flux_reconstruction.hpp exposes no
-// QUASAR_HOST_DEVICE limiter helpers to reuse. The device kernel therefore
-// implements a robust 2nd-order MUSCL-minmod reconstruction (in primitive
-// variables) for ALL scheme_order values; scheme_order 5/7 currently resolve to
-// the same 2nd-order device path. The host registry retains the full MP5/MP7
-// schemes. This is a documented build-safety-first simplification.
+// selects the spatial order and the device kernel HONORS it:
+//   2 = MUSCL-minmod (2nd-order TVD, primitive-variable slope limiting),
+//   5 = MP5  (5th-order monotonicity-preserving, Suresh-Huynh),
+//   7 = MP7  (7th-order monotonicity-preserving, Suresh-Huynh).
+// The MP5/MP7 paths run the SAME characteristic-variable reconstruction as the
+// host registry: the per-interface 7-wave eigensystem
+// (quasar::numerics::MhdEigensystem) projects the conserved delta into
+// characteristic space (quasar::numerics::CharacteristicProjector / CharVec7),
+// the scalar MP limiter (quasar/numerics/mp_limiter.hpp) is applied wave-by-wave,
+// and the result is mapped back to conserved variables -- all device-callable, so
+// scheme_order 5/7 run the full high-order characteristic MP reconstruction on
+// device (they achieve their design 5th/7th order; see mp_limiter.hpp for the
+// point-value interpolation-coefficient correction that makes this so -- results
+// are not bit-identical to the pre-port host MP5/MP7 output).
 //
 // Field-split + one-sided boundary extensions:
 //   `b0` is the static background magnetic field B = B0 + b. When b0.active is
@@ -173,5 +177,53 @@ void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>
 // simply never invokes it).
 void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                                  Grid2D grid, Real gamma, stream_t stream);
+
+// -- CFL maximum signal speed ------------------------------------------------
+// Reduce the maximum directional signal speed max(|v_dir| + c_fast_dir) over all
+// INTERIOR cells and write the single scalar into *host_max_speed. The fast
+// speed sees the TOTAL magnetic field B = b + B0 (b0-aware): when b0.active is
+// false this is the zero-background fast path (the stored b IS the total field).
+// Cells with non-positive or non-finite density are SKIPPED (they contribute no
+// speed) so a transiently floored cell cannot poison the reduction. Both
+// directions dir=0 and dir=1 are folded into the single maximum so one call
+// yields the global CFL-limiting speed. The result is read back to the host
+// pointer before this returns.
+void launch_mhd_cfl_max_speed(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+                              Real gamma, Real* host_max_speed, stream_t stream);
+
+// -- Constrained-transport div(B) L-infinity ---------------------------------
+// Reduce the maximum interior |div B| -- the cell-centered divergence of the
+// face-staggered in-plane field,
+//   div B(i,j) = (bx_face(i+1,j) - bx_face(i,j)) / dx
+//              + (by_face(i,j+1) - by_face(i,j)) / dy
+// -- over all interior cells and write the single scalar into *host_linf. This
+// is the CT consistency diagnostic; with the CT face-B update it should remain at
+// round-off. The result is read back to the host pointer before this returns.
+void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u, Real* host_linf, stream_t stream);
+
+// -- Ghost-layer fill (fluid components) -------------------------------------
+// Fill the ghost layers of ONE boundary `side` (canonical order 0=x_lo, 1=x_hi,
+// 2=y_lo, 3=y_hi) for the FLUID conserved components (rho, mx, my, mz, energy,
+// bz_cell) according to `mode`:
+//   mode 0 = periodic   : wrap from the opposite interior layer,
+//   mode 1 = outflow    : zero-gradient copy of the adjacent interior cell,
+//   mode 2 = reflecting : mirror the interior cells; the NORMAL momentum
+//                         component (mx at an x-side, my at a y-side) is sign-
+//                         flipped, every tangential momentum component and all
+//                         scalars (rho, energy, bz_cell) are copied even.
+void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode, stream_t stream);
+
+// -- Ghost-layer fill (face-staggered field components) -----------------------
+// Fill the ghost layers of ONE boundary `side` (same order as above) for the
+// face-staggered in-plane magnetic components (bx_face, by_face) according to
+// `mode`:
+//   mode 0 = periodic   : wrap from the opposite interior layer,
+//   mode 1 = outflow    : zero-gradient copy of the adjacent interior face,
+//   mode 2 = reflecting : mirror the interior faces; the NORMAL face-B component
+//                         (bx_face at an x-side, by_face at a y-side) is sign-
+//                         flipped, the tangential face-B component is copied
+//                         even. Run after the fluid fill so the CT face field
+//                         and the cell field carry a consistent boundary.
+void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode, stream_t stream);
 
 }  // namespace quasar::mhd

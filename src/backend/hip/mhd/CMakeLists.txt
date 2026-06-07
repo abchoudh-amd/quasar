@@ -7,6 +7,8 @@ set(_quasar_mhd_hip_sources
   mhd_riemann.hip
   mhd_ct.hip
   mhd_update.hip
+  mhd_reduce.hip
+  mhd_boundary_hip.hip
 )
 
 quasar_add_hip_module(mhd_hip SOURCES ${_quasar_mhd_hip_sources})

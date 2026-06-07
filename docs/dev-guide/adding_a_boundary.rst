@@ -47,6 +47,40 @@ zero-gradient / wall-mirror of the thin boundary halo); the fluid axis and the
 magnetic-field axis carry independent per-side selections because a reflecting
 wall imposes different symmetries on momentum than on **B**.
 
+Device-path ghost fills
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The MHD ghost fills run **on device** (HIP). Each concrete BC class is a **thin
+launcher**: its ``fill_ghosts`` simply dispatches one of the two per-physics
+launch ABI entry points
+
+.. code-block:: cpp
+
+   // include/quasar/physics/mhd/kernels.hpp
+   void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode, stream_t stream);
+   void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode, stream_t stream);
+
+implemented as device kernels in ``src/backend/hip/mhd/mhd_boundary_hip.hip``.
+The ``fluid`` variant fills the conserved fluid components (rho, momentum,
+energy, cell-centered ``bz``); the ``field`` variant fills the face-staggered
+in-plane magnetic components (``bx_face`` / ``by_face``). ``side`` is the
+canonical order ``0 = x_lo, 1 = x_hi, 2 = y_lo, 3 = y_hi``, and ``mode`` selects
+the wall behavior:
+
+* ``mode 0`` — **periodic**: wrap from the opposite interior layer.
+* ``mode 1`` — **outflow**: zero-gradient copy of the adjacent interior cell/face.
+* ``mode 2`` — **reflecting**: mirror the interior; the **normal** component is
+  sign-flipped (the normal momentum — ``mx`` at an x-side, ``my`` at a y-side —
+  for the fluid fill, and the normal face-B — ``bx_face`` at an x-side,
+  ``by_face`` at a y-side — for the field fill), while tangential momentum and
+  all cell-centered scalars are copied even.
+
+The four corner ghost blocks are filled as well: the y-side fills span the full
+storage width so the corner halo shared with the x-faces is populated. Backend
+isolation holds — all ``.hip`` / device code stays under
+``src/backend/hip/mhd/``, and the registry BC classes reach it only through the
+launch ABI in ``include/quasar/physics/mhd/kernels.hpp``.
+
 Where the MHD axis differs from PIC is in how a *non-periodic* side reaches into
 the finite-volume reconstruction. The solver classifies each side with the free
 function

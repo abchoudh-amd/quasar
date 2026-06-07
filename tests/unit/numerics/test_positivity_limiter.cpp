@@ -1,6 +1,11 @@
 // RED-phase tests for the positivity (troubled-cell) limiter.
 //
-// Targets the blind contract in include/quasar/numerics/positivity_limiter.hpp:
+// Post-port contract: "troubled_cell" is a thin launcher over the device floors
+// kernel (quasar::mhd::launch_mhd_apply_floors). The OBSERVABLE floor semantics
+// are unchanged from the host implementation, so these tests re-pin the floor
+// behavior at the field level after apply() and guard the port.
+//
+// Targets the contract in include/quasar/numerics/positivity_limiter.hpp:
 //
 //   class IPositivityLimiter {
 //    public: virtual ~IPositivityLimiter() = default;
@@ -11,19 +16,20 @@
 // Registry name "troubled_cell", obtained via
 //   quasar::Registry<quasar::numerics::IPositivityLimiter>::instance().create("troubled_cell").
 //
-// ASSUMED ACCESSORS (documented so the blind implementer matches them):
-//   * quasar::mhd::MhdField2D<Real>(Grid2D) ctor; cell-centered conserved
-//     DeviceBuffers .rho/.mx/.my/.mz/.energy and cell-centered .bz_cell, plus
-//     face-staggered .bx_face/.by_face, each DeviceBuffer<Real> of length
-//     grid.storage_size(). We seed and read them back via copy_from_host /
-//     copy_to_host as the PIC YeeField2D tests do.
-//   * The cell pressure follows the total-energy gamma law used by
-//     quasar/numerics/mhd_state.hpp::pressure(MhdState, gamma):
-//       p = (gamma-1) * (E - 0.5*|m|^2/rho - 0.5*|B|^2).
-//     For the limiter's positivity check the per-cell B is taken to be the
-//     cell-centered triple (bx_face(i,j), by_face(i,j), bz_cell(i,j)); this test
-//     keeps B = 0 so the check reduces to the hydrodynamic pressure and the
-//     limiter target is unambiguous.
+// FLOOR SEMANTICS PINNED:
+//   * gas pressure follows the total-energy gamma law in
+//       quasar/numerics/mhd_state.hpp::pressure(MhdState, gamma):
+//         p = (gamma-1)*(E - 0.5*|m|^2/rho - 0.5*|B|^2).
+//     For the limiter's positivity check the per-cell B is the cell-centered
+//     triple (bx_face(i,j), by_face(i,j), bz_cell(i,j)); we keep B = 0 in most
+//     cells so the check reduces to the hydrodynamic pressure.
+//   * a sub-floor-density cell (rho < rho_floor) has rho raised to EXACTLY
+//     rho_floor.
+//   * a sub-floor-pressure cell (p < p_floor) has gas pressure raised to EXACTLY
+//     p_floor by re-deriving total energy while holding momentum and B FIXED
+//     (only rho and energy may change).
+//   * an already-physical cell is left UNCHANGED to round-off across ALL eight
+//     conserved components.
 //
 // Device-touching assertions are guarded with has_hip_runtime() / GTEST_SKIP.
 // The registry-presence probe runs unconditionally and fails by missing symbol.
@@ -53,7 +59,7 @@ std::unique_ptr<IPositivityLimiter> make_limiter() {
 }
 
 // Host mirror of a field's conserved cell components, for building MhdState per
-// cell and checking positivity after the limiter runs.
+// cell and checking positivity / invariance after the limiter runs.
 struct HostState {
   std::vector<Real> rho, mx, my, mz, en, bx, by, bz;
 };
@@ -94,9 +100,145 @@ MhdState state_at(const HostState& h, std::size_t k) {
 
 }  // namespace
 
+// Constructing the limiter by registry name "troubled_cell" succeeds (the factory
+// is registered); this probe runs even without a HIP runtime.
 TEST(MhdPositivityLimiter, IsRegistered) {
   EXPECT_TRUE(
       quasar::Registry<IPositivityLimiter>::instance().contains("troubled_cell"));
+  EXPECT_NO_THROW({ auto p = make_limiter(); EXPECT_NE(p, nullptr); });
+}
+
+// apply() runs without error on a full MhdField2D constructed via the registry.
+TEST(MhdPositivityLimiter, ApplyRunsOnFullField) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const Real gamma = Real{5} / Real{3};
+  const Real rho_floor = Real{1e-8}, p_floor = Real{1e-9};
+  Grid2D g{8, 8, Real{1}, Real{1}, Real{0}, Real{0}, 4};
+  const std::size_t n = g.storage_size();
+
+  quasar::mhd::MhdField2D<Real> u{g};
+  std::vector<Real> rho(n, Real{1}), zero(n, Real{0}), en(n, Real{1});
+  u.rho.copy_from_host(rho.data(), rho.size());
+  u.mx.copy_from_host(zero.data(), zero.size());
+  u.my.copy_from_host(zero.data(), zero.size());
+  u.mz.copy_from_host(zero.data(), zero.size());
+  u.energy.copy_from_host(en.data(), en.size());
+  u.bx_face.copy_from_host(zero.data(), zero.size());
+  u.by_face.copy_from_host(zero.data(), zero.size());
+  u.bz_cell.copy_from_host(zero.data(), zero.size());
+
+  EXPECT_NO_THROW(make_limiter()->apply(u, rho_floor, p_floor, gamma));
+}
+
+// A cell with sub-floor density has its density raised to EXACTLY rho_floor, and
+// a cell with sub-floor (negative) pressure has its gas pressure raised to
+// EXACTLY p_floor with MOMENTUM and B held byte-unchanged. Already-physical
+// cells are untouched to round-off in every component.
+TEST(MhdPositivityLimiter, FloorsDensityAndPressureExactlyHoldingMomentumAndB) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const Real gamma = Real{5} / Real{3};
+  const Real rho_floor = Real{1e-8}, p_floor = Real{1e-9};
+  Grid2D g{8, 8, Real{1}, Real{1}, Real{0}, Real{0}, 4};
+  const std::size_t n = g.storage_size();
+
+  quasar::mhd::MhdField2D<Real> u{g};
+
+  // Physical background: rho = 1, some momentum and B, healthy positive pressure.
+  std::vector<Real> rho(n, Real{1});
+  std::vector<Real> mx(n, Real{0.3}), my(n, Real{-0.2}), mz(n, Real{0.1});
+  std::vector<Real> bx(n, Real{0.4}), by(n, Real{0.5}), bz(n, Real{-0.6});
+  std::vector<Real> en(n, Real{0});
+  const Real p_bg = Real{2.0};
+  for (std::size_t k = 0; k < n; ++k) {
+    const Real kinetic = Real{0.5} *
+        (mx[k] * mx[k] + my[k] * my[k] + mz[k] * mz[k]) / rho[k];
+    const Real magnetic = Real{0.5} *
+        (bx[k] * bx[k] + by[k] * by[k] + bz[k] * bz[k]);
+    en[k] = p_bg / (gamma - Real{1}) + kinetic + magnetic;
+  }
+
+  // Sub-floor-density cell: rho below the floor (B = 0 there so the pressure
+  // check is unambiguous; energy left small but positive-pressure).
+  const std::size_t kd = g.index(2, 3);
+  rho[kd] = rho_floor / Real{4};   // strictly below the floor
+  mx[kd] = Real{0}; my[kd] = Real{0}; mz[kd] = Real{0};
+  bx[kd] = Real{0}; by[kd] = Real{0}; bz[kd] = Real{0};
+  en[kd] = Real{1.0};              // p = (gamma-1)*E > 0, only density is bad
+
+  // Sub-floor-pressure cell: at rest with B = 0 and a strictly-negative total
+  // energy, so the thermal pressure p = (gamma-1)*E < 0. Choosing zero momentum
+  // AND zero B is deliberate: after the floor sets E = p_floor/(gamma-1), the
+  // recomputed pressure is (gamma-1)*E = p_floor with NO kinetic/magnetic terms
+  // to subtract, so there is no catastrophic cancellation and the exact
+  // p_floor target holds to a tight 1e-13-relative tolerance. The byte-unchanged
+  // momentum/B checks below still hold (they are zero before and after). The
+  // physical background cells carry nonzero momentum/B and exercise the
+  // "already-physical cell untouched" criterion.
+  const std::size_t kp = g.index(5, 6);
+  const Real rho_p = Real{1.0};
+  rho[kp] = rho_p;
+  mx[kp] = Real{0}; my[kp] = Real{0}; mz[kp] = Real{0};
+  bx[kp] = Real{0}; by[kp] = Real{0}; bz[kp] = Real{0};
+  en[kp] = Real{-0.5};  // p = (gamma-1)*E < 0, no kinetic/magnetic terms
+
+  u.rho.copy_from_host(rho.data(), rho.size());
+  u.mx.copy_from_host(mx.data(), mx.size());
+  u.my.copy_from_host(my.data(), my.size());
+  u.mz.copy_from_host(mz.data(), mz.size());
+  u.energy.copy_from_host(en.data(), en.size());
+  u.bx_face.copy_from_host(bx.data(), bx.size());
+  u.by_face.copy_from_host(by.data(), by.size());
+  u.bz_cell.copy_from_host(bz.data(), bz.size());
+
+  const HostState before = read_host(u, n);
+
+  // Sanity: the seeded cells really are sub-floor before limiting.
+  EXPECT_LT(before.rho[kd], rho_floor) << "test setup failed: density not sub-floor";
+  EXPECT_LT(quasar::numerics::pressure(state_at(before, kp), gamma), p_floor)
+      << "test setup failed to force a sub-floor-pressure cell";
+
+  make_limiter()->apply(u, rho_floor, p_floor, gamma);
+
+  const HostState after = read_host(u, n);
+
+  // --- Sub-floor-density cell: rho raised to EXACTLY rho_floor. ---
+  EXPECT_NEAR(after.rho[kd], rho_floor, std::abs(rho_floor) * Real{1e-13})
+      << "sub-floor density not raised to exactly rho_floor";
+
+  // --- Sub-floor-pressure cell: gas pressure raised to EXACTLY p_floor, with
+  //     momentum and B BYTE-UNCHANGED (only rho and energy may change). ---
+  const MhdState sp = state_at(after, kp);
+  EXPECT_NEAR(quasar::numerics::pressure(sp, gamma), p_floor,
+              std::abs(p_floor) * Real{1e-13})
+      << "sub-floor pressure not raised to exactly p_floor";
+  // Momentum and B held FIXED (bit-for-bit).
+  EXPECT_EQ(after.mx[kp], before.mx[kp]);
+  EXPECT_EQ(after.my[kp], before.my[kp]);
+  EXPECT_EQ(after.mz[kp], before.mz[kp]);
+  EXPECT_EQ(after.bx[kp], before.bx[kp]);
+  EXPECT_EQ(after.by[kp], before.by[kp]);
+  EXPECT_EQ(after.bz[kp], before.bz[kp]);
+
+  // --- Every other interior cell is already physical and left UNCHANGED to
+  //     round-off across all eight conserved components. ---
+  const Real rel = Real{1e-13};
+  auto unchanged = [&](Real a, Real b) {
+    EXPECT_NEAR(a, b, std::abs(b) * rel + rel);
+  };
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const std::size_t k = g.index(i, j);
+      if (k == kd || k == kp) continue;
+      unchanged(after.rho[k], before.rho[k]);
+      unchanged(after.mx[k], before.mx[k]);
+      unchanged(after.my[k], before.my[k]);
+      unchanged(after.mz[k], before.mz[k]);
+      unchanged(after.en[k], before.en[k]);
+      unchanged(after.bx[k], before.bx[k]);
+      unchanged(after.by[k], before.by[k]);
+      unchanged(after.bz[k], before.bz[k]);
+    }
+  }
 }
 
 // A cell whose energy is set so the (B=0) pressure is negative is restored to a

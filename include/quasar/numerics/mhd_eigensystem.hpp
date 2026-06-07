@@ -34,13 +34,13 @@ class MhdEigensystem {
   // conserved state `s` along normal `dir` (0=x, 1=y) for ratio-of-specific-heats
   // `gamma`. Degeneracies (B_perp -> 0, coincident speeds) are regularized with
   // the Roe/Balsara renormalization so L,R stay finite and L*R = I (loosened tol).
-  void build(const MhdState& s, int dir, Real gamma) {
+  QUASAR_HOST_DEVICE void build(const MhdState& s, int dir, Real gamma) {
     dir_ = dir;
 
     const MhdPrim w = to_primitive(s, gamma);
     const Real rho = w.rho;
     const Real p   = (w.p > Real{0}) ? w.p : Real{0};
-    const Real sqrt_rho = std::sqrt(rho);
+    const Real sqrt_rho = sqrt(rho);
     const Real inv_sqrt_rho = Real{1} / sqrt_rho;
 
     // Rotate to (normal, transverse1, transverse2). For dir=0: n=x, t1=y, t2=z.
@@ -57,24 +57,24 @@ class MhdEigensystem {
 
     // Sound speed, Alfven speeds.
     const Real a2 = gamma * p / rho;             // a^2
-    const Real a  = std::sqrt(a2);
+    const Real a  = sqrt(a2);
     const Real bn2 = bn * bn;
     const Real bt_sq = bt1 * bt1 + bt2 * bt2;    // |B_perp|^2
     const Real cax2 = bn2 / rho;                 // normal Alfven speed^2
-    const Real cax  = std::sqrt(cax2);
+    const Real cax  = sqrt(cax2);
     const Real ca2  = (bn2 + bt_sq) / rho;       // total Alfven speed^2 (b^2/rho)
 
     // Fast/slow magnetosonic speeds.
     const Real sum = a2 + ca2;
     Real disc = sum * sum - Real{4} * a2 * cax2;
     if (disc < Real{0}) disc = Real{0};
-    const Real sqrt_disc = std::sqrt(disc);
+    const Real sqrt_disc = sqrt(disc);
     Real cf2 = Real{0.5} * (sum + sqrt_disc);
     Real cs2 = Real{0.5} * (sum - sqrt_disc);
     if (cf2 < Real{0}) cf2 = Real{0};
     if (cs2 < Real{0}) cs2 = Real{0};
-    const Real cf = std::sqrt(cf2);
-    const Real cs = std::sqrt(cs2);
+    const Real cf = sqrt(cf2);
+    const Real cs = sqrt(cs2);
 
     // Roe/Balsara normalization coefficients alpha_f, alpha_s. Guard the
     // cf^2-cs^2 denominator: when fast and slow coincide (e.g. B_perp=0 and
@@ -84,15 +84,15 @@ class MhdEigensystem {
       const Real denom = cf2 - cs2;
       const Real eps = static_cast<Real>(1e-12);
       if (denom <= eps * (cf2 + cs2 + eps)) {
-        alpha_f = Real{1} / std::sqrt(Real{2});
-        alpha_s = Real{1} / std::sqrt(Real{2});
+        alpha_f = Real{1} / sqrt(Real{2});
+        alpha_s = Real{1} / sqrt(Real{2});
       } else {
         Real af2 = (a2 - cs2) / denom;
         Real as2 = (cf2 - a2) / denom;
         if (af2 < Real{0}) af2 = Real{0};
         if (as2 < Real{0}) as2 = Real{0};
-        alpha_f = std::sqrt(af2);
-        alpha_s = std::sqrt(as2);
+        alpha_f = sqrt(af2);
+        alpha_s = sqrt(as2);
       }
     }
 
@@ -101,11 +101,11 @@ class MhdEigensystem {
     // magnetosonic eigenvectors finite at B_perp -> 0.
     Real beta1, beta2;
     {
-      const Real bt = std::sqrt(bt_sq);
-      const Real eps = static_cast<Real>(1e-12) * (a + std::sqrt(ca2) + static_cast<Real>(1e-30));
+      const Real bt = sqrt(bt_sq);
+      const Real eps = static_cast<Real>(1e-12) * (a + sqrt(ca2) + static_cast<Real>(1e-30));
       if (bt < eps) {
-        beta1 = Real{1} / std::sqrt(Real{2});
-        beta2 = Real{1} / std::sqrt(Real{2});
+        beta1 = Real{1} / sqrt(Real{2});
+        beta2 = Real{1} / sqrt(Real{2});
       } else {
         beta1 = bt1 / bt;
         beta2 = bt2 / bt;
@@ -174,7 +174,7 @@ class MhdEigensystem {
     // Alfven - (k=1) and Alfven + (k=5). These carry only transverse v and B,
     // rotated 90 deg in the transverse plane: (beta2, -beta1).
     {
-      const Real s2 = Real{1} / std::sqrt(Real{2});
+      const Real s2 = Real{1} / sqrt(Real{2});
       Rp[1][0] = Real{0};
       Rp[1][1] = Real{0};
       Rp[1][2] = -beta2 * s2;
@@ -229,7 +229,7 @@ class MhdEigensystem {
     // Stone et al. Eqs. A21-A40. With the normalizations above, Lp*Rp = I.
     Real Lp[7][7] = {{0}};
     {
-      const Real s2 = Real{1} / std::sqrt(Real{2});
+      const Real s2 = Real{1} / sqrt(Real{2});
       const Real inv_rho = Real{1} / rho;
 
       // Fast - (k=0) and Fast + (k=6).
@@ -362,11 +362,11 @@ class MhdEigensystem {
   }
 
   // Pointer to length-7 left eigenvector k (row k of L). w_k = L_row(k) . delta.
-  const Real* left_row(int k) const { return &L_[k * 7]; }
+  QUASAR_HOST_DEVICE const Real* left_row(int k) const { return &L_[k * 7]; }
 
   // Pointer to length-7 right eigenvector k (column k of R). Stored contiguously
   // in a per-column scratch refreshed on each call.
-  const Real* right_col(int k) const {
+  QUASAR_HOST_DEVICE const Real* right_col(int k) const {
     for (int var = 0; var < 7; ++var) {
       col_scratch_[var] = R_[var * 7 + k];
     }
@@ -375,9 +375,9 @@ class MhdEigensystem {
 
   // Wave speed for wave k (0..6), ordering: fast-,alfven-,slow-,entropy,slow+,
   // alfven+,fast+.
-  Real wave_speed(int k) const { return speeds_[k]; }
+  QUASAR_HOST_DEVICE Real wave_speed(int k) const { return speeds_[k]; }
 
-  int dir() const { return dir_; }
+  QUASAR_HOST_DEVICE int dir() const { return dir_; }
 
  private:
   Real L_[49]{};        // row-major 7x7 left-eigenvector matrix (rows = waves)

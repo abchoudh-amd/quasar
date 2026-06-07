@@ -76,6 +76,31 @@ MhdState unpack7_x(const Real v[kN], Real bx) {
   return s;
 }
 
+// y-normal (dir=1) packing: the normal field component By is constant across the
+// wave fan, so the active variables are [rho, mx, my, mz, energy, bx, bz].
+void pack7_y(const MhdState& s, Real v[kN]) {
+  v[0] = s.rho;
+  v[1] = s.mx;
+  v[2] = s.my;
+  v[3] = s.mz;
+  v[4] = s.energy;
+  v[5] = s.bx;
+  v[6] = s.bz;
+}
+
+MhdState unpack7_y(const Real v[kN], Real by) {
+  MhdState s{};
+  s.rho = v[0];
+  s.mx = v[1];
+  s.my = v[2];
+  s.mz = v[3];
+  s.energy = v[4];
+  s.bx = v[5];
+  s.by = by;
+  s.bz = v[6];
+  return s;
+}
+
 // Analytic conserved-variable ideal-MHD flux in the x-direction. Local helper
 // for the finite-difference Jacobian; does not call any library internals.
 //   F = [ rho*vx,
@@ -107,6 +132,39 @@ void flux_x(const MhdState& s, Real gamma, Real f[kN]) {
   f[4] = (s.energy + p_tot) * vx - bx * vdotb;
   f[5] = by * vx - bx * vy;
   f[6] = bz * vx - bx * vz;
+}
+
+// Analytic conserved-variable ideal-MHD flux in the y-direction, packed in the
+// dir=1 active-variable order [rho, mx, my, mz, energy, bx, bz] (By constant
+// across the y-normal wave fan).
+//   F_y = [ rho*vy,
+//           rho*vy*vx - By*Bx,
+//           rho*vy^2 + p_total - By^2,
+//           rho*vy*vz - By*Bz,
+//           (E + p_total)*vy - By*(v.B),
+//           Bx*vy - By*vx,
+//           Bz*vy - By*vz ]
+void flux_y(const MhdState& s, Real gamma, Real f[kN]) {
+  const Real rho = s.rho;
+  const Real vx = s.mx / rho;
+  const Real vy = s.my / rho;
+  const Real vz = s.mz / rho;
+  const Real bx = s.bx;
+  const Real by = s.by;
+  const Real bz = s.bz;
+  const Real b2 = bx * bx + by * by + bz * bz;
+  const Real v2 = vx * vx + vy * vy + vz * vz;
+  const Real vdotb = vx * bx + vy * by + vz * bz;
+  const Real p_gas = (gamma - 1.0) * (s.energy - 0.5 * rho * v2 - 0.5 * b2);
+  const Real p_tot = p_gas + 0.5 * b2;
+
+  f[0] = rho * vy;
+  f[1] = rho * vy * vx - by * bx;
+  f[2] = rho * vy * vy + p_tot - by * by;
+  f[3] = rho * vy * vz - by * bz;
+  f[4] = (s.energy + p_tot) * vy - by * vdotb;
+  f[5] = bx * vy - by * vx;
+  f[6] = bz * vy - by * vz;
 }
 
 // A representative, well-separated magnetized state (no degeneracies).
@@ -255,6 +313,85 @@ TEST(MhdEigensystem, FiniteAndOrthonormalWhenFieldVanishes) {
       Real dot = 0.0;
       for (int k = 0; k < kN; ++k) dot += li[k] * rj[k];
       EXPECT_NEAR(dot, (i == j) ? 1.0 : 0.0, kIdentityTolDegenerate);
+    }
+  }
+}
+
+// (1y) L * R == Identity for the y-normal (dir=1) eigensystem about the same
+// representative state. The 7-wave algebra must hold in both directions.
+TEST(MhdEigensystem, LeftRightVectorsAreBiorthonormalDirY) {
+  const Real gamma = 5.0 / 3.0;
+  const MhdState s = make_reference_state(gamma);
+
+  MhdEigensystem eig;
+  eig.build(s, /*dir=*/1, gamma);
+  EXPECT_EQ(eig.dir(), 1);
+
+  for (int i = 0; i < kN; ++i) {
+    const Real* li = eig.left_row(i);
+    ASSERT_NE(li, nullptr);
+    ASSERT_FALSE(any_nonfinite(li, kN));
+    for (int j = 0; j < kN; ++j) {
+      const Real* rj = eig.right_col(j);
+      ASSERT_NE(rj, nullptr);
+      Real dot = 0.0;
+      for (int k = 0; k < kN; ++k) dot += li[k] * rj[k];
+      const Real expected = (i == j) ? 1.0 : 0.0;
+      EXPECT_NEAR(dot, expected, kIdentityTol)
+          << "L row " << i << " . R col " << j;
+    }
+  }
+}
+
+// (2y) Diagonalization of the y-direction flux Jacobian: R*diag(lambda)*L*du
+// reproduces the finite-difference of the analytic y-flux. The active-variable
+// ordering for dir=1 is [rho, mx, my, mz, energy, bx, bz] (By held constant).
+TEST(MhdEigensystem, DiagonalizesFluxJacobianDirY) {
+  const Real gamma = 5.0 / 3.0;
+  const MhdState s = make_reference_state(gamma);
+  const Real by = s.by;
+
+  MhdEigensystem eig;
+  eig.build(s, /*dir=*/1, gamma);
+
+  Real lambda[kN];
+  for (int k = 0; k < kN; ++k) lambda[k] = eig.wave_speed(k);
+
+  Real u0[kN];
+  pack7_y(s, u0);
+  Real f0[kN];
+  flux_y(s, gamma, f0);
+
+  const Real eps = 1e-6;
+  for (int comp = 0; comp < kN; ++comp) {
+    Real du[kN] = {0, 0, 0, 0, 0, 0, 0};
+    const Real scale = (std::abs(u0[comp]) > 1.0 ? std::abs(u0[comp]) : 1.0);
+    du[comp] = eps * scale;
+
+    Real up[kN];
+    for (int k = 0; k < kN; ++k) up[k] = u0[k] + du[k];
+    const MhdState sp = unpack7_y(up, by);
+    Real fp[kN];
+    flux_y(sp, gamma, fp);
+    Real fd[kN];
+    for (int k = 0; k < kN; ++k) fd[k] = fp[k] - f0[k];
+
+    Real ldu[kN];
+    for (int k = 0; k < kN; ++k) {
+      const Real* lk = eig.left_row(k);
+      Real acc = 0.0;
+      for (int m = 0; m < kN; ++m) acc += lk[m] * du[m];
+      ldu[k] = lambda[k] * acc;
+    }
+    Real adu[kN] = {0, 0, 0, 0, 0, 0, 0};
+    for (int k = 0; k < kN; ++k) {
+      const Real* rk = eig.right_col(k);
+      for (int m = 0; m < kN; ++m) adu[m] += rk[m] * ldu[k];
+    }
+
+    for (int m = 0; m < kN; ++m) {
+      EXPECT_NEAR(adu[m], fd[m], kJacobianTol * scale)
+          << "perturb comp " << comp << " response row " << m;
     }
   }
 }

@@ -5,6 +5,9 @@ set(_quasar_mhd_tests
   test_mhd_scheme_registry_linkage
   test_mhd_background_field
   test_mhd_onesided_boundary
+  test_mhd_boundary
+  test_mhd_device_compute
+  test_mhd_positivity_preservation
 )
 
 foreach(_test_name IN LISTS _quasar_mhd_tests)
