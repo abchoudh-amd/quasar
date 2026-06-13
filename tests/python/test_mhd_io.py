@@ -264,10 +264,10 @@ class BoundaryParseTests(unittest.TestCase):
 
     def test_four_list_maps_per_side(self):
         sides = _parse_side_map(
-            ["periodic", "outflow", "reflecting", "periodic"],
+            ["periodic", "outflow", "wall", "periodic"],
             "periodic", "boundary.fluid")
         self.assertEqual(
-            sides, ("periodic", "outflow", "reflecting", "periodic"))
+            sides, ("periodic", "outflow", "wall", "periodic"))
 
     def test_scalar_broadcasts_to_four_sides(self):
         sides = _parse_side_map("periodic", "periodic", "boundary.field")
@@ -287,6 +287,54 @@ class BoundaryParseTests(unittest.TestCase):
     def test_wrong_length_list_raises(self):
         with self.assertRaises(ValueError):
             _parse_side_map(["periodic", "outflow"], "periodic", "boundary.fluid")
+
+    def test_wall_fluid_boundary_validates_and_round_trips(self):
+        # "wall" is the renamed reflecting boundary; a deck selecting it on a
+        # side validates against the live registry and round-trips per side.
+        # Boundary order: [x_min, x_max, y_min, y_max].
+        deck = _deck(boundary=BoundaryConfig(
+            fluid=("periodic", "outflow", "wall", "periodic"),
+            field=("periodic", "outflow", "wall", "periodic")))
+        deck.validate()
+        self.assertEqual(
+            deck.boundary.fluid,
+            ("periodic", "outflow", "wall", "periodic"))
+        self.assertEqual(
+            deck.boundary.field,
+            ("periodic", "outflow", "wall", "periodic"))
+
+    def test_wall_boundary_parsed_from_yaml(self):
+        deck = parse({
+            "domain": {"nx": 8, "ny": 8, "lx_m": 1.0, "ly_m": 1.0},
+            "numerics": {"gamma": 1.6666667},
+            "initial": {"type": "brio_wu"},
+            "time": {"dt_s": "auto", "steps": 2},
+            "boundary": {
+                "fluid": ["wall", "wall", "periodic", "periodic"],
+                "field": ["wall", "wall", "periodic", "periodic"],
+            },
+        })
+        deck.validate()
+        self.assertEqual(
+            deck.boundary.fluid,
+            ("wall", "wall", "periodic", "periodic"))
+        self.assertEqual(
+            deck.boundary.field,
+            ("wall", "wall", "periodic", "periodic"))
+
+    def test_reflecting_fluid_boundary_rejected(self):
+        # "reflecting" was renamed to "wall" and removed from the registry; a
+        # deck selecting it on a side must fail registry-driven validation.
+        with self.assertRaises(ValueError):
+            _deck(boundary=BoundaryConfig(
+                fluid=("periodic", "reflecting", "periodic", "periodic"))
+            ).validate()
+
+    def test_reflecting_field_boundary_rejected(self):
+        with self.assertRaises(ValueError):
+            _deck(boundary=BoundaryConfig(
+                field=("periodic", "reflecting", "periodic", "periodic"))
+            ).validate()
 
     def test_unknown_fluid_boundary_rejected(self):
         with self.assertRaises(ValueError):

@@ -9,7 +9,7 @@
 // on device in src/backend/hip/mhd/mhd_boundary_hip.hip (launch_mhd_fill_ghosts_
 // fluid / _field), declared in quasar/physics/mhd/kernels.hpp. The six registry
 // BC classes below are thin launchers: each fill_ghosts selects a mode
-// (0=periodic, 1=outflow, 2=reflecting) and launches the matching device kernel
+// (0=periodic, 1=outflow, 2=wall) and launches the matching device kernel
 // for the requested side on the default stream.
 //
 // The launchers do NOT synchronize. Every kernel here and on the solver path
@@ -28,7 +28,8 @@
 // `side` integer the kernels expect via static_cast<int>(side). The device
 // kernels reproduce the index maps and the three critical correctness rules
 // (shared face/cell storage extent, full-width y-side corner coverage, and the
-// reflecting odd sign on the normal component only); see the .hip for details.
+// perfectly-conducting wall's odd sign on the normal component only — the wall
+// enforces v·n=0 and n·B=0); see the .hip for details.
 
 namespace quasar::boundary {
 namespace {
@@ -38,7 +39,7 @@ using mhd::MhdField2D;
 // Mode codes threaded into the device kernels.
 constexpr int kPeriodic = 0;
 constexpr int kOutflow = 1;
-constexpr int kReflecting = 2;
+constexpr int kWall = 2;  // perfectly-conducting wall: v·n=0, n·B=0
 
 // ---------------------------------------------------------------------------
 // Fluid boundaries
@@ -58,10 +59,10 @@ class OutflowFluidBC final : public IMhdFluidBoundary {
   }
 };
 
-class ReflectingFluidBC final : public IMhdFluidBoundary {
+class WallFluidBC final : public IMhdFluidBoundary {
  public:
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
-    mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kReflecting, nullptr);
+    mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kWall, nullptr);
   }
 };
 
@@ -83,10 +84,10 @@ class OutflowFieldBC final : public IMhdFieldBoundary {
   }
 };
 
-class ReflectingFieldBC final : public IMhdFieldBoundary {
+class WallFieldBC final : public IMhdFieldBoundary {
  public:
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
-    mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kReflecting, nullptr);
+    mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kWall, nullptr);
   }
 };
 
@@ -94,11 +95,11 @@ class ReflectingFieldBC final : public IMhdFieldBoundary {
 
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("periodic", PeriodicFluidBC)
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("outflow", OutflowFluidBC)
-QUASAR_REGISTER_MHD_FLUID_BOUNDARY("reflecting", ReflectingFluidBC)
+QUASAR_REGISTER_MHD_FLUID_BOUNDARY("wall", WallFluidBC)
 
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("periodic", PeriodicFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("outflow", OutflowFieldBC)
-QUASAR_REGISTER_MHD_FIELD_BOUNDARY("reflecting", ReflectingFieldBC)
+QUASAR_REGISTER_MHD_FIELD_BOUNDARY("wall", WallFieldBC)
 
 bool mhd_boundary_is_periodic(const std::string& name) { return name == "periodic"; }
 

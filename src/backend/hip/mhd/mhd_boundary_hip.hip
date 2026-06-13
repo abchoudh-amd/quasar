@@ -33,7 +33,7 @@
 //      stale and injects a div(B) leak. x-side fills iterate j over the interior
 //      [0,ny) (the y-side picks up the corners).
 //
-//  (c) REFLECTING SIGN. The odd (sign-flip) symmetry applies ONLY to the
+//  (c) WALL SIGN. The odd (sign-flip) symmetry applies ONLY to the
 //      component normal to the wall -- the normal momentum (mx on an x-side,
 //      my on a y-side) for the fluid fill, and the normal face-B (bx_face on an
 //      x-side, by_face on a y-side) for the field fill. Every tangential
@@ -56,7 +56,7 @@ inline constexpr unsigned kBlock = 256;
 
 // Resolve, for one ghost `layer` (1..nghost), the ghost target index `gi` on
 // `side`'s axis and the matching source interior index `si` for the requested
-// `mode` (0=periodic wrap, 1=outflow zero-gradient, 2=reflecting mirror). `n` is
+// `mode` (0=periodic wrap, 1=outflow zero-gradient, 2=wall mirror). `n` is
 // the axis extent (nx for an x-side, ny for a y-side) and `lo` is true for the
 // low side. The map is identical for cell-centered and face-staggered storage
 // because the face arrays share the cell storage extent (rule (a)).
@@ -68,7 +68,7 @@ __device__ inline void ghost_indices(int n, int layer, bool lo, int mode,
   } else if (mode == 1) {
     si = lo ? 0 : (n - 1);                  // outflow zero-gradient
   } else {
-    si = lo ? (layer - 1) : (n - layer);   // reflecting mirror
+    si = lo ? (layer - 1) : (n - layer);   // wall mirror
   }
 }
 
@@ -77,7 +77,7 @@ __device__ inline void ghost_indices(int n, int layer, bool lo, int mode,
 // the interior column j in [0, ny); for a y-side the line is the FULL storage
 // width i in [-ng, nx+ng) (rule (b), corner coverage). `s_normal` is the sign
 // applied to the normal-momentum component (mx on x-side, my on y-side): +1 for
-// periodic/outflow, -1 for a reflecting wall (rule (c)); every other component
+// periodic/outflow, -1 for a wall (rule (c)); every other component
 // is even.
 // ---------------------------------------------------------------------------
 __global__ void fill_ghosts_fluid_kernel(
@@ -130,7 +130,7 @@ __global__ void fill_ghosts_fluid_kernel(
 // ---------------------------------------------------------------------------
 // Field ghost fill. Same launch/line geometry as the fluid kernel. The normal
 // face-B (bx_face on an x-side, by_face on a y-side) takes `s_normal` (odd at a
-// reflecting wall); the tangential face-B and the cell-centered bz_cell are
+// wall); the tangential face-B and the cell-centered bz_cell are
 // always even. The hi ghost target uses the cell-identical index (rule (a)).
 // ---------------------------------------------------------------------------
 __global__ void fill_ghosts_field_kernel(
@@ -195,7 +195,7 @@ void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode,
   const unsigned total = fill_total_threads(g, side);
   if (total == 0) return;
   // Normal momentum (mx on an x-side, my on a y-side) gets the odd sign only on
-  // a reflecting wall (mode 2); everything else is even.
+  // a wall (mode 2); everything else is even.
   const bool x_side = (side == 0 || side == 1);
   const Real s_normal = (mode == 2) ? Real{-1} : Real{1};
   (void)x_side;  // selection of which component is normal happens in the kernel

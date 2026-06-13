@@ -1,7 +1,7 @@
 // MHD ghost-fill boundary contract (RED).
 //
 // This pins the EXACT reference ghost-fill rules of the three registered MHD
-// boundaries ("periodic" / "outflow" / "reflecting") as the post-port device
+// boundaries ("periodic" / "outflow" / "wall") as the post-port device
 // contract. The current host implementation lives in src/physics/mhd/
 // mhd_boundary.cpp; these tests encode its OBSERVABLE behavior (the values that
 // land in the ghost layers), not its implementation, so a later device-kernel
@@ -10,7 +10,7 @@
 // The boundaries are obtained by registry NAME (no enum / switch) exactly as the
 // solver does:
 //   Registry<boundary::IMhdFluidBoundary>::instance().create("periodic")
-//   Registry<boundary::IMhdFieldBoundary>::instance().create("reflecting")
+//   Registry<boundary::IMhdFieldBoundary>::instance().create("wall")
 // and applied to a seeded MhdField2D<Real> via fill_ghosts(field, Side).
 //
 // Index / staggering conventions (Grid2D::index(i,j), full padded storage):
@@ -27,7 +27,7 @@
 //                hi ghost (nx-1+layer)<- interior (layer-1)
 //   outflow    : lo ghost            <- interior 0       (zero-gradient)
 //                hi ghost            <- interior nx-1
-//   reflecting : lo ghost (-layer)   <- interior (layer-1) , sign s
+//   wall       : lo ghost (-layer)   <- interior (layer-1) , sign s
 //                hi ghost (nx-1+layer)<- interior (nx-layer), sign s
 //                where s = -1 (ODD) for the NORMAL momentum (mx on an x-side,
 //                my on a y-side) and the NORMAL face-B (bx_face on x, by_face on
@@ -261,22 +261,23 @@ TEST(MhdBoundary, OutflowCopiesOutermostInterior) {
 }
 
 // ---------------------------------------------------------------------------
-// REFLECTING: mirror about the wall. Tangential / cell-centered components are
-// EVEN (copy); the NORMAL momentum and NORMAL face-B are ODD (sign-flip). Both
-// the sign AND the mirror index are pinned:
+// WALL (perfectly-conducting wall): mirror about the wall. Tangential /
+// cell-centered components are EVEN (copy); the NORMAL momentum and NORMAL
+// face-B are ODD (sign-flip) so v.n=0 and n.B=0. Both the sign AND the mirror
+// index are pinned:
 //   x_lo: ghost(-layer) <- interior(layer-1)
 //   x_hi: ghost(nx-1+layer) <- interior(nx-layer)
 // On an x-side: mx & bx_face are ODD; rho, my, energy, by_face, bz_cell EVEN.
 // ---------------------------------------------------------------------------
-TEST(MhdBoundary, ReflectingMirrorsWithCorrectParityX) {
+TEST(MhdBoundary, WallMirrorsWithCorrectParityX) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   const Grid2D g = make_grid();
   MhdField2D<Real> f{g};
   seed_field(f);
 
-  auto fluid = make_fluid("reflecting");
-  auto field = make_field("reflecting");
+  auto fluid = make_fluid("wall");
+  auto field = make_field("wall");
 
   fluid->fill_ghosts(f, Side::x_lo);
   fluid->fill_ghosts(f, Side::x_hi);
@@ -298,39 +299,39 @@ TEST(MhdBoundary, ReflectingMirrorsWithCorrectParityX) {
     for (int j = 0; j < g.ny; ++j) {
       // EVEN.
       EXPECT_NEAR(rho[g.index(gi_lo, j)], pattern(si_lo, j, kBaseRho), kTol)
-          << "rho reflect even x_lo layer=" << layer << " j=" << j;
+          << "rho wall even x_lo layer=" << layer << " j=" << j;
       EXPECT_NEAR(rho[g.index(gi_hi, j)], pattern(si_hi, j, kBaseRho), kTol)
-          << "rho reflect even x_hi layer=" << layer << " j=" << j;
+          << "rho wall even x_hi layer=" << layer << " j=" << j;
       EXPECT_NEAR(my[g.index(gi_lo, j)], pattern(si_lo, j, kBaseMy), kTol)
-          << "my reflect even x_lo layer=" << layer << " j=" << j;
+          << "my wall even x_lo layer=" << layer << " j=" << j;
       EXPECT_NEAR(by[g.index(gi_lo, j)], pattern(si_lo, j, kBaseBy), kTol)
-          << "by_face reflect even x_lo layer=" << layer << " j=" << j;
+          << "by_face wall even x_lo layer=" << layer << " j=" << j;
       EXPECT_NEAR(bz[g.index(gi_hi, j)], pattern(si_hi, j, kBaseBz), kTol)
-          << "bz_cell reflect even x_hi layer=" << layer << " j=" << j;
+          << "bz_cell wall even x_hi layer=" << layer << " j=" << j;
       // ODD (sign flip): normal momentum mx and normal face bx_face.
       EXPECT_NEAR(mx[g.index(gi_lo, j)], -pattern(si_lo, j, kBaseMx), kTol)
-          << "mx reflect odd x_lo layer=" << layer << " j=" << j;
+          << "mx wall odd x_lo layer=" << layer << " j=" << j;
       EXPECT_NEAR(mx[g.index(gi_hi, j)], -pattern(si_hi, j, kBaseMx), kTol)
-          << "mx reflect odd x_hi layer=" << layer << " j=" << j;
+          << "mx wall odd x_hi layer=" << layer << " j=" << j;
       EXPECT_NEAR(bx[g.index(gi_lo, j)], -pattern(si_lo, j, kBaseBx), kTol)
-          << "bx_face reflect odd x_lo layer=" << layer << " j=" << j;
+          << "bx_face wall odd x_lo layer=" << layer << " j=" << j;
       EXPECT_NEAR(bx[g.index(gi_hi, j)], -pattern(si_hi, j, kBaseBx), kTol)
-          << "bx_face reflect odd x_hi layer=" << layer << " j=" << j;
+          << "bx_face wall odd x_hi layer=" << layer << " j=" << j;
     }
   }
 }
 
 // On a y-side the NORMAL momentum is my and the NORMAL face-B is by_face (ODD);
 // mx and bx_face are tangential (EVEN).
-TEST(MhdBoundary, ReflectingMirrorsWithCorrectParityY) {
+TEST(MhdBoundary, WallMirrorsWithCorrectParityY) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   const Grid2D g = make_grid();
   MhdField2D<Real> f{g};
   seed_field(f);
 
-  auto fluid = make_fluid("reflecting");
-  auto field = make_field("reflecting");
+  auto fluid = make_fluid("wall");
+  auto field = make_field("wall");
 
   fluid->fill_ghosts(f, Side::y_lo);
   fluid->fill_ghosts(f, Side::y_hi);
@@ -350,18 +351,18 @@ TEST(MhdBoundary, ReflectingMirrorsWithCorrectParityY) {
     for (int i = 0; i < g.nx; ++i) {
       // EVEN tangential.
       EXPECT_NEAR(mx[g.index(i, gj_lo)], pattern(i, sj_lo, kBaseMx), kTol)
-          << "mx reflect even y_lo layer=" << layer << " i=" << i;
+          << "mx wall even y_lo layer=" << layer << " i=" << i;
       EXPECT_NEAR(bx[g.index(i, gj_hi)], pattern(i, sj_hi, kBaseBx), kTol)
-          << "bx_face reflect even y_hi layer=" << layer << " i=" << i;
+          << "bx_face wall even y_hi layer=" << layer << " i=" << i;
       // ODD normal.
       EXPECT_NEAR(my[g.index(i, gj_lo)], -pattern(i, sj_lo, kBaseMy), kTol)
-          << "my reflect odd y_lo layer=" << layer << " i=" << i;
+          << "my wall odd y_lo layer=" << layer << " i=" << i;
       EXPECT_NEAR(my[g.index(i, gj_hi)], -pattern(i, sj_hi, kBaseMy), kTol)
-          << "my reflect odd y_hi layer=" << layer << " i=" << i;
+          << "my wall odd y_hi layer=" << layer << " i=" << i;
       EXPECT_NEAR(by[g.index(i, gj_lo)], -pattern(i, sj_lo, kBaseBy), kTol)
-          << "by_face reflect odd y_lo layer=" << layer << " i=" << i;
+          << "by_face wall odd y_lo layer=" << layer << " i=" << i;
       EXPECT_NEAR(by[g.index(i, gj_hi)], -pattern(i, sj_hi, kBaseBy), kTol)
-          << "by_face reflect odd y_hi layer=" << layer << " i=" << i;
+          << "by_face wall odd y_hi layer=" << layer << " i=" << i;
     }
   }
 }

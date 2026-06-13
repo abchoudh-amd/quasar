@@ -31,7 +31,7 @@ interfaces may still change between entries.
   `MhdSolver2D.seed_background`/`has_background`,
   `registered_mhd_background_profiles`), and a new `examples/mhd_guide_field`
   guide-field case.
-- MHD: one-sided non-periodic boundary stencils — at `outflow`/`reflecting`
+- MHD: one-sided non-periodic boundary stencils — at `outflow`/`wall`
   boundaries the boundary-face reconstruction uses an interior-biased one-sided
   slope (dropping dependence on the ghost gradient) while still reading the
   ghost values that impose the wall closure; periodic boundaries keep the
@@ -39,6 +39,10 @@ interfaces may still change between entries.
   unchanged, so discrete conservation still telescopes. The per-side periodic
   classification is owned by the boundary axis
   (`quasar::boundary::mhd_boundary_is_periodic`).
+- MHD: the `wall` boundary — a perfectly-conducting wall imposing `n·B = 0` on
+  the magnetic field and `v·n = 0` on the fluid, per-side with independent
+  fluid/field selection, selectable from an MHD deck via
+  `boundary.fluid`/`boundary.field`.
 - PIC: axisymmetric cylindrical `(r, z)` mode (`geometry: cylindrical`) — a full
   `m = 0` EM-PIC scheme family (`yee_cyl_o2`, `boris_cyl_*`, `esirkepov_cyl_*`)
   with `1/r` / `(1/r) d(r·)/dr` Yee curls, a finite-volume on-axis closure at
@@ -209,7 +213,7 @@ interfaces may still change between entries.
     helpers into a shared `QUASAR_HOST_DEVICE` header
     (`include/quasar/numerics/mp_limiter.hpp`).
   * MHD boundary ghost fills (fluid and magnetic-field; `periodic` / `outflow` /
-    `reflecting`) now run as device kernels instead of host-staged fills.
+    `wall`) now run as device kernels instead of host-staged fills.
   * The positivity floor (`troubled_cell`) now runs through the device floors
     kernel.
   * The CFL stable-timestep scan and the `div(B)` L-infinity diagnostic now run
@@ -217,7 +221,7 @@ interfaces may still change between entries.
   The registry-facing scheme/boundary classes are now thin launchers over the
   per-physics device launch ABI; behavior is selected by deck string exactly as
   before (registry names unchanged: `muscl_minmod` / `mp5` / `mp7`,
-  `troubled_cell`, `fd_ct_christlieb`, `periodic` / `outflow` / `reflecting`).
+  `troubled_cell`, `fd_ct_christlieb`, `periodic` / `outflow` / `wall`).
 - MHD: the device characteristic MP reconstruction falls back to 2nd-order MUSCL
   for any single interface whose high-order reconstructed state is non-finite or
   non-positive (a per-interface positivity guard), so a few troubled interfaces
@@ -267,6 +271,11 @@ interfaces may still change between entries.
   and shape, dropping the internal switch ladders. The specular current fold-back
   is now a `fold_current` hook on `IParticleBoundary` rather than a special case
   in the solver step.
+
+### Removed
+- MHD: the `reflecting` boundary name has been removed; it is renamed to `wall`
+  (same perfectly-conducting semantics), so decks must now select `wall` and
+  `reflecting` is rejected at validation.
 
 ### Optimized
 - MHD: the per-step CFL stable-timestep scan and the `div(B)` L-infinity

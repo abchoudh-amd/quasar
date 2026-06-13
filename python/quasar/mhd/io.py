@@ -115,7 +115,7 @@ class Diagnostics:
 class BoundaryConfig:
     """Per-side boundary kinds. Order: [x_min, x_max, y_min, y_max].
 
-    ``fluid`` and ``field`` are independent (a reflecting wall imposes different
+    ``fluid`` and ``field`` are independent (a wall imposes different
     symmetries on momentum than on the magnetic field). Names are validated
     against the live C++ registries.
     """

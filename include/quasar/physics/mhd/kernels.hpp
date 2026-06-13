@@ -225,7 +225,7 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
 // bz_cell) according to `mode`:
 //   mode 0 = periodic   : wrap from the opposite interior layer,
 //   mode 1 = outflow    : zero-gradient copy of the adjacent interior cell,
-//   mode 2 = reflecting : mirror the interior cells; the NORMAL momentum
+//   mode 2 = wall       : mirror the interior cells; the NORMAL momentum
 //                         component (mx at an x-side, my at a y-side) is sign-
 //                         flipped, every tangential momentum component and all
 //                         scalars (rho, energy, bz_cell) are copied even.
@@ -237,7 +237,7 @@ void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode, strea
 // `mode`:
 //   mode 0 = periodic   : wrap from the opposite interior layer,
 //   mode 1 = outflow    : zero-gradient copy of the adjacent interior face,
-//   mode 2 = reflecting : mirror the interior faces; the NORMAL face-B component
+//   mode 2 = wall       : mirror the interior faces; the NORMAL face-B component
 //                         (bx_face at an x-side, by_face at a y-side) is sign-
 //                         flipped, the tangential face-B component is copied
 //                         even. Run after the fluid fill so the CT face field

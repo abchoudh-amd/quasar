@@ -9,7 +9,7 @@
 //     signal that beats the fallback: cfl_limit() == cfl * min(dx,dy).
 //   * divergence_b_max() stays at round-off through a FULL step(dt) for a
 //     divergence-free seed (stable dt below cfl_limit()).
-//   * A deck with reconstruction "mp7", positivity "troubled_cell", reflecting
+//   * A deck with reconstruction "mp7", positivity "troubled_cell", wall
 //     boundaries runs one full step() with finite state and round-off div B.
 //
 // Seeds use CONSTANT rho / velocity / B so the host reference is exact and
@@ -221,25 +221,25 @@ TEST(MhdDeviceCompute, DivergenceBStaysRoundoffThroughStep) {
 
 // ---------------------------------------------------------------------------
 // End-to-end high-order deck: reconstruction "mp7", positivity "troubled_cell",
-// reflecting boundaries -> one full step runs without error and leaves finite
+// wall boundaries -> one full step runs without error and leaves finite
 // state. Div B is intentionally NOT asserted here: divergence_b_max() refills
-// ghosts from the configured BC before measuring, and a reflecting wall imposes
+// ghosts from the configured BC before measuring, and a wall imposes
 // ODD (sign-flipped) symmetry on the normal face-B. A field that is div-free in
 // the interior is therefore NOT solenoidal when the boundary cells read the
-// reflecting ghost faces (normal B through a conducting wall is not div-free at
+// wall ghost faces (normal B through a conducting wall is not div-free at
 // the wall by construction). The div-clean invariant is pinned on the PERIODIC
 // path by DivergenceBStaysRoundoffThroughStep; here we only pin that the
-// high-order + reflecting deck runs and stays finite.
+// high-order + wall deck runs and stays finite.
 // ---------------------------------------------------------------------------
-TEST(MhdDeviceCompute, Mp7ReflectingEndToEndStepIsFinite) {
+TEST(MhdDeviceCompute, Mp7WallEndToEndStepIsFinite) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   auto cfg = base_config();
   cfg.reconstruction = "mp7";
   cfg.positivity = "troubled_cell";
   for (int s = 0; s < 4; ++s) {
-    cfg.boundary.fluid[s] = "reflecting";
-    cfg.boundary.field[s] = "reflecting";
+    cfg.boundary.fluid[s] = "wall";
+    cfg.boundary.field[s] = "wall";
   }
   const Grid2D& g = cfg.grid;
 
@@ -254,8 +254,8 @@ TEST(MhdDeviceCompute, Mp7ReflectingEndToEndStepIsFinite) {
   const std::vector<Real> en = solver.state_component_to_host("energy");
   const std::vector<Real> bx = solver.state_component_to_host("bx");
   const std::vector<Real> by = solver.state_component_to_host("by");
-  EXPECT_TRUE(all_finite(rho)) << "mp7/reflecting step produced non-finite rho";
-  EXPECT_TRUE(all_finite(en)) << "mp7/reflecting step produced non-finite energy";
-  EXPECT_TRUE(all_finite(bx)) << "mp7/reflecting step produced non-finite bx";
-  EXPECT_TRUE(all_finite(by)) << "mp7/reflecting step produced non-finite by";
+  EXPECT_TRUE(all_finite(rho)) << "mp7/wall step produced non-finite rho";
+  EXPECT_TRUE(all_finite(en)) << "mp7/wall step produced non-finite energy";
+  EXPECT_TRUE(all_finite(bx)) << "mp7/wall step produced non-finite bx";
+  EXPECT_TRUE(all_finite(by)) << "mp7/wall step produced non-finite by";
 }

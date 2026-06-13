@@ -1,17 +1,17 @@
 // One-sided boundary stencils at NON-PERIODIC physical boundaries (RED).
 //
 // Today MHD boundaries rely purely on ghost-cell filling. The behavioral change
-// pinned here: at NON-PERIODIC physical boundaries (outflow, reflecting), the
+// pinned here: at NON-PERIODIC physical boundaries (outflow, wall), the
 // boundary-face reconstruction uses a one-sided (interior-biased) SLOPE so the
 // scheme does not depend on the ghost GRADIENT; periodic boundaries still wrap
-// via ghosts and stay numerically unchanged. The reflecting-wall closure is
+// via ghosts and stay numerically unchanged. The wall closure is
 // STILL supplied by the mirror ghost VALUES (which are still filled and read) --
 // the one-sided change only drops dependence on the ghost gradient, it does NOT
 // remove the wall symmetry.
 //
 // We cannot call the internal one-sided reconstruction directly, so the behavior
 // is pinned through OBSERVABLE solver outputs (finiteness, determinism, div-B,
-// boundedness near an outflow edge, odd/even symmetry across a reflecting wall)
+// boundedness near an outflow edge, odd/even symmetry across a wall)
 // plus the new boundary classifier free function.
 //
 // Staggering / index conventions (mirrored from test_mhd_divergence_free.cpp and
@@ -22,7 +22,7 @@
 //   * B built as the discrete curl of a corner-staggered A_z is divergence-free:
 //       bx_face(i,j) = +(A_z(i, j+1) - A_z(i, j)) / dy
 //       by_face(i,j) = -(A_z(i+1, j) - A_z(i, j)) / dx
-//   * A reflecting wall on x_lo fills ghost cell i=-layer from interior cell
+//   * A wall on x_lo fills ghost cell i=-layer from interior cell
 //     i=layer-1 (mirror about the i=0 left face): the first interior cell i=0
 //     maps to ghost i=-1, i=1 maps to i=-2, etc. Normal components (mx, bx_face)
 //     are ODD (sign flip); rho/energy/my/by_face are EVEN. We read these via
@@ -139,7 +139,7 @@ bool all_finite(const std::vector<Real>& v) {
 TEST(MhdOneSidedBoundary, ClassifierFlagsOnlyPeriodic) {
   EXPECT_TRUE(quasar::boundary::mhd_boundary_is_periodic("periodic"));
   EXPECT_FALSE(quasar::boundary::mhd_boundary_is_periodic("outflow"));
-  EXPECT_FALSE(quasar::boundary::mhd_boundary_is_periodic("reflecting"));
+  EXPECT_FALSE(quasar::boundary::mhd_boundary_is_periodic("wall"));
 }
 
 // ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ TEST(MhdOneSidedBoundary, OutflowEdgeStaysBounded) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Reflecting wall symmetry preserved across an x_lo wall after a step.
+// 3. Wall symmetry preserved across an x_lo wall after a step.
 //    The mirror ghost VALUES that impose the wall closure are still filled and
 //    read by the boundary-biased reconstruction, so the post-step state keeps
 //    the wall symmetry: normal momentum (mx) and normal field (bx) are ODD
@@ -240,11 +240,11 @@ TEST(MhdOneSidedBoundary, OutflowEdgeStaysBounded) {
 //    interior cell (i=0) to its mirror ghost cell (i=-1) -- mirror about the
 //    i=0 left face per src/physics/mhd/mhd_boundary.cpp (gi=-1 <- si=0).
 // ---------------------------------------------------------------------------
-TEST(MhdOneSidedBoundary, ReflectingWallSymmetryPreserved) {
+TEST(MhdOneSidedBoundary, WallSymmetryPreserved) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
-  // x_lo reflecting for BOTH fluid and field; others periodic.
-  const auto cfg = make_config("reflecting", "periodic", "periodic", "periodic");
+  // x_lo wall for BOTH fluid and field; others periodic.
+  const auto cfg = make_config("wall", "periodic", "periodic", "periodic");
   const quasar::Grid2D& g = cfg.grid;
 
   quasar::mhd::MhdSolver2D solver{cfg};

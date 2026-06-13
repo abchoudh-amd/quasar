@@ -72,18 +72,20 @@ TEST(MhdSchemeRegistryLinkage, FluidBoundariesAreRegistered) {
   const auto& reg = ::quasar::Registry<::quasar::boundary::IMhdFluidBoundary>::instance();
   ASSERT_TRUE(reg.contains("periodic"));
   ASSERT_TRUE(reg.contains("outflow"));
-  ASSERT_TRUE(reg.contains("reflecting"));
+  ASSERT_TRUE(reg.contains("wall"));
+  EXPECT_FALSE(reg.contains("reflecting"));
   EXPECT_NE(reg.create("periodic"), nullptr);
   EXPECT_NE(reg.create("outflow"), nullptr);
-  EXPECT_NE(reg.create("reflecting"), nullptr);
+  EXPECT_NE(reg.create("wall"), nullptr);
 }
 
 TEST(MhdSchemeRegistryLinkage, FieldBoundariesAreRegistered) {
   const auto& reg = ::quasar::Registry<::quasar::boundary::IMhdFieldBoundary>::instance();
   ASSERT_TRUE(reg.contains("periodic"));
   ASSERT_TRUE(reg.contains("outflow"));
-  ASSERT_TRUE(reg.contains("reflecting"));
+  ASSERT_TRUE(reg.contains("wall"));
+  EXPECT_FALSE(reg.contains("reflecting"));
   EXPECT_NE(reg.create("periodic"), nullptr);
   EXPECT_NE(reg.create("outflow"), nullptr);
-  EXPECT_NE(reg.create("reflecting"), nullptr);
+  EXPECT_NE(reg.create("wall"), nullptr);
 }

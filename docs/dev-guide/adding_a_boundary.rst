@@ -41,11 +41,11 @@ Ideal-MHD boundaries: one-sided non-periodic stencils
 The ideal-MHD vertical slice derives its boundaries from ``IMhdFluidBoundary``
 and ``IMhdFieldBoundary`` (declared in ``include/quasar/boundary/mhd_boundary.hpp``),
 which self-register under their string names via ``QUASAR_REGISTER_MHD_FLUID_BOUNDARY``
-and ``QUASAR_REGISTER_MHD_FIELD_BOUNDARY`` (``periodic`` | ``outflow`` | ``reflecting``).
+and ``QUASAR_REGISTER_MHD_FIELD_BOUNDARY`` (``periodic`` | ``outflow`` | ``wall``).
 As with PIC, every concrete wall does its work in ``fill_ghosts`` (wrap /
 zero-gradient / wall-mirror of the thin boundary halo); the fluid axis and the
-magnetic-field axis carry independent per-side selections because a reflecting
-wall imposes different symmetries on momentum than on **B**.
+magnetic-field axis carry independent per-side selections because a wall
+imposes different symmetries on momentum than on **B**.
 
 Device-path ghost fills
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -69,11 +69,13 @@ the wall behavior:
 
 * ``mode 0`` — **periodic**: wrap from the opposite interior layer.
 * ``mode 1`` — **outflow**: zero-gradient copy of the adjacent interior cell/face.
-* ``mode 2`` — **reflecting**: mirror the interior; the **normal** component is
+* ``mode 2`` — **wall**: mirror the interior; the **normal** component is
   sign-flipped (the normal momentum — ``mx`` at an x-side, ``my`` at a y-side —
   for the fluid fill, and the normal face-B — ``bx_face`` at an x-side,
   ``by_face`` at a y-side — for the field fill), while tangential momentum and
-  all cell-centered scalars are copied even.
+  all cell-centered scalars are copied even. This realizes a
+  perfectly-conducting wall: the sign-flipped normals impose ``v·n = 0`` on the
+  fluid and ``n·B = 0`` on the field at the boundary.
 
 The four corner ghost blocks are filled as well: the y-side fills span the full
 storage width so the corner halo shared with the x-faces is populated. Backend
@@ -116,7 +118,7 @@ all-periodic fast path and is bit-identical to the pre-flags behavior.
 The one-sided mechanism
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-At a **non-periodic** side (``outflow`` / ``reflecting``), the boundary-face
+At a **non-periodic** side (``outflow`` / ``wall``), the boundary-face
 reconstruction switches to an **interior-biased one-sided slope**: it drops its
 dependence on the ghost *gradient* near the edge while **still reading the filled
 ghost value** that supplies the wall closure. A **periodic** side keeps the
@@ -125,7 +127,7 @@ two-sided stencil and wraps through the ghosts, exactly as before.
 .. important::
 
    The ghost layers are **still filled and still read** — ``fill_ghosts`` is not
-   disabled at a non-periodic side. The reflecting / outflow wall closure
+   disabled at a non-periodic side. The wall / outflow closure
    continues to come from the mirrored / zero-gradient ghost **values**. The
    one-sided change removes only the dependence on the ghost **gradient** in the
    slope used at the edge interface, replacing the two-sided central slope with

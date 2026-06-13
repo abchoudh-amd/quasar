@@ -86,15 +86,21 @@ class RegistryIntrospectionTests(unittest.TestCase):
 
     def test_expected_fluid_boundaries_registered(self):
         fluid = set(_core.mhd.registered_mhd_fluid_boundaries())
-        for name in ("periodic", "outflow", "reflecting"):
+        for name in ("periodic", "outflow", "wall"):
             with self.subTest(name=name):
                 self.assertIn(name, fluid)
+        self.assertNotIn("reflecting", fluid,
+                         "fluid boundary 'reflecting' was renamed to 'wall' "
+                         "and must no longer be registered")
 
     def test_expected_field_boundaries_registered(self):
         field = set(_core.mhd.registered_mhd_field_boundaries())
-        for name in ("periodic", "outflow", "reflecting"):
+        for name in ("periodic", "outflow", "wall"):
             with self.subTest(name=name):
                 self.assertIn(name, field)
+        self.assertNotIn("reflecting", field,
+                         "field boundary 'reflecting' was renamed to 'wall' "
+                         "and must no longer be registered")
 
 
 # State components seeded/read through the per-component seed_state /
