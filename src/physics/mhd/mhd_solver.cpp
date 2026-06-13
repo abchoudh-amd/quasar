@@ -69,6 +69,17 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
   // zero-B0 fast path that is bit-identical to the no-background solver). The
   // actual B0 values are seeded from Python via seed_background().
   if (cfg_.background.enabled) {
+    // The cylindrical geometric source (MhdGeometricSource / geometric_source_kernel)
+    // builds its 1/r curvature terms from the stored perturbation b only, while the
+    // radial flux uses the total field B = B0 + b. Combining a static background with
+    // cylindrical geometry would therefore apply an inconsistent (flux-from-B,
+    // source-from-b) update, so reject it until the geometric source folds in B0.
+    if (is_cylindrical()) {
+      throw std::invalid_argument{
+          "MhdSolver2D: a static background field (background.enabled) is not yet "
+          "supported with cylindrical geometry (the geometric source does not fold "
+          "in B0)"};
+    }
     b0_ = MhdBackgroundField<Real>{grid_};
     b0_.active = true;
   }
@@ -339,12 +350,18 @@ Real MhdSolver2D::cfl_limit() const {
   // field reference without mutating it.
   auto& self = const_cast<MhdSolver2D&>(*this);
   Real max_rate = Real{0};
-  launch_mhd_cfl_max_rate(self.state(), b0_, cfg_.gamma, &max_rate, nullptr);
+  launch_mhd_cfl_max_rate(self.state(), b0_, cfg_.gamma, cfl_scratch_, &max_rate, nullptr);
 
   if (!(max_rate > Real{0}) || !std::isfinite(max_rate)) {
-    // A quiescent / zero-velocity field has no finite signal rate cap; fall back
-    // to the sound-speed-free spacing so step() does not reject every dt.
-    return cfg_.cfl * std::min(grid_.dx(), grid_.dy());
+    // Reached only when every interior cell has a non-positive / non-finite
+    // signal rate -- e.g. a pressureless, field-free, motionless state (the
+    // positivity floor keeps rho>0 and p>0, so a normal run always yields a
+    // finite positive rate). Any dt is stable for a truly signal-free field;
+    // return a finite, dimensionally-consistent dt using the additive rate with
+    // a unit reference speed (cfl / (1/dx + 1/dy)) so the fallback is a TIME like
+    // the main path, not a length.
+    const Real ref_rate = Real{1} / grid_.dx() + Real{1} / grid_.dy();
+    return cfg_.cfl / ref_rate;
   }
   return cfg_.cfl / max_rate;
 }

@@ -134,12 +134,11 @@ __global__ void ct_divb_linf_kernel(
 }
 
 // Finish a block-partials max on the host. Copies the partials to host and folds
-// them into a single scalar. The host staging vector is thread_local so a
-// per-step reduction reuses it instead of allocating every call (it only grows).
+// them into a single scalar. n_blocks is the number of 16x16 tiles over the grid
+// (small), so a per-call host vector is negligible next to the device reduction.
 inline Real finish_host_max(const quasar::backend::DeviceBuffer<Real>& partials,
                             std::size_t n_blocks) {
-  static thread_local std::vector<Real> host;
-  if (host.size() < n_blocks) host.resize(n_blocks);
+  std::vector<Real> host(n_blocks);
   partials.copy_to_host(host.data(), n_blocks);
   Real m = Real{0};
   for (std::size_t b = 0; b < n_blocks; ++b) {
@@ -163,17 +162,16 @@ inline void ensure_scratch(quasar::backend::DeviceBuffer<Real>& scratch,
 namespace quasar::mhd {
 
 void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                             Real gamma, Real* host_max_rate, stream_t stream) {
+                             Real gamma, backend::DeviceBuffer<Real>& scratch,
+                             Real* host_max_rate, stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
 
-  // Persistent per-thread scratch: the auto-dt loop calls this every step, so
-  // reuse the block-partials buffer across calls instead of a hipMalloc/hipFree
-  // pair per step (the kernel writes every block slot before any read).
-  static thread_local backend::DeviceBuffer<Real> block_partials;
-  ensure_scratch(block_partials, n_blocks);
+  // Caller-owned scratch reused across calls (the auto-dt loop calls this every
+  // step): grow it only when too small so there is no per-step hipMalloc/hipFree.
+  ensure_scratch(scratch, n_blocks);
 
   const Real inv_dx = Real{1} / g.dx();
   const Real inv_dy = Real{1} / g.dy();
@@ -188,24 +186,24 @@ void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),
-                     b0x, b0y, b0z, block_partials.device_ptr());
+                     b0x, b0y, b0z, scratch.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_max_rate = finish_host_max(block_partials, n_blocks);
+  *host_max_rate = finish_host_max(scratch, n_blocks);
 }
 
-void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u, Real* host_linf, stream_t stream) {
+void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
+                             backend::DeviceBuffer<Real>& scratch,
+                             Real* host_linf, stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
 
-  // Persistent per-thread scratch, same rationale as the CFL reduction (this runs
-  // on the divB-diagnostic cadence rather than every step, but the per-call
-  // allocation is equally avoidable).
-  static thread_local backend::DeviceBuffer<Real> block_partials;
-  ensure_scratch(block_partials, n_blocks);
+  // Caller-owned scratch reused across calls (same rationale as the CFL
+  // reduction); grow it only when too small.
+  ensure_scratch(scratch, n_blocks);
 
   const Real inv_dx = Real{1} / g.dx();
   const Real inv_dy = Real{1} / g.dy();
@@ -213,11 +211,11 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u, Real* host_linf, stream_
   hipLaunchKernelGGL(ct_divb_linf_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, inv_dx, inv_dy,
                      u.bx_face.device_ptr(), u.by_face.device_ptr(),
-                     block_partials.device_ptr());
+                     scratch.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_linf = finish_host_max(block_partials, n_blocks);
+  *host_linf = finish_host_max(scratch, n_blocks);
 }
 
 }  // namespace quasar::mhd

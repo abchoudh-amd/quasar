@@ -6,8 +6,10 @@
 // integrator, positivity limiter, per-side fluid/field boundaries) by deck-facing
 // string name through the plugin registry, owns ALL device scratch (the live
 // state, the SSP-RK stage registers, the residual register, the per-direction
-// interface states, a flux scratch field, and the corner EMF), and exposes the
-// residual/stage seam the SSP-RK integrator drives.
+// interface states, a flux scratch field, the corner EMF, and the CFL max-rate
+// reduction scratch), and exposes the residual/stage seam the SSP-RK integrator
+// drives. (The CT scheme owns its own div(B) reduction scratch, the only device
+// buffer not held here.)
 //
 // The integrator (numerics::ISsprkIntegrator) is intentionally state-free: it
 // only sequences calls to compute_residual / combine_stage / rk_register /
@@ -148,6 +150,10 @@ class MhdSolver2D {
   // Static background field B0 (field split B = B0 + b). active iff the deck
   // enabled the background; inactive (default) => zero B0 fast path.
   MhdBackgroundField<Real> b0_{};
+  // Solver-owned block-partials scratch for the CFL max-rate device reduction,
+  // reused across steps so cfl_limit() does not hipMalloc/hipFree per call.
+  // mutable because cfl_limit() is const (it only reads the state).
+  mutable backend::DeviceBuffer<Real> cfl_scratch_{};
 
   std::unique_ptr<numerics::IRiemannSolver> riemann_{};
   std::unique_ptr<numerics::ICtScheme> ct_{};

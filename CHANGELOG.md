@@ -72,6 +72,9 @@ interfaces may still change between entries.
   `weibel`, `em_wave_propagation`, `beam_in_channel`, `pec_cavity`,
   `magnetized_plasma`, `coil_confinement`) are now runnable, documented, and covered
   by integration tests.
+- New `square_quad_field` (Biot–Savart quadrupole field map) and `square_quad_pic`
+  (EM-PIC plasma on the quadrupole null) example decks, each with a README and a
+  matching `tests/python/test_examples.py` integration test.
 - PIC test coverage: a real FDTD plane-wave dispersion check, a behavioral
   mixed-boundary test, Gauss-residual diagnostics tests, an end-to-end CLI run
   smoke test, and a `--log-every` / `--write-every` diagnostics test.

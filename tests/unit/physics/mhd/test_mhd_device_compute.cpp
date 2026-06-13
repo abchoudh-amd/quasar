@@ -171,29 +171,30 @@ TEST(MhdDeviceCompute, CflLimitMatchesHostReductionBothDirections) {
 }
 
 // ---------------------------------------------------------------------------
-// Quiescent fallback: zero velocity AND zero field => the only signal is the
-// sound speed; but a TRULY quiescent state (zero pressure too) yields no finite
-// signal speed, so cfl_limit() falls back to cfl * min(dx,dy).
+// Quiescent fallback: zero velocity AND zero field AND zero pressure => no finite
+// signal rate, so cfl_limit() returns the dimensionally-consistent fallback dt
+// cfl / (1/dx + 1/dy) (the additive rate with a unit reference speed -- a TIME,
+// matching the main cfl/max_rate path, not a length).
 // ---------------------------------------------------------------------------
-TEST(MhdDeviceCompute, QuiescentFallsBackToCflTimesMinSpacing) {
+TEST(MhdDeviceCompute, QuiescentFallsBackToUnitRateDt) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   auto cfg = base_config();
   const Grid2D& g = cfg.grid;
   const Real gamma = cfg.gamma;
 
-  // Zero velocity, zero pressure, zero field -> max signal speed is 0; the
-  // solver must avoid a divide-by-zero and return the spacing-only fallback.
+  // Zero velocity, zero pressure, zero field -> max signal rate is 0; the solver
+  // must avoid a divide-by-zero and return the unit-reference-rate fallback.
   quasar::mhd::MhdSolver2D solver{cfg};
   seed_uniform(solver, g, gamma, /*rho=*/1.0, /*vx=*/0.0, /*vy=*/0.0, /*vz=*/0.0,
                /*p=*/0.0, /*bx=*/0.0, /*by=*/0.0, /*bz=*/0.0);
 
   const Real got = solver.cfl_limit();
-  const Real fallback = cfg.cfl * std::min(g.dx(), g.dy());
+  const Real fallback = cfg.cfl / (Real{1} / g.dx() + Real{1} / g.dy());
 
   ASSERT_TRUE(std::isfinite(got)) << "quiescent cfl_limit() must be finite";
   EXPECT_NEAR(got, fallback, 1e-12 * fallback)
-      << "quiescent state must fall back to cfl*min(dx,dy)";
+      << "quiescent state must fall back to cfl / (1/dx + 1/dy)";
 }
 
 // ---------------------------------------------------------------------------

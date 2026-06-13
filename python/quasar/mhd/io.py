@@ -269,6 +269,14 @@ class MhdDeck:
         bg = self.background
         if not bg.enabled:
             return
+        # The cylindrical geometric source builds its 1/r curvature terms from the
+        # perturbation b only, while the radial flux uses the total field B = B0 + b;
+        # combining a static background with cylindrical geometry would apply an
+        # inconsistent update, so reject it (mirrors the C++ MhdSolver2D guard).
+        if self.geometry == "cylindrical":
+            raise ValueError(
+                "background_field.enabled is not supported with geometry "
+                "'cylindrical' (the geometric source does not fold in B0)")
         # The profile must be a live registered background-field profile so a
         # newly-registered profile needs no Python edit (mirrors the numerics
         # scheme validation).

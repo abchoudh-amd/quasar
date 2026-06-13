@@ -68,9 +68,15 @@ class ChristliebFdCt : public ICtScheme {
 
   Real divergence_b_linf(const quasar::mhd::MhdField2D<Real>& u) const override {
     Real linf = Real{0};
-    quasar::mhd::launch_mhd_ct_divb_linf(u, &linf, nullptr);
+    quasar::mhd::launch_mhd_ct_divb_linf(u, divb_scratch_, &linf, nullptr);
     return linf;
   }
+
+ private:
+  // Scheme-owned block-partials scratch for the div(B) device reduction, reused
+  // across calls so the diagnostic does not hipMalloc/hipFree each time. mutable
+  // because divergence_b_linf is const (it only reads the field).
+  mutable backend::DeviceBuffer<Real> divb_scratch_{};
 };
 
 }  // namespace quasar::numerics

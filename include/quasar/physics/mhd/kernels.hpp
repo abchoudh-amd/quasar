@@ -192,8 +192,16 @@ void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& du
 // stored b IS the total field). Cells with non-positive or non-finite density are
 // SKIPPED (they contribute no rate) so a transiently floored cell cannot poison
 // the reduction. The result is read back to the host pointer before this returns.
+//
+// `scratch` is a caller-owned block-partials buffer reused across calls (the
+// auto-dt loop calls this every step): the launcher (re)sizes it only when it is
+// smaller than the per-launch block count, so the caller avoids a per-step
+// hipMalloc/hipFree. Ownership stays with the caller (the solver), honoring the
+// "solver owns all device scratch" contract; the kernel writes every block slot
+// before any read, so a larger reused buffer is safe.
 void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                             Real gamma, Real* host_max_rate, stream_t stream);
+                             Real gamma, backend::DeviceBuffer<Real>& scratch,
+                             Real* host_max_rate, stream_t stream);
 
 // -- Constrained-transport div(B) L-infinity ---------------------------------
 // Reduce the maximum interior |div B| -- the cell-centered divergence of the
@@ -203,7 +211,13 @@ void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField
 // -- over all interior cells and write the single scalar into *host_linf. This
 // is the CT consistency diagnostic; with the CT face-B update it should remain at
 // round-off. The result is read back to the host pointer before this returns.
-void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u, Real* host_linf, stream_t stream);
+//
+// `scratch` is a caller-owned block-partials buffer reused across calls (same
+// contract as launch_mhd_cfl_max_rate): the launcher (re)sizes it only when it is
+// too small, so the caller (the CT scheme) avoids a per-call hipMalloc/hipFree.
+void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
+                             backend::DeviceBuffer<Real>& scratch,
+                             Real* host_linf, stream_t stream);
 
 // -- Ghost-layer fill (fluid components) -------------------------------------
 // Fill the ghost layers of ONE boundary `side` (canonical order 0=x_lo, 1=x_hi,
