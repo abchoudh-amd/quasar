@@ -32,22 +32,12 @@ Grid2D resolve_working_grid(const Grid2D& deck_grid, int required) {
   return g;
 }
 
-// Build the reconstruction scheme first (its required_nghost() fixes the working
-// grid) so MhdSolver2D's member initializer list can size every field/register
-// at the resolved grid. Throws std::invalid_argument on an unknown deck name
-// (Registry::create throws std::out_of_range, which we rephrase for the deck).
-std::unique_ptr<numerics::IFluxReconstruction> make_reconstruction(const std::string& name) {
-  try {
-    auto p = Registry<numerics::IFluxReconstruction>::instance().create(name);
-    if (!p) {
-      throw std::invalid_argument{"MhdSolver2D: unknown reconstruction scheme '" + name + "'"};
-    }
-    return p;
-  } catch (const std::out_of_range&) {
-    throw std::invalid_argument{"MhdSolver2D: unknown reconstruction scheme '" + name + "'"};
-  }
-}
-
+// Resolve a pluggable scheme by registry name. Throws std::invalid_argument on an
+// unknown deck name (Registry::create throws std::out_of_range, which we rephrase
+// for the deck). Used for every MHD scheme axis, including the reconstruction
+// scheme that is built first because its required_nghost() fixes the working grid
+// (so MhdSolver2D's member initializer list can size every field/register at the
+// resolved grid).
 template <class Base>
 std::unique_ptr<Base> make_scheme(const std::string& name, const char* what) {
   try {
@@ -65,7 +55,8 @@ std::unique_ptr<Base> make_scheme(const std::string& name, const char* what) {
 
 MhdSolver2D::MhdSolver2D(MhdConfig cfg)
   : cfg_{cfg},
-    reconstruction_{make_reconstruction(cfg.reconstruction)},
+    reconstruction_{make_scheme<numerics::IFluxReconstruction>(cfg.reconstruction,
+                                                              "reconstruction scheme")},
     grid_{resolve_working_grid(cfg.grid, reconstruction_->required_nghost())},
     rk_{MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}},
     residual_{grid_},
@@ -333,27 +324,29 @@ MhdField2D<Real>& MhdSolver2D::rk_register(int k) {
 }
 
 Real MhdSolver2D::cfl_limit() const {
-  // Reduce the maximum interior signal speed |v_dir| + c_fast,dir over both
-  // directions on device, then return cfl * min(spacing) / max_speed. The device
-  // reduction is b0-aware (it folds the total field B = B0 + b) and skips cells
-  // with non-positive / non-finite rho, matching the former host scan exactly.
-  // Cylindrical uses (dr, dz) = (dx, dy) on the (r,z) grid, which the Grid2D
-  // dx()/dy() already report.
+  // Reduce the maximum interior ADDITIVE signal rate
+  //   (|v_x| + c_fast_x)/dx + (|v_y| + c_fast_y)/dy
+  // on device, then return cfl / max_rate. The additive (rather than per-direction
+  // max over min(dx,dy)) bound is the correct stability limit for the UNSPLIT
+  // residual, which sums both directional flux differences into one dudt per
+  // SSP-RK3 stage; a per-direction max would accept up to ~2x the stable step on
+  // an isotropic grid. The device reduction is b0-aware (it folds the total field
+  // B = B0 + b) and skips cells with non-positive / non-finite rho. Cylindrical
+  // uses (dr, dz) = (dx, dy) on the (r,z) grid, which Grid2D dx()/dy() report.
   //
-  // launch_mhd_cfl_max_speed takes the field by const ref; state() is a mutable
+  // launch_mhd_cfl_max_rate takes the field by const ref; state() is a mutable
   // accessor, so reuse the established const_cast pattern to obtain the live
   // field reference without mutating it.
   auto& self = const_cast<MhdSolver2D&>(*this);
-  Real max_speed = Real{0};
-  launch_mhd_cfl_max_speed(self.state(), b0_, cfg_.gamma, &max_speed, nullptr);
+  Real max_rate = Real{0};
+  launch_mhd_cfl_max_rate(self.state(), b0_, cfg_.gamma, &max_rate, nullptr);
 
-  const Real min_spacing = std::min(grid_.dx(), grid_.dy());
-  if (!(max_speed > Real{0}) || !std::isfinite(max_speed)) {
-    // A quiescent / zero-velocity field has no finite signal speed cap; fall back
+  if (!(max_rate > Real{0}) || !std::isfinite(max_rate)) {
+    // A quiescent / zero-velocity field has no finite signal rate cap; fall back
     // to the sound-speed-free spacing so step() does not reject every dt.
-    return cfg_.cfl * min_spacing;
+    return cfg_.cfl * std::min(grid_.dx(), grid_.dy());
   }
-  return cfg_.cfl * min_spacing / max_speed;
+  return cfg_.cfl / max_rate;
 }
 
 Real MhdSolver2D::divergence_b_max() const {
@@ -385,11 +378,26 @@ void MhdSolver2D::step(Real dt) {
   integrator_->advance(*this, dt);
 }
 
+void MhdSolver2D::step_unchecked(Real dt) {
+  // CFL pre-validated by the caller (the auto-dt loop just called cfl_limit());
+  // skip the redundant full-grid reduction inside check_cfl(). Still guard the
+  // sign so a bad caller cannot advance with a non-positive dt.
+  if (dt <= Real{0}) {
+    throw std::invalid_argument{"MhdSolver2D: dt must be positive"};
+  }
+  integrator_->advance(*this, dt);
+}
+
 void MhdSolver2D::advance(Real t_end, Real dt) {
   if (dt <= Real{0}) {
     throw std::invalid_argument{"MhdSolver2D::advance: dt must be positive"};
   }
-  for (Real t = Real{0}; t < t_end; t += dt) {
+  // Drive the loop by an integer step count so repeated += dt cannot drift the
+  // termination by up to a full step from floating-point accumulation.
+  const long n_steps = (t_end > Real{0})
+                           ? static_cast<long>(std::ceil(t_end / dt))
+                           : 0L;
+  for (long s = 0; s < n_steps; ++s) {
     step(dt);
   }
 }

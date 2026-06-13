@@ -171,25 +171,29 @@ void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>
 // -- Cylindrical geometric source --------------------------------------------
 // Accumulate the axisymmetric (r,z) geometric source into `dudt`:
 //   dudt += S(u, r)
-// with the radius read from grid.r_at_cell_center(i) and an on-axis (r -> 0)
-// guard. No-op contribution where r is at/below the guard floor. The solver
-// only calls this in cylindrical mode (it is a pure add, so a Cartesian solver
-// simply never invokes it).
+// with the radius read from grid.r_at_cell_center(i) = (i+0.5)*dr, which is > 0
+// at every cell center (the innermost cell i=0 is at r = 0.5*dr), so the source
+// is applied at every column including the axis column; only a non-positive /
+// non-finite cell-center radius (which a valid grid never produces) is skipped.
+// The solver only calls this in cylindrical mode (it is a pure add, so a
+// Cartesian solver simply never invokes it).
 void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                                  Grid2D grid, Real gamma, stream_t stream);
 
-// -- CFL maximum signal speed ------------------------------------------------
-// Reduce the maximum directional signal speed max(|v_dir| + c_fast_dir) over all
-// INTERIOR cells and write the single scalar into *host_max_speed. The fast
-// speed sees the TOTAL magnetic field B = b + B0 (b0-aware): when b0.active is
-// false this is the zero-background fast path (the stored b IS the total field).
-// Cells with non-positive or non-finite density are SKIPPED (they contribute no
-// speed) so a transiently floored cell cannot poison the reduction. Both
-// directions dir=0 and dir=1 are folded into the single maximum so one call
-// yields the global CFL-limiting speed. The result is read back to the host
-// pointer before this returns.
-void launch_mhd_cfl_max_speed(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                              Real gamma, Real* host_max_speed, stream_t stream);
+// -- CFL maximum signal rate -------------------------------------------------
+// Reduce the maximum ADDITIVE directional signal rate
+//   (|v_x| + c_fast_x)/dx + (|v_y| + c_fast_y)/dy
+// over all INTERIOR cells and write the single scalar into *host_max_rate; the
+// caller's stable step is then dt = cfl / max_rate. This is the multidimensional
+// unsplit Courant condition (the residual sums both directional flux differences
+// into one dudt per RK stage), which is stricter than a per-direction max signal
+// speed over min(dx,dy). The fast speed sees the TOTAL magnetic field B = b + B0
+// (b0-aware): when b0.active is false this is the zero-background fast path (the
+// stored b IS the total field). Cells with non-positive or non-finite density are
+// SKIPPED (they contribute no rate) so a transiently floored cell cannot poison
+// the reduction. The result is read back to the host pointer before this returns.
+void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+                             Real gamma, Real* host_max_rate, stream_t stream);
 
 // -- Constrained-transport div(B) L-infinity ---------------------------------
 // Reduce the maximum interior |div B| -- the cell-centered divergence of the

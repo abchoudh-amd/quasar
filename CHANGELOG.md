@@ -7,6 +7,15 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
+- MHD: new high-order ideal-MHD vertical slice — MP5/MP7 monotonicity-preserving
+  characteristic reconstruction, an HLLD Riemann solver, finite-difference
+  constrained transport (FD-CT) for `div(B) = 0`, an SSP-RK3 integrator, and a
+  troubled-cell positivity floor, in Cartesian and axisymmetric cylindrical
+  `(r, z)` geometry. Driven from a new `quasar.mhd` CLI
+  (`python -m quasar.mhd.cli run <input.yaml>`) with `_core.mhd` bindings, and
+  shipped with the `brio_wu`, `mhd_blast`, `mhd_rotor`, `orszag_tang`, and
+  `mhd_linear_wave` example decks. Every scheme axis self-registers and is
+  selected by deck string.
 - MHD: static background magnetic-field split `B = B0 + b` — runs can carry a
   fixed, curl-free external field `B0` while the solver evolves only the
   perturbation `b`. Enabled via a `background_field:` deck block (`enabled`,
@@ -80,10 +89,39 @@ interfaces may still change between entries.
   six-field dict every snapshot.
 
 ### Fixed
+- MHD: completed the axisymmetric cylindrical `(r, z)` geometric source. The
+  radial flux is differenced in Cartesian form, so every conserved component
+  needs a `1/r` curvature source; previously only a partial radial-momentum term
+  and a spurious toroidal-field term were applied. Mass, energy, axial- and
+  azimuthal-momentum sources are now supplied (the radial-momentum source gains
+  the missing `-(rho v_r^2 - B_r^2)/r` piece and the toroidal-field source is
+  removed, as the `phi` induction is metric-free). Cylindrical runs with radial
+  flow now conserve mass/momentum/energy.
+- MHD: the HLLD seven-wave algebra is now a single host/device-callable core
+  (`numerics/hlld_core.hpp`) shared by the device hot path and the host registry
+  solver, so the two can no longer drift in their degeneracy guards or
+  intermediate-state formulas (they previously used different denominator floors
+  and fallback branches).
+- MHD: the `mhd_linear_wave` convergence example now emits the seeded `t = 0`
+  profile (`state_<name>_initial`) and the example tests compare the final field
+  against that exact analytic reference instead of a self-referential harmonic
+  fit; the `div(B)` example assertions now read the post-step `divb_linf_final`
+  instead of the `t = 0` seed value.
 - MHD: corrected the MP5/MP7 device interpolation coefficients. They were the
   finite-volume cell-average coefficients, but the scheme reconstructs point
   values at the faces, so the point-value Lagrange coefficients are now used —
   this is what restores 5th-/7th-order convergence on device.
+- MHD: the CFL stable-timestep guard now enforces the additive multidimensional
+  Courant condition `dt * ((|v_x|+c_f,x)/dx + (|v_y|+c_f,y)/dy) <= cfl`. The
+  unsplit residual sums both directional flux differences into one stage update,
+  so the previous per-direction `max(...)/min(dx,dy)` bound accepted up to ~2x the
+  stable step on an isotropic grid (an `auto`-`dt` run with `cfl` near 1 could go
+  unstable).
+- MHD: the axisymmetric geometric source is now applied at the on-axis column
+  `i = 0` (cell-center radius `r = 0.5*dr > 0`); the previous `r <= 0.5*dr` guard
+  wrongly skipped that whole column, dropping a nonzero `1/r` source while the
+  Cartesian flux difference still ran — breaking conservation at the axis for any
+  state with radial flow.
 - PIC: `total_em_energy` and `gauss_residual` diagnostics now use the
   axisymmetric metric for cylindrical `(r, z)` runs — the field energy integrates
   over the ring volume `2 pi r dr dz` (`Grid2D::cell_volume`) instead of a flat
@@ -231,6 +269,11 @@ interfaces may still change between entries.
 - MHD: the per-step CFL stable-timestep scan and the `div(B)` L-infinity
   diagnostic are now device reductions, removing the per-step copy of the whole
   field back to the host that those host-side scans required.
+- MHD: the auto-`dt` CLI run loop no longer computes the CFL stable-step device
+  reduction twice per step — a new `MhdSolver2D::step_unchecked` reuses the limit
+  the loop just computed instead of re-reducing inside `step`. The `div(B)`
+  diagnostic reduction is sampled on the diagnostics cadence (plus the final step)
+  rather than every step.
 - PIC: per-step full-grid scratch allocations hoisted out of the current filter
   and particle compaction; the Biot–Savart double-precision path uploads the host
   SoA directly instead of an element-by-element copy.
@@ -254,6 +297,13 @@ interfaces may still change between entries.
   genuine high-order MP7 can drive cells to the pressure floor. The floor
   re-derives energy and is not yet energy-conserving; a floor-aware
   positivity-preserving limiter is a planned follow-up.
+- MHD: cylindrical `(r, z)` constrained transport uses the Cartesian `div(B)`
+  stencil (`dBx/dx + dBy/dz`), not the cylindrical form
+  `(1/r) d(r B_r)/dr + dB_z/dz`. It holds the Cartesian divergence at round-off
+  (exact for a radius-independent `B_r`, `O(dr/r)` otherwise); a fully
+  area-weighted cylindrical CT that annihilates the true cylindrical `div(B)` is
+  a planned follow-up (it would replace the bit-exact telescoping cancellation
+  the Cartesian curl provides).
 
 ### Upcoming changes
 - A `file_grid` field evaluator name is reserved in the registry but not yet

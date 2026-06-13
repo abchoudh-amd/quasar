@@ -215,6 +215,8 @@ void bind_mhd(py::module_& m) {
   py::class_<quasar::mhd::MhdSolver2D>(mhd, "MhdSolver2D")
       .def(py::init<quasar::mhd::MhdConfig>(), py::arg("config"))
       .def("step", &quasar::mhd::MhdSolver2D::step, py::arg("dt"))
+      .def("step_unchecked", &quasar::mhd::MhdSolver2D::step_unchecked,
+           py::arg("dt"))
       .def("advance", &quasar::mhd::MhdSolver2D::advance,
            py::arg("t_end"), py::arg("dt"))
       .def("grid", &quasar::mhd::MhdSolver2D::grid)

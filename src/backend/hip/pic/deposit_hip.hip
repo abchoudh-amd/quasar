@@ -29,13 +29,6 @@ namespace {
 // guard are shared with the cylindrical deposit and live in deposit_common.hpp.
 using namespace quasar::backend::pic;
 
-// Cartesian-only fused node index (the cylindrical deposit uses the per-axis
-// decomposition directly and does not need this).
-__device__ inline std::size_t deposit_index(const quasar::Grid2D& g, int i, int j,
-                                            bool periodic_x, bool periodic_y) {
-  return g.index(deposit_axis_x(g, i, periodic_x), deposit_axis_y(g, j, periodic_y));
-}
-
 template <int ShapeOrder>
 __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
                                bool periodic_x, bool periodic_y,
@@ -98,8 +91,9 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
   // so precompute the wrap/clamp once per axis (2*kWindow calls, not kWindow^2)
   // and form each node index as colx[a] + rowy[b]. This shrinks the per-thread
   // table from kWindow^2 to 2*kWindow ints and removes the kWindow^2 wrap/clamp
-  // recomputation, while reproducing deposit_index() bit-for-bit on both periodic
-  // and wall axes. storage_size stays well under INT_MAX, so int offsets are safe.
+  // recomputation; colx[a] + rowy[b] equals g.index(deposit_axis_x(g, bx+a, ...),
+  // deposit_axis_y(g, by+b, ...)) on both periodic and wall axes. storage_size
+  // stays well under INT_MAX, so int offsets are safe.
   const int pitch = g.pitch();
   int colx[kWindow];
   int rowy[kWindow];

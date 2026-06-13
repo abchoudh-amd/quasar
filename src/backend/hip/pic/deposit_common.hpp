@@ -4,8 +4,8 @@
 // extracting them here keeps the per-axis node indexing, the local stencil-window
 // sizing, the 1-D shape weight, and the sum-to-1 deposition-window overflow guard
 // in one place. The cylindrical r-weighting / V_cell current normalisation stays
-// in deposit_cyl_hip.hip; the Cartesian deposit_index() (Cartesian-only) stays in
-// deposit_hip.hip.
+// in deposit_cyl_hip.hip; each deposit kernel forms its node index inline from
+// deposit_axis_x/y (colx[a] + rowy[b]).
 //
 // Header-only `__device__ inline` (no ODR/link issue). Included only by the .hip
 // definitions under src/backend/hip/pic/; never include from a non-HIP TU.

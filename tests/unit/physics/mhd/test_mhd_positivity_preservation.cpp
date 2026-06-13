@@ -201,6 +201,70 @@ Real interior_energy_sum(const Grid2D& g, const std::vector<Real>& en) {
 // is approximately conserved (no large per-step injection). The energy-growth
 // bound is the load-bearing assertion the PP limiter must satisfy.
 // ---------------------------------------------------------------------------
+// ENABLED weaker contract: the floor limiter that IS implemented guarantees the
+// stiff state stays finite and STRICTLY POSITIVE (rho, gas pressure) and that
+// div B stays at round-off over a stiff run. This is the robustness property the
+// solver currently promises; the stronger energy-conservation bound is pinned
+// (DISABLED) below for the future per-cell PP scheme. Keeping this enabled means
+// solver-level positivity has live coverage instead of being entirely disabled.
+TEST(MhdPositivityPreservation, StiffStateStaysFiniteAndPositive) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = stiff_config();
+  const Grid2D& g = cfg.grid;
+  const Real gamma = cfg.gamma;
+
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const StiffSeed seed = seed_stiff(solver, g, gamma);
+  ASSERT_GT(seed.rho_min, cfg.rho_floor);
+  ASSERT_GT(seed.p_min, cfg.p_floor);
+
+  // A shorter run than the (aspirational) energy test: enough stiff steps to
+  // fire the floor on interface overshoots, exercising the positivity guarantee.
+  const int n_steps = 60;
+  for (int s = 0; s < n_steps; ++s) {
+    const Real dt = 0.4 * solver.cfl_limit();
+    ASSERT_GT(dt, 0.0) << "step " << s << " produced a non-positive CFL dt";
+    ASSERT_TRUE(std::isfinite(dt)) << "step " << s << " produced a non-finite dt";
+    ASSERT_NO_THROW(solver.step(dt)) << "step " << s << " threw";
+  }
+
+  const std::vector<Real> rho = solver.state_component_to_host("rho");
+  const std::vector<Real> mx = solver.state_component_to_host("mx");
+  const std::vector<Real> my = solver.state_component_to_host("my");
+  const std::vector<Real> mz = solver.state_component_to_host("mz");
+  const std::vector<Real> en = solver.state_component_to_host("energy");
+  const std::vector<Real> bx = solver.state_component_to_host("bx");
+  const std::vector<Real> by = solver.state_component_to_host("by");
+  const std::vector<Real> bz = solver.state_component_to_host("bz");
+
+  EXPECT_TRUE(all_finite(rho) && all_finite(mx) && all_finite(my) &&
+              all_finite(mz) && all_finite(en) && all_finite(bx) &&
+              all_finite(by) && all_finite(bz))
+      << "stiff run produced a non-finite component";
+
+  Real min_rho = std::numeric_limits<Real>::infinity();
+  Real min_p = std::numeric_limits<Real>::infinity();
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const std::size_t k = g.index(i, j);
+      quasar::numerics::MhdState u;
+      u.rho = rho[k]; u.mx = mx[k]; u.my = my[k]; u.mz = mz[k];
+      u.energy = en[k]; u.bx = bx[k]; u.by = by[k]; u.bz = bz[k];
+      const Real p = quasar::numerics::pressure(u, gamma);
+      if (rho[k] < min_rho) min_rho = rho[k];
+      if (p < min_p) min_p = p;
+    }
+  }
+  EXPECT_GT(min_rho, 0.0) << "an interior cell lost positivity of density";
+  EXPECT_GT(min_p, 0.0) << "an interior cell lost positivity of gas pressure";
+  EXPECT_GE(min_rho, cfg.rho_floor * (1.0 - 1e-12))
+      << "density fell below the enforced floor";
+
+  const Real div1 = solver.divergence_b_max();
+  EXPECT_LT(div1, 1e-9) << "FD-CT must hold div B at round-off through the run";
+}
+
 // DISABLED pending a follow-up: this pins the energy-conservation behavior of a
 // floor-aware positivity-preserving (PP) limiter that is NOT yet implemented.
 // Three interface-level limiter approaches were prototyped during the device

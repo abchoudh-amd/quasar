@@ -2,7 +2,7 @@ Quasar documentation
 ====================
 
 Quasar is a HIP-accelerated numerical simulation framework. It currently
-ships two physics vertical slices:
+ships three physics vertical slices:
 
 * **magnetostatics** - computes magnetic flux density and its analytic
   Jacobian via the Biot-Savart law on arbitrary thin-wire current-carrying
@@ -11,6 +11,10 @@ ships two physics vertical slices:
 * **electromagnetic PIC** - a 2D3V particle-in-cell module (Yee FDTD fields,
   charge-conserving current deposition, Boris push) driven from the
   ``quasar.pic`` front-end.
+* **ideal MHD** - a high-order conservative finite-difference + constrained-
+  transport module (MP5/MP7 reconstruction, HLLD Riemann solver, SSP-RK3,
+  Cartesian and axisymmetric cylindrical ``(r, z)``) driven from the
+  ``quasar.mhd`` front-end.
 
 .. toctree::
    :maxdepth: 2
@@ -29,6 +33,7 @@ ships two physics vertical slices:
    user-guide/coil_design
    user-guide/pic_simulation
    user-guide/pic_cylindrical
+   user-guide/mhd_simulation
    user-guide/mhd_background_field
 
 .. toctree::
@@ -43,6 +48,7 @@ ships two physics vertical slices:
    dev-guide/adding_a_deposit_scheme
    dev-guide/adding_a_filter
    dev-guide/adding_a_background_field
+   dev-guide/adding_an_mhd_scheme
 
 Indices and tables
 ------------------

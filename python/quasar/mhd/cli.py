@@ -20,15 +20,8 @@ from typing import Sequence
 import numpy as np
 
 from .. import _core
-from .._paths import confine_output_path
+from .._paths import confine_output_path, positive_int as _positive_int
 from . import io as mhd_io
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return parsed
 
 
 def _make_config(deck: mhd_io.MhdDeck):
@@ -186,10 +179,21 @@ def _snapshot_fields(solver, deck: mhd_io.MhdDeck) -> dict:
     # Interior (ny, nx) cell-centered fields, matching the final state_* layout
     # written by _flatten_for_npz (the ghost halo is stripped here too).
     nx, ny, nghost = deck.domain.nx, deck.domain.ny, solver.grid().nghost
-    return {name: _interior_slice(
-                np.asarray(solver.state_component_to_host(name)).reshape(
-                    ny + 2 * nghost, nx + 2 * nghost), nx, ny, nghost)
+    return {name: _interior_slice(_component_2d(solver, deck, name), nx, ny, nghost)
             for name in deck.diagnostics.fields}
+
+
+def _initial_state_2d(solver, deck: mhd_io.MhdDeck) -> dict:
+    """Interior (ny, nx) cell-centered snapshot of every conserved component at
+    the current time, keyed ``state_<name>_initial``. Captured at t=0 so a
+    smooth-wave example can compare the final field against the exact (== seeded)
+    analytic reference instead of a self-referential harmonic fit."""
+    nx, ny, nghost = deck.domain.nx, deck.domain.ny, solver.grid().nghost
+    out: dict[str, np.ndarray] = {}
+    for name in mhd_io.STATE_COMPONENTS:
+        padded = _component_2d(solver, deck, name)
+        out[f"state_{name}_initial"] = _interior_slice(padded, nx, ny, nghost)
+    return out
 
 
 def _flatten_for_npz(solver, deck: mhd_io.MhdDeck, final_step: int,
@@ -212,9 +216,7 @@ def _flatten_for_npz(solver, deck: mhd_io.MhdDeck, final_step: int,
     # interior only, so strip the ghost halo here rather than leak the padding.
     nx, ny = deck.domain.nx, deck.domain.ny
     for name in mhd_io.STATE_COMPONENTS:
-        padded = np.asarray(
-            solver.state_component_to_host(name)).reshape(ny + 2 * nghost,
-                                                          nx + 2 * nghost)
+        padded = _component_2d(solver, deck, name)
         flat[f"state_{name}"] = _interior_slice(padded, nx, ny, nghost)
     # div B diagnostic: per-snapshot series plus the final scalar.
     flat["divb_linf"] = np.asarray(divb_series, dtype=np.float64)
@@ -245,24 +247,42 @@ def _run_loop(solver, deck: mhd_io.MhdDeck, dt: float, dt_is_auto: bool, out_pat
     if deck.initial.type == "orszag_tang":
         extra_scalars.update(_orszag_tang_invariants(solver, deck))
 
+    # Seeded (t=0) conserved state. For an exactly-periodic smooth wave the
+    # analytic solution at an integer-wavelength output time equals this seed, so
+    # convergence tests compare the final field against these state_*_initial keys.
+    initial_state = _initial_state_2d(solver, deck)
+
     log_every = max(0, int(args.log_every))
 
     # Record the t=0 div B as the first series sample so the diagnostic captures
     # the seeded (machine-epsilon) value too.
     divb_series.append(float(solver.divergence_b_max()))
 
+    cadence = deck.diagnostics.cadence
     for step in range(deck.time.steps):
+        step_done = step + 1
+        is_last = step_done == deck.time.steps
         # For "auto" dt the stable step tightens as the flow develops, so refresh
         # it from the live state before each step; an explicit deck dt is held
-        # fixed (the solver rejects it if it later exceeds the limit).
+        # fixed (the solver rejects it if it later exceeds the limit). The auto
+        # path uses step_unchecked: cfl_limit() was just computed, so step()'s
+        # internal CFL re-reduction would be redundant.
         if dt_is_auto:
             dt = solver.cfl_limit()
-        solver.step(dt)
+            solver.step_unchecked(dt)
+        else:
+            solver.step(dt)
         sim_time += dt
-        step_done = step + 1
-        divb_now = float(solver.divergence_b_max())
-        divb_series.append(divb_now)
-        if deck.diagnostics.cadence > 0 and step_done % deck.diagnostics.cadence == 0:
+        # divergence_b_max() runs a ghost refill + a syncing device reduction, so
+        # sample it only on cadence steps, the final step (for divb_linf_final),
+        # and when a progress log needs it -- not every step.
+        on_cadence = cadence > 0 and step_done % cadence == 0
+        need_divb = on_cadence or is_last or (
+            log_every > 0 and step_done % log_every == 0)
+        divb_now = float(solver.divergence_b_max()) if need_divb else None
+        if divb_now is not None:
+            divb_series.append(divb_now)
+        if on_cadence:
             snapshots.append({
                 "step": step_done,
                 "time_s": sim_time,
@@ -278,9 +298,11 @@ def _run_loop(solver, deck: mhd_io.MhdDeck, dt: float, dt_is_auto: bool, out_pat
                   f"eta={remaining:.0f}s  |divB|inf={divb_now:.3e}",
                   flush=True)
 
-    np.savez(out_path, **_flatten_for_npz(
+    flat = _flatten_for_npz(
         solver, deck, deck.time.steps, sim_time, divb_series, snapshots,
-        extra_scalars))
+        extra_scalars)
+    flat.update(initial_state)
+    np.savez(out_path, **flat)
 
 
 def _build_parser() -> argparse.ArgumentParser:

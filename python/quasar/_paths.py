@@ -1,8 +1,17 @@
-"""Shared filesystem helpers for the Quasar CLIs."""
+"""Shared filesystem and argument helpers for the Quasar CLIs."""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+
+
+def positive_int(value: str) -> int:
+    """argparse ``type=`` for a strictly-positive integer (e.g. --steps-override)."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def confine_output_path(base: Path | str, rel: str, *, label: str = "output.path") -> Path:

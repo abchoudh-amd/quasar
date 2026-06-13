@@ -41,6 +41,12 @@ import yaml
 
 from .. import _core
 from .._deck import require as _require
+from .._deck import (
+    as_finite as _as_finite,
+    require_finite as _require_finite,
+    require_positive_finite as _require_positive_finite,
+    parse_side_map as _parse_side_map,
+)
 from . import numerics as mhd_num
 
 
@@ -56,25 +62,6 @@ INITIAL_TYPES = ("brio_wu", "alfven_wave", "orszag_tang", "blast", "rotor")
 
 # Conserved-state components written to / read from the solver and the .npz.
 STATE_COMPONENTS = ("rho", "mx", "my", "mz", "energy", "bx", "by", "bz")
-
-
-def _as_finite(value: float, context: str) -> float:
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{context} must be a finite number") from None
-    if not math.isfinite(v):
-        raise ValueError(f"{context} must be finite")
-    return v
-
-
-def _require_finite(value: float, context: str) -> None:
-    _as_finite(value, context)
-
-
-def _require_positive_finite(value: float, context: str) -> None:
-    if _as_finite(value, context) <= 0:
-        raise ValueError(f"{context} must be positive")
 
 
 @dataclass
@@ -389,26 +376,6 @@ def _parse_diagnostics(d: dict | None) -> Diagnostics:
     )
 
 
-# Side ordering and the scalar | 4-list | side-keyed-map flexibility are shared
-# with the PIC deck (quasar.pic.io._parse_side_map / _SIDE_KEYS); duplicated here
-# (small, no cross-package import) so the MHD loader stays self-contained.
-_SIDE_KEYS = ("x_lo", "x_hi", "y_lo", "y_hi")
-
-
-def _parse_side_map(spec, default: str, what: str) -> tuple[str, str, str, str]:
-    # Accepts a scalar (all sides), a 4-element list ([x_lo, x_hi, y_lo, y_hi]),
-    # or a dict keyed by side name.
-    if spec is None:
-        return (default, default, default, default)
-    if isinstance(spec, str):
-        return (spec, spec, spec, spec)
-    if isinstance(spec, (list, tuple)) and len(spec) == 4:
-        return (str(spec[0]), str(spec[1]), str(spec[2]), str(spec[3]))
-    if isinstance(spec, dict):
-        return tuple(str(spec.get(k, default)) for k in _SIDE_KEYS)  # type: ignore[return-value]
-    raise ValueError(f"{what} must be a string, 4-element list, or side-keyed map")
-
-
 def _parse_boundary(d: dict | None) -> BoundaryConfig:
     if d is None:
         return BoundaryConfig()
@@ -689,7 +656,7 @@ def _background_from_file(file_rel: str, source_dir, shape, storage):
     if not path.is_file():
         raise ValueError(f"background_field.file {file_rel!r} not found at {path}")
     try:
-        loaded = np.load(path)
+        loaded = np.load(path, allow_pickle=False)
     except Exception as exc:  # malformed / non-npz file
         raise ValueError(
             f"background_field.file {file_rel!r} could not be read as an npz: "

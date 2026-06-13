@@ -23,7 +23,8 @@ namespace quasar::backend::pic {
 // non-periodic (wall) axis clamps the shape node into the ghost layer via
 // Grid2D::index, reading the field values the field-boundary layer maintains
 // there (mirror/one-sided closure for the self field, edge-replicated external
-// field) instead of wrapping to the far edge. Mirrors deposit_index().
+// field) instead of wrapping to the far edge. Mirrors the deposit node indexing
+// (deposit_axis_x/y in deposit_common.hpp).
 __device__ inline int clamp_axis(int i, int lo, int hi) {
   return i < lo ? lo : (i > hi ? hi : i);
 }

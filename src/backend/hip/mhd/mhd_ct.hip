@@ -6,6 +6,16 @@
 //   divB(i,j) = (bx_face(i+1,j)-bx_face(i,j))/dx + (by_face(i,j+1)-by_face(i,j))/dy
 // The face-B update curl below is chosen so this discrete div(B) telescopes to
 // identically zero for any corner-Ez field (Evans & Hawley 1988).
+//
+// CYLINDRICAL (r,z) LIMITATION: this CT stencil is Cartesian -- it annihilates
+// the planar divergence dBx/dx + dBy/dy, NOT the cylindrical solenoidal form
+// (1/r) d(r B_r)/dr + dB_z/dz. In cylindrical mode the scheme therefore keeps
+// the Cartesian div(B) at round-off (the diagnostic launch_mhd_ct_divb_linf
+// measures the same Cartesian form, so the two stay consistent), which is exact
+// for a radius-independent B_r and an O(dr/r) approximation otherwise. A fully
+// area-weighted (r-face) CT that annihilates the true cylindrical div(B) is
+// deliberately deferred: it would break the bit-exact telescoping cancellation
+// the Cartesian curl provides. See CHANGELOG "Known issues".
 
 #include "quasar/core/grid.hpp"
 #include "quasar/numerics/mhd_state.hpp"

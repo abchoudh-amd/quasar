@@ -90,11 +90,11 @@ Real host_cfl_limit_uniform(const Grid2D& g, Real cfl, Real gamma, Real rho,
 
   const Real cfx = quasar::numerics::fast_magnetosonic_speed(u, /*dir=*/0, gamma);
   const Real cfy = quasar::numerics::fast_magnetosonic_speed(u, /*dir=*/1, gamma);
-  const Real sx = std::abs(vx) + cfx;
-  const Real sy = std::abs(vy) + cfy;
-  const Real smax = std::max(sx, sy);
-  const Real hmin = std::min(g.dx(), g.dy());
-  return cfl * hmin / smax;
+  // Additive multidimensional Courant rate (matches the unsplit residual): the
+  // stable step is cfl / max_cells((|vx|+cfx)/dx + (|vy|+cfy)/dy). For a uniform
+  // state every cell has the same rate, so the reduction is just this single sum.
+  const Real rate = (std::abs(vx) + cfx) / g.dx() + (std::abs(vy) + cfy) / g.dy();
+  return cfl / rate;
 }
 
 // Corner-staggered periodic A_z giving a discretely divergence-free face B.
@@ -167,7 +167,7 @@ TEST(MhdDeviceCompute, CflLimitMatchesHostReductionBothDirections) {
 
   ASSERT_TRUE(std::isfinite(got));
   EXPECT_NEAR(got, ref, 1e-10 * ref)
-      << "cfl_limit() must equal cfl*min(dx,dy)/max(|v|+c_fast) over both dirs";
+      << "cfl_limit() must equal cfl / ((|vx|+c_fast,x)/dx + (|vy|+c_fast,y)/dy)";
 }
 
 // ---------------------------------------------------------------------------

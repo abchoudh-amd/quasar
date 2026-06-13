@@ -19,7 +19,7 @@ from typing import Sequence
 import numpy as np
 
 from .. import _core
-from .._paths import confine_output_path
+from .._paths import confine_output_path, positive_int as _positive_int
 from ..coil.io import build_conductor_system
 from . import initial_conditions as ic
 from . import io as pic_io
@@ -27,13 +27,6 @@ from ._units import QE as EV_TO_J  # elementary charge in C == eV->J factor
 from ._units import Units
 from .numerics import (besselj0, cfl_dt, cfl_limit, cyl_cfl_dt, cyl_cfl_limit,
                        j0_zero)
-
-
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return parsed
 
 
 def _internal_spacing(domain, units: Units) -> tuple[float, float]:

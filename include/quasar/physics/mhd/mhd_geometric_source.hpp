@@ -18,31 +18,42 @@
 // divergence via launch_mhd_flux_difference, which is a *Cartesian-style*
 // flux difference  -(F_{i+1/2} - F_{i-1/2})/dr  in BOTH directions (it does not
 // apply the cylindrical conservative operator (1/r) d(r F_r)/dr). With that
-// planar radial difference, the leftover geometric source that the cylindrical
-// divergence would otherwise produce is the standard axisymmetric ideal-MHD
-// curvature source. This source supplies that FULL 1/r correction so a balanced
-// (r,z) equilibrium is stationary.
+// planar radial difference, EVERY conserved component whose radial flux is
+// nonzero needs a leftover geometric source equal to (true cylindrical operator
+// minus the applied Cartesian dF/dr). This source supplies that FULL 1/r
+// correction for all fluid components so axisymmetric mass/momentum/energy are
+// conserved and a balanced (r,z) equilibrium is stationary.
 //
 // -- Exact formulas implemented (authoritative device kernel,
 //    src/backend/hip/mhd/mhd_update.hip :: geometric_source_kernel) -----------
-// With v_r = m_r/rho, v_phi = m_phi/rho, B_r, B_phi read from the slots above:
+// With v = m/rho per slot, p* = p_gas + B^2/2, v.B = v_r B_r + v_z B_z +
+// v_phi B_phi, and the leftover = (cylindrical operator) - (Cartesian dF/dr):
 //
-//   S_{m_r}   = (rho * v_phi^2 - B_phi^2) / r      -> dudt.mx      += S_{m_r}
-//   S_{B_phi} = -(v_r * B_phi - v_phi * B_r) / r   -> dudt.bz_cell += S_{B_phi}
+//   S_{rho}   = -(rho v_r) / r                              -> dudt.rho
+//   S_{m_r}   = (rho v_phi^2 - B_phi^2 - rho v_r^2 + B_r^2)/r -> dudt.mx
+//   S_{m_z}   = -(rho v_r v_z - B_r B_z) / r                -> dudt.my  (axial)
+//   S_{m_phi} = -2 (rho v_r v_phi - B_r B_phi) / r          -> dudt.mz
+//   S_{energy}= -((E + p*) v_r - B_r (v.B)) / r             -> dudt.energy
+//   S_{B_phi} = S_{B_r} = S_{B_z} = 0
 //
-//   S_{m_z}, S_{m_phi}, S_{rho}, S_{energy}, S_{B_r}, S_{B_z} = 0
+// S_{m_r} groups the centrifugal (rho v_phi^2/r) and hoop-tension (-B_phi^2/r)
+// terms with the radial self-flux curvature -(rho v_r^2 - B_r^2)/r (p* cancels
+// between the cylindrical and Cartesian operators). S_{m_phi} is the angular-
+// momentum 2 G/r curvature (the phi flux carries an r^2 metric weight). The
+// toroidal field B_phi has NO geometric source: (curl E)_phi = dE_r/dz -
+// dE_z/dr is metric-free, so the Cartesian flux difference is already exact;
+// the poloidal faces B_r/B_z are advanced by the CT EMF curl, not by this source.
 //
-// S_{m_r} is the centrifugal term (rho v_phi^2 / r) plus the toroidal magnetic
-// hoop-tension term (-B_phi^2 / r). S_{B_phi} is the toroidal-induction
-// curvature term arising from the cylindrical curl of the kinematic EMF. The
-// remaining components carry no 1/r geometric source under this splitting.
-//
-// -- On-axis (r -> 0) guard ---------------------------------------------------
-// The radius is grid.r_at_cell_center(i). Cells with r <= 0.5*dr (i.e. the
-// on-axis column when the domain starts at r=0) are skipped: the source is
-// regular there and the 1/r factor would otherwise overflow. This matches the
-// PIC cylindrical on-axis convention (src/physics/pic), which zeroes the
-// inside-axis radial flux at the r=0 face.
+// -- On-axis (r -> 0) handling ------------------------------------------------
+// The radius is grid.r_at_cell_center(i) = (i+0.5)*dr for a domain starting on
+// the axis (origin_x = 0), so EVERY cell center has r > 0 -- the innermost cell
+// i=0 sits at r = 0.5*dr and its 1/r factor (= 2/dr) is finite. The geometric
+// source is therefore applied at the i=0 column like any other; for a state with
+// nonzero radial flow at the axis the source is genuinely nonzero there, and
+// skipping it (as an over-eager r <= 0.5*dr guard would) drops an O(1) term while
+// the Cartesian flux difference still runs, breaking conservation at the axis
+// row. Only a non-positive / non-finite cell-center radius is skipped, which a
+// valid grid never produces.
 //
 // add() is a thin host wrapper that delegates to launch_mhd_geometric_source
 // (kernels.hpp); the device kernel is the single authoritative implementation

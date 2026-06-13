@@ -104,6 +104,67 @@ Real max_abs_diff(const std::vector<Real>& a, const std::vector<Real>& b,
   return m;
 }
 
+// Rigidly-rotating, centrifugally-balanced column (pure hydro, uniform rho):
+//   v_phi(r) = Omega * r,  v_r = v_z = 0,  B = 0,
+//   dp/dr = rho * v_phi^2 / r = rho * Omega^2 * r
+//   => p(r) = p0 + 0.5 * rho * Omega^2 * r^2.
+// This is an exact equilibrium of the axisymmetric Euler equations: the radial
+// pressure gradient is balanced by the centrifugal geometric source
+// rho*v_phi^2/r. Unlike the uniform seed, the geometric source is NON-ZERO here
+// (it carries the rho*v_phi^2/r term and is balanced against a real dp/dr), so
+// this seed exercises the source magnitude/sign rather than its vanishing.
+void seed_rotating_equilibrium(quasar::mhd::MhdSolver2D& solver,
+                               const quasar::Grid2D& g, Real omega) {
+  const std::size_t n = g.storage_size();
+  std::vector<Real> rho(n, kRho0), mx(n, 0.0), my(n, 0.0), mz(n, 0.0), en(n, 0.0);
+  std::vector<Real> bx(n, 0.0), by(n, 0.0), bz(n, 0.0);  // B = 0 (pure hydro)
+
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const std::size_t k = g.index(i, j);
+      const Real r = g.r_at_cell_center(i);
+      const Real vphi = omega * r;             // rigid rotation
+      const Real p = kP0 + 0.5 * kRho0 * omega * omega * r * r;
+      mz[k] = kRho0 * vphi;                     // m_phi (azimuthal momentum slot)
+      const Real kinetic = 0.5 * kRho0 * vphi * vphi;
+      en[k] = p / (kGamma - 1.0) + kinetic;     // B=0 => no magnetic energy
+    }
+  }
+  solver.seed_state("rho", rho);
+  solver.seed_state("mx", mx);
+  solver.seed_state("my", my);
+  solver.seed_state("mz", mz);
+  solver.seed_state("energy", en);
+  solver.seed_state("bx", bx);
+  solver.seed_state("by", by);
+  solver.seed_state("bz", bz);
+}
+
+// Uniform radial outflow: rho = rho0, v_r = vr0 (> 0), v_z = v_phi = 0, B = 0,
+// p = p0. The radial mass flux F_rho = rho*v_r is spatially UNIFORM, so the
+// Cartesian flux difference -dF/dr is zero in the interior; the ONLY term that
+// moves a cell is the axisymmetric geometric source S_rho = -(rho v_r)/r. This
+// isolates the geometric source at the axis column i=0 (r = 0.5*dr), where it is
+// largest (~ -2 rho v_r / dr). An over-eager on-axis guard that skips i=0 would
+// leave that column frozen; a correct source evolves it.
+void seed_uniform_radial_outflow(quasar::mhd::MhdSolver2D& solver,
+                                 const quasar::Grid2D& g, Real vr0) {
+  const std::size_t n = g.storage_size();
+  std::vector<Real> rho(n, kRho0), mx(n, kRho0 * vr0), my(n, 0.0), mz(n, 0.0), en(n, 0.0);
+  std::vector<Real> bx(n, 0.0), by(n, 0.0), bz(n, 0.0);  // B = 0 (pure hydro)
+  const Real kinetic = 0.5 * kRho0 * vr0 * vr0;
+  const Real e_cell = kP0 / (kGamma - 1.0) + kinetic;  // B=0 => no magnetic energy
+  for (std::size_t k = 0; k < n; ++k) en[k] = e_cell;
+  solver.seed_state("rho", rho);
+  solver.seed_state("mx", mx);
+  solver.seed_state("my", my);
+  solver.seed_state("mz", mz);
+  solver.seed_state("energy", en);
+  solver.seed_state("bx", bx);
+  solver.seed_state("by", by);
+  solver.seed_state("bz", bz);
+}
+
 }  // namespace
 
 // Constructing a cylindrical solver with the axis included (origin_x == 0) must
@@ -149,6 +210,89 @@ TEST(MhdCylindricalSource, BalancedEquilibriumStaysStationary) {
   // correctly-cancelling geometric source leaves it essentially unchanged.
   EXPECT_LT(max_abs_diff(rho1, rho0, g), 1e-8);
   EXPECT_LT(max_abs_diff(en1, en0, g), 1e-8);
+}
+
+// A rigidly-rotating, centrifugally-balanced column must hold near-stationary in
+// the deep interior to truncation order. The radial pressure gradient is exactly
+// balanced by the rho*v_phi^2/r geometric source, so a CORRECT source keeps the
+// central momentum from drifting. With the centrifugal term missing (or wrong
+// sign/coefficient) the unbalanced dp/dr would drive an O(1) radial momentum in
+// a single step; we assert the interior radial momentum stays tiny relative to
+// that pressure-gradient scale. Restricting to the interior columns avoids the
+// outflow-boundary mismatch (the seed's r-dependent profile is not zero-gradient
+// at the wall, so the boundary ring is expected to move).
+TEST(MhdCylindricalSource, RotatingEquilibriumHoldsInInterior) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const auto cfg = make_cyl_config();
+  const auto& g = cfg.grid;
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const Real omega = 0.3;
+  seed_rotating_equilibrium(solver, g, omega);
+
+  const std::vector<Real> mr0 = solver.state_component_to_host("mx");
+
+  const Real dt = 0.2 * solver.cfl_limit();
+  solver.step(dt);
+
+  const std::vector<Real> mr1 = solver.state_component_to_host("mx");
+
+  // Scale of the radial momentum an UNBALANCED dp/dr would inject in one step:
+  // |dp/dr| * dt ~ rho*omega^2*r * dt at mid-radius. The balanced source must
+  // keep the actual interior drift well below this.
+  const Real r_mid = g.r_at_cell_center(g.nx / 2);
+  const Real unbalanced_scale = kRho0 * omega * omega * r_mid * dt;
+  EXPECT_GT(unbalanced_scale, 0.0);
+
+  // Deep-interior window (exclude the outer/inner few columns near r=0 and the
+  // wall, where the boundary closure and on-axis guard legitimately move it).
+  Real max_interior_drift = 0.0;
+  const int lo = g.nx / 4, hi = 3 * g.nx / 4;
+  for (int j = g.ny / 4; j < 3 * g.ny / 4; ++j) {
+    for (int i = lo; i < hi; ++i) {
+      max_interior_drift = std::max(
+          max_interior_drift, std::abs(mr1[g.index(i, j)] - mr0[g.index(i, j)]));
+    }
+  }
+  // A correct centrifugal source keeps the drift to a small fraction of the
+  // unbalanced scale (truncation error of the high-order scheme), not O(1) of it.
+  EXPECT_LT(max_interior_drift, 0.1 * unbalanced_scale);
+}
+
+// The on-axis column (i=0, r = 0.5*dr) must receive the geometric source. With a
+// uniform radial mass flux the Cartesian flux difference is zero in the interior,
+// so the density change at i=0 is driven ENTIRELY by S_rho = -(rho v_r)/r. The
+// expected one-step change is dt * (-rho*v_r / r_axis) with r_axis = 0.5*dr; a
+// guard that wrongly skipped i=0 would leave the axis column exactly unchanged.
+// We assert (a) the axis column moves by close to the analytic source magnitude,
+// and (b) it is not frozen relative to a neighbor interior column.
+TEST(MhdCylindricalSource, AxisColumnReceivesGeometricSource) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const auto cfg = make_cyl_config();
+  const auto& g = cfg.grid;
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const Real vr0 = 0.1;
+  seed_uniform_radial_outflow(solver, g, vr0);
+
+  const std::vector<Real> rho0 = solver.state_component_to_host("rho");
+  const Real dt = 0.2 * solver.cfl_limit();
+  solver.step(dt);
+  const std::vector<Real> rho1 = solver.state_component_to_host("rho");
+
+  // Sample a mid-z row to avoid any z-boundary influence; column i=0 is the axis.
+  const int j = g.ny / 2;
+  const Real r_axis = g.r_at_cell_center(0);  // 0.5 * dr
+  const Real expected_axis = -kRho0 * vr0 / r_axis * dt;  // S_rho * dt
+  const Real actual_axis = rho1[g.index(0, j)] - rho0[g.index(0, j)];
+
+  // The axis cell must NOT be frozen: a skipped source would give exactly 0.
+  // (This is the assertion that fails if the on-axis guard wrongly skips i=0.)
+  EXPECT_GT(std::abs(actual_axis), 0.2 * std::abs(expected_axis));
+  // Mass drains radially outward, so density drops at the axis: sign must match.
+  EXPECT_LT(actual_axis, 0.0);
+  // Order-of-magnitude band around the analytic source: the one-sided outflow
+  // stencil makes the flux difference at i=0 not exactly zero, so this is a
+  // factor-of-a-few check, not an exact equality.
+  EXPECT_LT(std::abs(actual_axis), 3.0 * std::abs(expected_axis));
 }
 
 // CT divergence stays at machine epsilon in the cylindrical discretization for

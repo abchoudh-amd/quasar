@@ -5,6 +5,7 @@
 
 #include "quasar/physics/pic/kernels.hpp"
 
+#include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -423,7 +424,12 @@ void EmPic2D3V::advance(Real t_end, Real dt) {
     throw std::invalid_argument{"EmPic2D3V::advance: dt must be positive"};
   }
   check_cfl(dt);
-  for (Real t = 0; t < t_end; t += dt) {
+  // Drive the loop by an integer step count so repeated += dt cannot drift the
+  // termination by up to a full step from floating-point accumulation.
+  const long n_steps = (t_end > Real{0})
+                           ? static_cast<long>(std::ceil(t_end / dt))
+                           : 0L;
+  for (long s = 0; s < n_steps; ++s) {
     step(dt);
   }
   finalize();

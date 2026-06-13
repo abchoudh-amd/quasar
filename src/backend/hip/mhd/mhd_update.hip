@@ -122,45 +122,77 @@ __global__ void apply_floors_kernel(
   }
 }
 
-// Axisymmetric (r,z) geometric source for the m=0 cylindrical update. With the
-// x-axis as the radius r, the standard divergence-form axisymmetric source adds
-// to the radial-momentum equation the pressure-like term (p_total - B_r^2 +
-// rho*v_phi^2 - B_phi^2 stays grouped; here v_phi = vz slot, B_phi = bz slot):
-//   d(rho v_r)/dt += (p_gas + rho*v_phi^2 - B_phi^2) / r
-// and the azimuthal-momentum / toroidal-field equations carry the curvature
-// (-rho v_r v_phi / r + B_r B_phi / r) and (-(v_r B_phi - v_phi B_r)/r) terms.
-// An on-axis guard skips cells with r below half a cell width.
+// Axisymmetric (r,z) geometric source for the m=0 cylindrical update.
+//
+// -- Why every conserved component gets a 1/r source --------------------------
+// The solver assembles the divergence with a purely CARTESIAN flux difference
+// dF/dr in the radial direction (flux_difference_kernel, no (1/r) d(rF)/dr area
+// weighting). The true axisymmetric radial operators carry curvature factors:
+//   continuity / energy / z-momentum :  (1/r) d(r F)/dr  = dF/dr + F/r
+//   r-momentum                       :  (1/r) d(r F_rr)/dr + RHS source
+//   phi-momentum (angular momentum)  :  (1/r^2) d(r^2 G)/dr = dG/dr + 2 G/r
+// Subtracting the Cartesian dF/dr the code actually applies, the leftover that
+// this source must supply (slot map: mx=m_r, my=m_z, mz=m_phi; bx=B_r, by=B_z,
+// bz=B_phi; p* = p_gas + B^2/2; v.B = v_r B_r + v_z B_z + v_phi B_phi) is:
+//   S_rho   = -(rho v_r)/r
+//   S_{m_r} = (rho v_phi^2 - B_phi^2 - rho v_r^2 + B_r^2)/r        (p* cancels)
+//   S_{m_z} = -(rho v_r v_z - B_r B_z)/r
+//   S_{m_phi} = -2 (rho v_r v_phi - B_r B_phi)/r
+//   S_E     = -((E + p*) v_r - B_r (v.B))/r
+//   S_{B_phi} = 0   (toroidal induction (curl E)_phi = dE_r/dz - dE_z/dr is
+//                    metric-free, so the Cartesian dF/dr is already exact)
+// B_r and B_z are face-staggered and advanced by the CT EMF curl, not by this
+// source, so they carry no geometric term here.
+//
+// On-axis handling: the radius is read at the CELL CENTER, r = (i+0.5)*dr (for a
+// domain that starts on the axis, origin_x = 0), so the innermost cell i=0 has
+// r = 0.5*dr > 0 and the 1/r factor is finite (= 2/dr) -- the geometric source is
+// NOT singular at any cell center and the i=0 column must receive it like every
+// other column. Only a non-positive or non-finite radius (which cannot occur for
+// a cell center on a valid grid, but is guarded defensively) is skipped to avoid
+// a division by zero.
 __global__ void geometric_source_kernel(
-    quasar::Grid2D g, Real /*gamma*/,
+    quasar::Grid2D g, Real gamma,
     const double* __restrict__ rho, const double* __restrict__ mx,
     const double* __restrict__ my, const double* __restrict__ mz,
     const double* __restrict__ energy, const double* __restrict__ bx,
     const double* __restrict__ by, const double* __restrict__ bz,
-    double* __restrict__ dmr, double* __restrict__ dmz,
-    double* __restrict__ dbphi) {
+    double* __restrict__ drho, double* __restrict__ dmr,
+    double* __restrict__ dmz_axial, double* __restrict__ dmphi,
+    double* __restrict__ denergy) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
   if (i >= g.nx || j >= g.ny) return;
   const Real r = g.r_at_cell_center(i);
-  const Real r_floor = Real{0.5} * g.dx();
-  if (r <= r_floor) return;  // on-axis guard: source is regular / vanishes
+  if (!(r > Real{0})) return;  // defensive: skip only a non-positive cell-center radius
   const std::size_t k = g.index(i, j);
   const Real inv_rho = Real{1} / rho[k];
-  // Slot mapping: mx = radial momentum (m_r), my = axial (m_z), mz = azimuthal
-  // (m_phi); bx = B_r, by = B_z, bz = B_phi.
+  // Slot mapping: mx = m_r, my = m_z (axial), mz = m_phi (azimuthal);
+  // bx = B_r, by = B_z, bz = B_phi.
   const Real vr   = mx[k] * inv_rho;
+  const Real vz   = my[k] * inv_rho;
   const Real vphi = mz[k] * inv_rho;
   const Real br   = bx[k];
+  const Real bz_axial = by[k];
   const Real bphi = bz[k];
   const Real inv_r = Real{1} / r;
-  // Radial-momentum geometric source (axisymmetric, divergence-form residual):
-  // the centrifugal term plus the toroidal magnetic-tension term that the planar
-  // flux divergence omits.  S_{m_r} = (rho*v_phi^2 - B_phi^2)/r.
-  dmr[k]   += (rho[k] * vphi * vphi - bphi * bphi) * inv_r;
-  // Axial momentum carries no geometric source in axisymmetry.
-  (void)dmz; (void)my; (void)by; (void)energy;
-  // Toroidal-field induction curvature term: -(v_r B_phi - v_phi B_r)/r.
-  dbphi[k] += -(vr * bphi - vphi * br) * inv_r;
+
+  MhdState s;
+  s.rho = rho[k]; s.mx = mx[k]; s.my = my[k]; s.mz = mz[k];
+  s.energy = energy[k]; s.bx = br; s.by = bz_axial; s.bz = bphi;
+  const Real p_gas = pressure(s, MhdBackground{}, gamma);
+  const Real bsq = br * br + bz_axial * bz_axial + bphi * bphi;
+  const Real p_star = p_gas + Real{0.5} * bsq;
+  const Real v_dot_b = vr * br + vz * bz_axial + vphi * bphi;
+
+  drho[k]      += -(rho[k] * vr) * inv_r;
+  dmr[k]       += (rho[k] * vphi * vphi - bphi * bphi
+                   - rho[k] * vr * vr + br * br) * inv_r;
+  dmz_axial[k] += -(rho[k] * vr * vz - br * bz_axial) * inv_r;
+  dmphi[k]     += -Real{2} * (rho[k] * vr * vphi - br * bphi) * inv_r;
+  denergy[k]   += -((energy[k] + p_star) * vr - br * v_dot_b) * inv_r;
+  // S_{B_phi} = 0: toroidal induction is metric-free, handled by the Cartesian
+  // flux difference; the poloidal faces B_r/B_z are advanced by CT.
 }
 
 }  // namespace
@@ -233,7 +265,8 @@ void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& du
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),
-                     dudt.mx.device_ptr(), dudt.my.device_ptr(), dudt.bz_cell.device_ptr());
+                     dudt.rho.device_ptr(), dudt.mx.device_ptr(), dudt.my.device_ptr(),
+                     dudt.mz.device_ptr(), dudt.energy.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 

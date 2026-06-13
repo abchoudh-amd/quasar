@@ -1,0 +1,2072 @@
+# Magnetic-field calculator for a 30 cm square-frame quadrupole.
+#
+# 256 z-directed filaments (current along +/- lab z): top & bottom
+#   rows = +z, left & right rows = -z, 234.375 A each
+#   (15000 A per side). In the z=0 midplane the field is
+#   transverse (B_x, B_y), zero at the center, rising outward.
+#
+# Observation grid = the 0.25 cm PIC patch at z=0.
+#
+# Regenerate with:
+#   python examples/square_quad_field/build_yaml.py
+
+units: SI
+
+conductors:
+  - name: top_00
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.14765625, +0.15000000, -1.00000000]
+        - [-0.14765625, +0.15000000, +1.00000000]
+
+  - name: top_01
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.14296875, +0.15000000, -1.00000000]
+        - [-0.14296875, +0.15000000, +1.00000000]
+
+  - name: top_02
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.13828125, +0.15000000, -1.00000000]
+        - [-0.13828125, +0.15000000, +1.00000000]
+
+  - name: top_03
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.13359375, +0.15000000, -1.00000000]
+        - [-0.13359375, +0.15000000, +1.00000000]
+
+  - name: top_04
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.12890625, +0.15000000, -1.00000000]
+        - [-0.12890625, +0.15000000, +1.00000000]
+
+  - name: top_05
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.12421875, +0.15000000, -1.00000000]
+        - [-0.12421875, +0.15000000, +1.00000000]
+
+  - name: top_06
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.11953125, +0.15000000, -1.00000000]
+        - [-0.11953125, +0.15000000, +1.00000000]
+
+  - name: top_07
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.11484375, +0.15000000, -1.00000000]
+        - [-0.11484375, +0.15000000, +1.00000000]
+
+  - name: top_08
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.11015625, +0.15000000, -1.00000000]
+        - [-0.11015625, +0.15000000, +1.00000000]
+
+  - name: top_09
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.10546875, +0.15000000, -1.00000000]
+        - [-0.10546875, +0.15000000, +1.00000000]
+
+  - name: top_10
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.10078125, +0.15000000, -1.00000000]
+        - [-0.10078125, +0.15000000, +1.00000000]
+
+  - name: top_11
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.09609375, +0.15000000, -1.00000000]
+        - [-0.09609375, +0.15000000, +1.00000000]
+
+  - name: top_12
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.09140625, +0.15000000, -1.00000000]
+        - [-0.09140625, +0.15000000, +1.00000000]
+
+  - name: top_13
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.08671875, +0.15000000, -1.00000000]
+        - [-0.08671875, +0.15000000, +1.00000000]
+
+  - name: top_14
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.08203125, +0.15000000, -1.00000000]
+        - [-0.08203125, +0.15000000, +1.00000000]
+
+  - name: top_15
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.07734375, +0.15000000, -1.00000000]
+        - [-0.07734375, +0.15000000, +1.00000000]
+
+  - name: top_16
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.07265625, +0.15000000, -1.00000000]
+        - [-0.07265625, +0.15000000, +1.00000000]
+
+  - name: top_17
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.06796875, +0.15000000, -1.00000000]
+        - [-0.06796875, +0.15000000, +1.00000000]
+
+  - name: top_18
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.06328125, +0.15000000, -1.00000000]
+        - [-0.06328125, +0.15000000, +1.00000000]
+
+  - name: top_19
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.05859375, +0.15000000, -1.00000000]
+        - [-0.05859375, +0.15000000, +1.00000000]
+
+  - name: top_20
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.05390625, +0.15000000, -1.00000000]
+        - [-0.05390625, +0.15000000, +1.00000000]
+
+  - name: top_21
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.04921875, +0.15000000, -1.00000000]
+        - [-0.04921875, +0.15000000, +1.00000000]
+
+  - name: top_22
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.04453125, +0.15000000, -1.00000000]
+        - [-0.04453125, +0.15000000, +1.00000000]
+
+  - name: top_23
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.03984375, +0.15000000, -1.00000000]
+        - [-0.03984375, +0.15000000, +1.00000000]
+
+  - name: top_24
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.03515625, +0.15000000, -1.00000000]
+        - [-0.03515625, +0.15000000, +1.00000000]
+
+  - name: top_25
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.03046875, +0.15000000, -1.00000000]
+        - [-0.03046875, +0.15000000, +1.00000000]
+
+  - name: top_26
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.02578125, +0.15000000, -1.00000000]
+        - [-0.02578125, +0.15000000, +1.00000000]
+
+  - name: top_27
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.02109375, +0.15000000, -1.00000000]
+        - [-0.02109375, +0.15000000, +1.00000000]
+
+  - name: top_28
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.01640625, +0.15000000, -1.00000000]
+        - [-0.01640625, +0.15000000, +1.00000000]
+
+  - name: top_29
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.01171875, +0.15000000, -1.00000000]
+        - [-0.01171875, +0.15000000, +1.00000000]
+
+  - name: top_30
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.00703125, +0.15000000, -1.00000000]
+        - [-0.00703125, +0.15000000, +1.00000000]
+
+  - name: top_31
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.00234375, +0.15000000, -1.00000000]
+        - [-0.00234375, +0.15000000, +1.00000000]
+
+  - name: top_32
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.00234375, +0.15000000, -1.00000000]
+        - [+0.00234375, +0.15000000, +1.00000000]
+
+  - name: top_33
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.00703125, +0.15000000, -1.00000000]
+        - [+0.00703125, +0.15000000, +1.00000000]
+
+  - name: top_34
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.01171875, +0.15000000, -1.00000000]
+        - [+0.01171875, +0.15000000, +1.00000000]
+
+  - name: top_35
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.01640625, +0.15000000, -1.00000000]
+        - [+0.01640625, +0.15000000, +1.00000000]
+
+  - name: top_36
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.02109375, +0.15000000, -1.00000000]
+        - [+0.02109375, +0.15000000, +1.00000000]
+
+  - name: top_37
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.02578125, +0.15000000, -1.00000000]
+        - [+0.02578125, +0.15000000, +1.00000000]
+
+  - name: top_38
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.03046875, +0.15000000, -1.00000000]
+        - [+0.03046875, +0.15000000, +1.00000000]
+
+  - name: top_39
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.03515625, +0.15000000, -1.00000000]
+        - [+0.03515625, +0.15000000, +1.00000000]
+
+  - name: top_40
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.03984375, +0.15000000, -1.00000000]
+        - [+0.03984375, +0.15000000, +1.00000000]
+
+  - name: top_41
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.04453125, +0.15000000, -1.00000000]
+        - [+0.04453125, +0.15000000, +1.00000000]
+
+  - name: top_42
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.04921875, +0.15000000, -1.00000000]
+        - [+0.04921875, +0.15000000, +1.00000000]
+
+  - name: top_43
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.05390625, +0.15000000, -1.00000000]
+        - [+0.05390625, +0.15000000, +1.00000000]
+
+  - name: top_44
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.05859375, +0.15000000, -1.00000000]
+        - [+0.05859375, +0.15000000, +1.00000000]
+
+  - name: top_45
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.06328125, +0.15000000, -1.00000000]
+        - [+0.06328125, +0.15000000, +1.00000000]
+
+  - name: top_46
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.06796875, +0.15000000, -1.00000000]
+        - [+0.06796875, +0.15000000, +1.00000000]
+
+  - name: top_47
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.07265625, +0.15000000, -1.00000000]
+        - [+0.07265625, +0.15000000, +1.00000000]
+
+  - name: top_48
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.07734375, +0.15000000, -1.00000000]
+        - [+0.07734375, +0.15000000, +1.00000000]
+
+  - name: top_49
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.08203125, +0.15000000, -1.00000000]
+        - [+0.08203125, +0.15000000, +1.00000000]
+
+  - name: top_50
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.08671875, +0.15000000, -1.00000000]
+        - [+0.08671875, +0.15000000, +1.00000000]
+
+  - name: top_51
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.09140625, +0.15000000, -1.00000000]
+        - [+0.09140625, +0.15000000, +1.00000000]
+
+  - name: top_52
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.09609375, +0.15000000, -1.00000000]
+        - [+0.09609375, +0.15000000, +1.00000000]
+
+  - name: top_53
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.10078125, +0.15000000, -1.00000000]
+        - [+0.10078125, +0.15000000, +1.00000000]
+
+  - name: top_54
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.10546875, +0.15000000, -1.00000000]
+        - [+0.10546875, +0.15000000, +1.00000000]
+
+  - name: top_55
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.11015625, +0.15000000, -1.00000000]
+        - [+0.11015625, +0.15000000, +1.00000000]
+
+  - name: top_56
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.11484375, +0.15000000, -1.00000000]
+        - [+0.11484375, +0.15000000, +1.00000000]
+
+  - name: top_57
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.11953125, +0.15000000, -1.00000000]
+        - [+0.11953125, +0.15000000, +1.00000000]
+
+  - name: top_58
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.12421875, +0.15000000, -1.00000000]
+        - [+0.12421875, +0.15000000, +1.00000000]
+
+  - name: top_59
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.12890625, +0.15000000, -1.00000000]
+        - [+0.12890625, +0.15000000, +1.00000000]
+
+  - name: top_60
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.13359375, +0.15000000, -1.00000000]
+        - [+0.13359375, +0.15000000, +1.00000000]
+
+  - name: top_61
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.13828125, +0.15000000, -1.00000000]
+        - [+0.13828125, +0.15000000, +1.00000000]
+
+  - name: top_62
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.14296875, +0.15000000, -1.00000000]
+        - [+0.14296875, +0.15000000, +1.00000000]
+
+  - name: top_63
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.14765625, +0.15000000, -1.00000000]
+        - [+0.14765625, +0.15000000, +1.00000000]
+
+  - name: bottom_00
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.14765625, -0.15000000, -1.00000000]
+        - [-0.14765625, -0.15000000, +1.00000000]
+
+  - name: bottom_01
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.14296875, -0.15000000, -1.00000000]
+        - [-0.14296875, -0.15000000, +1.00000000]
+
+  - name: bottom_02
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.13828125, -0.15000000, -1.00000000]
+        - [-0.13828125, -0.15000000, +1.00000000]
+
+  - name: bottom_03
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.13359375, -0.15000000, -1.00000000]
+        - [-0.13359375, -0.15000000, +1.00000000]
+
+  - name: bottom_04
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.12890625, -0.15000000, -1.00000000]
+        - [-0.12890625, -0.15000000, +1.00000000]
+
+  - name: bottom_05
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.12421875, -0.15000000, -1.00000000]
+        - [-0.12421875, -0.15000000, +1.00000000]
+
+  - name: bottom_06
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.11953125, -0.15000000, -1.00000000]
+        - [-0.11953125, -0.15000000, +1.00000000]
+
+  - name: bottom_07
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.11484375, -0.15000000, -1.00000000]
+        - [-0.11484375, -0.15000000, +1.00000000]
+
+  - name: bottom_08
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.11015625, -0.15000000, -1.00000000]
+        - [-0.11015625, -0.15000000, +1.00000000]
+
+  - name: bottom_09
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.10546875, -0.15000000, -1.00000000]
+        - [-0.10546875, -0.15000000, +1.00000000]
+
+  - name: bottom_10
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.10078125, -0.15000000, -1.00000000]
+        - [-0.10078125, -0.15000000, +1.00000000]
+
+  - name: bottom_11
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.09609375, -0.15000000, -1.00000000]
+        - [-0.09609375, -0.15000000, +1.00000000]
+
+  - name: bottom_12
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.09140625, -0.15000000, -1.00000000]
+        - [-0.09140625, -0.15000000, +1.00000000]
+
+  - name: bottom_13
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.08671875, -0.15000000, -1.00000000]
+        - [-0.08671875, -0.15000000, +1.00000000]
+
+  - name: bottom_14
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.08203125, -0.15000000, -1.00000000]
+        - [-0.08203125, -0.15000000, +1.00000000]
+
+  - name: bottom_15
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.07734375, -0.15000000, -1.00000000]
+        - [-0.07734375, -0.15000000, +1.00000000]
+
+  - name: bottom_16
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.07265625, -0.15000000, -1.00000000]
+        - [-0.07265625, -0.15000000, +1.00000000]
+
+  - name: bottom_17
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.06796875, -0.15000000, -1.00000000]
+        - [-0.06796875, -0.15000000, +1.00000000]
+
+  - name: bottom_18
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.06328125, -0.15000000, -1.00000000]
+        - [-0.06328125, -0.15000000, +1.00000000]
+
+  - name: bottom_19
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.05859375, -0.15000000, -1.00000000]
+        - [-0.05859375, -0.15000000, +1.00000000]
+
+  - name: bottom_20
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.05390625, -0.15000000, -1.00000000]
+        - [-0.05390625, -0.15000000, +1.00000000]
+
+  - name: bottom_21
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.04921875, -0.15000000, -1.00000000]
+        - [-0.04921875, -0.15000000, +1.00000000]
+
+  - name: bottom_22
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.04453125, -0.15000000, -1.00000000]
+        - [-0.04453125, -0.15000000, +1.00000000]
+
+  - name: bottom_23
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.03984375, -0.15000000, -1.00000000]
+        - [-0.03984375, -0.15000000, +1.00000000]
+
+  - name: bottom_24
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.03515625, -0.15000000, -1.00000000]
+        - [-0.03515625, -0.15000000, +1.00000000]
+
+  - name: bottom_25
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.03046875, -0.15000000, -1.00000000]
+        - [-0.03046875, -0.15000000, +1.00000000]
+
+  - name: bottom_26
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.02578125, -0.15000000, -1.00000000]
+        - [-0.02578125, -0.15000000, +1.00000000]
+
+  - name: bottom_27
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.02109375, -0.15000000, -1.00000000]
+        - [-0.02109375, -0.15000000, +1.00000000]
+
+  - name: bottom_28
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.01640625, -0.15000000, -1.00000000]
+        - [-0.01640625, -0.15000000, +1.00000000]
+
+  - name: bottom_29
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.01171875, -0.15000000, -1.00000000]
+        - [-0.01171875, -0.15000000, +1.00000000]
+
+  - name: bottom_30
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.00703125, -0.15000000, -1.00000000]
+        - [-0.00703125, -0.15000000, +1.00000000]
+
+  - name: bottom_31
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.00234375, -0.15000000, -1.00000000]
+        - [-0.00234375, -0.15000000, +1.00000000]
+
+  - name: bottom_32
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.00234375, -0.15000000, -1.00000000]
+        - [+0.00234375, -0.15000000, +1.00000000]
+
+  - name: bottom_33
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.00703125, -0.15000000, -1.00000000]
+        - [+0.00703125, -0.15000000, +1.00000000]
+
+  - name: bottom_34
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.01171875, -0.15000000, -1.00000000]
+        - [+0.01171875, -0.15000000, +1.00000000]
+
+  - name: bottom_35
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.01640625, -0.15000000, -1.00000000]
+        - [+0.01640625, -0.15000000, +1.00000000]
+
+  - name: bottom_36
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.02109375, -0.15000000, -1.00000000]
+        - [+0.02109375, -0.15000000, +1.00000000]
+
+  - name: bottom_37
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.02578125, -0.15000000, -1.00000000]
+        - [+0.02578125, -0.15000000, +1.00000000]
+
+  - name: bottom_38
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.03046875, -0.15000000, -1.00000000]
+        - [+0.03046875, -0.15000000, +1.00000000]
+
+  - name: bottom_39
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.03515625, -0.15000000, -1.00000000]
+        - [+0.03515625, -0.15000000, +1.00000000]
+
+  - name: bottom_40
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.03984375, -0.15000000, -1.00000000]
+        - [+0.03984375, -0.15000000, +1.00000000]
+
+  - name: bottom_41
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.04453125, -0.15000000, -1.00000000]
+        - [+0.04453125, -0.15000000, +1.00000000]
+
+  - name: bottom_42
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.04921875, -0.15000000, -1.00000000]
+        - [+0.04921875, -0.15000000, +1.00000000]
+
+  - name: bottom_43
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.05390625, -0.15000000, -1.00000000]
+        - [+0.05390625, -0.15000000, +1.00000000]
+
+  - name: bottom_44
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.05859375, -0.15000000, -1.00000000]
+        - [+0.05859375, -0.15000000, +1.00000000]
+
+  - name: bottom_45
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.06328125, -0.15000000, -1.00000000]
+        - [+0.06328125, -0.15000000, +1.00000000]
+
+  - name: bottom_46
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.06796875, -0.15000000, -1.00000000]
+        - [+0.06796875, -0.15000000, +1.00000000]
+
+  - name: bottom_47
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.07265625, -0.15000000, -1.00000000]
+        - [+0.07265625, -0.15000000, +1.00000000]
+
+  - name: bottom_48
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.07734375, -0.15000000, -1.00000000]
+        - [+0.07734375, -0.15000000, +1.00000000]
+
+  - name: bottom_49
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.08203125, -0.15000000, -1.00000000]
+        - [+0.08203125, -0.15000000, +1.00000000]
+
+  - name: bottom_50
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.08671875, -0.15000000, -1.00000000]
+        - [+0.08671875, -0.15000000, +1.00000000]
+
+  - name: bottom_51
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.09140625, -0.15000000, -1.00000000]
+        - [+0.09140625, -0.15000000, +1.00000000]
+
+  - name: bottom_52
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.09609375, -0.15000000, -1.00000000]
+        - [+0.09609375, -0.15000000, +1.00000000]
+
+  - name: bottom_53
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.10078125, -0.15000000, -1.00000000]
+        - [+0.10078125, -0.15000000, +1.00000000]
+
+  - name: bottom_54
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.10546875, -0.15000000, -1.00000000]
+        - [+0.10546875, -0.15000000, +1.00000000]
+
+  - name: bottom_55
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.11015625, -0.15000000, -1.00000000]
+        - [+0.11015625, -0.15000000, +1.00000000]
+
+  - name: bottom_56
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.11484375, -0.15000000, -1.00000000]
+        - [+0.11484375, -0.15000000, +1.00000000]
+
+  - name: bottom_57
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.11953125, -0.15000000, -1.00000000]
+        - [+0.11953125, -0.15000000, +1.00000000]
+
+  - name: bottom_58
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.12421875, -0.15000000, -1.00000000]
+        - [+0.12421875, -0.15000000, +1.00000000]
+
+  - name: bottom_59
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.12890625, -0.15000000, -1.00000000]
+        - [+0.12890625, -0.15000000, +1.00000000]
+
+  - name: bottom_60
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.13359375, -0.15000000, -1.00000000]
+        - [+0.13359375, -0.15000000, +1.00000000]
+
+  - name: bottom_61
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.13828125, -0.15000000, -1.00000000]
+        - [+0.13828125, -0.15000000, +1.00000000]
+
+  - name: bottom_62
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.14296875, -0.15000000, -1.00000000]
+        - [+0.14296875, -0.15000000, +1.00000000]
+
+  - name: bottom_63
+    current_A: +234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.14765625, -0.15000000, -1.00000000]
+        - [+0.14765625, -0.15000000, +1.00000000]
+
+  - name: left_00
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.14765625, -1.00000000]
+        - [-0.15000000, -0.14765625, +1.00000000]
+
+  - name: left_01
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.14296875, -1.00000000]
+        - [-0.15000000, -0.14296875, +1.00000000]
+
+  - name: left_02
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.13828125, -1.00000000]
+        - [-0.15000000, -0.13828125, +1.00000000]
+
+  - name: left_03
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.13359375, -1.00000000]
+        - [-0.15000000, -0.13359375, +1.00000000]
+
+  - name: left_04
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.12890625, -1.00000000]
+        - [-0.15000000, -0.12890625, +1.00000000]
+
+  - name: left_05
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.12421875, -1.00000000]
+        - [-0.15000000, -0.12421875, +1.00000000]
+
+  - name: left_06
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.11953125, -1.00000000]
+        - [-0.15000000, -0.11953125, +1.00000000]
+
+  - name: left_07
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.11484375, -1.00000000]
+        - [-0.15000000, -0.11484375, +1.00000000]
+
+  - name: left_08
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.11015625, -1.00000000]
+        - [-0.15000000, -0.11015625, +1.00000000]
+
+  - name: left_09
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.10546875, -1.00000000]
+        - [-0.15000000, -0.10546875, +1.00000000]
+
+  - name: left_10
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.10078125, -1.00000000]
+        - [-0.15000000, -0.10078125, +1.00000000]
+
+  - name: left_11
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.09609375, -1.00000000]
+        - [-0.15000000, -0.09609375, +1.00000000]
+
+  - name: left_12
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.09140625, -1.00000000]
+        - [-0.15000000, -0.09140625, +1.00000000]
+
+  - name: left_13
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.08671875, -1.00000000]
+        - [-0.15000000, -0.08671875, +1.00000000]
+
+  - name: left_14
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.08203125, -1.00000000]
+        - [-0.15000000, -0.08203125, +1.00000000]
+
+  - name: left_15
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.07734375, -1.00000000]
+        - [-0.15000000, -0.07734375, +1.00000000]
+
+  - name: left_16
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.07265625, -1.00000000]
+        - [-0.15000000, -0.07265625, +1.00000000]
+
+  - name: left_17
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.06796875, -1.00000000]
+        - [-0.15000000, -0.06796875, +1.00000000]
+
+  - name: left_18
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.06328125, -1.00000000]
+        - [-0.15000000, -0.06328125, +1.00000000]
+
+  - name: left_19
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.05859375, -1.00000000]
+        - [-0.15000000, -0.05859375, +1.00000000]
+
+  - name: left_20
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.05390625, -1.00000000]
+        - [-0.15000000, -0.05390625, +1.00000000]
+
+  - name: left_21
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.04921875, -1.00000000]
+        - [-0.15000000, -0.04921875, +1.00000000]
+
+  - name: left_22
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.04453125, -1.00000000]
+        - [-0.15000000, -0.04453125, +1.00000000]
+
+  - name: left_23
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.03984375, -1.00000000]
+        - [-0.15000000, -0.03984375, +1.00000000]
+
+  - name: left_24
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.03515625, -1.00000000]
+        - [-0.15000000, -0.03515625, +1.00000000]
+
+  - name: left_25
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.03046875, -1.00000000]
+        - [-0.15000000, -0.03046875, +1.00000000]
+
+  - name: left_26
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.02578125, -1.00000000]
+        - [-0.15000000, -0.02578125, +1.00000000]
+
+  - name: left_27
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.02109375, -1.00000000]
+        - [-0.15000000, -0.02109375, +1.00000000]
+
+  - name: left_28
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.01640625, -1.00000000]
+        - [-0.15000000, -0.01640625, +1.00000000]
+
+  - name: left_29
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.01171875, -1.00000000]
+        - [-0.15000000, -0.01171875, +1.00000000]
+
+  - name: left_30
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.00703125, -1.00000000]
+        - [-0.15000000, -0.00703125, +1.00000000]
+
+  - name: left_31
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, -0.00234375, -1.00000000]
+        - [-0.15000000, -0.00234375, +1.00000000]
+
+  - name: left_32
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.00234375, -1.00000000]
+        - [-0.15000000, +0.00234375, +1.00000000]
+
+  - name: left_33
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.00703125, -1.00000000]
+        - [-0.15000000, +0.00703125, +1.00000000]
+
+  - name: left_34
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.01171875, -1.00000000]
+        - [-0.15000000, +0.01171875, +1.00000000]
+
+  - name: left_35
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.01640625, -1.00000000]
+        - [-0.15000000, +0.01640625, +1.00000000]
+
+  - name: left_36
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.02109375, -1.00000000]
+        - [-0.15000000, +0.02109375, +1.00000000]
+
+  - name: left_37
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.02578125, -1.00000000]
+        - [-0.15000000, +0.02578125, +1.00000000]
+
+  - name: left_38
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.03046875, -1.00000000]
+        - [-0.15000000, +0.03046875, +1.00000000]
+
+  - name: left_39
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.03515625, -1.00000000]
+        - [-0.15000000, +0.03515625, +1.00000000]
+
+  - name: left_40
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.03984375, -1.00000000]
+        - [-0.15000000, +0.03984375, +1.00000000]
+
+  - name: left_41
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.04453125, -1.00000000]
+        - [-0.15000000, +0.04453125, +1.00000000]
+
+  - name: left_42
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.04921875, -1.00000000]
+        - [-0.15000000, +0.04921875, +1.00000000]
+
+  - name: left_43
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.05390625, -1.00000000]
+        - [-0.15000000, +0.05390625, +1.00000000]
+
+  - name: left_44
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.05859375, -1.00000000]
+        - [-0.15000000, +0.05859375, +1.00000000]
+
+  - name: left_45
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.06328125, -1.00000000]
+        - [-0.15000000, +0.06328125, +1.00000000]
+
+  - name: left_46
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.06796875, -1.00000000]
+        - [-0.15000000, +0.06796875, +1.00000000]
+
+  - name: left_47
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.07265625, -1.00000000]
+        - [-0.15000000, +0.07265625, +1.00000000]
+
+  - name: left_48
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.07734375, -1.00000000]
+        - [-0.15000000, +0.07734375, +1.00000000]
+
+  - name: left_49
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.08203125, -1.00000000]
+        - [-0.15000000, +0.08203125, +1.00000000]
+
+  - name: left_50
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.08671875, -1.00000000]
+        - [-0.15000000, +0.08671875, +1.00000000]
+
+  - name: left_51
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.09140625, -1.00000000]
+        - [-0.15000000, +0.09140625, +1.00000000]
+
+  - name: left_52
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.09609375, -1.00000000]
+        - [-0.15000000, +0.09609375, +1.00000000]
+
+  - name: left_53
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.10078125, -1.00000000]
+        - [-0.15000000, +0.10078125, +1.00000000]
+
+  - name: left_54
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.10546875, -1.00000000]
+        - [-0.15000000, +0.10546875, +1.00000000]
+
+  - name: left_55
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.11015625, -1.00000000]
+        - [-0.15000000, +0.11015625, +1.00000000]
+
+  - name: left_56
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.11484375, -1.00000000]
+        - [-0.15000000, +0.11484375, +1.00000000]
+
+  - name: left_57
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.11953125, -1.00000000]
+        - [-0.15000000, +0.11953125, +1.00000000]
+
+  - name: left_58
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.12421875, -1.00000000]
+        - [-0.15000000, +0.12421875, +1.00000000]
+
+  - name: left_59
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.12890625, -1.00000000]
+        - [-0.15000000, +0.12890625, +1.00000000]
+
+  - name: left_60
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.13359375, -1.00000000]
+        - [-0.15000000, +0.13359375, +1.00000000]
+
+  - name: left_61
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.13828125, -1.00000000]
+        - [-0.15000000, +0.13828125, +1.00000000]
+
+  - name: left_62
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.14296875, -1.00000000]
+        - [-0.15000000, +0.14296875, +1.00000000]
+
+  - name: left_63
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [-0.15000000, +0.14765625, -1.00000000]
+        - [-0.15000000, +0.14765625, +1.00000000]
+
+  - name: right_00
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.14765625, -1.00000000]
+        - [+0.15000000, -0.14765625, +1.00000000]
+
+  - name: right_01
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.14296875, -1.00000000]
+        - [+0.15000000, -0.14296875, +1.00000000]
+
+  - name: right_02
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.13828125, -1.00000000]
+        - [+0.15000000, -0.13828125, +1.00000000]
+
+  - name: right_03
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.13359375, -1.00000000]
+        - [+0.15000000, -0.13359375, +1.00000000]
+
+  - name: right_04
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.12890625, -1.00000000]
+        - [+0.15000000, -0.12890625, +1.00000000]
+
+  - name: right_05
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.12421875, -1.00000000]
+        - [+0.15000000, -0.12421875, +1.00000000]
+
+  - name: right_06
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.11953125, -1.00000000]
+        - [+0.15000000, -0.11953125, +1.00000000]
+
+  - name: right_07
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.11484375, -1.00000000]
+        - [+0.15000000, -0.11484375, +1.00000000]
+
+  - name: right_08
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.11015625, -1.00000000]
+        - [+0.15000000, -0.11015625, +1.00000000]
+
+  - name: right_09
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.10546875, -1.00000000]
+        - [+0.15000000, -0.10546875, +1.00000000]
+
+  - name: right_10
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.10078125, -1.00000000]
+        - [+0.15000000, -0.10078125, +1.00000000]
+
+  - name: right_11
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.09609375, -1.00000000]
+        - [+0.15000000, -0.09609375, +1.00000000]
+
+  - name: right_12
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.09140625, -1.00000000]
+        - [+0.15000000, -0.09140625, +1.00000000]
+
+  - name: right_13
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.08671875, -1.00000000]
+        - [+0.15000000, -0.08671875, +1.00000000]
+
+  - name: right_14
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.08203125, -1.00000000]
+        - [+0.15000000, -0.08203125, +1.00000000]
+
+  - name: right_15
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.07734375, -1.00000000]
+        - [+0.15000000, -0.07734375, +1.00000000]
+
+  - name: right_16
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.07265625, -1.00000000]
+        - [+0.15000000, -0.07265625, +1.00000000]
+
+  - name: right_17
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.06796875, -1.00000000]
+        - [+0.15000000, -0.06796875, +1.00000000]
+
+  - name: right_18
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.06328125, -1.00000000]
+        - [+0.15000000, -0.06328125, +1.00000000]
+
+  - name: right_19
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.05859375, -1.00000000]
+        - [+0.15000000, -0.05859375, +1.00000000]
+
+  - name: right_20
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.05390625, -1.00000000]
+        - [+0.15000000, -0.05390625, +1.00000000]
+
+  - name: right_21
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.04921875, -1.00000000]
+        - [+0.15000000, -0.04921875, +1.00000000]
+
+  - name: right_22
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.04453125, -1.00000000]
+        - [+0.15000000, -0.04453125, +1.00000000]
+
+  - name: right_23
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.03984375, -1.00000000]
+        - [+0.15000000, -0.03984375, +1.00000000]
+
+  - name: right_24
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.03515625, -1.00000000]
+        - [+0.15000000, -0.03515625, +1.00000000]
+
+  - name: right_25
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.03046875, -1.00000000]
+        - [+0.15000000, -0.03046875, +1.00000000]
+
+  - name: right_26
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.02578125, -1.00000000]
+        - [+0.15000000, -0.02578125, +1.00000000]
+
+  - name: right_27
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.02109375, -1.00000000]
+        - [+0.15000000, -0.02109375, +1.00000000]
+
+  - name: right_28
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.01640625, -1.00000000]
+        - [+0.15000000, -0.01640625, +1.00000000]
+
+  - name: right_29
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.01171875, -1.00000000]
+        - [+0.15000000, -0.01171875, +1.00000000]
+
+  - name: right_30
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.00703125, -1.00000000]
+        - [+0.15000000, -0.00703125, +1.00000000]
+
+  - name: right_31
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, -0.00234375, -1.00000000]
+        - [+0.15000000, -0.00234375, +1.00000000]
+
+  - name: right_32
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.00234375, -1.00000000]
+        - [+0.15000000, +0.00234375, +1.00000000]
+
+  - name: right_33
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.00703125, -1.00000000]
+        - [+0.15000000, +0.00703125, +1.00000000]
+
+  - name: right_34
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.01171875, -1.00000000]
+        - [+0.15000000, +0.01171875, +1.00000000]
+
+  - name: right_35
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.01640625, -1.00000000]
+        - [+0.15000000, +0.01640625, +1.00000000]
+
+  - name: right_36
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.02109375, -1.00000000]
+        - [+0.15000000, +0.02109375, +1.00000000]
+
+  - name: right_37
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.02578125, -1.00000000]
+        - [+0.15000000, +0.02578125, +1.00000000]
+
+  - name: right_38
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.03046875, -1.00000000]
+        - [+0.15000000, +0.03046875, +1.00000000]
+
+  - name: right_39
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.03515625, -1.00000000]
+        - [+0.15000000, +0.03515625, +1.00000000]
+
+  - name: right_40
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.03984375, -1.00000000]
+        - [+0.15000000, +0.03984375, +1.00000000]
+
+  - name: right_41
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.04453125, -1.00000000]
+        - [+0.15000000, +0.04453125, +1.00000000]
+
+  - name: right_42
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.04921875, -1.00000000]
+        - [+0.15000000, +0.04921875, +1.00000000]
+
+  - name: right_43
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.05390625, -1.00000000]
+        - [+0.15000000, +0.05390625, +1.00000000]
+
+  - name: right_44
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.05859375, -1.00000000]
+        - [+0.15000000, +0.05859375, +1.00000000]
+
+  - name: right_45
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.06328125, -1.00000000]
+        - [+0.15000000, +0.06328125, +1.00000000]
+
+  - name: right_46
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.06796875, -1.00000000]
+        - [+0.15000000, +0.06796875, +1.00000000]
+
+  - name: right_47
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.07265625, -1.00000000]
+        - [+0.15000000, +0.07265625, +1.00000000]
+
+  - name: right_48
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.07734375, -1.00000000]
+        - [+0.15000000, +0.07734375, +1.00000000]
+
+  - name: right_49
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.08203125, -1.00000000]
+        - [+0.15000000, +0.08203125, +1.00000000]
+
+  - name: right_50
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.08671875, -1.00000000]
+        - [+0.15000000, +0.08671875, +1.00000000]
+
+  - name: right_51
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.09140625, -1.00000000]
+        - [+0.15000000, +0.09140625, +1.00000000]
+
+  - name: right_52
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.09609375, -1.00000000]
+        - [+0.15000000, +0.09609375, +1.00000000]
+
+  - name: right_53
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.10078125, -1.00000000]
+        - [+0.15000000, +0.10078125, +1.00000000]
+
+  - name: right_54
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.10546875, -1.00000000]
+        - [+0.15000000, +0.10546875, +1.00000000]
+
+  - name: right_55
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.11015625, -1.00000000]
+        - [+0.15000000, +0.11015625, +1.00000000]
+
+  - name: right_56
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.11484375, -1.00000000]
+        - [+0.15000000, +0.11484375, +1.00000000]
+
+  - name: right_57
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.11953125, -1.00000000]
+        - [+0.15000000, +0.11953125, +1.00000000]
+
+  - name: right_58
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.12421875, -1.00000000]
+        - [+0.15000000, +0.12421875, +1.00000000]
+
+  - name: right_59
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.12890625, -1.00000000]
+        - [+0.15000000, +0.12890625, +1.00000000]
+
+  - name: right_60
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.13359375, -1.00000000]
+        - [+0.15000000, +0.13359375, +1.00000000]
+
+  - name: right_61
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.13828125, -1.00000000]
+        - [+0.15000000, +0.13828125, +1.00000000]
+
+  - name: right_62
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.14296875, -1.00000000]
+        - [+0.15000000, +0.14296875, +1.00000000]
+
+  - name: right_63
+    current_A: -234.37500000
+    geometry:
+      type: polyline
+      points_xyz_m:
+        - [+0.15000000, +0.14765625, -1.00000000]
+        - [+0.15000000, +0.14765625, +1.00000000]
+
+observation:
+  type: grid
+  bounds_m: [[-0.00125000, +0.00125000], [-0.00125000, +0.00125000], [0.0, 0.0]]
+  resolution: [128, 128, 1]
+
+output:
+  format: npz
+  path: out.npz
+  fields: [B_xyz, B_magnitude]

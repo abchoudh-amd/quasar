@@ -236,8 +236,8 @@ class SquareToroidExampleTest(unittest.TestCase):
 
 
 def _segment_B(a: np.ndarray, b: np.ndarray, p: np.ndarray,
-               I: float) -> np.ndarray:
-    """Closed-form B from one straight filament a->b carrying current I, at the
+               current: float) -> np.ndarray:
+    """Closed-form B from one straight filament a->b carrying ``current``, at the
     points p (shape (M, 3)). Mirrors the device kernel
     ``segment_B`` in src/backend/hip/magnetostatics/biot_savart_segment.hpp so the
     test reference is the same formula the GPU evaluates, not an approximation."""
@@ -249,7 +249,7 @@ def _segment_B(a: np.ndarray, b: np.ndarray, p: np.ndarray,
     L = b - a
     RaRb = Ra * Rb
     s = RaRb + np.einsum("ij,ij->i", ra, rb)
-    coeff = mu0_over_4pi * I * (Ra + Rb) / (RaRb * s)
+    coeff = mu0_over_4pi * current * (Ra + Rb) / (RaRb * s)
     return coeff[:, None] * np.cross(np.broadcast_to(L, ra.shape), ra)
 
 
@@ -1080,7 +1080,7 @@ class BrioWuExampleTest(unittest.TestCase):
                                msg=f"no left>right density drop: {left} vs {right}")
 
             # divb at machine epsilon.
-            divb = _mhd_scalar(data, "divb_linf")
+            divb = _mhd_scalar(data, "divb_linf_final")
             self.assertLess(divb, _DIVB_EPS,
                             msg=f"divb_linf {divb} not at machine epsilon")
 
@@ -1091,101 +1091,89 @@ class BrioWuExampleTest(unittest.TestCase):
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class MhdLinearWaveConvergenceTest(unittest.TestCase):
     """Smooth Alfven wave, ``examples/mhd_linear_wave`` (initial.type
-    ``alfven_wave``) -- the high-order convergence proof.
+    ``alfven_wave``) -- the smooth-flow convergence proof.
 
-    The deck seeds a smooth wave whose exact solution at the deck's output time
-    is the initial profile translated by an integer number of wavelengths (i.e.
-    it returns to the seed). We run the deck at its shipped resolution and at a
-    refined copy with ``nx``/``ny`` DOUBLED (rewriting the YAML), form the L1
-    error of ``state_rho`` against the analytic (== seeded) profile at each
-    resolution, and assert the empirical convergence RATE approaches the mp7
-    design order (~7). The bound is a tolerant lower bound (rate > 5.5) to allow
-    measurement noise, limiter clipping at the extrema, and round-off.
+    The deck seeds a circularly-polarized Alfven wave that is an exact nonlinear
+    solution of ideal MHD: after exactly one wave period the profile returns to
+    its initial state, so the L1 error of the transverse field ``By`` against the
+    seeded ``state_by_initial`` measures the scheme's discretization error.
 
-    HOW THE TWO RESOLUTIONS ARE OBTAINED: the deck file is copied into the
-    sandbox once at its shipped resolution; a second copy has ``domain.nx`` and
-    ``domain.ny`` doubled by a regex rewrite of the YAML text. Task 3.12's deck
-    MUST keep ``domain.nx``/``domain.ny`` as plain integer scalars on their own
-    ``key: value`` lines (or inside a ``{nx: .., ny: ..}`` inline map) so this
-    rewrite matches, and MUST seed a wave that is exactly periodic over the
-    domain at the output time so the analytic reference equals the seed.
+    To make this a TRUE convergence proof (not a self-referential fit), both runs
+    must stop at exactly the same physical time -- one full period ``T = 1`` -- so
+    the analytic solution is identically the seed. We pin a FIXED ``dt`` that
+    divides ``T`` evenly at each resolution and double both ``nx``/``ny`` and the
+    step count together (halving ``dt``), then assert the error decreases at a
+    real, super-first-order rate.
+
+    Note on the achievable rate: under fixed-CFL refinement the SSP-RK3 temporal
+    error (``~dt^3``) dominates the 7th-order spatial reconstruction error, so the
+    OBSERVED order of this coupled space-time refinement is ~2-3, not 7. We assert
+    a robust lower bound (rate > 1.5) -- the point is genuine, monotone
+    convergence against the exact solution, which a self-referential harmonic fit
+    could not establish.
     """
 
-    def _l1_error_vs_seed(self, workdir: Path) -> float:
-        """Run the deck in ``workdir`` and return the L1 error of the final
-        density against the analytic reference. For an exactly-advected smooth
-        wave the analytic final state equals the initial seed; the deck is
-        expected to also emit the seeded ("exact") profile, but to stay robust
-        we reconstruct the reference as the *mean-removed* periodic structure:
-        the error metric is the L1 distance between the final density and a
-        smooth fit is overkill, so we instead compare final vs the deck's seed
-        profile if present, else fall back to the first-harmonic projection.
+    def _l1_error_vs_seed(self, workdir: Path, nx: int, dt: float,
+                          steps: int) -> float:
+        """Rewrite the deck in ``workdir`` to ``nx``x``nx`` with a fixed ``dt``
+        and ``steps`` (so it stops at exactly one period ``dt*steps == 1``), run
+        it, and return the per-cell L1 error of the final ``By`` against the
+        seeded ``state_by_initial``. The CP Alfven wave holds density exactly
+        uniform and carries the wave in the transverse field, so ``By`` is the
+        quantity that actually varies (a density metric would be round-off)."""
+        deck = workdir / "input.yaml"
+        text = deck.read_text()
+        text = re.sub(r"(\bnx\s*:\s*)\d+", rf"\g<1>{nx}", text)
+        text = re.sub(r"(\bny\s*:\s*)\d+", rf"\g<1>{nx}", text)
+        text = re.sub(r"dt_s\s*:\s*[\w.]+", f"dt_s: {dt!r}", text)
+        text = re.sub(r"steps\s*:\s*\d+", f"steps: {steps}", text)
+        deck.write_text(text)
 
-        Concretely: if the deck writes ``state_rho_initial`` we use it; else we
-        treat the analytic solution as a pure cosine of the dominant spatial
-        harmonic fitted to the final field (amplitude + phase), which for a
-        correctly-advected smooth wave is the exact solution. The L1 norm is
-        normalized by the number of cells so errors at different resolutions are
-        directly comparable.
-        """
-        _run_mhd_cli(workdir / "input.yaml")
+        _run_mhd_cli(deck)
         data = np.load(workdir / "out.npz", allow_pickle=False)
         _mhd_no_nans(self, data)
-        nx = int(_mhd_scalar(data, "nx"))
-        ny = int(_mhd_scalar(data, "ny"))
-        rho = _mhd_field(data, "state_rho", nx, ny)
+        rnx = int(_mhd_scalar(data, "nx"))
+        rny = int(_mhd_scalar(data, "ny"))
+        by = _mhd_field(data, "state_by", rnx, rny)
 
-        if "state_rho_initial" in data.files:
-            ref = _mhd_field(data, "state_rho_initial", nx, ny)
-        else:
-            # Analytic reference for an exactly-periodic smooth wave: the
-            # dominant first spatial harmonic along x (mean + single cosine).
-            # A correctly high-order scheme reproduces this to its design order;
-            # dispersion/dissipation errors are what shrink with resolution.
-            line_mean = rho.mean(axis=0)  # average over y (wave is along x)
-            n = line_mean.size
-            k = np.arange(n)
-            dc = line_mean.mean()
-            c = (2.0 / n) * np.sum(line_mean * np.cos(2 * np.pi * k / n))
-            s = (2.0 / n) * np.sum(line_mean * np.sin(2 * np.pi * k / n))
-            fit = dc + c * np.cos(2 * np.pi * k / n) + s * np.sin(
-                2 * np.pi * k / n)
-            ref = np.broadcast_to(fit, rho.shape)
+        self.assertIn("state_by_initial", data.files,
+                      msg="CLI did not emit the seeded state_by_initial "
+                          "reference; the convergence test needs the exact "
+                          "analytic profile to compare against.")
+        ref = _mhd_field(data, "state_by_initial", rnx, rny)
+        # Final time must be exactly one period for initial == analytic.
+        self.assertAlmostEqual(float(_mhd_scalar(data, "final_time_s")), 1.0,
+                               places=9, msg="run did not stop at one period")
+        return float(np.mean(np.abs(by - ref)))
 
-        return float(np.mean(np.abs(rho - ref)))
-
-    def test_convergence_rate_approaches_seventh_order(self):
+    def test_smooth_wave_converges_against_exact_solution(self):
         with tempfile.TemporaryDirectory() as tmp:
-            base = _copy_example("mhd_linear_wave", Path(tmp))
-            e_coarse = self._l1_error_vs_seed(base)
+            # Both runs end at t = dt*steps = 1.0 (one period). Halving dt with
+            # the grid keeps the run CFL-stable and isolates discretization error.
+            # The fixed dt must stay under the (additive, multidimensional) CFL
+            # limit at the coarse resolution: for this CP-Alfven seed the nx=32
+            # limit is ~4.5e-3, so 1/256 (~3.9e-3) is stable and 1/512 halves it
+            # with the grid refinement.
+            coarse = _copy_example("mhd_linear_wave", Path(tmp) / "coarse")
+            e_coarse = self._l1_error_vs_seed(coarse, nx=32, dt=1.0 / 256,
+                                              steps=256)
 
-            # Refined copy: double domain.nx and domain.ny in the YAML text.
-            fine = _copy_example("mhd_linear_wave", Path(tmp) / "refined")
-            deck = fine / "input.yaml"
-            text = deck.read_text()
-
-            def _double(match: "re.Match") -> str:
-                return f"{match.group(1)}{int(match.group(2)) * 2}"
-
-            text = re.sub(r"(\bnx\s*:\s*)(\d+)", _double, text)
-            text = re.sub(r"(\bny\s*:\s*)(\d+)", _double, text)
-            deck.write_text(text)
-            e_fine = self._l1_error_vs_seed(fine)
+            fine = _copy_example("mhd_linear_wave", Path(tmp) / "fine")
+            e_fine = self._l1_error_vs_seed(fine, nx=64, dt=1.0 / 512, steps=512)
 
             self.assertGreater(e_coarse, 0.0, msg="coarse error vanished")
             self.assertGreater(e_fine, 0.0, msg="fine error vanished")
-            # Refinement must reduce the error.
             self.assertLess(e_fine, e_coarse,
                             msg=f"error grew under refinement: "
-                                f"{e_coarse} -> {e_fine}")
+                                f"{e_coarse:.3e} -> {e_fine:.3e}")
 
-            # Empirical order from a 2x refinement: p = log2(e_coarse / e_fine).
             rate = math.log(e_coarse / e_fine) / math.log(2.0)
             self.assertGreater(
-                rate, 5.5,
-                msg=f"convergence rate {rate:.2f} below the mp7 design order "
-                    f"(~7); errors {e_coarse:.3e} -> {e_fine:.3e}. A low rate "
-                    f"points at the reconstruction order or the time integrator.")
+                rate, 1.5,
+                msg=f"convergence rate {rate:.2f} too low for a smooth wave "
+                    f"against the exact solution; errors {e_coarse:.3e} -> "
+                    f"{e_fine:.3e}. A low rate points at the reconstruction "
+                    f"order or the time integrator.")
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
@@ -1227,7 +1215,7 @@ class OrszagTangExampleTest(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(energy)))
 
             # divb at machine epsilon throughout (final value reported).
-            divb = _mhd_scalar(data, "divb_linf")
+            divb = _mhd_scalar(data, "divb_linf_final")
             self.assertLess(divb, _DIVB_EPS,
                             msg=f"divb_linf {divb} not at machine epsilon")
 
@@ -1316,7 +1304,7 @@ class MhdBlastExampleTest(unittest.TestCase):
                                 f"min={pressure.min()}")
 
             # divb at machine epsilon.
-            divb = _mhd_scalar(data, "divb_linf")
+            divb = _mhd_scalar(data, "divb_linf_final")
             self.assertLess(divb, _DIVB_EPS,
                             msg=f"divb_linf {divb} not at machine epsilon")
 
@@ -1386,7 +1374,7 @@ class MhdRotorExampleTest(unittest.TestCase):
                                 f"min={pressure.min()}")
 
             # divb at machine epsilon.
-            divb = _mhd_scalar(data, "divb_linf")
+            divb = _mhd_scalar(data, "divb_linf_final")
             self.assertLess(divb, _DIVB_EPS,
                             msg=f"divb_linf {divb} not at machine epsilon")
 
@@ -1488,7 +1476,7 @@ class MhdGuideFieldExampleTest(unittest.TestCase):
             # that divb_linf is reported and finite; the background's div-neutrality
             # (div(B0+b) == div(b) for the same seed with/without B0) is pinned
             # exactly in the C++ unit test.
-            divb = _mhd_scalar(data, "divb_linf")
+            divb = _mhd_scalar(data, "divb_linf_final")
             self.assertTrue(np.isfinite(divb),
                             msg=f"divb_linf not finite: {divb}")
 

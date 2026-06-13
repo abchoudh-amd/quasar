@@ -70,10 +70,6 @@ using quasar::numerics::MhdState;
 // per-cell kernels here all use the same square block). Kept tiny and internal
 // so each .hip is self-contained.
 inline constexpr unsigned kBlock2D = 16;
-inline dim3 mhd_grid_2d(const quasar::Grid2D& g, dim3 block) {
-  return dim3((static_cast<unsigned>(g.nx) + block.x - 1) / block.x,
-              (static_cast<unsigned>(g.ny) + block.y - 1) / block.y);
-}
 
 // Minmod limiter on two slopes (returns the smaller-magnitude same-sign slope,
 // zero on a sign change). Device-callable, matches the host muscl_minmod logic.

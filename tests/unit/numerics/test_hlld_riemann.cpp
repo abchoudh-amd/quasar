@@ -117,13 +117,24 @@ TEST(HlldRiemann, RegistryProducesSolver) {
   ASSERT_NE(solver, nullptr);
 }
 
-// Consistency: flux(L, L) equals the analytic physical flux of the single state.
+// The adiabatic index the registry-created "hlld" solver carries by default.
+// flux() is gamma-free by interface design (gamma is a construction-time
+// property) and the registry default-constructs the solver, so a caller holding
+// the IRiemannSolver base cannot override it; any test that compares the solver's
+// flux to an analytic reference must build the reference at THIS gamma. (The full
+// MhdSolver2D passes cfg_.gamma to the device kernel explicitly, so production
+// runs honor the deck gamma regardless of this default.)
+constexpr Real kSolverGamma = 5.0 / 3.0;
+
+// Consistency: flux(L, L) equals the analytic physical flux of the single state,
+// evaluated at the solver's own gamma.
 TEST(HlldRiemann, ConsistencyEqualsAnalyticFlux) {
   auto solver = make_hlld();
   ASSERT_NE(solver, nullptr);
 
-  const MhdState s = conserved(1.3, 0.4, -0.2, 0.3, 1.1, 0.6, 0.5, -0.4, kGamma);
-  const MhdFlux ref = analytic_flux_x(s, kGamma);
+  const MhdState s =
+      conserved(1.3, 0.4, -0.2, 0.3, 1.1, 0.6, 0.5, -0.4, kSolverGamma);
+  const MhdFlux ref = analytic_flux_x(s, kSolverGamma);
 
   MhdFlux out{};
   solver->flux(s, s, /*dir=*/0, out);
@@ -184,6 +195,73 @@ TEST(HlldRiemann, MaxWavespeedBoundsFastSpeeds) {
   EXPECT_GT(sR, 0.0);
   EXPECT_GE(sL, fast_speed_x(L, kGamma) - kFluxTol);
   EXPECT_GE(sR, fast_speed_x(R, kGamma) - kFluxTol);
+}
+
+// Symmetric interface: when L and R are mirror images about the interface
+// (same rho/p/Bx, opposite tangential v and By), the contact sits at the
+// interface so the mass flux F_rho is ~0 and the normal momentum flux equals the
+// star total pressure. This pins the contact/star construction, not just
+// finiteness -- an HLL-degenerate solver would NOT generally give F_rho==0 here.
+TEST(HlldRiemann, SymmetricInterfaceHasZeroMassFlux) {
+  auto solver = make_hlld();
+  ASSERT_NE(solver, nullptr);
+
+  const Real bx = 0.5;
+  // Mirror states: identical rho/p/Bx/Bz, opposite vy and By so the problem is
+  // symmetric under x-reflection. The HLLD contact speed S_M is then exactly 0.
+  const MhdState L = conserved(1.0, 0.0,  0.3, 0.0, 1.0, bx,  0.4, 0.1, kGamma);
+  const MhdState R = conserved(1.0, 0.0, -0.3, 0.0, 1.0, bx, -0.4, 0.1, kGamma);
+
+  MhdFlux out{};
+  solver->flux(L, R, /*dir=*/0, out);
+  EXPECT_TRUE(finite_flux(out));
+  // Contact at the interface => no net mass crosses it.
+  EXPECT_NEAR(out.rho, 0.0, 1e-9);
+  // Normal field flux remains zero.
+  EXPECT_NEAR(out.bx, 0.0, kFluxTol);
+}
+
+// HLLD resolves the rotational/Alfven discontinuity that HLL smears: across an
+// interface with a tangential-field reversal and a normal field, the tangential
+// magnetic flux F_By is nonzero and finite (the rotational wave carries it). A
+// single-state HLL average would not capture the rotational structure; this pins
+// that the multi-state machinery is actually engaged.
+TEST(HlldRiemann, RotationalDiscontinuityProducesTangentialFieldFlux) {
+  auto solver = make_hlld();
+  ASSERT_NE(solver, nullptr);
+
+  const Real bx = 0.7;  // strong normal field => well-separated Alfven waves
+  const MhdState L = conserved(1.0, 0.2, 0.0, 0.0, 1.0, bx,  0.6, 0.0, kGamma);
+  const MhdState R = conserved(1.0, 0.2, 0.0, 0.0, 1.0, bx, -0.6, 0.0, kGamma);
+
+  MhdFlux out{};
+  solver->flux(L, R, /*dir=*/0, out);
+  EXPECT_TRUE(finite_flux(out));
+  // The tangential field reverses across the fan; the rotational wave gives a
+  // nonzero tangential-field flux (it would be ~0 for a trivial average here).
+  EXPECT_GT(std::abs(out.by), 1e-3);
+}
+
+// Direction wiring: the dir=1 solve runs the same +x-normal core on the
+// (x<->y)-swapped state (shared rotate_in/out, also used by the device kernel).
+// For a uniform state the mass flux is rho*v_normal -- rho*vx for dir=0 and
+// rho*vy for dir=1 -- and the NORMAL magnetic flux vanishes in each direction
+// (F_Bx==0 for dir=0, F_By==0 for dir=1). These pin the rotation wiring without
+// relying on the subtler transverse-component algebra.
+TEST(HlldRiemann, DirectionRotationConsistency) {
+  auto solver = make_hlld();
+  ASSERT_NE(solver, nullptr);
+
+  const MhdState s =
+      conserved(1.2, 0.3, -0.15, 0.25, 0.9, 0.5, 0.45, -0.3, kSolverGamma);
+  MhdFlux fx{}, fy{};
+  solver->flux(s, s, /*dir=*/0, fx);
+  solver->flux(s, s, /*dir=*/1, fy);
+  EXPECT_NEAR(fx.rho, s.mx, kFluxTol);  // rho*vx
+  EXPECT_NEAR(fy.rho, s.my, kFluxTol);  // rho*vy
+  EXPECT_NEAR(fx.bx, 0.0, kFluxTol);    // dir=0 normal-field flux
+  EXPECT_NEAR(fy.by, 0.0, kFluxTol);    // dir=1 normal-field flux
+  EXPECT_TRUE(finite_flux(fx) && finite_flux(fy));
 }
 
 // Degenerate B -> 0 interface (pure hydro): the flux stays finite (no NaN).

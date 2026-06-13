@@ -28,7 +28,6 @@ intentionally distinct (see ``quasar.coil.io``).
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence, Union
@@ -38,6 +37,13 @@ import yaml
 from .. import _core
 from .._deck import require as _require, triple as _triple
 from .._deck import validate_evaluator_type as _validate_evaluator_type
+from .._deck import (
+    require_finite as _require_finite,
+    require_positive_finite as _require_positive_finite,
+    require_nonnegative_finite as _require_nonnegative_finite,
+    require_vec_finite as _require_vec_finite,
+    parse_side_map as _parse_side_map,
+)
 
 
 # Sanity ceilings on deck-supplied sizes that flow into device allocations.
@@ -50,35 +56,6 @@ MAX_PARTICLES = 1 << 31       # ~2.1e9 particles per species
 # bindings/python/bind_pic.cpp and the E/B split in quasar.pic._units must mirror
 # this set.
 FIELD_COMPONENTS = ("ex", "ey", "ez", "bx", "by", "bz")
-
-
-def _as_finite(value: float, context: str) -> float:
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{context} must be a finite number") from None
-    if not math.isfinite(v):
-        raise ValueError(f"{context} must be finite")
-    return v
-
-
-def _require_finite(value: float, context: str) -> None:
-    _as_finite(value, context)
-
-
-def _require_positive_finite(value: float, context: str) -> None:
-    if _as_finite(value, context) <= 0:
-        raise ValueError(f"{context} must be positive")
-
-
-def _require_nonnegative_finite(value: float, context: str) -> None:
-    if _as_finite(value, context) < 0:
-        raise ValueError(f"{context} must be >= 0")
-
-
-def _require_vec_finite(values: Sequence[float], context: str) -> None:
-    for i, value in enumerate(values):
-        _require_finite(value, f"{context}[{i}]")
 
 
 def _vec3(xyz: Sequence[float] | None,
@@ -642,23 +619,6 @@ def _parse_diagnostics(d: dict | None) -> Diagnostics:
         fields=list(d.get("fields", ["bz"])),
         per_species=bool(d.get("per_species", True)),
     )
-
-
-_SIDE_KEYS = ("x_lo", "x_hi", "y_lo", "y_hi")
-
-
-def _parse_side_map(spec, default: str, what: str) -> tuple[str, str, str, str]:
-    # Accepts a scalar (all sides), a 4-element list ([x_lo, x_hi, y_lo, y_hi]),
-    # or a dict keyed by side name.
-    if spec is None:
-        return (default, default, default, default)
-    if isinstance(spec, str):
-        return (spec, spec, spec, spec)
-    if isinstance(spec, (list, tuple)) and len(spec) == 4:
-        return (str(spec[0]), str(spec[1]), str(spec[2]), str(spec[3]))
-    if isinstance(spec, dict):
-        return tuple(str(spec.get(k, default)) for k in _SIDE_KEYS)  # type: ignore[return-value]
-    raise ValueError(f"{what} must be a string, 4-element list, or side-keyed map")
 
 
 def _parse_boundary(d: dict | None) -> BoundaryConfig:

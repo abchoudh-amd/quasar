@@ -7,7 +7,8 @@
 //
 // We work in PRIMITIVE variables w = (rho, vn, vt1, vt2, p, bt1, bt2), where for
 // dir=0 (x-normal): vn=vx, vt1=vy, vt2=vz, bt1=by, bt2=bz; for dir=1 (y-normal):
-// vn=vy, vt1=vx (sign-consistent rotation below), bt1=bx, bt2=bz. The normal
+// vn=vy, vt1=vz, vt2=vx, bt1=bz, bt2=bx (the cyclic (x,y,z)->(y,z,x) rotation
+// realized at lines 54/124, matching characteristic_projection.hpp). The normal
 // magnetic component B_n is held continuous (constrained transport) and is NOT
 // an independent wave in the 7-wave set.
 //

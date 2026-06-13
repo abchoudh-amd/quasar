@@ -51,11 +51,17 @@ __device__ inline void block_max_reduce(double* sdata, unsigned tid) {
   }
 }
 
-// Per-cell CFL signal speed max(|vx| + c_fast_x, |vy| + c_fast_y), reduced to one
-// partial max per block. Cells with non-positive / non-finite rho contribute 0
-// (parity with the host scan), as do out-of-range threads.
-__global__ void cfl_max_speed_kernel(
-    quasar::Grid2D g, int b0_active, Real gamma,
+// Per-cell CFL signal RATE (|vx| + c_fast_x)/dx + (|vy| + c_fast_y)/dy, reduced to
+// one partial max per block. The unsplit residual sums both directional flux
+// differences into a single dudt per RK stage, so the stable step is bounded by
+// the ADDITIVE multidimensional Courant condition dt*(Sx/dx + Sy/dy) <= C, not by
+// a per-direction max over min(dx,dy) (which is up to ~2x too permissive on an
+// isotropic grid). Reducing the per-cell rate Sx/dx + Sy/dy and returning
+// cfl/max_rate enforces the additive bound directly. Cells with non-positive /
+// non-finite rho contribute 0 (parity with the host scan), as do out-of-range
+// threads.
+__global__ void cfl_max_rate_kernel(
+    quasar::Grid2D g, int b0_active, Real gamma, Real inv_dx, Real inv_dy,
     const double* __restrict__ rho, const double* __restrict__ mx,
     const double* __restrict__ my, const double* __restrict__ mz,
     const double* __restrict__ energy, const double* __restrict__ bx,
@@ -87,9 +93,8 @@ __global__ void cfl_max_speed_kernel(
       const Real vy = std::abs(s.my * inv_rho);
       const Real cfx = fast_magnetosonic_speed(s, bg, 0, gamma);
       const Real cfy = fast_magnetosonic_speed(s, bg, 1, gamma);
-      const Real sx = vx + cfx;
-      const Real sy = vy + cfy;
-      local = (sx > sy) ? sx : sy;
+      // Additive multidimensional CFL rate: (|vx|+cfx)/dx + (|vy|+cfy)/dy.
+      local = (vx + cfx) * inv_dx + (vy + cfy) * inv_dy;
     }
   }
 
@@ -129,10 +134,12 @@ __global__ void ct_divb_linf_kernel(
 }
 
 // Finish a block-partials max on the host. Copies the partials to host and folds
-// them into a single scalar.
+// them into a single scalar. The host staging vector is thread_local so a
+// per-step reduction reuses it instead of allocating every call (it only grows).
 inline Real finish_host_max(const quasar::backend::DeviceBuffer<Real>& partials,
                             std::size_t n_blocks) {
-  std::vector<Real> host(n_blocks);
+  static thread_local std::vector<Real> host;
+  if (host.size() < n_blocks) host.resize(n_blocks);
   partials.copy_to_host(host.data(), n_blocks);
   Real m = Real{0};
   for (std::size_t b = 0; b < n_blocks; ++b) {
@@ -141,26 +148,43 @@ inline Real finish_host_max(const quasar::backend::DeviceBuffer<Real>& partials,
   return m;
 }
 
+// Ensure `scratch` holds at least n_blocks elements; (re)allocate only when it is
+// too small. The reduction kernels write every slot before reading, so an
+// uninitialized (possibly larger) buffer is safe to reuse across calls.
+inline void ensure_scratch(quasar::backend::DeviceBuffer<Real>& scratch,
+                           std::size_t n_blocks) {
+  if (scratch.size() < n_blocks) {
+    scratch = quasar::backend::DeviceBuffer<Real>{n_blocks, quasar::backend::uninitialized};
+  }
+}
+
 }  // namespace
 
 namespace quasar::mhd {
 
-void launch_mhd_cfl_max_speed(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                              Real gamma, Real* host_max_speed, stream_t stream) {
+void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+                             Real gamma, Real* host_max_rate, stream_t stream) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
 
-  backend::DeviceBuffer<Real> block_partials{n_blocks, backend::uninitialized};
+  // Persistent per-thread scratch: the auto-dt loop calls this every step, so
+  // reuse the block-partials buffer across calls instead of a hipMalloc/hipFree
+  // pair per step (the kernel writes every block slot before any read).
+  static thread_local backend::DeviceBuffer<Real> block_partials;
+  ensure_scratch(block_partials, n_blocks);
+
+  const Real inv_dx = Real{1} / g.dx();
+  const Real inv_dy = Real{1} / g.dy();
 
   const int b0_active = b0.active ? 1 : 0;
   const Real* b0x = b0.active ? b0.b0x_face.device_ptr() : nullptr;
   const Real* b0y = b0.active ? b0.b0y_face.device_ptr() : nullptr;
   const Real* b0z = b0.active ? b0.b0z_cell.device_ptr() : nullptr;
 
-  hipLaunchKernelGGL(cfl_max_speed_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, b0_active, gamma,
+  hipLaunchKernelGGL(cfl_max_rate_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
+                     g, b0_active, gamma, inv_dx, inv_dy,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),
@@ -168,7 +192,7 @@ void launch_mhd_cfl_max_speed(const MhdField2D<Real>& u, const MhdBackgroundFiel
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_max_speed = finish_host_max(block_partials, n_blocks);
+  *host_max_rate = finish_host_max(block_partials, n_blocks);
 }
 
 void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u, Real* host_linf, stream_t stream) {
@@ -177,7 +201,11 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u, Real* host_linf, stream_
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
 
-  backend::DeviceBuffer<Real> block_partials{n_blocks, backend::uninitialized};
+  // Persistent per-thread scratch, same rationale as the CFL reduction (this runs
+  // on the divB-diagnostic cadence rather than every step, but the per-call
+  // allocation is equally avoidable).
+  static thread_local backend::DeviceBuffer<Real> block_partials;
+  ensure_scratch(block_partials, n_blocks);
 
   const Real inv_dx = Real{1} / g.dx();
   const Real inv_dy = Real{1} / g.dy();

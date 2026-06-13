@@ -87,10 +87,18 @@ class MhdSolver2D {
 
   // One SSP-RK3 step; rejects a dt above cfl_limit() (an over-CFL step diverges).
   void step(Real dt);
+  // One SSP-RK3 step WITHOUT the CFL re-check. For the auto-dt run loop, which
+  // obtains dt from cfl_limit() immediately before stepping: step() would
+  // recompute the identical full-grid device reduction inside check_cfl(), so
+  // the caller that already holds a freshly-computed limit uses this to avoid
+  // the redundant reduction. dt must still be positive.
+  void step_unchecked(Real dt);
   // Loop step() to t_end, CFL-checked each step.
   void advance(Real t_end, Real dt);
 
-  // cfl * min(dx,dy) / max_cells(|v_dir| + c_fast,dir). Cylindrical uses (dr,dz).
+  // cfl / max_cells((|v_x|+c_fast,x)/dx + (|v_y|+c_fast,y)/dy): the additive
+  // multidimensional Courant limit for the unsplit residual. Cylindrical uses
+  // (dr,dz) = (dx,dy).
   Real cfl_limit() const;
 
   // Max |div B| over the interior; delegates to the CT scheme diagnostic.
