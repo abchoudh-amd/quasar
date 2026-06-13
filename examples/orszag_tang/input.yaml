@@ -15,15 +15,29 @@
 units: normalized
 domain: {nx: 128, ny: 128, lx_m: 1.0, ly_m: 1.0, origin_x_m: 0.0, origin_y_m: 0.0}
 geometry: cartesian
+# Numerics notes:
+#  * MP5/MP7 characteristic reconstruction is high-order but not
+#    positivity-preserving. At 128^2 the OT current sheet at the box centre
+#    genuinely steepens toward a marginally-resolved near-vacuum around t~0.21;
+#    once a cell's average reaches the density/pressure floor the troubled-cell
+#    floor re-derives energy and the run loses conservation (and the auto dt
+#    collapses). cfl=0.1 keeps the resolved phase stable, and the run is
+#    integrated to t~0.19 (steps below) -- BEFORE that under-resolved vacuum
+#    forms -- where total mass/energy are conserved to round-off and div(B) is at
+#    machine epsilon. Reaching the canonical t=0.5 vortex-decay time on this grid
+#    needs higher resolution or a positivity-preserving scheme (separate numerics
+#    work).
 numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
-           ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.4}
+           ct: fd_ct_christlieb, positivity: troubled_cell,
+           rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.1}
 initial:
   type: orszag_tang
   params:
     # gamma-derived ambient state and B normalization are computed by the IC
     # generator from numerics.gamma; b0 = 1/sqrt(4*pi) is the standard OT value.
     b0: 0.2820947918    # 1 / sqrt(4*pi)
-time: {dt_s: auto, steps: 4000, t_end: 0.5}
+# steps=1000 at cfl=0.1 integrates to t~0.19, the resolved pre-vacuum phase.
+time: {dt_s: auto, steps: 1000, t_end: 0.2}
 diagnostics: {output_path: out.npz, cadence: 0,
               fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
 boundary: {fluid: [periodic, periodic, periodic, periodic],

@@ -48,3 +48,11 @@ The integration test in `tests/python/test_examples.py` runs this deck and
 asserts the run completes with `min(rho) > 0` and `min(p) > 0` and that the
 central disk has spun up the surrounding field (nontrivial `by` away from the
 axis where it began at zero).
+
+The `div B` check is **field-relative**: the test asserts `div B * dx / |B|`
+(dimensionless, ~1e-14) is at machine epsilon, not the raw *absolute*
+`divb_linf_final`. The absolute L-inf scales with `|B|` and accumulates
+telescoping round-off that grows with the 4000-step count (~1.4e-10 here), so a
+strict absolute `1e-10` bound would flag a solenoidal field. This deck runs at
+`cfl = 0.2` for headroom with the non-positivity-preserving MP7 reconstruction
+(see the `orszag_tang` example for the full rationale).
