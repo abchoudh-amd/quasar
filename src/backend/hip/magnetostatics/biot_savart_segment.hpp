@@ -44,6 +44,41 @@ Vec3T<T> segment_B(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
   return coeff * cross(L, ra);
 }
 
+// Closed-form magnetic vector potential A (Coulomb gauge) of one straight
+// filamentary segment a->b carrying current I, evaluated at observation point p,
+// templated on precision T. This is the A such that B = curl A reproduces
+// segment_B.
+//
+// Derivation (line integral of the current element along the straight segment):
+//   A(p) = (mu0 I / 4 pi) * t_hat * ln( (Ra + Rb + L) / (Ra + Rb - L) )
+// with ra = p - a, rb = p - b, L = b - a, Ra = |ra|, Rb = |rb|,
+// Lmag = |L|, and t_hat = L / Lmag the segment unit tangent.
+//
+// Singularity: by the triangle inequality Ra + Rb >= Lmag with equality only on
+// the segment itself, so the denominator (Ra + Rb - Lmag) vanishes exactly where
+// the filament sits (the physical log divergence). Guard the segment length on an
+// absolute floor (degenerate zero-length segment) and the cancellation-prone
+// (Ra + Rb - Lmag) relative to (Ra + Rb), mirroring the scale-aware guards in
+// segment_B.
+template <class T>
+__device__ __forceinline__
+Vec3T<T> segment_A(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p, T I) {
+  const Vec3T<T> ra   = p - a;
+  const Vec3T<T> rb   = p - b;
+  const T        Ra   = length(ra);
+  const T        Rb   = length(rb);
+  const Vec3T<T> L    = b - a;
+  const T        Lmag = length(L);
+  const T        sum  = Ra + Rb;
+  const T        den  = sum - Lmag;  // >= 0 by triangle inequality
+  if (Lmag < kEps_v<T> || den < kRelEps_v<T> * sum) {
+    return Vec3T<T>{T{0}, T{0}, T{0}};
+  }
+  // (mu0 I / 4 pi) * ln((sum + Lmag)/(sum - Lmag)) / Lmag, then * L gives t_hat.
+  const T coeff = mu0_over_4pi_v<T> * I * log((sum + Lmag) / den) / Lmag;
+  return coeff * L;
+}
+
 // Closed-form Jacobian of segment_B with respect to the observation point p,
 // templated on precision T. Returns the 3x3 matrix grad B with
 // (grad B)_{ij} = d B_i / d p_j.

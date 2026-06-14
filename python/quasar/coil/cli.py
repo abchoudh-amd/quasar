@@ -23,13 +23,19 @@ from .._paths import confine_output_path
 from . import io as coil_io
 
 
+def _needs_A(deck: coil_io.CoilDeck) -> bool:
+    """True if any requested output field is derived from the vector potential A."""
+    return bool({"A_xyz", "A_xyz_grid"} & set(deck.output.fields))
+
+
 def _build_payload(
-    deck: coil_io.CoilDeck, B: np.ndarray
+    deck: coil_io.CoilDeck, B: np.ndarray, A: np.ndarray | None = None
 ) -> tuple[dict[str, np.ndarray], set[str]]:
-    """Assemble the .npz payload from the evaluated B field (shape (M, 3)) and the
-    deck's requested output fields. Returns the payload plus the resolved field set
-    (so callers don't recompute it). Pure (no I/O, no kernel) so the field-shaping
-    and the B_xyz_grid/observation-kind guard are unit-testable without a GPU."""
+    """Assemble the .npz payload from the evaluated B field (shape (M, 3)), the
+    optional vector potential A (shape (M, 3)), and the deck's requested output
+    fields. Returns the payload plus the resolved field set (so callers don't
+    recompute it). Pure (no I/O, no kernel) so the field-shaping and the
+    *_grid/observation-kind guards are unit-testable without a GPU."""
     payload: dict[str, np.ndarray] = {}
     fields = set(deck.output.fields)
 
@@ -43,6 +49,19 @@ def _build_payload(
                 "field B_xyz_grid requires observation.type == 'grid'")
         nx, ny, nz = deck.observation.dims
         payload["B_xyz_grid"] = B.reshape(nz, ny, nx, 3)
+
+    if {"A_xyz", "A_xyz_grid"} & fields:
+        if A is None:
+            raise ValueError(
+                "vector-potential output requested but A was not evaluated")
+        if "A_xyz" in fields:
+            payload["A_xyz"] = A
+        if "A_xyz_grid" in fields:
+            if deck.observation.kind != "grid":
+                raise ValueError(
+                    "field A_xyz_grid requires observation.type == 'grid'")
+            nx, ny, nz = deck.observation.dims
+            payload["A_xyz_grid"] = A.reshape(nz, ny, nx, 3)
 
     payload["dims"] = np.asarray(deck.observation.dims, dtype=np.int64)
     payload["observation_kind"] = np.asarray(
@@ -61,8 +80,12 @@ def _do_run(args: argparse.Namespace) -> int:
     evaluator = _ms.create_field_evaluator(deck.evaluator_type)
     B = evaluator.evaluate_B(deck.conductors, deck.observation.points)
     # B is shape (M, 3).
+    # Vector potential A (B = curl A) only when an A_* field is requested; the
+    # MHD coil-seeded IC differences A on a grid for a divergence-free seed.
+    A = (evaluator.evaluate_A(deck.conductors, deck.observation.points)
+         if _needs_A(deck) else None)
 
-    payload, fields = _build_payload(deck, B)
+    payload, fields = _build_payload(deck, B, A)
 
     # Confine the deck-supplied output path to the input deck's directory so a
     # stray absolute path or "../" cannot write outside it.

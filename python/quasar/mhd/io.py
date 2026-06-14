@@ -58,7 +58,8 @@ MAX_GRID_CELLS = 1 << 30      # ~1.07e9 cells total
 
 # Canonical initial-condition tokens (the SINGLE source of truth, mirrored by the
 # example decks). Validation rejects any initial.type not in this set.
-INITIAL_TYPES = ("brio_wu", "alfven_wave", "orszag_tang", "blast", "rotor")
+INITIAL_TYPES = ("brio_wu", "alfven_wave", "orszag_tang", "blast", "rotor",
+                 "confined_blob")
 
 # Conserved-state components written to / read from the solver and the .npz.
 STATE_COMPONENTS = ("rho", "mx", "my", "mz", "energy", "bx", "by", "bz")
@@ -144,6 +145,13 @@ class BackgroundConfig:
     bz0: float = 0.0
     params: dict = field(default_factory=dict)
     file: Union[str, None] = None
+    # Coil vector-potential mode: an npz with the cell-corner 'A_xyz_grid' (from
+    # the coil CLI). The in-plane B0 is the discrete curl of the out-of-plane A,
+    # so B0 is exactly divergence-free; the uniform out-of-plane bz0 is added as
+    # the toroidal component. This is the one supported NON-UNIFORM background: a
+    # curl-free (vacuum coil) field carries no net Maxwell self-force, so the
+    # field-split conservative bookkeeping stays valid without static sources.
+    a_file: Union[str, None] = None
 
 
 @dataclass
@@ -292,6 +300,12 @@ class MhdDeck:
         _require_finite(bg.bz0, "background_field.bz0")
         if bg.file is not None and not str(bg.file).strip():
             raise ValueError("background_field.file must be a non-empty path")
+        if bg.a_file is not None and not str(bg.a_file).strip():
+            raise ValueError("background_field.a_file must be a non-empty path")
+        if bg.file is not None and bg.a_file is not None:
+            raise ValueError(
+                "background_field: set at most one of 'file' (staggered B0 arrays) "
+                "or 'a_file' (coil vector-potential A); they are mutually exclusive")
         # An ABSOLUTE file path's existence is knowable now (independent of the
         # deck directory), so reject an enabled background whose only source is a
         # non-existent absolute file at parse time -- an enabled block must name a
@@ -299,8 +313,10 @@ class MhdDeck:
         # which is only known after load(); its existence + array-shape + div-free
         # checks happen in build_background_field(deck, nghost) once the solver's
         # ghost width and storage layout are available.
-        if bg.file is not None:
-            _file_path = Path(str(bg.file))
+        for _key, _val in (("file", bg.file), ("a_file", bg.a_file)):
+            if _val is None:
+                continue
+            _file_path = Path(str(_val))
             if _file_path.is_absolute():
                 try:
                     _exists = _file_path.is_file()
@@ -308,7 +324,7 @@ class MhdDeck:
                     _exists = False  # unreadable / inaccessible path == not usable
                 if not _exists:
                     raise ValueError(
-                        f"background_field.file {bg.file!r} does not exist")
+                        f"background_field.{_key} {_val!r} does not exist")
 
     def _validate_cylindrical(self) -> None:
         # The on-axis (r=0) closure assumes the radial domain starts exactly at
@@ -400,6 +416,7 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
     if d is None:
         return BackgroundConfig()
     file_raw = d.get("file")
+    a_file_raw = d.get("a_file")
     return BackgroundConfig(
         enabled=bool(d.get("enabled", False)),
         profile=str(d.get("profile", "uniform")),
@@ -408,6 +425,7 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
         bz0=float(d.get("bz0", 0.0)),
         params=dict(d.get("params", {}) or {}),
         file=None if file_raw is None else str(file_raw),
+        a_file=None if a_file_raw is None else str(a_file_raw),
     )
 
 
@@ -510,6 +528,7 @@ def build_initial_state(deck: MhdDeck, nghost: int) -> dict:
         "orszag_tang": _ic_orszag_tang,
         "blast": _ic_blast,
         "rotor": _ic_rotor,
+        "confined_blob": _ic_confined_blob,
     }
     builder = builders[deck.initial.type]
     return builder(deck, nghost)
@@ -563,7 +582,13 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     dx = deck.domain.lx_m / nx
     dy = deck.domain.ly_m / ny
 
-    if bg.file is not None:
+    # The coil A-file mode builds a NON-UNIFORM but curl-free B0 from a vector
+    # potential; it is solenoidal by construction and skips the uniformity check
+    # (justified below). Every other mode produces a uniform field.
+    coil_mode = bg.a_file is not None
+    if coil_mode:
+        b0x, b0y, b0z = _background_from_a_file(deck, nghost, shape)
+    elif bg.file is not None:
         b0x, b0y, b0z = _background_from_file(bg.file, deck.source_dir, shape,
                                               storage)
     else:
@@ -587,25 +612,105 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     # CONSTANT B0: a non-uniform background carries a magnetic-pressure gradient
     # grad(0.5|B0|^2) and tension, plus a grad(B0).F_b energy term, which would
     # need explicit static source terms in the momentum/energy residual to stay
-    # conservative. Those source terms are not implemented, so a non-uniform B0
-    # would silently break energy/momentum conservation. Reject it here with a
-    # clear error rather than run an unconservative split. (Uniform guide fields,
-    # the supported case, pass trivially.)
-    for name, comp in (("b0x", b0x), ("b0y", b0y), ("b0z", b0z)):
-        cmin = float(np.min(comp))
-        cmax = float(np.max(comp))
-        spread = cmax - cmin
-        tol = 1.0e-12 * max(1.0, abs(cmin), abs(cmax))
-        if spread > tol:
-            raise ValueError(
-                f"background_field component {name} is not spatially uniform "
-                f"(range [{cmin:.3e}, {cmax:.3e}]). Only a spatially-uniform "
-                f"background field is supported: the field-split solver carries no "
-                f"source terms for a non-uniform B0, so a varying background would "
-                f"violate energy/momentum conservation. Supply a constant vector "
-                f"(bx0/by0/bz0) or a file whose arrays are constant per component.")
+    # conservative.
+    #
+    # EXCEPTION (coil A-file mode): a CURL-FREE vacuum coil field carries no net
+    # Maxwell self-force -- div(B0 B0 - 0.5|B0|^2 I) = (curl B0) x B0 = 0 -- so the
+    # missing static momentum source is exactly zero (not merely small) in the
+    # continuum, and the energy cross-term grad(B0).F_b integrates to a boundary
+    # flux for the smooth coil field. The split therefore stays conservative to
+    # truncation order, so the uniformity guard is skipped for this mode. (It is a
+    # vacuum field threading the bore, the intended physical use.)
+    if not coil_mode:
+        for name, comp in (("b0x", b0x), ("b0y", b0y), ("b0z", b0z)):
+            cmin = float(np.min(comp))
+            cmax = float(np.max(comp))
+            spread = cmax - cmin
+            tol = 1.0e-12 * max(1.0, abs(cmin), abs(cmax))
+            if spread > tol:
+                raise ValueError(
+                    f"background_field component {name} is not spatially uniform "
+                    f"(range [{cmin:.3e}, {cmax:.3e}]). Only a spatially-uniform "
+                    f"background field is supported: the field-split solver carries "
+                    f"no source terms for a non-uniform B0, so a varying background "
+                    f"would violate energy/momentum conservation. Supply a constant "
+                    f"vector (bx0/by0/bz0), a file whose arrays are constant per "
+                    f"component, or a curl-free coil field via a_file.")
 
     return {"b0x": b0x.reshape(-1), "b0y": b0y.reshape(-1), "b0z": b0z.reshape(-1)}
+
+
+def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
+    """Build a non-uniform, divergence-free B0 from a coil vector-potential npz.
+
+    The coil CLI writes ``A_xyz_grid`` on the cell-corner grid of the FULL padded
+    domain (so B0 is defined in the ghost layers too -- B0 is static and never
+    ghost-refilled, and the reconstruction stencil reaches `nghost` cells past the
+    interior). With the lab Y=0 slice and the mapping MHD-x = lab-X, MHD-y = lab-Z,
+    out-of-plane = lab-Y, the saved array has shape ``(Ny+1, 1, Nx+1, 3)`` where
+    ``Nx = nx + 2g``, ``Ny = ny + 2g`` are the padded cell counts. The in-plane B0
+    is the discrete curl of the corner lab-Y component A[j, i]:
+
+        b0x_face(i,j) = -(A[j+1,i] - A[j,i]) / dy      # B_R on the left face
+        b0y_face(i,j) =  (A[j,i+1] - A[j,i]) / dx      # B_z on the bottom face
+
+    spanning the full padded face layout, so the cell-centered discrete divergence
+    telescopes to zero everywhere. The uniform out-of-plane ``bz0`` is added as the
+    toroidal component. ``params.b_scale`` (default 1) scales the loaded A.
+    """
+    bg = deck.background
+    nx, ny = deck.domain.nx, deck.domain.ny
+    g = nghost
+    height, pitch = shape                     # (ny+2g, nx+2g)
+    dx = deck.domain.lx_m / nx
+    dy = deck.domain.ly_m / ny
+
+    file_rel = str(bg.a_file)
+    base = (Path(deck.source_dir).resolve()
+            if deck.source_dir is not None else Path.cwd())
+    file_path = Path(file_rel)
+    path = file_path.resolve() if file_path.is_absolute() \
+        else (base / file_rel).resolve()
+    if not file_path.is_absolute() and not path.is_relative_to(base):
+        raise ValueError(
+            f"background_field.a_file {file_rel!r} escapes the deck directory {base}")
+    if not path.is_file():
+        raise ValueError(
+            f"background_field.a_file {file_rel!r} not found at {path}")
+    try:
+        loaded = np.load(path, allow_pickle=False)
+    except Exception as exc:
+        raise ValueError(
+            f"background_field.a_file {file_rel!r} could not be read as an npz: "
+            f"{exc}") from None
+    if "A_xyz_grid" not in loaded:
+        raise ValueError(
+            f"background_field.a_file {file_rel!r} is missing array 'A_xyz_grid' "
+            "(run the coil CLI with output.fields including 'A_xyz_grid')")
+    a = np.asarray(loaded["A_xyz_grid"], dtype=np.float64)
+    expected = (height + 1, 1, pitch + 1, 3)
+    if a.shape != expected:
+        raise ValueError(
+            f"background_field.a_file {file_rel!r} array 'A_xyz_grid' has shape "
+            f"{a.shape}; expected {expected} (the (Nx+1)x(Ny+1) corner grid over "
+            f"the PADDED domain Nx=nx+2g={pitch}, Ny=ny+2g={height} on the lab Y=0 "
+            "slice, coil resolution [Nx+1, 1, Ny+1])")
+    a_ji = a[:, 0, :, 1]                       # (height+1, pitch+1), [j, i]
+    if not np.all(np.isfinite(a_ji)):
+        raise ValueError(
+            f"background_field.a_file {file_rel!r} A_xyz_grid has non-finite values")
+    b_scale = float(bg.params.get("b_scale", 1.0))
+    a_ji = a_ji * b_scale
+
+    b0x = -(a_ji[1:, :] - a_ji[:-1, :]) / dy  # (height, pitch+1) -> trim to faces
+    b0y = (a_ji[:, 1:] - a_ji[:, :-1]) / dx   # (height+1, pitch) -> trim to faces
+    # Face arrays are stored on the (height, pitch) cell layout: bx_face uses the
+    # left face (drop the extra right column), by_face the bottom face (drop the
+    # extra top row).
+    b0x = b0x[:, :pitch].copy()
+    b0y = b0y[:height, :].copy()
+    b0z = np.full(shape, float(bg.bz0))
+    return b0x, b0y, b0z
 
 
 def _background_from_profile(deck: MhdDeck, nghost: int, shape):
@@ -916,5 +1021,50 @@ def _ic_rotor(deck: MhdDeck, nghost: int) -> dict:
     by = np.full(shape, by0)
     bz = np.full(shape, bz0)
     _ = r_safe  # documented guard; speed uses rx/ry directly so no division.
+    _set_primitive(state, rho, vx, vy, vz, pr, bx, by, bz, gamma)
+    return _pack(state)
+
+
+def _ic_confined_blob(deck: MhdDeck, nghost: int) -> dict:
+    """Confined plasma blob on a uniform out-of-plane (toroidal) field.
+
+    A denser, higher-pressure plasma inside a centered square bore, ambient
+    outside, initially at rest. The IN-PLANE perturbation field b is zero (so the
+    constrained-transport div(b) starts and stays at exactly zero under any
+    boundary closure); the confining POLOIDAL field is supplied separately as a
+    static, non-uniform field-split background B0 (see ``background_field`` with a
+    coil ``A`` file). The out-of-plane ``bz`` is a uniform toroidal guide field
+    carried in the evolving state (uniform, so any open BC preserves it).
+
+    params:
+      bz        : uniform out-of-plane (toroidal) field (default 0.1).
+      rho_in/out, p_in/out : confined-blob vs ambient density/pressure.
+      blob_half : half-width (m) of the centered square plasma blob.
+    """
+    p = deck.initial.params
+    gamma = deck.numerics.gamma
+    xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
+    shape = xc.shape
+    state = _empty_state(shape)
+
+    rho_in = float(p.get("rho_in", 10.0))
+    rho_out = float(p.get("rho_out", 1.0))
+    p_in = float(p.get("p_in", 1.0))
+    p_out = float(p.get("p_out", 0.1))
+    cx = deck.domain.origin_x_m + 0.5 * deck.domain.lx_m
+    cy = deck.domain.origin_y_m + 0.5 * deck.domain.ly_m
+    half = float(p.get("blob_half", 0.25 * min(deck.domain.lx_m,
+                                               deck.domain.ly_m)))
+    inside = (np.abs(xc - cx) <= half) & (np.abs(yc - cy) <= half)
+    rho = np.where(inside, rho_in, rho_out)
+    pr = np.where(inside, p_in, p_out)
+    vx = np.zeros(shape)
+    vy = np.zeros(shape)
+    vz = np.zeros(shape)
+    # In-plane perturbation b = 0; uniform toroidal guide field in the state.
+    bx = np.zeros(shape)
+    by = np.zeros(shape)
+    bz = np.full(shape, float(p.get("bz", 0.1)))
+
     _set_primitive(state, rho, vx, vy, vz, pr, bx, by, bz, gamma)
     return _pack(state)

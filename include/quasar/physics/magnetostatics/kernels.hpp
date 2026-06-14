@@ -35,6 +35,25 @@ void launch_biot_savart_B_f32(
     float* Bx, float* By, float* Bz,
     quasar_ms_stream_t stream);
 
+// Vector potential A (B = curl A). Defined in
+// src/backend/hip/magnetostatics/biot_savart_hip.hip alongside the B launchers;
+// the output SoA Ax/Ay/Az mirrors the B entry points.
+void launch_biot_savart_A_f64(
+    const double* ax, const double* ay, const double* az,
+    const double* bx, const double* by, const double* bz,
+    const double* I_, int N,
+    const double* px, const double* py, const double* pz, int M,
+    double* Ax, double* Ay, double* Az,
+    quasar_ms_stream_t stream);
+
+void launch_biot_savart_A_f32(
+    const float* ax, const float* ay, const float* az,
+    const float* bx, const float* by, const float* bz,
+    const float* I_, int N,
+    const float* px, const float* py, const float* pz, int M,
+    float* Ax, float* Ay, float* Az,
+    quasar_ms_stream_t stream);
+
 // Defined in src/backend/hip/magnetostatics/biot_savart_grad_hip.hip.
 void launch_biot_savart_gradB_f64(
     const double* ax, const double* ay, const double* az,

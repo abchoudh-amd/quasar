@@ -236,7 +236,15 @@ PYBIND11_MODULE(_core, m) {
               const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
              return grad_field_to_numpy(self.evaluate_grad_B(src, obs));
            },
-           py::arg("source"), py::arg("observations"));
+           py::arg("source"), py::arg("observations"))
+      .def("evaluate_A",
+           [](const IFieldEvaluator& self,
+              const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
+             return field_to_numpy(self.evaluate_A(src, obs));
+           },
+           py::arg("source"), py::arg("observations"),
+           "Magnetic vector potential A (B = curl A), NumPy (N, 3). Raises if "
+           "the evaluator does not model A.");
 
   py::class_<BiotSavartEvaluator, IFieldEvaluator>(ms, "BiotSavartEvaluator")
       .def(py::init<>())

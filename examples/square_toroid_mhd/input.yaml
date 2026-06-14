@@ -1,0 +1,41 @@
+# Ideal-MHD: confined plasma blob in a square-toroid bore (poloidal slice).
+#
+# MHD x = lab X = major radius R; MHD y = lab Z (cross-section vertical);
+# out-of-plane (bz) = lab Y, the toroidal guide-field direction.
+#
+# The confining POLOIDAL field is a field-split background B0 (B = B0 + b)
+# built from coil.npz: the lab-Y vector potential A on the padded cell-corner
+# grid, differenced to a face-staggered
+#   b0x_face(i,j) = -(A[j+1,i]-A[j,i])/dy   (B_R, left face)
+#   b0y_face(i,j) =  (A[j,i+1]-A[j,i])/dx   (B_z, bottom face)
+# which is divergence-free by construction and static (never ghost-refilled,
+# so no open BC can corrupt it). The evolving perturbation b starts at zero,
+# so the constrained-transport div(b) stays exactly zero. bz is a uniform
+# toroidal guide field (0.1); B_phi ~ mu0 N I/(2 pi R) ~ 0.040 T from the TF coils.
+#
+# Run coil.yaml FIRST to produce coil.npz, then this deck.
+# Regenerate: python examples/square_toroid_mhd/build_yaml.py
+
+units: normalized
+domain: {nx: 128, ny: 128, lx_m: 0.270000, ly_m: 0.270000, origin_x_m: 0.865000, origin_y_m: -0.135000}
+geometry: cartesian
+numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}
+initial:
+  type: confined_blob
+  params:
+    bz: 0.1             # uniform toroidal guide field (in the state)
+    rho_in: 10.0
+    rho_out: 1.0
+    p_in: 1.0
+    p_out: 0.1
+    blob_half: 0.067500   # half-width of the centered plasma blob
+background_field:
+  enabled: true
+  a_file: coil.npz       # padded corner-grid A_xyz_grid from coil.yaml
+  bz0: 0.0               # toroidal field lives in the state (initial.bz)
+  params: {b_scale: 1.0}   # SI A (T*m) -> normalized field units
+time: {dt_s: auto, steps: 400}
+diagnostics: {output_path: out.npz, cadence: 0,
+              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
+boundary: {fluid: [wall, wall, wall, wall],
+           field: [wall, wall, wall, wall]}

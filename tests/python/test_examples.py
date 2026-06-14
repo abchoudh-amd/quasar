@@ -1524,5 +1524,74 @@ class MhdGuideFieldExampleTest(unittest.TestCase):
                         f"mean(state_bx) ~ B0 (see class docstring).")
 
 
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class SquareToroidMhdExampleTest(unittest.TestCase):
+    """Coil-seeded ideal-MHD in a square-toroid bore, ``examples/square_toroid_mhd``
+    (initial.type ``confined_blob`` + field-split coil background).
+
+    Two-stage run: the coil CLI evaluates the vector potential A on the PADDED
+    cell-corner grid (``coil.npz``); the MHD ``background_field.a_file`` loader
+    differences A into a discretely divergence-free, static, NON-UNIFORM poloidal
+    background B0, and the evolving perturbation b starts at zero. A confined
+    plasma blob sits on a uniform toroidal guide field bz carried in the state.
+
+    Assertions:
+      * The SEEDED div(B) (``divb_linf[0]``, the perturbation b at t=0) is exactly
+        at round-off -- b == 0 is trivially solenoidal, and B0 is curl-of-A
+        div-free, so the field-split seed is divergence-free by construction.
+      * The run is finite with strictly positive density.
+      * The toroidal guide field bz ~ 0.1 is carried.
+      * The plasma responds to the field-split background: the in-plane
+        perturbation grows from zero (showing B0 exerts a real Lorentz force).
+      * The final div(B) diagnostic is finite. We do NOT assert it at round-off:
+        like the guide-field example, ``divergence_b_max`` ghost-fills with the
+        open BC before measuring, so the boundary ring of the perturbation against
+        the static B0 edge shows a nonzero divB there. That ring is a measurement
+        artifact -- it does not propagate inward (the CT update keeps the strict
+        interior div(b) at round-off) and the outflow boundary lets b leave."""
+
+    def test_end_to_end_field_split_coil_background(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = _copy_example("square_toroid_mhd", Path(tmp))
+            # Stage 1: coil vector potential A -> coil.npz (sibling of the decks).
+            _run_cli(workdir / "coil.yaml")
+            self.assertTrue((workdir / "coil.npz").is_file(),
+                            msg="coil CLI did not produce coil.npz")
+            # Stage 2: MHD run (reads coil.npz via background_field.a_file).
+            _run_mhd_cli(workdir / "input.yaml")
+
+            data = np.load(workdir / "out.npz", allow_pickle=False)
+            _mhd_no_nans(self, data)
+
+            # Seeded div(B) at round-off (field-split: b == 0, B0 = curl A).
+            divb_seed = float(np.asarray(data["divb_linf"]).reshape(-1)[0])
+            self.assertLess(divb_seed, _DIVB_EPS,
+                            msg=f"seeded div(B) {divb_seed} not at round-off")
+
+            nx = int(_mhd_scalar(data, "nx"))
+            ny = int(_mhd_scalar(data, "ny"))
+            rho = _mhd_field(data, "state_rho", nx, ny)
+            self.assertTrue(np.all(rho > 0.0),
+                            msg=f"density not strictly positive: min={rho.min()}")
+
+            # Toroidal guide field bz ~ 0.1 carried in the state.
+            bz = _mhd_field(data, "state_bz", nx, ny)
+            self.assertAlmostEqual(float(np.mean(bz)), 0.1, places=2,
+                                   msg=f"toroidal bz mean {np.mean(bz)} != 0.1")
+
+            # The plasma responds to the field-split background: the in-plane
+            # perturbation b grew from zero (B0 exerts a Lorentz force).
+            bx = _mhd_field(data, "state_bx", nx, ny)
+            by = _mhd_field(data, "state_by", nx, ny)
+            bpol = float(np.max(np.sqrt(bx * bx + by * by)))
+            self.assertGreater(bpol, 0.0,
+                               msg="in-plane perturbation never grew (no B0 force?)")
+
+            # Final div(B) diagnostic is finite (boundary-ring artifact tolerated).
+            divb_final = _mhd_scalar(data, "divb_linf_final")
+            self.assertTrue(np.isfinite(divb_final),
+                            msg=f"divb_linf_final not finite: {divb_final}")
+
+
 if __name__ == "__main__":
     unittest.main()

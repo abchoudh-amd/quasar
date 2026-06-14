@@ -63,6 +63,22 @@ void dispatch_launch_B(const T* ax, const T* ay, const T* az,
 }
 
 template <class T>
+void dispatch_launch_A(const T* ax, const T* ay, const T* az,
+                       const T* bx, const T* by, const T* bz,
+                       const T* I_, int N,
+                       const T* px, const T* py, const T* pz, int M,
+                       T* Ax, T* Ay, T* Az,
+                       stream_t stream) {
+  if constexpr (std::is_same_v<T, double>) {
+    ::launch_biot_savart_A_f64(ax, ay, az, bx, by, bz, I_, N,
+                                px, py, pz, M, Ax, Ay, Az, stream);
+  } else {
+    ::launch_biot_savart_A_f32(ax, ay, az, bx, by, bz, I_, N,
+                                px, py, pz, M, Ax, Ay, Az, stream);
+  }
+}
+
+template <class T>
 void dispatch_launch_gradB(const T* ax, const T* ay, const T* az,
                            const T* bx, const T* by, const T* bz,
                            const T* I_, int N,
@@ -173,6 +189,54 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
   return result;
 }
 
+// Vector potential A: structurally identical to evaluate_B_impl (Vec3 SoA
+// output), differing only in the launched kernel.
+template <class T>
+Field<Vec3T<T>> evaluate_A_impl(const BiotSavartConfig&  cfg,
+                                const ConductorSystem&    cs,
+                                const PointCloud&         obs) {
+  using ::quasar::backend::DeviceBuffer;
+
+  const SegmentSoA& seg = cs.segments_soa();
+  const PointSoA    pts = obs.to_point_soa();
+  const int N = static_cast<int>(seg.n_segments());
+  const int M = static_cast<int>(pts.n_points());
+
+  Field<Vec3T<T>> result(static_cast<std::size_t>(M));
+  if (N == 0 || M == 0) {
+    for (std::size_t i = 0; i < result.size(); ++i) {
+      result[i] = Vec3T<T>{T{0}, T{0}, T{0}};
+    }
+    return result;
+  }
+
+  const UploadedInputs<T> in{seg, pts, cfg.stream};
+  // The kernel writes every observation-point entry, so skip the zero-fill.
+  DeviceBuffer<T> d_Ax(M, ::quasar::backend::uninitialized);
+  DeviceBuffer<T> d_Ay(M, ::quasar::backend::uninitialized);
+  DeviceBuffer<T> d_Az(M, ::quasar::backend::uninitialized);
+
+  dispatch_launch_A<T>(
+      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
+      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
+      in.I.device_ptr(), N,
+      in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
+      d_Ax.device_ptr(), d_Ay.device_ptr(), d_Az.device_ptr(),
+      cfg.stream);
+
+  const std::size_t MM = static_cast<std::size_t>(M);
+  std::vector<T> hA(std::size_t{3} * MM);
+  d_Ax.copy_to_host_async(hA.data(),           M, cfg.stream);
+  d_Ay.copy_to_host_async(hA.data() + MM,      M, cfg.stream);
+  d_Az.copy_to_host_async(hA.data() + 2 * MM,  M, cfg.stream);
+  ::quasar::backend::device_synchronize(cfg.stream);
+
+  for (std::size_t i = 0; i < MM; ++i) {
+    result[i] = Vec3T<T>{hA[i], hA[MM + i], hA[2 * MM + i]};
+  }
+  return result;
+}
+
 template <class T>
 Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
                                        const ConductorSystem&   cs,
@@ -253,6 +317,11 @@ Field<Mat3x3> BiotSavartEvaluator::evaluate_grad_B(const core::IFieldSource& sou
   return evaluate_grad_B_impl<double>(cfg_, as_conductors(source), obs);
 }
 
+Field<Vec3> BiotSavartEvaluator::evaluate_A(const core::IFieldSource& source,
+                                             const PointCloud&      obs) const {
+  return evaluate_A_impl<double>(cfg_, as_conductors(source), obs);
+}
+
 // -- Single-precision evaluator --------------------------------------------
 
 BiotSavartEvaluatorF::BiotSavartEvaluatorF() = default;
@@ -266,6 +335,11 @@ Field<Vec3f> BiotSavartEvaluatorF::evaluate_B(const ConductorSystem& cs,
 Field<Mat3x3f> BiotSavartEvaluatorF::evaluate_grad_B(const ConductorSystem& cs,
                                                       const PointCloud&      obs) const {
   return evaluate_grad_B_impl<float>(cfg_, cs, obs);
+}
+
+Field<Vec3f> BiotSavartEvaluatorF::evaluate_A(const ConductorSystem& cs,
+                                               const PointCloud&      obs) const {
+  return evaluate_A_impl<float>(cfg_, cs, obs);
 }
 
 }  // namespace quasar::magnetostatics

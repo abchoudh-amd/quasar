@@ -37,6 +37,11 @@ class BiotSavartEvaluator final : public IFieldEvaluator {
   Field<Mat3x3> evaluate_grad_B(const core::IFieldSource& source,
                                 const PointCloud&         observations) const override;
 
+  // Closed-form magnetic vector potential A (Coulomb gauge), with B = curl A.
+  // Used to seed a discretely divergence-free in-plane field for MHD.
+  Field<Vec3>   evaluate_A     (const core::IFieldSource& source,
+                                const PointCloud&         observations) const override;
+
   const BiotSavartConfig& config() const noexcept { return cfg_; }
 
  private:
@@ -60,6 +65,9 @@ class BiotSavartEvaluatorF final {
                                  const PointCloud&      observations) const;
 
   Field<Mat3x3f> evaluate_grad_B(const ConductorSystem& conductors,
+                                 const PointCloud&      observations) const;
+
+  Field<Vec3f>   evaluate_A     (const ConductorSystem& conductors,
                                  const PointCloud&      observations) const;
 
   const BiotSavartConfig& config() const noexcept { return cfg_; }

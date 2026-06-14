@@ -30,6 +30,7 @@ set(_quasar_magnetostatics_hip_tests
   test_finite_segment
   test_circular_loop_on_axis
   test_segment_gradient
+  test_vector_potential
   test_infinite_wire_limit
   test_helmholtz_pair
   test_solenoid_inside

@@ -74,6 +74,17 @@ class IFieldEvaluator {
     return Field<Mat3x3>(observations.size());
   }
 
+  // Magnetic vector potential A (Coulomb gauge), with B = curl A. Defaults to
+  // throwing: most evaluators expose only B, and a caller that needs A (e.g. a
+  // divergence-free MHD seed built from a discrete curl of A) must select an
+  // evaluator that models it. Biot-Savart overrides with the closed-form
+  // line-integral A.
+  virtual Field<Vec3> evaluate_A(const core::IFieldSource&,
+                                 const core::PointCloud&) const {
+    throw std::runtime_error{
+        "this field evaluator does not provide a vector potential A"};
+  }
+
   // E field. Defaults to zero: the magnetostatic evaluators model no E field, so
   // a caller using one as a PIC external-field source contributes zero E.
   // Evaluators that model an E field (uniform with e0) override.
