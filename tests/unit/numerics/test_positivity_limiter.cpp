@@ -20,9 +20,9 @@
 //   * gas pressure follows the total-energy gamma law in
 //       quasar/numerics/mhd_state.hpp::pressure(MhdState, gamma):
 //         p = (gamma-1)*(E - 0.5*|m|^2/rho - 0.5*|B|^2).
-//     For the limiter's positivity check the per-cell B is the cell-centered
-//     triple (bx_face(i,j), by_face(i,j), bz_cell(i,j)); we keep B = 0 in most
-//     cells so the check reduces to the hydrodynamic pressure.
+//     For the limiter's positivity check the transverse magnetic components
+//     are centered from their staggered faces. We keep B = 0 in most cells so
+//     the check reduces to the hydrodynamic pressure.
 //   * a sub-floor-density cell (rho < rho_floor) has rho raised to EXACTLY
 //     rho_floor.
 //   * a sub-floor-pressure cell (p < p_floor) has gas pressure raised to EXACTLY
@@ -40,6 +40,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/registry.hpp"
 #include "quasar/backend/device.hpp"
+#include "quasar/physics/mhd/mhd_staggering.hpp"
 
 #include <gtest/gtest.h>
 
@@ -85,15 +86,19 @@ HostState read_host(const quasar::mhd::MhdField2D<Real>& u, std::size_t n) {
   return h;
 }
 
-MhdState state_at(const HostState& h, std::size_t k) {
+MhdState state_at(const HostState& h, const Grid2D& g, int i, int j) {
+  const std::size_t k = g.index(i, j);
   MhdState s{};
   s.rho = h.rho[k];
   s.mx = h.mx[k];
   s.my = h.my[k];
   s.mz = h.mz[k];
   s.energy = h.en[k];
-  s.bx = h.bx[k];
-  s.by = h.by[k];
+  // Mirror the same order-aware finite-volume face-to-cell collocation used by
+  // load_cell_state() in the repair kernel. A two-face arithmetic mean is not
+  // the solver EOS on MP5/MP7 grids and can misdiagnose the repaired pressure.
+  s.bx = quasar::mhd::cell_bx(g, h.bx.data(), i, j);
+  s.by = quasar::mhd::cell_by(g, h.by.data(), i, j);
   s.bz = h.bz[k];
   return s;
 }
@@ -130,6 +135,47 @@ TEST(MhdPositivityLimiter, ApplyRunsOnFullField) {
   EXPECT_NO_THROW(make_limiter()->apply(u, rho_floor, p_floor, gamma));
 }
 
+// The conservative predicate must use the same scale-safe quadratic forms as
+// the EOS. Here Bx*Bx overflows although |Bx|^2/2 and the full total energy are
+// representable. Identical positive base/candidate states therefore have an
+// admissible fraction of exactly one.
+TEST(MhdPositivityLimiter, AdmissibleFractionAcceptsExtremeRepresentableField) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  constexpr Real gamma = Real{5} / Real{3};
+  Grid2D g{8, 8, Real{1}, Real{1}, Real{0}, Real{0}, 4};
+  const std::size_t n = g.storage_size();
+
+  const Real bx_value = Real{1.5e154};
+  const Real magnetic =
+      quasar::numerics::half_squared_norm3(bx_value, Real{0}, Real{0});
+  ASSERT_TRUE(std::isfinite(magnetic));
+  ASSERT_FALSE(std::isfinite(bx_value * bx_value));
+  const Real energy = magnetic + Real{1e300} / (gamma - Real{1});
+
+  quasar::mhd::MhdField2D<Real> base{g};
+  quasar::mhd::MhdField2D<Real> candidate{g};
+  const std::vector<Real> rho(n, Real{1});
+  const std::vector<Real> zero(n, Real{0});
+  const std::vector<Real> bx(n, bx_value);
+  const std::vector<Real> en(n, energy);
+  auto seed = [&](quasar::mhd::MhdField2D<Real>& u) {
+    u.rho.copy_from_host(rho.data(), n);
+    u.mx.copy_from_host(zero.data(), n);
+    u.my.copy_from_host(zero.data(), n);
+    u.mz.copy_from_host(zero.data(), n);
+    u.energy.copy_from_host(en.data(), n);
+    u.bx_face.copy_from_host(bx.data(), n);
+    u.by_face.copy_from_host(zero.data(), n);
+    u.bz_cell.copy_from_host(zero.data(), n);
+  };
+  seed(base);
+  seed(candidate);
+
+  const Real theta = make_limiter()->admissible_fraction(
+      base, candidate, Real{0}, Real{0}, gamma);
+  EXPECT_EQ(theta, Real{1});
+}
+
 // A cell with sub-floor density has its density raised to EXACTLY rho_floor, and
 // a cell with sub-floor (negative) pressure has its gas pressure raised to
 // EXACTLY p_floor with MOMENTUM and B held byte-unchanged. Already-physical
@@ -163,6 +209,8 @@ TEST(MhdPositivityLimiter, FloorsDensityAndPressureExactlyHoldingMomentumAndB) {
   rho[kd] = rho_floor / Real{4};   // strictly below the floor
   mx[kd] = Real{0}; my[kd] = Real{0}; mz[kd] = Real{0};
   bx[kd] = Real{0}; by[kd] = Real{0}; bz[kd] = Real{0};
+  bx[g.index(3, 3)] = Real{0};
+  by[g.index(2, 4)] = Real{0};
   en[kd] = Real{1.0};              // p = (gamma-1)*E > 0, only density is bad
 
   // Sub-floor-pressure cell: at rest with B = 0 and a strictly-negative total
@@ -178,7 +226,13 @@ TEST(MhdPositivityLimiter, FloorsDensityAndPressureExactlyHoldingMomentumAndB) {
   const Real rho_p = Real{1.0};
   rho[kp] = rho_p;
   mx[kp] = Real{0}; my[kp] = Real{0}; mz[kp] = Real{0};
-  bx[kp] = Real{0}; by[kp] = Real{0}; bz[kp] = Real{0};
+  // MP7 collocates each in-plane component from eight face averages. Zero the
+  // complete two stencils, not merely the adjacent low/high faces, so the
+  // cell-centred B used by the EOS is exactly zero and the exact-floor assertion
+  // below is not measuring cancellation against a residual magnetic energy.
+  for (int q = 2; q <= 9; ++q) bx[g.index(q, 6)] = Real{0};
+  for (int q = 3; q <= 10; ++q) by[g.index(5, q)] = Real{0};
+  bz[kp] = Real{0};
   en[kp] = Real{-0.5};  // p = (gamma-1)*E < 0, no kinetic/magnetic terms
 
   u.rho.copy_from_host(rho.data(), rho.size());
@@ -194,7 +248,7 @@ TEST(MhdPositivityLimiter, FloorsDensityAndPressureExactlyHoldingMomentumAndB) {
 
   // Sanity: the seeded cells really are sub-floor before limiting.
   EXPECT_LT(before.rho[kd], rho_floor) << "test setup failed: density not sub-floor";
-  EXPECT_LT(quasar::numerics::pressure(state_at(before, kp), gamma), p_floor)
+  EXPECT_LT(quasar::numerics::pressure(state_at(before, g, 5, 6), gamma), p_floor)
       << "test setup failed to force a sub-floor-pressure cell";
 
   make_limiter()->apply(u, rho_floor, p_floor, gamma);
@@ -207,7 +261,7 @@ TEST(MhdPositivityLimiter, FloorsDensityAndPressureExactlyHoldingMomentumAndB) {
 
   // --- Sub-floor-pressure cell: gas pressure raised to EXACTLY p_floor, with
   //     momentum and B BYTE-UNCHANGED (only rho and energy may change). ---
-  const MhdState sp = state_at(after, kp);
+  const MhdState sp = state_at(after, g, 5, 6);
   EXPECT_NEAR(quasar::numerics::pressure(sp, gamma), p_floor,
               std::abs(p_floor) * Real{1e-13})
       << "sub-floor pressure not raised to exactly p_floor";
@@ -278,7 +332,8 @@ TEST(MhdPositivityLimiter, RestoresNegativePressureCell) {
   // Sanity: the seeded bad cell really has negative pressure before limiting.
   {
     const HostState before = read_host(u, n);
-    EXPECT_LT(quasar::numerics::pressure(state_at(before, bk), gamma), Real{0})
+    EXPECT_LT(quasar::numerics::pressure(state_at(before, g, bi, bj), gamma),
+              Real{0})
         << "test setup failed to force a negative-pressure cell";
   }
 
@@ -288,7 +343,7 @@ TEST(MhdPositivityLimiter, RestoresNegativePressureCell) {
   for (int j = 0; j < g.ny; ++j) {
     for (int i = 0; i < g.nx; ++i) {
       const std::size_t k = g.index(i, j);
-      const MhdState s = state_at(after, k);
+      const MhdState s = state_at(after, g, i, j);
       EXPECT_GE(s.rho, rho_floor) << "density below floor at (" << i << "," << j << ")";
       EXPECT_GE(quasar::numerics::pressure(s, gamma), p_floor)
           << "pressure below floor at (" << i << "," << j << ")";

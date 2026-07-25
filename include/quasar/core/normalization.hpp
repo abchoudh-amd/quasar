@@ -32,23 +32,32 @@ struct Normalization {
   Real m_ref{Real{1}};
   Real omega_p_ref{Real{1}};
 
+  // The all-ones state is reserved for the dimensionless identity mapping.
+  // Encoding the mode in the existing public state preserves this type's
+  // layout while distinguishing it from every value produced by plasma().
+  static constexpr Normalization identity() noexcept { return {}; }
+  constexpr bool is_identity() const noexcept {
+    return n_ref == Real{1} && q_ref == Real{1} && m_ref == Real{1}
+        && omega_p_ref == Real{1};
+  }
+
   static Normalization plasma(Real n_ref, Real q_ref, Real m_ref);
 
   Real to_internal(Real value, UnitTag tag) const;
   Real to_si(Real value, UnitTag tag) const;
 
-  Real length_scale() const noexcept { return constants::c0 / omega_p_ref; }
-  Real time_scale() const noexcept { return Real{1} / omega_p_ref; }
-  Real e_field_scale() const noexcept {
-    return m_ref * constants::c0 * omega_p_ref / q_ref;
-  }
-  Real b_field_scale() const noexcept {
-    return m_ref * omega_p_ref / q_ref;
-  }
+  // These products/ratios use exponent-scaled implementations in the .cpp so
+  // they remain robust on platforms where long double has no wider exponent
+  // range than Real.
+  Real length_scale() const noexcept;
+  Real time_scale() const noexcept;
+  Real e_field_scale() const noexcept;
+  Real b_field_scale() const noexcept;
+  Real temperature_eV_scale() const noexcept;
 };
 
-inline Normalization identity_normalization() {
-  return Normalization{};
+inline constexpr Normalization identity_normalization() noexcept {
+  return Normalization::identity();
 }
 
 }  // namespace quasar

@@ -11,8 +11,7 @@
 #
 # Tuning data: the values are baseline starting points sized to fit comfortably
 # in LDS for each architecture family. Refinement against the actual
-# micro-benchmark sweep (benchmarks/micro/biot_savart_bench.cpp) is tracked in
-# Phase 4.B.
+# micro-benchmark sweep lives in benchmarks/micro/biot_savart_bench.cpp.
 
 include_guard(GLOBAL)
 
@@ -30,11 +29,16 @@ function(quasar_set_launch_params target)
   set(_block 128)
   set(_family "unknown")
 
-  if(_arch STREQUAL "gfx942" OR _arch STREQUAL "gfx950")
-    # MI300x / MI350x: 64KB LDS, wavefront 64, large CU count.
+  if(_arch STREQUAL "gfx942")
+    # MI300 family (CDNA3): 64KB LDS, wavefront 64, large CU count.
     set(_tile 128)
     set(_block 256)
-    set(_family "gfx94x/gfx95x (CDNA3)")
+    set(_family "gfx94x (CDNA3)")
+  elseif(_arch STREQUAL "gfx950")
+    # MI350 family (CDNA4): retain the same conservative launch baseline.
+    set(_tile 128)
+    set(_block 256)
+    set(_family "gfx95x (CDNA4)")
   elseif(_arch STREQUAL "gfx90a" OR _arch STREQUAL "gfx908")
     # MI200 family: 64KB LDS, wavefront 64.
     set(_tile 128)

@@ -50,8 +50,9 @@ TF_Z_MAX_M = +SIDE_M / 2.0
 
 PIC_NX = 128
 PIC_NY = 128
-PIC_LX_M = SIDE_M
-PIC_LY_M = SIDE_M
+PIC_FRACTION = 0.90
+PIC_LX_M = PIC_FRACTION * SIDE_M
+PIC_LY_M = PIC_FRACTION * SIDE_M
 PIC_ORIGIN_X_M = R0_M - PIC_LX_M / 2.0
 PIC_ORIGIN_Y_M = -PIC_LY_M / 2.0
 
@@ -68,7 +69,7 @@ TEMPERATURE_EV = 10.0
 
 BORE_CENTER_X_M = R0_M
 BORE_CENTER_Y_M = 0.0
-BLOCK_HALF_WIDTH_M = PIC_LX_M / 4.0
+BLOCK_HALF_WIDTH_M = SIDE_M / 4.0
 BLOCK_X_MIN_M = BORE_CENTER_X_M - BLOCK_HALF_WIDTH_M
 BLOCK_X_MAX_M = BORE_CENTER_X_M + BLOCK_HALF_WIDTH_M
 BLOCK_Y_MIN_M = BORE_CENTER_Y_M - BLOCK_HALF_WIDTH_M
@@ -140,6 +141,8 @@ def build_yaml() -> str:
         f"#   + {N_TF_COILS} discrete rectangular TF coils ({TF_COIL_CURRENT_A:.0f} A each).",
         "# Sheets give poloidal B (B_x, B_z); TF coils give toroidal",
         "# B_phi ~ mu_0 N I / (2 pi R) ~ 0.032 T at R = R0.",
+        "# The PIC window covers the inner 90% of the bore so no Yee sample",
+        "# lies on an ideal zero-radius TF-coil filament (where B is singular).",
         "#",
         f"# Particles are loaded into a {2*BLOCK_HALF_WIDTH_M:.3f} m square block",
         f"# centered on the right-side bore at (x, y) = ({BORE_CENTER_X_M:.3f},",
@@ -233,6 +236,7 @@ def build_yaml() -> str:
         "time:",
         "  dt_s: auto",
         f"  steps: {STEPS}",
+        f"  t_end_s: {TOTAL_TIME_S:.12e}",
         "",
         "diagnostics:",
         "  output_path: out.npz",
@@ -242,8 +246,10 @@ def build_yaml() -> str:
         "",
         "boundary:",
         "  # Mark particles that drift out of the PIC domain as dead, so we",
-        "  # can count loss. Default (omitted) is 'periodic' = no-op.",
+        "  # can count loss. PEC field walls keep the Maxwell and particle",
+        "  # domains consistently non-periodic while allowing normal E flux.",
         "  particle: absorbing",
+        "  field: pec",
         "",
     ])
 

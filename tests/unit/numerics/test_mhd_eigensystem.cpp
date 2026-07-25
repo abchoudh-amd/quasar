@@ -1,4 +1,4 @@
-// RED-phase tests for the ideal-MHD eigensystem.
+// Tests for the ideal-MHD eigensystem.
 //
 // Targets the blind contract in include/quasar/numerics/mhd_eigensystem.hpp:
 //   class MhdEigensystem {
@@ -35,6 +35,7 @@ namespace {
 
 using quasar::Real;
 using quasar::numerics::MhdEigensystem;
+using quasar::numerics::MhdPrim;
 using quasar::numerics::MhdState;
 
 // Number of MHD waves / size of the eigen-basis used by these property checks.
@@ -343,6 +344,44 @@ TEST(MhdEigensystem, LeftRightVectorsAreBiorthonormalDirY) {
   }
 }
 
+TEST(MhdEigensystem, SplitBuildStaysFiniteForDominantBackground) {
+  constexpr Real gamma = Real{5} / Real{3};
+  const MhdPrim w{Real{1}, Real{0.2}, Real{-0.1}, Real{0.3}, Real{1},
+                  Real{0.25}, Real{-0.5}, Real{0.75}};
+  const MhdState s = quasar::numerics::to_conserved(w, gamma);
+  const quasar::numerics::MhdBackground b0{
+      Real{1e100}, Real{-2e100}, Real{0.5e100}};
+
+  ASSERT_NEAR(quasar::numerics::pressure(s, b0, gamma), Real{1}, Real{2e-15});
+  MhdEigensystem eig;
+  eig.build(s, b0, /*dir=*/0, gamma);
+  for (int k = 0; k < kN; ++k) {
+    EXPECT_TRUE(std::isfinite(eig.wave_speed(k)));
+    EXPECT_FALSE(any_nonfinite(eig.left_row(k), kN));
+    EXPECT_FALSE(any_nonfinite(eig.right_col(k), kN));
+  }
+}
+
+TEST(MhdEigensystem, ZeroBackgroundOverloadIsBitExact) {
+  constexpr Real gamma = Real{5} / Real{3};
+  const MhdState s = make_reference_state(gamma);
+  MhdEigensystem ordinary;
+  MhdEigensystem split;
+  ordinary.build(s, /*dir=*/1, gamma);
+  split.build(s, quasar::numerics::MhdBackground{}, /*dir=*/1, gamma);
+  for (int wave = 0; wave < kN; ++wave) {
+    EXPECT_EQ(split.wave_speed(wave), ordinary.wave_speed(wave));
+    const Real* lo = ordinary.left_row(wave);
+    const Real* ls = split.left_row(wave);
+    const Real* ro = ordinary.right_col(wave);
+    const Real* rs = split.right_col(wave);
+    for (int var = 0; var < kN; ++var) {
+      EXPECT_EQ(ls[var], lo[var]);
+      EXPECT_EQ(rs[var], ro[var]);
+    }
+  }
+}
+
 // (2y) Diagonalization of the y-direction flux Jacobian: R*diag(lambda)*L*du
 // reproduces the finite-difference of the analytic y-flux. The active-variable
 // ordering for dir=1 is [rho, mx, my, mz, energy, bx, bz] (By held constant).
@@ -431,6 +470,40 @@ TEST(MhdEigensystem, FiniteAndOrthonormalWhenTransverseFieldVanishes) {
       Real dot = 0.0;
       for (int k = 0; k < kN; ++k) dot += li[k] * rj[k];
       EXPECT_NEAR(dot, (i == j) ? 1.0 : 0.0, kIdentityTolDegenerate);
+    }
+  }
+}
+
+TEST(MhdEigensystem, ExtremeFiniteStateHasFiniteRootsAndBasis) {
+  const Real gamma = Real{5} / Real{3};
+  MhdPrim w{};
+  w.rho = Real{1};
+  w.vx = Real{0.2};
+  w.vy = Real{-0.1};
+  w.vz = Real{0.05};
+  w.p = Real{2e299};
+  w.bx = Real{8e149};
+  w.by = Real{-6e149};
+  w.bz = Real{4e149};
+  const MhdState s = quasar::numerics::to_conserved(w, gamma);
+  ASSERT_TRUE(std::isfinite(s.energy));
+
+  MhdEigensystem eig;
+  eig.build(s, /*dir=*/0, gamma);
+  for (int k = 0; k < kN; ++k) {
+    EXPECT_TRUE(std::isfinite(eig.wave_speed(k))) << "wave " << k;
+    EXPECT_FALSE(any_nonfinite(eig.left_row(k), kN)) << "left row " << k;
+    EXPECT_FALSE(any_nonfinite(eig.right_col(k), kN)) << "right col " << k;
+  }
+
+  for (int i = 0; i < kN; ++i) {
+    const Real* li = eig.left_row(i);
+    for (int j = 0; j < kN; ++j) {
+      const Real* rj = eig.right_col(j);
+      Real dot = Real{0};
+      for (int k = 0; k < kN; ++k) dot += li[k] * rj[k];
+      EXPECT_NEAR(dot, (i == j) ? Real{1} : Real{0}, Real{2e-6})
+          << "L row " << i << " . R col " << j;
     }
   }
 }

@@ -19,6 +19,8 @@ class IDepositScheme {
   virtual ~IDepositScheme() = default;
   virtual void deposit(const pic::ParticleSpecies& species, JField2D<Real>& current,
                        Real dt) const = 0;
+  virtual void deposit_charge(const pic::ParticleSpecies& species,
+                              ScalarGrid2D<Real>& charge) const = 0;
   // Selects per-axis node indexing in the deposit: a periodic axis wraps, a wall
   // axis deposits into ghost cells (later folded back by the specular BC). An axis
   // is periodic only when BOTH of its sides are periodic.
@@ -30,6 +32,8 @@ class Esirkepov2D final : public IDepositScheme {
  public:
   void deposit(const pic::ParticleSpecies& species, JField2D<Real>& current,
                Real dt) const override;
+  void deposit_charge(const pic::ParticleSpecies& species,
+                      ScalarGrid2D<Real>& charge) const override;
   void set_periodic_axes(bool periodic_x, bool periodic_y) override {
     periodic_x_ = periodic_x;
     periodic_y_ = periodic_y;

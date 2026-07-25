@@ -22,9 +22,8 @@ project   = "Quasar"
 author    = "Quasar contributors"
 copyright = f"{datetime.now().year}, {author}"
 
-# Version is read from include/quasar/core/types.hpp / pyproject when the
-# project grows a release flow; for now keep the literal in lock-step with
-# CMakeLists.txt and python/quasar/__init__.py.
+# Keep the literal in lock-step with CMakeLists.txt and
+# python/quasar/__init__.py.
 version = "0.1.0"
 release = version
 
@@ -50,7 +49,8 @@ intersphinx_mapping = {
 # -- HTML output -------------------------------------------------------------
 
 html_title       = "Quasar Documentation"
-html_static_path = ["_static"]
+html_static_path = ["_static"] if os.path.isdir(
+    os.path.join(os.path.dirname(__file__), "_static")) else []
 
 # Prefer sphinx_rtd_theme when installed; fall back to the bundled alabaster
 # theme so the build still works without extra dependencies.

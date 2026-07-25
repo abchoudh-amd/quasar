@@ -12,6 +12,7 @@
 #include "quasar/core/field_source.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/analytic_fields/dipole.hpp"
+#include "quasar/physics/analytic_fields/file_grid.hpp"
 #include "quasar/physics/analytic_fields/gradient.hpp"
 #include "quasar/physics/analytic_fields/uniform.hpp"
 #include "quasar/physics/magnetostatics/biot_savart.hpp"
@@ -21,6 +22,7 @@
 #include "quasar/physics/magnetostatics/observation.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -218,17 +220,29 @@ PYBIND11_MODULE(_core, m) {
   // sampler and selected by registry name.
   using ::quasar::numerics::IFieldEvaluator;
   py::class_<IFieldEvaluator>(ms, "IFieldEvaluator")
+      .def_property_readonly(
+           "provides_vector_potential",
+           &IFieldEvaluator::provides_vector_potential)
+      .def_property_readonly(
+           "provides_grad_B",
+           &IFieldEvaluator::provides_grad_B)
       .def("configure",
            [](IFieldEvaluator& self, const ::quasar::numerics::EvaluatorParams& params) {
              self.configure(params);
            },
            py::arg("params"),
            "Apply deck parameters (name -> flat float list; Vec3=3, Mat3x3=9 "
-           "row-major) after registry construction. Unknown keys are ignored.")
+           "row-major) after registry construction. Unknown keys are rejected.")
       .def("evaluate_B",
            [](const IFieldEvaluator& self,
               const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
              return field_to_numpy(self.evaluate_B(src, obs));
+           },
+           py::arg("source"), py::arg("observations"))
+      .def("evaluate_E",
+           [](const IFieldEvaluator& self,
+              const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
+             return field_to_numpy(self.evaluate_E(src, obs));
            },
            py::arg("source"), py::arg("observations"))
       .def("evaluate_grad_B",
@@ -271,6 +285,15 @@ PYBIND11_MODULE(_core, m) {
            }),
            py::arg("b0"), py::arg("grad"), py::arg("origin") = Vec3{0, 0, 0});
 
+  py::class_<::quasar::analytic_fields::FileGridEvaluator, IFieldEvaluator>(
+      ms, "FileGridEvaluator")
+      .def(py::init<>())
+      .def(py::init<std::string>(), py::arg("path"))
+      .def_property_readonly("path",
+          &::quasar::analytic_fields::FileGridEvaluator::path)
+      .def_property_readonly("configured",
+          &::quasar::analytic_fields::FileGridEvaluator::configured);
+
   // Create a registered evaluator by name (default-constructed). Mirrors the
   // string-keyed selection the C++ deck boundary uses; concrete evaluators
   // self-register via QUASAR_REGISTER_FIELD_EVALUATOR.
@@ -281,6 +304,31 @@ PYBIND11_MODULE(_core, m) {
          py::arg("name"),
          "Construct a registered IFieldEvaluator by name (e.g. 'biot_savart', "
          "'uniform', 'dipole', 'gradient', 'file_grid').");
+  ms.def("field_evaluator_names",
+         [] {
+           auto names = ::quasar::Registry<IFieldEvaluator>::instance().names();
+           std::sort(names.begin(), names.end());
+           return names;
+         },
+         "Return every currently registered field-evaluator name in sorted order.");
+  ms.def("field_evaluator_provides_vector_potential",
+         [](const std::string& name) {
+           const auto evaluator =
+               ::quasar::Registry<IFieldEvaluator>::instance().create(name);
+           return evaluator->provides_vector_potential();
+         },
+         py::arg("name"),
+         "Return whether a registered evaluator implements magnetic vector "
+         "potential A.");
+  ms.def("field_evaluator_provides_grad_B",
+         [](const std::string& name) {
+           const auto evaluator =
+               ::quasar::Registry<IFieldEvaluator>::instance().create(name);
+           return evaluator->provides_grad_B();
+         },
+         py::arg("name"),
+         "Return whether a registered evaluator supplies a trustworthy "
+         "magnetic-field Jacobian.");
 
   // -- geometry generators -------------------------------------------------
 

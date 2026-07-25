@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -40,7 +41,9 @@ TEST(CircularLoop, ProducesClosedRingOnCorrectCircle) {
     EXPECT_NEAR(r.z, Real{0}, Real{1e-14});
     EXPECT_NEAR(std::sqrt(r.x * r.x + r.y * r.y), R, Real{1e-14});
   }
-  EXPECT_LT(dist(fil.points.front(), fil.points.back()), Real{1e-14});
+  EXPECT_EQ(fil.points.front().x, fil.points.back().x);
+  EXPECT_EQ(fil.points.front().y, fil.points.back().y);
+  EXPECT_EQ(fil.points.front().z, fil.points.back().z);
 
   EXPECT_EQ(fil.current_A, Real{2.0});
   EXPECT_EQ(fil.name, "loop_test");
@@ -51,7 +54,43 @@ TEST(CircularLoop, ThrowsOnBadArguments) {
                std::invalid_argument);
   EXPECT_THROW(circular_loop({0,0,0}, {0,0,1}, Real{1}, /*n=*/0, Real{1}),
                std::invalid_argument);
+  EXPECT_THROW(circular_loop({0,0,0}, {0,0,1}, Real{1}, /*n=*/1, Real{1}),
+               std::invalid_argument);
+  EXPECT_THROW(circular_loop({0,0,0}, {0,0,1}, Real{1}, /*n=*/2, Real{1}),
+               std::invalid_argument);
+  EXPECT_THROW(circular_loop({0,0,0}, {0,0,1}, Real{1},
+                             std::numeric_limits<int>::max(), Real{1}),
+               std::invalid_argument);
   EXPECT_THROW(circular_loop({0,0,0}, {0,0,0}, Real{1}, 4, Real{1}),
+               std::invalid_argument);
+}
+
+TEST(CircularLoop, NormalizesExtremeFiniteAxisWithoutOverflow) {
+  const Real largest = std::numeric_limits<Real>::max();
+  const auto fil = circular_loop({0,0,0}, {largest, largest, largest},
+                                 Real{1}, 8, Real{1});
+  ASSERT_EQ(fil.points.size(), 9u);
+  for (const Vec3 p : fil.points) {
+    EXPECT_TRUE(std::isfinite(p.x));
+    EXPECT_TRUE(std::isfinite(p.y));
+    EXPECT_TRUE(std::isfinite(p.z));
+    EXPECT_NEAR(length(p), Real{1}, Real{2e-15});
+  }
+}
+
+TEST(CircularLoop, RejectsRadiusThatDisappearsAtTranslatedCenter) {
+  const Real largest = std::numeric_limits<Real>::max();
+  EXPECT_THROW(circular_loop({largest, 0, 0}, {0, 0, 1}, Real{1}, 4, Real{1}),
+               std::invalid_argument);
+}
+
+TEST(Helix, RejectsDiscretizationThatCannotRepresentATurn) {
+  EXPECT_THROW(helix({0,0,0}, {0,0,1}, Real{1}, Real{0}, 1, 1, Real{1}),
+               std::invalid_argument);
+  EXPECT_THROW(helix({0,0,0}, {0,0,1}, Real{1}, Real{0.1}, 1, 2, Real{1}),
+               std::invalid_argument);
+  EXPECT_THROW(helix({0,0,0}, {0,0,1}, Real{1}, Real{0.1},
+                     std::numeric_limits<int>::max(), 3, Real{1}),
                std::invalid_argument);
 }
 
@@ -79,6 +118,18 @@ TEST(Helix, AdvancesByPitchPerTurnAndKeepsRadiusConstant) {
               Real{1e-12});
 }
 
+TEST(Helix, RejectsTranslatedOrSubsegmentGeometryThatCannotBeRepresented) {
+  const Real largest = std::numeric_limits<Real>::max();
+  EXPECT_THROW(helix({largest, 0, 0}, {0, 0, 1}, Real{1}, Real{1},
+                     1, 4, Real{1}),
+               std::invalid_argument);
+
+  const Real smallest = std::numeric_limits<Real>::denorm_min();
+  EXPECT_THROW(helix({0, 0, 0}, {0, 0, 1}, Real{1}, smallest,
+                     1, 3, Real{1}),
+               std::invalid_argument);
+}
+
 TEST(Solenoid, EquivalentToHelixWithPitchEqLengthOverTurns) {
   const Vec3 axis{Real{0}, Real{1}, Real{0}};
   const Real R     = Real{0.05};
@@ -93,6 +144,13 @@ TEST(Solenoid, EquivalentToHelixWithPitchEqLengthOverTurns) {
   for (std::size_t i = 0; i < a.points.size(); ++i) {
     EXPECT_LT(dist(a.points[i], b.points[i]), Real{1e-14});
   }
+}
+
+TEST(Solenoid, RejectsPositiveLengthWhosePitchUnderflows) {
+  const Real smallest = std::numeric_limits<Real>::denorm_min();
+  EXPECT_THROW(solenoid({0, 0, 0}, {0, 0, 1}, Real{1}, smallest,
+                        2, 4, Real{1}),
+               std::invalid_argument);
 }
 
 TEST(Racetrack, HasExpectedVertexCountAndPerimeter) {
@@ -114,6 +172,18 @@ TEST(Racetrack, HasExpectedVertexCountAndPerimeter) {
   EXPECT_NEAR(perim, exact, Real{0.01} * exact);
 }
 
+TEST(Racetrack, RejectsZeroStraightLengthInsteadOfCreatingDuplicateEdges) {
+  EXPECT_THROW(racetrack({0,0,0}, {0,0,1}, Real{0}, Real{0.2}, 8, Real{1}),
+               std::invalid_argument);
+}
+
+TEST(Racetrack, RejectsLocalDimensionsLostAtTranslatedCenter) {
+  const Real largest = std::numeric_limits<Real>::max();
+  EXPECT_THROW(racetrack({largest, 0, 0}, {0, 0, 1}, Real{2}, Real{1},
+                         4, Real{1}),
+               std::invalid_argument);
+}
+
 TEST(Polygon, HasEqualSideLengthsAndClosesBack) {
   const int  N = 6;
   const Real R = Real{1.0};
@@ -132,6 +202,12 @@ TEST(Polygon, RejectsTooFewSides) {
                std::invalid_argument);
 }
 
+TEST(Polygon, RejectsRadiusThatDisappearsAtTranslatedCenter) {
+  const Real largest = std::numeric_limits<Real>::max();
+  EXPECT_THROW(polygon({largest, 0, 0}, {0, 0, 1}, Real{1}, 4, Real{1}),
+               std::invalid_argument);
+}
+
 TEST(GenericPolyline, PassesThroughGivenVertices) {
   const std::vector<Vec3> pts = {
     Vec3{0,0,0}, Vec3{1,0,0}, Vec3{1,1,0}, Vec3{1,1,1}
@@ -147,6 +223,15 @@ TEST(GenericPolyline, PassesThroughGivenVertices) {
 
 TEST(GenericPolyline, ThrowsOnFewerThanTwoPoints) {
   EXPECT_THROW(generic_polyline({Vec3{0,0,0}}, Real{1}, "bad"),
+               std::invalid_argument);
+}
+
+TEST(GenericPolyline, RejectsNonFiniteAndDuplicateVertices) {
+  EXPECT_THROW(generic_polyline({Vec3{0,0,0}, Vec3{0,0,0}}, Real{1}, "dup"),
+               std::invalid_argument);
+  EXPECT_THROW(generic_polyline(
+                   {Vec3{0,0,0}, Vec3{std::numeric_limits<Real>::infinity(),0,0}},
+                   Real{1}, "inf"),
                std::invalid_argument);
 }
 

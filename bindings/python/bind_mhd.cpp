@@ -17,6 +17,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "numpy_utils.hpp"
+
 #include "quasar/boundary/mhd_boundary.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/registry.hpp"
@@ -30,6 +32,7 @@
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -39,19 +42,8 @@ namespace py = pybind11;
 namespace {
 
 using ::quasar::Real;
-
-// Forces a contiguous, correctly-typed array at the binding boundary so the raw
-// data()+shape(0) copy below never reads strided/wrong-type memory (mirrors the
-// RealArray alias in bind_pic.cpp).
-using RealArray = py::array_t<Real, py::array::c_style | py::array::forcecast>;
-
-std::vector<Real> numpy_to_real_vector(const RealArray& arr, const char* what) {
-  if (arr.ndim() != 1) {
-    throw std::invalid_argument(std::string{what} + ": expected 1-D NumPy array");
-  }
-  const auto* data = arr.data();
-  return std::vector<Real>{data, data + arr.shape(0)};
-}
+using ::quasar::python_detail::numpy_to_real_vector;
+using ::quasar::python_detail::require_real_array;
 
 template <typename T>
 py::array_t<T> vector_to_numpy(const std::vector<T>& v) {
@@ -132,6 +124,56 @@ void bind_mhd(py::module_& m) {
                 quasar::Registry<quasar::numerics::IMhdBackgroundProfile>::instance().names());
           },
           "Names of registered static background-field (B0) profiles.");
+  mhd.def(
+      "sample_mhd_background_profile",
+      [](const std::string& name, int comp, const py::object& x_input,
+         const py::object& y_input, const py::dict& params) {
+        const auto x = require_real_array(x_input, "background x coordinates");
+        const auto y = require_real_array(y_input, "background y coordinates");
+        if (comp < 0 || comp > 2) {
+          throw std::invalid_argument{"background component must be 0, 1, or 2"};
+        }
+        if (x.ndim() != y.ndim()) {
+          throw std::invalid_argument{"background x/y arrays must have equal rank"};
+        }
+        for (py::ssize_t d = 0; d < x.ndim(); ++d) {
+          if (x.shape(d) != y.shape(d)) {
+            throw std::invalid_argument{"background x/y arrays must have equal shape"};
+          }
+        }
+        auto profile =
+            quasar::Registry<quasar::numerics::IMhdBackgroundProfile>::instance().create(name);
+        for (const auto& item : params) {
+          const std::string key = py::cast<std::string>(item.first);
+          const Real value = py::cast<Real>(item.second);
+          if (!std::isfinite(value)) {
+            throw std::invalid_argument{"background parameter " + key + " must be finite"};
+          }
+          if (!profile->set_parameter(key, value)) {
+            throw std::invalid_argument{"unknown parameter " + key
+                                        + " for background profile " + name};
+          }
+        }
+        py::array_t<Real> out(x.request().shape);
+        const auto n = static_cast<std::size_t>(x.size());
+        const Real* xp = x.data();
+        const Real* yp = y.data();
+        Real* op = out.mutable_data();
+        for (std::size_t k = 0; k < n; ++k) {
+          if (!std::isfinite(xp[k]) || !std::isfinite(yp[k])) {
+            throw std::invalid_argument{
+                "background profile coordinates must be finite"};
+          }
+          op[k] = profile->sample(comp, xp[k], yp[k]);
+          if (!std::isfinite(op[k])) {
+            throw std::runtime_error{"background profile produced a non-finite sample"};
+          }
+        }
+        return out;
+      },
+      py::arg("name"), py::arg("component"), py::arg("x"), py::arg("y"),
+      py::arg("params") = py::dict{},
+      "Sample a registered analytic MHD background profile on matching arrays.");
 
   // -- Boundary spec --------------------------------------------------------
   // Per-side fluid/field boundary kinds (order: x_lo, x_hi, y_lo, y_hi). Names
@@ -181,7 +223,8 @@ void bind_mhd(py::module_& m) {
   // Deck-facing static background magnetic field B0 for the field-split
   // formulation B = B0 + b. `profile` is a registry name (default "uniform");
   // bx0/by0/bz0 are the uniform-vector parameters consumed when profile ==
-  // "uniform". The Python deck validator queries
+  // "uniform", while params carries scalar parameters for any analytic profile.
+  // The Python deck validator queries
   // registered_mhd_background_profiles() above rather than mirroring the name
   // list, so it stays in sync with the C++ registry automatically.
   py::class_<quasar::mhd::MhdBackgroundSpec>(mhd, "MhdBackgroundSpec")
@@ -190,7 +233,8 @@ void bind_mhd(py::module_& m) {
       .def_readwrite("profile", &quasar::mhd::MhdBackgroundSpec::profile)
       .def_readwrite("bx0", &quasar::mhd::MhdBackgroundSpec::bx0)
       .def_readwrite("by0", &quasar::mhd::MhdBackgroundSpec::by0)
-      .def_readwrite("bz0", &quasar::mhd::MhdBackgroundSpec::bz0);
+      .def_readwrite("bz0", &quasar::mhd::MhdBackgroundSpec::bz0)
+      .def_readwrite("params", &quasar::mhd::MhdBackgroundSpec::params);
 
   // -- Config ---------------------------------------------------------------
   // Every scheme axis is a registry-name string so a new scheme is selectable
@@ -226,19 +270,20 @@ void bind_mhd(py::module_& m) {
       .def("divergence_b_max", &quasar::mhd::MhdSolver2D::divergence_b_max)
       .def("seed_state",
            [](quasar::mhd::MhdSolver2D& self, const std::string& component,
-              const RealArray& values) {
+              const py::object& values) {
              // Stage a (storage_size,) host array into the named live-state
              // component. The array must already be in the solver's internal
-             // (normalized) units and full ghost-padded storage layout
-             // (matches state_component_to_host()). Magnetic spellings accept
-             // both the staggered and the short name (bx/bx_face, by/by_face,
-             // bz/bz_cell); the solver resolves the alias.
+             // (normalized) units and full ghost-padded storage layout.
+             // Magnetic spellings accept both the staggered and the short name
+             // (bx/bx_face, by/by_face, bz/bz_cell); seeding always consumes the
+             // staggered internal layout. On readback, bx/by are collocated to
+             // cells while bx_face/by_face expose the raw CT arrays.
              self.seed_state(component, numpy_to_real_vector(values, "values"));
            },
            py::arg("component"), py::arg("values"))
       .def("seed_background",
            [](quasar::mhd::MhdSolver2D& self, const std::string& component,
-              const RealArray& values) {
+              const py::object& values) {
              // Stage a (storage_size,) host array into the named static
              // background-field component for the field-split B = B0 + b. The
              // array layout mirrors seed_state exactly (full ghost-padded
@@ -253,5 +298,8 @@ void bind_mhd(py::module_& m) {
            [](const quasar::mhd::MhdSolver2D& self, const std::string& component) {
              return vector_to_numpy(self.state_component_to_host(component));
            },
-           py::arg("component"));
+           py::arg("component"),
+           "Read one storage-sized state array. 'bx'/'by' use the same "
+           "finite-volume face-to-cell collocation as the EOS; 'bx_face'/"
+           "'by_face' return the raw staggered CT samples.");
 }

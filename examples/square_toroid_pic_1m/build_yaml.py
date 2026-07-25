@@ -6,9 +6,9 @@ Unlike the sibling examples/square_toroid_pic (which simulates the equatorial
 x-y slice), this deck sets ``plane: xz`` so the 2D grid is the lab y=0 meridional
 cut. The torus axis is lab z, so that cut shows the 0.3 m square cross-section:
 PIC x = major radius R, PIC y = lab z (the cross-section's vertical). The
-out-of-plane direction is lab y, along which the toroidal field B_phi (from the
-TF coils) points -- so B_phi is the confining out-of-plane field the PIC sees as
-external Bz.
+right-handed PIC out-of-plane direction is -lab y. The toroidal field B_phi
+(from the TF coils) is therefore the confining out-of-plane field stored as
+external Bz = -B_y (and -B_phi on the positive-x meridian).
 
 Run ``python build_yaml.py`` to (re)write input.yaml. Run with ``--field-check``
 to also emit field_check.yaml: a quasar.coil eval deck with the SAME conductors
@@ -75,8 +75,9 @@ OUTPUT_PATH = "out.npz"
 def _recompute_derived() -> None:
     """Recompute resolution-dependent globals (cell size, CFL dt, step count) from
     the current PIC_NX/PIC_NY. STEPS is resolution-dependent (dt shrinks as the
-    grid refines), so this must run after any --nx override so the emitted deck's
-    `steps` still encodes TOTAL_TIME_S."""
+    grid refines), so this must run after any --nx override. The emitted
+    ``steps`` is the ceiling safety cap; ``t_end_s`` clips the last step exactly
+    to ``TOTAL_TIME_S``."""
     global _DX, _DY, DT_CFL_S, STEPS
     _DX = PIC_LX_M / PIC_NX
     _DY = PIC_LY_M / PIC_NY
@@ -193,9 +194,9 @@ def build_yaml() -> str:
         "#",
         "# Torus axis = lab z. plane: xz makes the PIC grid the lab y=0 meridional",
         "# cut, i.e. the 0.30 m square cross-section: PIC x = major radius R,",
-        "# PIC y = lab z. The out-of-plane direction is lab y, along which the",
-        "# toroidal field B_phi (from the TF coils) points -- the PIC sees it as",
-        "# external Bz and it provides the cross-section confinement.",
+        "# PIC y = lab z. The right-handed out-of-plane direction is -lab y;",
+        "# the PIC Bz slot stores -B_y (-B_phi on the positive-x meridian),",
+        "# providing the cross-section confinement.",
         "#",
         "# Magnet = axisymmetric square-cross-section current sheets",
         f"#   ({SHEET_CURRENT_A:.0f} A per sheet group)",
@@ -271,6 +272,7 @@ def build_yaml() -> str:
         "time:",
         "  dt_s: auto",
         f"  steps: {STEPS}",
+        f"  t_end_s: {TOTAL_TIME_S:.12e}",
         "",
         "diagnostics:",
         f"  output_path: {OUTPUT_PATH}",
@@ -280,8 +282,10 @@ def build_yaml() -> str:
         "",
         "boundary:",
         "  # Mark particles that drift out of the PIC domain as dead, so we",
-        "  # can count loss against the magnet wall. Default (omitted) is periodic.",
+        "  # can count loss against the magnet wall. PEC field walls keep the",
+        "  # Maxwell and particle domains consistently non-periodic.",
         "  particle: absorbing",
+        "  field: pec",
         "",
     ])
     return "\n".join(lines)
@@ -333,7 +337,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Generate the square_toroid_pic_1m deck.")
     p.add_argument("--nx", type=int, default=None,
                    help="Grid resolution (sets both nx and ny); default 128. "
-                        "STEPS is recomputed so the deck still targets 5 us.")
+                        "STEPS is recomputed and t_end_s still targets 5 us exactly.")
     p.add_argument("--out", default="input.yaml",
                    help="Output deck filename (written next to this script).")
     p.add_argument("--output-path", default=None,

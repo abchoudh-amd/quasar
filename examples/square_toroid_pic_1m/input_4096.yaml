@@ -2,9 +2,9 @@
 #
 # Torus axis = lab z. plane: xz makes the PIC grid the lab y=0 meridional
 # cut, i.e. the 0.30 m square cross-section: PIC x = major radius R,
-# PIC y = lab z. The out-of-plane direction is lab y, along which the
-# toroidal field B_phi (from the TF coils) points -- the PIC sees it as
-# external Bz and it provides the cross-section confinement.
+# PIC y = lab z. The right-handed out-of-plane direction is -lab y;
+# the PIC Bz slot stores -B_y (-B_phi on the positive-x meridian),
+# providing the cross-section confinement.
 #
 # Magnet = axisymmetric square-cross-section current sheets
 #   (150000 A per sheet group)
@@ -2469,6 +2469,7 @@ species:
 time:
   dt_s: auto
   steps: 64317905
+  t_end_s: 5.000000000000e-06
 
 diagnostics:
   output_path: out_4096_full.npz
@@ -2478,5 +2479,7 @@ diagnostics:
 
 boundary:
   # Mark particles that drift out of the PIC domain as dead, so we
-  # can count loss against the magnet wall. Default (omitted) is periodic.
+  # can count loss against the magnet wall. PEC field walls keep the
+  # Maxwell and particle domains consistently non-periodic.
   particle: absorbing
+  field: pec

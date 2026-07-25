@@ -71,16 +71,22 @@ inline void launch_along_side(const quasar::Grid2D& g, int side,
     QUASAR_HIP_CHECK(::hipGetLastError());                                     \
   }
 
-// Gather+push ABI: (grid, species, self field, ext field, periodic_x,
-// periodic_y, dt, stream).
+// Gather+push ABI: (grid, species, self field, ext field, previous B, periodic_x,
+// periodic_y, force_dt, position_dt, previous/current B weights, stream).
 #define QUASAR_PIC_GATHER_PUSH_ABI(fn_name, shape_order)                        \
   extern "C" void fn_name(const quasar::Grid2D& g,                             \
                           quasar::pic::ParticleSpecies& s,                    \
                           const quasar::YeeField2D<quasar::Real>& self,        \
                           const quasar::YeeField2D<quasar::Real>& ext,         \
-                          int periodic_x, int periodic_y, quasar::Real dt,     \
+                          const quasar::BField2D<quasar::Real>& previous_b,   \
+                          int periodic_x, int periodic_y,                      \
+                          quasar::Real force_dt, quasar::Real position_dt,     \
+                          quasar::Real previous_b_weight,                      \
+                          quasar::Real current_b_weight,                       \
                           quasar_stream_t stream) {                            \
-    launch<shape_order>(g, s, self, ext, periodic_x != 0, periodic_y != 0, dt, \
+    launch<shape_order>(g, s, self, ext, previous_b, periodic_x != 0,         \
+                        periodic_y != 0, force_dt, position_dt,                \
+                        previous_b_weight, current_b_weight,                   \
                         static_cast<hipStream_t>(stream));                     \
     QUASAR_HIP_CHECK(::hipGetLastError());                                     \
   }

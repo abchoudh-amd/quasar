@@ -1,4 +1,4 @@
-// MHD ghost-fill boundary contract (RED).
+// MHD ghost-fill boundary contract.
 //
 // This pins the EXACT reference ghost-fill rules of the three registered MHD
 // boundaries ("periodic" / "outflow" / "wall") as the post-port device
@@ -17,21 +17,17 @@
 //   * interior cells:  i in [0, nx),  j in [0, ny).
 //   * x ghost layers (layer = 1..nghost): lo -> i = -layer ; hi -> i = nx-1+layer.
 //   * y ghost layers (layer = 1..nghost): lo -> j = -layer ; hi -> j = ny-1+layer.
-//   * Cell-centered components (rho, mx, my, mz, energy, bz_cell) and the
-//     face-staggered components (bx_face, by_face) SHARE the same storage extent:
-//     there is NO extra slot at nx+nghost, so the hi face ghost lives at
-//     nx-1+layer, identical to the cell hi convention.
+//   * Cell and face components share one allocation, but a normal face is offset
+//     by half a cell: physical x faces are i=0..nx (and y faces j=0..ny).
 //
 // Reference rules pinned (per side):
 //   periodic   : lo ghost (-layer)   <- interior (nx-layer)
 //                hi ghost (nx-1+layer)<- interior (layer-1)
 //   outflow    : lo ghost            <- interior 0       (zero-gradient)
 //                hi ghost            <- interior nx-1
-//   wall       : lo ghost (-layer)   <- interior (layer-1) , sign s
-//                hi ghost (nx-1+layer)<- interior (nx-layer), sign s
-//                where s = -1 (ODD) for the NORMAL momentum (mx on an x-side,
-//                my on a y-side) and the NORMAL face-B (bx_face on x, by_face on
-//                y); s = +1 (EVEN) for every other component.
+//   wall       : cell quantities mirror about the boundary cell face. Normal B
+//                instead mirrors about its own staggered boundary face: Bn=0 at
+//                face 0/n and Bn(-q)=-Bn(q), Bn(n+q)=-Bn(n-q).
 //
 // x-side fills touch only j in [0, ny); y-side fills span the FULL storage width
 // i in [-ng, nx+ng). The solver fills x-sides THEN y-sides, so the four corner
@@ -201,8 +197,10 @@ TEST(MhdBoundary, PeriodicWrapsInteriorOnBothAxes) {
 }
 
 // ---------------------------------------------------------------------------
-// OUTFLOW: zero-gradient copy of the outermost interior cell/face into every
-// ghost layer: lo <- index 0, hi <- index nx-1 (j analogous).
+// OUTFLOW: cell-centered and tangential quantities copy the outermost interior
+// cell into every ghost layer. A normal face uses its staggered physical extent
+// 0..n: low ghosts copy face 0, high physical face n remains authoritative, and
+// only face ghosts beyond n copy face n.
 // ---------------------------------------------------------------------------
 TEST(MhdBoundary, OutflowCopiesOutermostInterior) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
@@ -230,9 +228,10 @@ TEST(MhdBoundary, OutflowCopiesOutermostInterior) {
           << "rho outflow x_hi layer=" << layer << " j=" << j;
       EXPECT_NEAR(bx[g.index(-layer, j)], pattern(0, j, kBaseBx), kTol)
           << "bx_face outflow x_lo layer=" << layer << " j=" << j;
-      EXPECT_NEAR(bx[g.index(g.nx - 1 + layer, j)], pattern(g.nx - 1, j, kBaseBx),
+      EXPECT_NEAR(bx[g.index(g.nx - 1 + layer, j)], pattern(g.nx, j, kBaseBx),
                   kTol)
-          << "bx_face outflow x_hi layer=" << layer << " j=" << j;
+          << "bx_face outflow x_hi physical/ghost layer=" << layer
+          << " j=" << j;
     }
   }
 
@@ -253,9 +252,10 @@ TEST(MhdBoundary, OutflowCopiesOutermostInterior) {
           << "my outflow y_hi layer=" << layer << " i=" << i;
       EXPECT_NEAR(by[g.index(i, -layer)], pattern(i, 0, kBaseBy), kTol)
           << "by_face outflow y_lo layer=" << layer << " i=" << i;
-      EXPECT_NEAR(by[g.index(i, g.ny - 1 + layer)], pattern(i, g.ny - 1, kBaseBy),
+      EXPECT_NEAR(by[g.index(i, g.ny - 1 + layer)], pattern(i, g.ny, kBaseBy),
                   kTol)
-          << "by_face outflow y_hi layer=" << layer << " i=" << i;
+          << "by_face outflow y_hi physical/ghost layer=" << layer
+          << " i=" << i;
     }
   }
 }
@@ -263,8 +263,8 @@ TEST(MhdBoundary, OutflowCopiesOutermostInterior) {
 // ---------------------------------------------------------------------------
 // WALL (perfectly-conducting wall): mirror about the wall. Tangential /
 // cell-centered components are EVEN (copy); the NORMAL momentum and NORMAL
-// face-B are ODD (sign-flip) so v.n=0 and n.B=0. Both the sign AND the mirror
-// index are pinned:
+  // face-B are ODD (sign-flip) so v.n=0 and n.B=0. Cell and face mirror indices
+  // differ by half a cell because Bn lives on the wall itself:
 //   x_lo: ghost(-layer) <- interior(layer-1)
 //   x_hi: ghost(nx-1+layer) <- interior(nx-layer)
 // On an x-side: mx & bx_face are ODD; rho, my, energy, by_face, bz_cell EVEN.
@@ -313,11 +313,21 @@ TEST(MhdBoundary, WallMirrorsWithCorrectParityX) {
           << "mx wall odd x_lo layer=" << layer << " j=" << j;
       EXPECT_NEAR(mx[g.index(gi_hi, j)], -pattern(si_hi, j, kBaseMx), kTol)
           << "mx wall odd x_hi layer=" << layer << " j=" << j;
-      EXPECT_NEAR(bx[g.index(gi_lo, j)], -pattern(si_lo, j, kBaseBx), kTol)
+      EXPECT_NEAR(bx[g.index(gi_lo, j)], -pattern(layer, j, kBaseBx), kTol)
           << "bx_face wall odd x_lo layer=" << layer << " j=" << j;
-      EXPECT_NEAR(bx[g.index(gi_hi, j)], -pattern(si_hi, j, kBaseBx), kTol)
-          << "bx_face wall odd x_hi layer=" << layer << " j=" << j;
+      if (layer == 1) {
+        EXPECT_EQ(bx[g.index(g.nx, j)], Real{0})
+            << "bx_face x_hi wall value j=" << j;
+      } else {
+        const int q = layer - 1;
+        EXPECT_NEAR(bx[g.index(g.nx + q, j)],
+                    -pattern(g.nx - q, j, kBaseBx), kTol)
+            << "bx_face wall odd x_hi layer=" << layer << " j=" << j;
+      }
     }
+  }
+  for (int j = 0; j < g.ny; ++j) {
+    EXPECT_EQ(bx[g.index(0, j)], Real{0}) << "bx_face x_lo wall value j=" << j;
   }
 }
 
@@ -359,11 +369,21 @@ TEST(MhdBoundary, WallMirrorsWithCorrectParityY) {
           << "my wall odd y_lo layer=" << layer << " i=" << i;
       EXPECT_NEAR(my[g.index(i, gj_hi)], -pattern(i, sj_hi, kBaseMy), kTol)
           << "my wall odd y_hi layer=" << layer << " i=" << i;
-      EXPECT_NEAR(by[g.index(i, gj_lo)], -pattern(i, sj_lo, kBaseBy), kTol)
+      EXPECT_NEAR(by[g.index(i, gj_lo)], -pattern(i, layer, kBaseBy), kTol)
           << "by_face wall odd y_lo layer=" << layer << " i=" << i;
-      EXPECT_NEAR(by[g.index(i, gj_hi)], -pattern(i, sj_hi, kBaseBy), kTol)
-          << "by_face wall odd y_hi layer=" << layer << " i=" << i;
+      if (layer == 1) {
+        EXPECT_EQ(by[g.index(i, g.ny)], Real{0})
+            << "by_face y_hi wall value i=" << i;
+      } else {
+        const int q = layer - 1;
+        EXPECT_NEAR(by[g.index(i, g.ny + q)],
+                    -pattern(i, g.ny - q, kBaseBy), kTol)
+            << "by_face wall odd y_hi layer=" << layer << " i=" << i;
+      }
     }
+  }
+  for (int i = 0; i < g.nx; ++i) {
+    EXPECT_EQ(by[g.index(i, 0)], Real{0}) << "by_face y_lo wall value i=" << i;
   }
 }
 

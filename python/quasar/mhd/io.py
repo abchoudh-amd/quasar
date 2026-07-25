@@ -25,21 +25,22 @@ positivity / boundary.*) are validated against the LIVE C++ registries exposed a
 (mirrors ``quasar.pic.io``).
 
 ``initial.type`` must be one of the canonical tokens
-``{brio_wu, alfven_wave, orszag_tang, blast, rotor}``; ``initial.params`` is a
-free dict passed to the matching IC generator below.
+``{brio_wu, alfven_wave, orszag_tang, blast, rotor, confined_blob}``;
+``initial.params`` is validated for the selected generator below.
 """
 
 from __future__ import annotations
 
 import math
+import operator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence, Union
 
 import numpy as np
-import yaml
 
 from .. import _core
+from .._deck import load_yaml as _load_yaml
 from .._deck import require as _require
 from .._deck import (
     as_finite as _as_finite,
@@ -48,6 +49,7 @@ from .._deck import (
     parse_side_map as _parse_side_map,
 )
 from . import numerics as mhd_num
+from . import _units as mhd_units
 
 
 # Sanity ceilings on deck-supplied sizes that flow into device allocations
@@ -63,6 +65,201 @@ INITIAL_TYPES = ("brio_wu", "alfven_wave", "orszag_tang", "blast", "rotor",
 
 # Conserved-state components written to / read from the solver and the .npz.
 STATE_COMPONENTS = ("rho", "mx", "my", "mz", "energy", "bx", "by", "bz")
+
+_TOP_LEVEL_KEYS = {
+    "units", "domain", "geometry", "numerics", "initial", "time",
+    "diagnostics", "boundary", "background_field",
+}
+
+
+def _as_exact_int(value, context: str) -> int:
+    """Return an integer-valued object without silently truncating floats.
+
+    YAML integers arrive as :class:`int`; ``operator.index`` also admits NumPy
+    integer scalars used by programmatic callers. Booleans and floats (including
+    integral-looking values such as ``16.0``) are rejected so a misspelled deck
+    cannot quietly change its grid, run length, cadence, or mode number.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context} must be an integer, not a boolean")
+    try:
+        return int(operator.index(value))
+    except TypeError:
+        raise ValueError(f"{context} must be an integer") from None
+
+
+def _as_bool(value, context: str) -> bool:
+    """Require a real boolean instead of applying Python truthiness."""
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context} must be a boolean")
+    return bool(value)
+
+
+def _mapping(value, context: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a mapping")
+    return value
+
+
+def _reject_unknown(d: dict, allowed, context: str) -> None:
+    unknown = set(d) - set(allowed)
+    if unknown:
+        names = ", ".join(sorted(repr(name) for name in unknown))
+        raise ValueError(f"{context}: unknown key(s): {names}")
+
+
+def _finite_pair(value, context: str) -> tuple[float, float]:
+    """Return an exactly two-element finite coordinate pair."""
+    if isinstance(value, (str, bytes, dict)):
+        raise ValueError(f"{context} must be a two-element sequence")
+    try:
+        if len(value) != 2:
+            raise ValueError(f"{context} must contain exactly two values")
+        return (_as_finite(value[0], f"{context}[0]"),
+                _as_finite(value[1], f"{context}[1]"))
+    except TypeError:
+        raise ValueError(f"{context} must be a two-element sequence") from None
+
+
+_PRIMITIVE_KEYS = ("rho", "p", "vx", "vy", "vz", "bx", "by", "bz")
+
+
+def _validate_brio_wu_params(params: dict) -> None:
+    _reject_unknown(params, {"interface", "left", "right"},
+                    "initial.params")
+    interface = _as_finite(
+        _require(params, "interface", "initial.params"),
+        "initial.params.interface")
+    _ = interface
+    states: dict[str, dict] = {}
+    for side in ("left", "right"):
+        state = _mapping(
+            _require(params, side, "initial.params"),
+            f"initial.params.{side}")
+        _reject_unknown(state, _PRIMITIVE_KEYS, f"initial.params.{side}")
+        missing = [name for name in _PRIMITIVE_KEYS if name not in state]
+        if missing:
+            raise ValueError(
+                f"initial.params.{side}: missing required field(s) {missing}")
+        for name in _PRIMITIVE_KEYS:
+            _as_finite(state[name], f"initial.params.{side}.{name}")
+        if _as_finite(state["rho"], f"initial.params.{side}.rho") <= 0.0:
+            raise ValueError(f"initial.params.{side}.rho must be positive")
+        if _as_finite(state["p"], f"initial.params.{side}.p") <= 0.0:
+            raise ValueError(f"initial.params.{side}.p must be positive")
+        states[side] = state
+    bx_left = _as_finite(states["left"]["bx"], "initial.params.left.bx")
+    bx_right = _as_finite(states["right"]["bx"], "initial.params.right.bx")
+    if bx_left != bx_right:
+        raise ValueError(
+            "brio_wu requires a continuous normal magnetic field: "
+            "initial.params.left.bx must equal initial.params.right.bx")
+
+
+def _alfven_reference_bx(deck: "MhdDeck") -> float:
+    """Axial field that fixes the Alfven eigenvector's propagation sign."""
+    b0 = _as_finite(deck.initial.params.get("b0", 1.0),
+                    "initial.params.b0")
+    bg = deck.background
+    # A uniform field-split guide field contributes to the same total axial
+    # field as the evolving state's uniform bx. File/non-uniform profiles do not
+    # have one global axial value, so the analytic IC can only use its own b0.
+    if (isinstance(bg.enabled, (bool, np.bool_)) and bool(bg.enabled)
+            and bg.file is None and bg.a_file is None
+            and bg.profile == "uniform"):
+        bx0 = _as_finite(bg.bx0, "background_field.bx0")
+        with np.errstate(over="ignore", invalid="ignore"):
+            b0 += bx0
+        if not math.isfinite(b0):
+            raise ValueError(
+                "alfven_wave total axial background field is not representable")
+    return b0
+
+
+def _validate_alfven_wave_params(deck: "MhdDeck", params: dict) -> None:
+    _reject_unknown(
+        params, {"rho", "p", "b0", "amplitude", "wavenumber",
+                 "polarization"}, "initial.params")
+    _require_positive_finite(params.get("rho", 1.0), "initial.params.rho")
+    _require_positive_finite(params.get("p", 0.1), "initial.params.p")
+    _require_finite(params.get("amplitude", 1.0e-6),
+                    "initial.params.amplitude")
+    if _alfven_reference_bx(deck) == 0.0:
+        raise ValueError(
+            "alfven_wave requires a nonzero total axial background field")
+    n = _as_exact_int(params.get("wavenumber", 1),
+                      "initial.params.wavenumber")
+    if n <= 0:
+        raise ValueError("initial.params.wavenumber must be positive")
+    # The circular mode needs both sine and cosine quadratures. At or above the
+    # x-grid Nyquist mode one quadrature aliases away, so it is not resolved.
+    if 2 * n >= deck.domain.nx:
+        raise ValueError(
+            "initial.params.wavenumber must be below the x-grid Nyquist mode")
+    polarization = params.get("polarization", "circular")
+    if not isinstance(polarization, str) or polarization != "circular":
+        raise ValueError(
+            "alfven_wave currently supports only polarization='circular'")
+
+
+def _validate_orszag_tang_params(params: dict) -> None:
+    _reject_unknown(params, {"b0"}, "initial.params")
+    _require_finite(params.get("b0", 1.0 / math.sqrt(4.0 * math.pi)),
+                    "initial.params.b0")
+
+
+def _validate_blast_params(params: dict) -> None:
+    _reject_unknown(
+        params, {"rho_ambient", "p_ambient", "p_core", "r_in", "center",
+                 "bx", "by", "bz"}, "initial.params")
+    _require_positive_finite(params.get("rho_ambient", 1.0),
+                             "initial.params.rho_ambient")
+    _require_positive_finite(params.get("p_ambient", 0.1),
+                             "initial.params.p_ambient")
+    _require_positive_finite(params.get("p_core", 10.0),
+                             "initial.params.p_core")
+    _require_positive_finite(params.get("r_in", 0.1),
+                             "initial.params.r_in")
+    _finite_pair(params.get("center", [0.0, 0.0]),
+                 "initial.params.center")
+    for name in ("bx", "by", "bz"):
+        _require_finite(params.get(name, 0.0), f"initial.params.{name}")
+
+
+def _validate_rotor_params(params: dict) -> None:
+    _reject_unknown(
+        params, {"center", "r0", "r1", "rho_in", "rho_out", "u0", "p",
+                 "bx", "by", "bz"}, "initial.params")
+    _finite_pair(params.get("center", [0.5, 0.5]),
+                 "initial.params.center")
+    r0 = _as_finite(params.get("r0", 0.1), "initial.params.r0")
+    r1 = _as_finite(params.get("r1", 0.115), "initial.params.r1")
+    if r0 <= 0.0:
+        raise ValueError("initial.params.r0 must be positive")
+    if r1 <= r0:
+        raise ValueError("initial.params.r1 must be greater than r0")
+    for name, default in (("rho_in", 10.0), ("rho_out", 1.0), ("p", 1.0)):
+        _require_positive_finite(params.get(name, default),
+                                 f"initial.params.{name}")
+    u0 = _as_finite(params.get("u0", 2.0), "initial.params.u0")
+    if not math.isfinite(u0 / r0):
+        raise ValueError("rotor angular velocity u0/r0 is not representable")
+    for name in ("bx", "by", "bz"):
+        _require_finite(params.get(name, 0.0), f"initial.params.{name}")
+
+
+def _validate_confined_blob_params(params: dict, domain: "Domain") -> None:
+    _reject_unknown(
+        params, {"bz", "rho_in", "rho_out", "p_in", "p_out", "blob_half"},
+        "initial.params")
+    for name, default in (("rho_in", 10.0), ("rho_out", 1.0),
+                          ("p_in", 1.0), ("p_out", 0.1)):
+        _require_positive_finite(params.get(name, default),
+                                 f"initial.params.{name}")
+    _require_finite(params.get("bz", 0.1), "initial.params.bz")
+    _require_positive_finite(
+        params.get("blob_half", 0.25 * min(domain.lx_m, domain.ly_m)),
+        "initial.params.blob_half")
 
 
 @dataclass
@@ -135,7 +332,8 @@ class BackgroundConfig:
     name validated against the live C++ registry
     (``_core.mhd.registered_mhd_background_profiles()``); ``bx0/by0/bz0`` are the
     uniform-vector parameters consumed when ``profile == "uniform"`` and no
-    ``file`` is given. ``params`` is a free dict for future named profiles.
+    ``file`` is given. ``params`` configures any other registered analytic
+    profile.
     ``file`` (optional) names an npz holding the staggered B0 arrays directly.
     """
     enabled: bool = False
@@ -147,10 +345,10 @@ class BackgroundConfig:
     file: Union[str, None] = None
     # Coil vector-potential mode: an npz with the cell-corner 'A_xyz_grid' (from
     # the coil CLI). The in-plane B0 is the discrete curl of the out-of-plane A,
-    # so B0 is exactly divergence-free; the uniform out-of-plane bz0 is added as
-    # the toroidal component. This is the one supported NON-UNIFORM background: a
-    # curl-free (vacuum coil) field carries no net Maxwell self-force, so the
-    # field-split conservative bookkeeping stays valid without static sources.
+    # so its staggered divergence telescopes; the uniform out-of-plane bz0 is
+    # added as the toroidal component. This is one supported non-uniform input
+    # paths. Its curl may be nonzero: the exact split-energy rate transformation
+    # supports current-carrying backgrounds as long as B0 is discretely solenoidal.
     a_file: Union[str, None] = None
 
 
@@ -188,18 +386,37 @@ class MhdDeck:
             self._validate_cylindrical()
 
     def _validate_domain(self) -> None:
-        if self.domain.nx <= 0 or self.domain.ny <= 0:
+        nx = _as_exact_int(self.domain.nx, "domain.nx")
+        ny = _as_exact_int(self.domain.ny, "domain.ny")
+        if nx <= 0 or ny <= 0:
             raise ValueError("domain.nx and domain.ny must be positive")
-        if self.domain.nx > MAX_GRID_DIM or self.domain.ny > MAX_GRID_DIM:
+        if nx > MAX_GRID_DIM or ny > MAX_GRID_DIM:
             raise ValueError(
                 f"domain.nx/ny must be <= {MAX_GRID_DIM} (got "
-                f"{self.domain.nx}x{self.domain.ny})")
-        if self.domain.nx * self.domain.ny > MAX_GRID_CELLS:
+                f"{nx}x{ny})")
+        if nx * ny > MAX_GRID_CELLS:
             raise ValueError(f"domain.nx*ny must be <= {MAX_GRID_CELLS} cells")
-        _require_positive_finite(self.domain.lx_m, "domain.lx_m")
-        _require_positive_finite(self.domain.ly_m, "domain.ly_m")
-        _require_finite(self.domain.origin_x_m, "domain.origin_x_m")
-        _require_finite(self.domain.origin_y_m, "domain.origin_y_m")
+        lx = _as_finite(self.domain.lx_m, "domain.lx_m")
+        ly = _as_finite(self.domain.ly_m, "domain.ly_m")
+        if lx <= 0.0 or ly <= 0.0:
+            raise ValueError("domain.lx_m and domain.ly_m must be positive")
+        x0 = _as_finite(self.domain.origin_x_m, "domain.origin_x_m")
+        y0 = _as_finite(self.domain.origin_y_m, "domain.origin_y_m")
+        x1 = x0 + lx
+        y1 = y0 + ly
+        _require_finite(x1, "domain upper x bound")
+        _require_finite(y1, "domain upper y bound")
+        dx = lx / nx
+        dy = ly / ny
+        _require_positive_finite(dx, "domain x spacing")
+        _require_positive_finite(dy, "domain y spacing")
+        # A formally positive length is still unusable when translating it to a
+        # large origin erases cell-center distinctions in binary64. Catch both
+        # ends, matching the coordinate convention used by Grid2D.
+        if (x0 + 0.5 * dx == x0 or x0 + (nx - 0.5) * dx == x1
+                or y0 + 0.5 * dy == y0 or y0 + (ny - 0.5) * dy == y1):
+            raise ValueError(
+                "domain cell coordinates collapse in floating-point precision")
 
     def _validate_numerics(self) -> None:
         # gamma must exceed 1 (the ideal-gas adiabatic index; gamma<=1 makes the
@@ -239,20 +456,39 @@ class MhdDeck:
                 f"{list(INITIAL_TYPES)}")
         if not isinstance(self.initial.params, dict):
             raise ValueError("initial.params must be a mapping")
+        validators = {
+            "brio_wu": lambda: _validate_brio_wu_params(self.initial.params),
+            "alfven_wave": lambda: _validate_alfven_wave_params(
+                self, self.initial.params),
+            "orszag_tang": lambda: _validate_orszag_tang_params(
+                self.initial.params),
+            "blast": lambda: _validate_blast_params(self.initial.params),
+            "rotor": lambda: _validate_rotor_params(self.initial.params),
+            "confined_blob": lambda: _validate_confined_blob_params(
+                self.initial.params, self.domain),
+        }
+        validators[self.initial.type]()
 
     def _validate_time(self) -> None:
         if isinstance(self.time.dt_s, str) and self.time.dt_s != "auto":
             raise ValueError("time.dt_s must be a float or the string 'auto'")
         if not isinstance(self.time.dt_s, str):
             _require_positive_finite(self.time.dt_s, "time.dt_s")
-        if self.time.steps <= 0:
+        steps = _as_exact_int(self.time.steps, "time.steps")
+        if steps <= 0:
             raise ValueError("time.steps must be positive")
         if self.time.t_end is not None:
             _require_positive_finite(self.time.t_end, "time.t_end")
 
     def _validate_diagnostics(self) -> None:
-        if self.diagnostics.cadence < 0:
+        if (not isinstance(self.diagnostics.output_path, str)
+                or not self.diagnostics.output_path.strip()):
+            raise ValueError(
+                "diagnostics.output_path must be a non-empty string")
+        cadence = _as_exact_int(self.diagnostics.cadence, "diagnostics.cadence")
+        if cadence < 0:
             raise ValueError("diagnostics.cadence must be >= 0")
+        _as_bool(self.diagnostics.divb, "diagnostics.divb")
         for field_name in self.diagnostics.fields:
             if field_name not in STATE_COMPONENTS:
                 raise ValueError(
@@ -272,19 +508,28 @@ class MhdDeck:
                 raise ValueError(
                     f"boundary.field[{i}] = {bc!r} must be one of "
                     f"{sorted(allowed_field)}")
+        if self.geometry != "cylindrical" and (
+                "axis" in self.boundary.fluid or "axis" in self.boundary.field):
+            raise ValueError("boundary kind 'axis' requires geometry 'cylindrical'")
+        for side in range(4):
+            if ((self.boundary.fluid[side] == "periodic") !=
+                    (self.boundary.field[side] == "periodic")):
+                raise ValueError(
+                    "fluid and field periodicity must match on every side")
+        for axis in range(2):
+            lo, hi = 2 * axis, 2 * axis + 1
+            if ((self.boundary.fluid[lo] == "periodic") !=
+                    (self.boundary.fluid[hi] == "periodic") or
+                    (self.boundary.field[lo] == "periodic") !=
+                    (self.boundary.field[hi] == "periodic")):
+                raise ValueError(
+                    "periodic boundaries must be selected on both sides of an axis")
 
     def _validate_background(self) -> None:
         bg = self.background
+        _as_bool(bg.enabled, "background_field.enabled")
         if not bg.enabled:
             return
-        # The cylindrical geometric source builds its 1/r curvature terms from the
-        # perturbation b only, while the radial flux uses the total field B = B0 + b;
-        # combining a static background with cylindrical geometry would apply an
-        # inconsistent update, so reject it (mirrors the C++ MhdSolver2D guard).
-        if self.geometry == "cylindrical":
-            raise ValueError(
-                "background_field.enabled is not supported with geometry "
-                "'cylindrical' (the geometric source does not fold in B0)")
         # The profile must be a live registered background-field profile so a
         # newly-registered profile needs no Python edit (mirrors the numerics
         # scheme validation).
@@ -293,6 +538,26 @@ class MhdDeck:
                           "background_field.profile")
         if not isinstance(bg.params, dict):
             raise ValueError("background_field.params must be a mapping")
+        for key, value in bg.params.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError(
+                    "background_field.params keys must be non-empty strings")
+            if key == "vacuum_project":
+                continue
+            _require_finite(value, f"background_field.params.{key}")
+        if "vacuum_project" in bg.params:
+            project = bg.params["vacuum_project"]
+            if not isinstance(project, (bool, np.bool_)):
+                raise ValueError(
+                    "background_field.params.vacuum_project must be a boolean")
+            if project and bg.a_file is None:
+                raise ValueError(
+                    "background_field.params.vacuum_project requires "
+                    "background_field.a_file")
+            if project and self.geometry != "cylindrical":
+                raise ValueError(
+                    "background_field.params.vacuum_project is currently "
+                    "defined only for cylindrical A_phi data")
         # Uniform-vector parameters must be finite. (They are still parsed/stored
         # for a non-uniform profile, but only consumed by the uniform profile.)
         _require_finite(bg.bx0, "background_field.bx0")
@@ -327,14 +592,41 @@ class MhdDeck:
                         f"background_field.{_key} {_val!r} does not exist")
 
     def _validate_cylindrical(self) -> None:
-        # The on-axis (r=0) closure assumes the radial domain starts exactly at
-        # r=0; finite inner radius / annular domains are not supported (mirrors
-        # the PIC cylindrical validation).
-        if self.domain.origin_x_m != 0.0:
+        # Radial finite-volume averages use the ring measure r dr, whereas the
+        # current MP5/MP7 reconstruction and magnetic collocation coefficients
+        # are uniform Cartesian moments. Accepting either MP scheme here would
+        # advertise its Cartesian design order while retaining only second-order
+        # radial consistency. Keep the supported scheme explicit until native
+        # reconstruction owns radius-dependent weighted moments.
+        if self.numerics.reconstruction != "muscl_minmod":
             raise ValueError(
-                "geometry 'cylindrical': domain.origin_x_m must be 0 (the m=0 "
-                "on-axis scheme requires the radial domain to start at r=0; "
-                "finite inner radius / annular domains are not supported yet)")
+                "geometry 'cylindrical' currently supports only "
+                "numerics.reconstruction='muscl_minmod'; MP5/MP7 require "
+                "r-weighted radial finite-volume moments")
+        # A cylindrical radial coordinate cannot be negative. At r_min=0 the
+        # low side is the coordinate axis and needs the parity closure. For a
+        # finite-inner-radius annulus it is an ordinary physical boundary and
+        # must not use the axis closure.
+        if self.domain.origin_x_m < 0.0:
+            raise ValueError(
+                "geometry 'cylindrical': domain.origin_x_m must be non-negative")
+        if "axis" in self.boundary.fluid[1:] or "axis" in self.boundary.field[1:]:
+            raise ValueError("the MHD 'axis' boundary is valid only on x_lo")
+        fluid_axis = self.boundary.fluid[0] == "axis"
+        field_axis = self.boundary.field[0] == "axis"
+        if self.domain.origin_x_m == 0.0:
+            if not fluid_axis or not field_axis:
+                raise ValueError(
+                    "geometry 'cylindrical' starting at r=0 requires "
+                    "boundary.fluid.x_lo and boundary.field.x_lo to be 'axis'")
+        elif fluid_axis or field_axis:
+            raise ValueError(
+                "geometry 'cylindrical' with origin_x_m > 0 is an annular domain; "
+                "the x_lo boundary must be physical, not 'axis'")
+        if ("periodic" in self.boundary.fluid[:2] or
+                "periodic" in self.boundary.field[:2]):
+            raise ValueError(
+                "geometry 'cylindrical': the radial axis cannot be periodic")
 
 
 def _check_registered(name: str, allowed: Sequence[str], context: str) -> None:
@@ -344,9 +636,13 @@ def _check_registered(name: str, allowed: Sequence[str], context: str) -> None:
 
 
 def _parse_domain(d: dict) -> Domain:
+    d = _mapping(d, "domain")
+    _reject_unknown(
+        d, {"nx", "ny", "lx_m", "ly_m", "origin_x_m", "origin_y_m"},
+        "domain")
     return Domain(
-        nx=int(_require(d, "nx", "domain")),
-        ny=int(_require(d, "ny", "domain")),
+        nx=_as_exact_int(_require(d, "nx", "domain"), "domain.nx"),
+        ny=_as_exact_int(_require(d, "ny", "domain"), "domain.ny"),
         lx_m=float(_require(d, "lx_m", "domain")),
         ly_m=float(_require(d, "ly_m", "domain")),
         origin_x_m=float(d.get("origin_x_m", 0.0)),
@@ -357,6 +653,10 @@ def _parse_domain(d: dict) -> Domain:
 def _parse_numerics(d: dict | None) -> Numerics:
     if d is None:
         return Numerics()
+    d = _mapping(d, "numerics")
+    _reject_unknown(
+        d, {"gamma", "reconstruction", "riemann", "integrator", "ct",
+            "positivity", "rho_floor", "p_floor", "cfl"}, "numerics")
     return Numerics(
         gamma=float(d.get("gamma", 5.0 / 3.0)),
         reconstruction=str(d.get("reconstruction", "mp7")),
@@ -373,36 +673,56 @@ def _parse_numerics(d: dict | None) -> Numerics:
 def _parse_initial(d: dict | None) -> Union[Initial, None]:
     if d is None:
         return None
+    d = _mapping(d, "initial")
+    _reject_unknown(d, {"type", "params"}, "initial")
+    params = d.get("params", {})
+    params = _mapping(params, "initial.params")
     return Initial(
         type=str(_require(d, "type", "initial")),
-        params=dict(d.get("params", {}) or {}),
+        params=dict(params),
     )
 
 
 def _parse_time(d: dict | None) -> Time:
     if d is None:
         return Time()
+    d = _mapping(d, "time")
+    _reject_unknown(d, {"dt_s", "steps", "t_end"}, "time")
     dt_raw = d.get("dt_s", "auto")
     dt_s: Union[float, str] = dt_raw if isinstance(dt_raw, str) else float(dt_raw)
     t_end = d.get("t_end")
-    return Time(dt_s=dt_s, steps=int(d.get("steps", 100)),
+    return Time(dt_s=dt_s,
+                steps=_as_exact_int(d.get("steps", 100), "time.steps"),
                 t_end=None if t_end is None else float(t_end))
 
 
 def _parse_diagnostics(d: dict | None) -> Diagnostics:
     if d is None:
         return Diagnostics()
+    d = _mapping(d, "diagnostics")
+    _reject_unknown(d, {"output_path", "cadence", "fields", "divb"},
+                    "diagnostics")
+    output_path = d.get("output_path", "out.npz")
+    if not isinstance(output_path, str):
+        raise ValueError("diagnostics.output_path must be a string")
     return Diagnostics(
-        output_path=str(d.get("output_path", "out.npz")),
-        cadence=int(d.get("cadence", 0)),
+        output_path=output_path,
+        cadence=_as_exact_int(d.get("cadence", 0), "diagnostics.cadence"),
         fields=list(d.get("fields", list(STATE_COMPONENTS))),
-        divb=bool(d.get("divb", True)),
+        divb=_as_bool(d.get("divb", True), "diagnostics.divb"),
     )
 
 
 def _parse_boundary(d: dict | None) -> BoundaryConfig:
     if d is None:
         return BoundaryConfig()
+    d = _mapping(d, "boundary")
+    _reject_unknown(d, {"fluid", "field"}, "boundary")
+    for name in ("fluid", "field"):
+        side_map = d.get(name)
+        if isinstance(side_map, dict):
+            _reject_unknown(side_map, {"x_lo", "x_hi", "y_lo", "y_hi"},
+                            f"boundary.{name}")
     return BoundaryConfig(
         fluid=_parse_side_map(d.get("fluid"), "periodic", "boundary.fluid"),
         field=_parse_side_map(d.get("field"), "periodic", "boundary.field"),
@@ -415,21 +735,28 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
     # "uniform" and every uniform-vector component to 0.
     if d is None:
         return BackgroundConfig()
+    d = _mapping(d, "background_field")
+    _reject_unknown(
+        d, {"enabled", "profile", "bx0", "by0", "bz0", "params", "file",
+            "a_file"}, "background_field")
     file_raw = d.get("file")
     a_file_raw = d.get("a_file")
+    params = _mapping(d.get("params", {}), "background_field.params")
     return BackgroundConfig(
-        enabled=bool(d.get("enabled", False)),
+        enabled=_as_bool(d.get("enabled", False), "background_field.enabled"),
         profile=str(d.get("profile", "uniform")),
         bx0=float(d.get("bx0", 0.0)),
         by0=float(d.get("by0", 0.0)),
         bz0=float(d.get("bz0", 0.0)),
-        params=dict(d.get("params", {}) or {}),
+        params=dict(params),
         file=None if file_raw is None else str(file_raw),
         a_file=None if a_file_raw is None else str(a_file_raw),
     )
 
 
 def parse(data: dict) -> MhdDeck:
+    data = _mapping(data, "deck")
+    _reject_unknown(data, _TOP_LEVEL_KEYS, "deck")
     deck = MhdDeck(
         domain=_parse_domain(_require(data, "domain", "deck")),
         numerics=_parse_numerics(data.get("numerics")),
@@ -448,7 +775,7 @@ def parse(data: dict) -> MhdDeck:
 
 def load(path: Union[str, Path]) -> MhdDeck:
     with open(path) as fh:
-        data = yaml.safe_load(fh)
+        data = _load_yaml(fh)
     if not isinstance(data, dict):
         raise ValueError(f"{path}: top-level YAML must be a mapping")
     deck = parse(data)
@@ -490,7 +817,9 @@ def _padded_grids(domain: Domain, nghost: int):
     cells carry a consistent analytic value.
     """
     nx, ny = domain.nx, domain.ny
-    g = nghost
+    g = _as_exact_int(nghost, "nghost")
+    if g < 0:
+        raise ValueError("nghost must be non-negative")
     pitch = nx + 2 * g
     height = ny + 2 * g
     dx = domain.lx_m / nx
@@ -504,7 +833,25 @@ def _padded_grids(domain: Domain, nghost: int):
     yc = domain.origin_y_m + (j_int + 0.5) * dy   # cell-center y
     xf = domain.origin_x_m + i_int * dx           # left-face x (for bx_face)
     yf = domain.origin_y_m + j_int * dy           # bottom-face y (for by_face)
+    if not all(np.all(np.isfinite(a)) for a in (xc, yc, xf, yf)):
+        raise ValueError("padded grid coordinates are not representable in float64")
     return xc, yc, xf, yf, dx, dy
+
+
+def _validate_padded_cylindrical_domain(deck: MhdDeck, nghost: int) -> None:
+    """Reject an annular reconstruction halo that reaches non-positive radius."""
+    g = _as_exact_int(nghost, "nghost")
+    if g < 0:
+        raise ValueError("nghost must be non-negative")
+    if deck.geometry != "cylindrical" or deck.domain.origin_x_m == 0.0:
+        return
+    dx = deck.domain.lx_m / deck.domain.nx
+    padded_r_lo = deck.domain.origin_x_m - g * dx
+    if not math.isfinite(padded_r_lo) or padded_r_lo <= 0.0:
+        raise ValueError(
+            "annular cylindrical geometry requires "
+            "domain.origin_x_m - nghost*dr > 0 so the full "
+            "reconstruction halo stays at positive radius")
 
 
 def _empty_state(shape) -> dict:
@@ -522,6 +869,7 @@ def build_initial_state(deck: MhdDeck, nghost: int) -> dict:
     Returns ``{component: 1-D host buffer}`` for every STATE_COMPONENT, ready to
     hand to ``solver.seed_state(component, buf)``.
     """
+    _validate_padded_cylindrical_domain(deck, nghost)
     builders = {
         "brio_wu": _ic_brio_wu,
         "alfven_wave": _ic_alfven_wave,
@@ -531,18 +879,62 @@ def build_initial_state(deck: MhdDeck, nghost: int) -> dict:
         "confined_blob": _ic_confined_blob,
     }
     builder = builders[deck.initial.type]
-    return builder(deck, nghost)
+    state = builder(deck, nghost)
+
+    # Builders express their analytic magnetic profiles in deck units and, for
+    # historical reasons, initially form energy from the raw face slots.  Convert
+    # SI Tesla to the solver's mu0=1 magnetic variable and replace that magnetic
+    # energy by the field collocated at the cell centre.
+    shape = (deck.domain.ny + 2 * nghost, deck.domain.nx + 2 * nghost)
+    bx_deck = np.asarray(state["bx"], dtype=np.float64).reshape(shape)
+    by_deck = np.asarray(state["by"], dtype=np.float64).reshape(shape)
+    bz_deck = np.asarray(state["bz"], dtype=np.float64).reshape(shape)
+    energy = np.asarray(state["energy"], dtype=np.float64).reshape(shape)
+    old_magnetic = mhd_num.half_squared_norm3(bx_deck, by_deck, bz_deck)
+
+    bx = mhd_units.magnetic_to_internal(bx_deck, deck.units)
+    by = mhd_units.magnetic_to_internal(by_deck, deck.units)
+    bz = mhd_units.magnetic_to_internal(bz_deck, deck.units)
+    # Face data are finite-volume face averages, not point values. Match the
+    # native order-aware face-to-cell quadrature (including its outer-ghost
+    # closure) so the seeded energy and the solver EOS use exactly the same B.
+    bx_c = mhd_num.face_samples_to_cell_average(bx, axis=1, nghost=nghost)
+    by_c = mhd_num.face_samples_to_cell_average(by, axis=0, nghost=nghost)
+    new_magnetic = mhd_num.half_squared_norm3(bx_c, by_c, bz)
+
+    state["bx"] = bx.reshape(-1)
+    state["by"] = by.reshape(-1)
+    state["bz"] = bz.reshape(-1)
+    adjusted_energy = energy - old_magnetic + new_magnetic
+    state["energy"] = adjusted_energy.reshape(-1)
+
+    # Final preflight on the exact conserved arrays handed to the native
+    # solver.  Face-to-cell magnetic collocation and float64 energy assembly can
+    # expose an otherwise-hidden loss of internal energy at extreme scales; do
+    # not defer that error to the first CFL reduction/device kernel.
+    rho = np.asarray(state["rho"], dtype=np.float64).reshape(shape)
+    mx = np.asarray(state["mx"], dtype=np.float64).reshape(shape)
+    my = np.asarray(state["my"], dtype=np.float64).reshape(shape)
+    mz = np.asarray(state["mz"], dtype=np.float64).reshape(shape)
+    if not np.all(np.isfinite(rho)) or np.any(rho <= 0.0):
+        raise ValueError(
+            "initial state must have finite, strictly positive density everywhere")
+    pressure = mhd_num.conserved_to_pressure(
+        rho, mx, my, mz, adjusted_energy, bx_c, by_c, bz, deck.numerics.gamma)
+    if np.any(pressure <= 0.0):
+        raise ValueError(
+            "initial state must have strictly positive gas pressure everywhere")
+    return state
 
 
 # =============================================================================
 # Static background magnetic field B0 (field-split form B = B0 + b)
 # =============================================================================
 
-# Round-off tolerance scale for the discrete divergence-free check on a seeded
-# background field. The threshold is `_DIVB_TOL * max(1, |B0|_inf / min(dx,dy))`
-# so a uniform/constant field passes trivially and a malformed (div-B != 0) file
-# is rejected.
-_DIVB_TOL = 1.0e-9
+# The optional cylindrical vacuum projection solves a curl-free elliptic
+# condition.  Its algebraic stopping tolerance is independent of the strict,
+# scale-free solenoidality proof applied to the resulting staggered field.
+_VACUUM_PROJECTION_RELATIVE_TOL = 5.0e-11
 
 
 def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
@@ -560,8 +952,7 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     * **profile** (named ``profile``, no ``file``): sample the analytic profile
       over the padded staggered meshes from :func:`_padded_grids` (b0x at the
       left face ``xf``, b0y at the bottom face ``yf``, b0z at cell centers).
-      Only "uniform" is registered today (so this reduces to the constants), but
-      the sampling is written generically so a future profile slots in.
+      Registered profile parameters are forwarded to the native sampler.
     * **file** (``file:`` given): ``np.load`` the npz and read arrays ``b0x``,
       ``b0y``, ``b0z`` each shaped ``(ny+2g, nx+2g)`` or flat ``(storage,)``;
       reshape/flatten to the 1-D storage layout.
@@ -569,6 +960,7 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     In ALL modes the interior discrete face-divergence of the assembled field is
     checked and a non-divergence-free background raises ``ValueError``.
     """
+    _validate_padded_cylindrical_domain(deck, nghost)
     bg = deck.background
     if not bg.enabled:
         return None
@@ -582,11 +974,7 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     dx = deck.domain.lx_m / nx
     dy = deck.domain.ly_m / ny
 
-    # The coil A-file mode builds a NON-UNIFORM but curl-free B0 from a vector
-    # potential; it is solenoidal by construction and skips the uniformity check
-    # (justified below). Every other mode produces a uniform field.
-    coil_mode = bg.a_file is not None
-    if coil_mode:
+    if bg.a_file is not None:
         b0x, b0y, b0z = _background_from_a_file(deck, nghost, shape)
     elif bg.file is not None:
         b0x, b0y, b0z = _background_from_file(bg.file, deck.source_dir, shape,
@@ -594,50 +982,162 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     else:
         b0x, b0y, b0z = _background_from_profile(deck, nghost, shape)
 
-    # Divergence-free check (interior face divergence). Scale the tolerance by the
-    # field magnitude so it survives a large but smooth uniform field while still
-    # rejecting a genuinely non-solenoidal seed.
-    inv_dmin = 1.0 / min(dx, dy)
-    scale = max(1.0, float(np.max(np.abs(b0x)) + np.max(np.abs(b0y))) * inv_dmin)
-    divb = mhd_num.background_divergence_linf(b0x, b0y, nx, ny, g, dx, dy)
-    if divb > _DIVB_TOL * scale:
-        raise ValueError(
-            f"background_field is not divergence-free: max |div B0| = {divb:.3e} "
-            f"exceeds tolerance {_DIVB_TOL * scale:.3e}. A uniform or staggered "
-            f"solenoidal field is required.")
+    # SI decks provide B0 in tesla (and A in T m); the solver stores B/sqrt(mu0)
+    # so magnetic pressure and Alfven speed use the normalized mu0=1 equations.
+    b0x = mhd_units.magnetic_to_internal(b0x, deck.units)
+    b0y = mhd_units.magnetic_to_internal(b0y, deck.units)
+    b0z = mhd_units.magnetic_to_internal(b0z, deck.units)
 
-    # Uniformity check. The static field-split residual uses a conservative-flux-
-    # only bookkeeping (the HLLD energy back-correction f_E_pert = f_E_tot - B0.F_B
-    # and the total-field Maxwell stress). That is exact ONLY for a spatially
-    # CONSTANT B0: a non-uniform background carries a magnetic-pressure gradient
-    # grad(0.5|B0|^2) and tension, plus a grad(B0).F_b energy term, which would
-    # need explicit static source terms in the momentum/energy residual to stay
-    # conservative.
-    #
-    # EXCEPTION (coil A-file mode): a CURL-FREE vacuum coil field carries no net
-    # Maxwell self-force -- div(B0 B0 - 0.5|B0|^2 I) = (curl B0) x B0 = 0 -- so the
-    # missing static momentum source is exactly zero (not merely small) in the
-    # continuum, and the energy cross-term grad(B0).F_b integrates to a boundary
-    # flux for the smooth coil field. The split therefore stays conservative to
-    # truncation order, so the uniformity guard is skipped for this mode. (It is a
-    # vacuum field threading the bore, the intended physical use.)
-    if not coil_mode:
-        for name, comp in (("b0x", b0x), ("b0y", b0y), ("b0z", b0z)):
-            cmin = float(np.min(comp))
-            cmax = float(np.max(comp))
-            spread = cmax - cmin
-            tol = 1.0e-12 * max(1.0, abs(cmin), abs(cmax))
-            if spread > tol:
-                raise ValueError(
-                    f"background_field component {name} is not spatially uniform "
-                    f"(range [{cmin:.3e}, {cmax:.3e}]). Only a spatially-uniform "
-                    f"background field is supported: the field-split solver carries "
-                    f"no source terms for a non-uniform B0, so a varying background "
-                    f"would violate energy/momentum conservation. Supply a constant "
-                    f"vector (bx0/by0/bz0), a file whose arrays are constant per "
-                    f"component, or a curl-free coil field via a_file.")
+    # Use the same per-cell, common-exponent relative defect as the native live
+    # and background preflights.  This is invariant under field-unit and mesh
+    # rescaling; there is no unit-dependent absolute floor.
+    divb_defect = mhd_num.background_divergence_relative_linf(
+        b0x, b0y, nx, ny, g, dx, dy,
+        geometry=deck.geometry, origin_x=deck.domain.origin_x_m)
+    if divb_defect > mhd_num.DISCRETE_SOLENOIDAL_TOLERANCE:
+        raise ValueError(
+            "background_field is not discretely divergence-free: maximum "
+            f"relative stencil defect {divb_defect:.3e} exceeds "
+            f"{mhd_num.DISCRETE_SOLENOIDAL_TOLERANCE:.3e}.")
+    mhd_num.validate_background_boundary_compatibility(
+        b0x, b0y, b0z, nx, ny, g, deck.boundary.field)
 
     return {"b0x": b0x.reshape(-1), "b0y": b0y.reshape(-1), "b0z": b0z.reshape(-1)}
+
+
+def _project_cylindrical_vacuum_a(a_ji, r_face, dx, dy):
+    """Project sampled ``A_phi`` onto the discrete annular vacuum operator.
+
+    The projection fixes every value on the outer boundary of the padded corner
+    grid and solves for ``psi = r A_phi`` at interior nodes so that
+
+    ``D_r[(1/r) D_r psi] + D_zz(A_phi) = 0``.
+
+    The radial differences are exactly the annular differences used to construct
+    ``B_z`` below, and the axial differences are exactly those used for ``B_r``.
+    Consequently the resulting face field has telescoping discrete ``div(B)``
+    from the curl construction, while its discrete ``curl(B)`` is driven to the
+    CG target by the solved equation. This is an opt-in operation because it
+    replaces the interior by
+    the unique discrete-vacuum harmonic continuation of the supplied boundary.
+    Without projection the supplied potential is differenced directly; the
+    resulting current-carrying field is valid if its divergence passes setup
+    validation.
+
+    A strictly positive padded radial interval is required. The r=0 parity
+    closure needs a separate axis row in this elliptic operator and is therefore
+    intentionally not inferred here.
+    """
+    a = np.asarray(a_ji, dtype=np.float64)
+    radii = np.asarray(r_face, dtype=np.float64)
+    if a.ndim != 2 or radii.ndim != 1 or a.shape[1] != radii.size:
+        raise ValueError("invalid corner grid for cylindrical vacuum projection")
+    if not np.all(radii > 0.0):
+        raise ValueError(
+            "background_field.params.vacuum_project requires the full padded "
+            "corner grid to lie at r > 0 (annular geometry)")
+
+    if not np.all(np.isfinite(a)) or not np.all(np.isfinite(radii)):
+        raise ValueError("cylindrical vacuum projection inputs must be finite")
+    if not math.isfinite(dx) or dx <= 0.0 or not math.isfinite(dy) or dy <= 0.0:
+        raise ValueError("cylindrical vacuum projection spacing must be finite and positive")
+    with np.errstate(over="ignore", invalid="ignore"):
+        psi = a * radii[None, :]
+    if not np.all(np.isfinite(psi)):
+        raise ValueError("r*A_phi is not representable in float64")
+    r = radii[1:-1]
+    dr_e = radii[2:] - r
+    dr_w = r - radii[:-2]
+    rmid_e = 0.5 * radii[2:] + 0.5 * r
+    rmid_w = 0.5 * r + 0.5 * radii[:-2]
+    ring_e = dr_e * rmid_e
+    ring_w = dr_w * rmid_w
+    if np.any(ring_e <= 0.0) or np.any(ring_w <= 0.0):
+        raise ValueError(
+            "cylindrical vacuum projection requires monotonically increasing "
+            "positive radial faces")
+
+    # -L is symmetric positive definite for fixed Dirichlet boundary values.
+    ce = (1.0 / dx) / ring_e
+    cw = (1.0 / dx) / ring_w
+    cz = ((1.0 / dy) / dy) / r
+    diag = ce + cw + 2.0 * cz
+    if (not np.all(np.isfinite(ce)) or not np.all(np.isfinite(cw))
+            or not np.all(np.isfinite(cz)) or not np.all(np.isfinite(diag))):
+        raise ValueError(
+            "cylindrical vacuum projection coefficients are not representable")
+
+    def apply_zero_boundary(x):
+        out = diag[None, :] * x
+        out[:, :-1] -= ce[:-1][None, :] * x[:, 1:]
+        out[:, 1:] -= cw[1:][None, :] * x[:, :-1]
+        out[:-1, :] -= cz[None, :] * x[1:, :]
+        out[1:, :] -= cz[None, :] * x[:-1, :]
+        return out
+
+    centre = psi[1:-1, 1:-1]
+    a_raw = (diag[None, :] * centre
+             - ce[None, :] * psi[1:-1, 2:]
+             - cw[None, :] * psi[1:-1, :-2]
+             - cz[None, :] * (psi[2:, 1:-1] + psi[:-2, 1:-1]))
+    rhs = -a_raw
+
+    # Scale the algebraic vacuum-operator residual to the characteristic field
+    # derivative.  This is a curl/vacuum solve criterion, not the separate
+    # scale-free divergence acceptance bound.
+    br_raw = -(a[1:, :] - a[:-1, :]) / dy
+    dr = radii[1:] - radii[:-1]
+    rmid = 0.5 * radii[1:] + 0.5 * radii[:-1]
+    bz_raw = ((a[:, 1:] - a[:, :-1]) / dr[None, :]
+              + (0.5 * a[:, 1:] + 0.5 * a[:, :-1]) / rmid[None, :])
+    field_scale = max(
+        1.0,
+        max(float(np.max(np.abs(br_raw))), float(np.max(np.abs(bz_raw)))) /
+        min(dx, dy))
+    if not math.isfinite(field_scale):
+        raise ValueError("projected field derivative scale is not representable")
+    target = _VACUUM_PROJECTION_RELATIVE_TOL * field_scale
+
+    residual = rhs.copy()
+    correction = np.zeros_like(residual)
+    z = residual / diag[None, :]
+    direction = z.copy()
+    rz = float(np.sum(residual * z))
+    converged = float(np.max(np.abs(residual))) <= target
+    max_iterations = max(200, 20 * max(a.shape))
+    for _ in range(max_iterations):
+        if converged:
+            break
+        ad = apply_zero_boundary(direction)
+        denom = float(np.sum(direction * ad))
+        if not (math.isfinite(denom) and denom > 0.0 and math.isfinite(rz)):
+            raise ValueError(
+                "cylindrical vacuum projection failed: discrete operator lost "
+                "positive definiteness")
+        alpha = rz / denom
+        correction += alpha * direction
+        residual -= alpha * ad
+        if float(np.max(np.abs(residual))) <= target:
+            converged = True
+            break
+        z = residual / diag[None, :]
+        rz_next = float(np.sum(residual * z))
+        if not (math.isfinite(rz_next) and rz_next >= 0.0):
+            raise ValueError(
+                "cylindrical vacuum projection failed with a non-finite residual")
+        beta = rz_next / rz
+        direction = z + beta * direction
+        rz = rz_next
+    if not converged:
+        final = float(np.max(np.abs(residual)))
+        raise ValueError(
+            "cylindrical vacuum projection did not converge within "
+            f"{max_iterations} iterations (residual {final:.3e}, target "
+            f"{target:.3e})")
+
+    projected_psi = psi.copy()
+    projected_psi[1:-1, 1:-1] += correction
+    return projected_psi / radii[None, :]
 
 
 def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
@@ -649,10 +1149,16 @@ def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
     interior). With the lab Y=0 slice and the mapping MHD-x = lab-X, MHD-y = lab-Z,
     out-of-plane = lab-Y, the saved array has shape ``(Ny+1, 1, Nx+1, 3)`` where
     ``Nx = nx + 2g``, ``Ny = ny + 2g`` are the padded cell counts. The in-plane B0
-    is the discrete curl of the corner lab-Y component A[j, i]:
+    is the discrete curl of the corner lab-Y component A[j, i]. In Cartesian
+    geometry this is
 
         b0x_face(i,j) = -(A[j+1,i] - A[j,i]) / dy      # B_R on the left face
         b0y_face(i,j) =  (A[j,i+1] - A[j,i]) / dx      # B_z on the bottom face
+
+    while cylindrical (R,Z) geometry uses the annular form
+
+        b0y_face(i,j) = (R_hi A[j,i+1] - R_lo A[j,i])
+                         / (0.5 (R_hi^2-R_lo^2)).
 
     spanning the full padded face layout, so the cell-centered discrete divergence
     telescopes to zero everywhere. The uniform out-of-plane ``bz0`` is added as the
@@ -683,11 +1189,16 @@ def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
         raise ValueError(
             f"background_field.a_file {file_rel!r} could not be read as an npz: "
             f"{exc}") from None
-    if "A_xyz_grid" not in loaded:
+    if not hasattr(loaded, "files") or not hasattr(loaded, "close"):
         raise ValueError(
-            f"background_field.a_file {file_rel!r} is missing array 'A_xyz_grid' "
-            "(run the coil CLI with output.fields including 'A_xyz_grid')")
-    a = np.asarray(loaded["A_xyz_grid"], dtype=np.float64)
+            f"background_field.a_file {file_rel!r} is not an npz archive")
+    with loaded:
+        if "A_xyz_grid" not in loaded:
+            raise ValueError(
+                f"background_field.a_file {file_rel!r} is missing array "
+                "'A_xyz_grid' (run the coil CLI with output.fields including "
+                "'A_xyz_grid')")
+        a = np.asarray(loaded["A_xyz_grid"], dtype=np.float64)
     expected = (height + 1, 1, pitch + 1, 3)
     if a.shape != expected:
         raise ValueError(
@@ -700,45 +1211,85 @@ def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
         raise ValueError(
             f"background_field.a_file {file_rel!r} A_xyz_grid has non-finite values")
     b_scale = float(bg.params.get("b_scale", 1.0))
-    a_ji = a_ji * b_scale
+    if not math.isfinite(b_scale):
+        raise ValueError("background_field.params.b_scale must be finite")
+    with np.errstate(over="ignore", invalid="ignore"):
+        a_ji = a_ji * b_scale
+    if not np.all(np.isfinite(a_ji)):
+        raise ValueError("scaled background vector potential is not representable")
+
+    if bool(bg.params.get("vacuum_project", False)):
+        # The opt-in projection is performed in deck units before B is converted
+        # to the solver's B/sqrt(mu0) variable. The linear solve is scale
+        # invariant; the derived field still undergoes the standard divergence
+        # validation after unit conversion.
+        face_index = np.arange(pitch + 1, dtype=np.float64) - g
+        r_face = deck.domain.origin_x_m + face_index * dx
+        a_ji = _project_cylindrical_vacuum_a(a_ji, r_face, dx, dy)
 
     b0x = -(a_ji[1:, :] - a_ji[:-1, :]) / dy  # (height, pitch+1) -> trim to faces
-    b0y = (a_ji[:, 1:] - a_ji[:, :-1]) / dx   # (height+1, pitch) -> trim to faces
+    if deck.geometry == "cylindrical":
+        # Axisymmetric curl of A=A_phi e_phi:
+        #   B_r = -dA_phi/dz,
+        #   B_z = (1/r)d(r A_phi)/dr.
+        # Use the same annular volume integral as the solver. This makes the
+        # subsequent ring-weighted div(B0) telescope exactly.
+        face_index = np.arange(pitch + 1, dtype=np.float64) - g
+        r_face = deck.domain.origin_x_m + face_index * dx
+        r_lo = r_face[:-1]
+        r_hi = r_face[1:]
+        dr = r_hi - r_lo
+        r_mid = 0.5 * r_hi + 0.5 * r_lo
+        ring = dr * r_mid
+        if (not np.all(np.isfinite(ring)) or np.any(ring == 0.0)
+                or np.any(dr <= 0.0)):
+            raise ValueError(
+                "background_field.a_file cylindrical curl encountered an invalid "
+                "annular cell measure")
+        b0y = ((a_ji[:, 1:] - a_ji[:, :-1]) / dr[None, :]
+               + (0.5 * a_ji[:, 1:] + 0.5 * a_ji[:, :-1]) /
+               r_mid[None, :])
+    else:
+        b0y = (a_ji[:, 1:] - a_ji[:, :-1]) / dx
+    # b0x has shape (height,pitch+1); b0y has (height+1,pitch).
     # Face arrays are stored on the (height, pitch) cell layout: bx_face uses the
     # left face (drop the extra right column), by_face the bottom face (drop the
     # extra top row).
     b0x = b0x[:, :pitch].copy()
     b0y = b0y[:height, :].copy()
     b0z = np.full(shape, float(bg.bz0))
+    if not all(np.all(np.isfinite(a)) for a in (b0x, b0y, b0z)):
+        raise ValueError("background vector-potential curl is not representable")
     return b0x, b0y, b0z
 
 
 def _background_from_profile(deck: MhdDeck, nghost: int, shape):
     """Sample the analytic background profile over the padded staggered meshes.
 
-    Only the "uniform" profile is registered today, so this reduces to constant
-    components (b0x==bx0, b0y==by0, b0z==bz0). The face/cell mesh plumbing is
-    written generically so a future spatially-varying profile (b0x at xf, b0y at
-    yf, b0z at cell centers) slots in without changing the call site.
+    The native registry owns profile evaluation. Normal components are sampled on
+    their staggered faces and the out-of-plane component at cell centres.
     """
     bg = deck.background
-    xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
-    _ = (xc, yc, xf, yf)  # staggered meshes for a future spatial profile.
+    xc, yc, xf, yf, _dx, _dy = _padded_grids(deck.domain, nghost)
+    params = dict(bg.params)
     if bg.profile == "uniform":
-        b0x = np.full(shape, float(bg.bx0))
-        b0y = np.full(shape, float(bg.by0))
-        b0z = np.full(shape, float(bg.bz0))
-        return b0x, b0y, b0z
-    # The profile name validated against the live C++ registry, but only "uniform"
-    # has a Python-side analytic sampler today. A different registered profile has
-    # no host sampler to fill the staggered B0 buffers, so fail loudly rather than
-    # silently substitute a constant field (which would misrepresent the requested
-    # profile). A future spatial profile adds its sampler here using the xf/yf/xc
-    # meshes above.
-    raise NotImplementedError(
-        f"background_field.profile {bg.profile!r} is registered but has no "
-        f"Python-side sampler yet; only 'uniform' is supported from the deck. "
-        f"Supply uniform components (bx0/by0/bz0) or load B0 from a file.")
+        params.update(bx0=float(bg.bx0), by0=float(bg.by0), bz0=float(bg.bz0))
+
+    sampler = _core.mhd.sample_mhd_background_profile
+    try:
+        b0x = np.asarray(sampler(bg.profile, 0, xf, yc, params), dtype=np.float64)
+        b0y = np.asarray(sampler(bg.profile, 1, xc, yf, params), dtype=np.float64)
+        b0z = np.asarray(sampler(bg.profile, 2, xc, yc, params), dtype=np.float64)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"background_field.profile {bg.profile!r} could not be sampled: {exc}") \
+            from None
+    for name, arr in (("b0x", b0x), ("b0y", b0y), ("b0z", b0z)):
+        if arr.shape != shape or not np.all(np.isfinite(arr)):
+            raise ValueError(
+                f"background_field.profile {bg.profile!r} produced invalid {name} "
+                f"samples (shape {arr.shape}, expected {shape})")
+    return b0x, b0y, b0z
 
 
 def _background_from_file(file_rel: str, source_dir, shape, storage):
@@ -774,21 +1325,25 @@ def _background_from_file(file_rel: str, source_dir, shape, storage):
         raise ValueError(
             f"background_field.file {file_rel!r} could not be read as an npz: "
             f"{exc}") from None
+    if not hasattr(loaded, "files") or not hasattr(loaded, "close"):
+        raise ValueError(
+            f"background_field.file {file_rel!r} is not an npz archive")
     out = []
-    for name in ("b0x", "b0y", "b0z"):
-        if name not in loaded:
-            raise ValueError(
-                f"background_field.file {file_rel!r} is missing array {name!r} "
-                f"(needs b0x, b0y, b0z)")
-        arr = np.asarray(loaded[name], dtype=np.float64)
-        if arr.shape == shape:
-            out.append(arr.copy())
-        elif arr.shape == (storage,):
-            out.append(arr.reshape(shape))
-        else:
-            raise ValueError(
-                f"background_field.file {file_rel!r} array {name!r} has shape "
-                f"{arr.shape}; expected {shape} or ({storage},)")
+    with loaded:
+        for name in ("b0x", "b0y", "b0z"):
+            if name not in loaded:
+                raise ValueError(
+                    f"background_field.file {file_rel!r} is missing array "
+                    f"{name!r} (needs b0x, b0y, b0z)")
+            arr = np.asarray(loaded[name], dtype=np.float64)
+            if arr.shape == shape:
+                out.append(arr.copy())
+            elif arr.shape == (storage,):
+                out.append(arr.reshape(shape).copy())
+            else:
+                raise ValueError(
+                    f"background_field.file {file_rel!r} array {name!r} has "
+                    f"shape {arr.shape}; expected {shape} or ({storage},)")
     if not np.all(np.isfinite(out[0])) or not np.all(np.isfinite(out[1])) \
             or not np.all(np.isfinite(out[2])):
         raise ValueError(
@@ -849,12 +1404,13 @@ def _ic_alfven_wave(deck: MhdDeck, nghost: int) -> dict:
     params: rho, p, b0, amplitude (A), wavenumber (n, full wavelengths across
     lx), polarization ("circular").
 
-    With background B0 along x and Alfven speed vA = B0/sqrt(rho), the exact CP
-    eigen-relation (matching the example deck) is, for k = 2*pi*n/lx::
+    With total axial background B0 and Alfven speed |B0|/sqrt(rho), the exact CP
+    eigen-relation (matching the example deck) is, for
+    ``k = 2*pi*n/lx`` and ``xi=x-origin_x``::
 
-        By =  A sin(k x),    Bz =  A cos(k x)
-        vy = -A/sqrt(rho) sin(k x) = -(A/B0) vA sin(k x)
-        vz = -A/sqrt(rho) cos(k x)
+        By =  A sin(k xi),    Bz =  A cos(k xi)
+        vy = -sign(B0) A/sqrt(rho) sin(k xi)
+        vz = -sign(B0) A/sqrt(rho) cos(k xi)
 
     so dv = -dB/sqrt(rho) (a +x-propagating Alfven wave). Bx = B0 (uniform),
     vx = 0, rho and p uniform. Energy from primitive_to_energy.
@@ -864,33 +1420,35 @@ def _ic_alfven_wave(deck: MhdDeck, nghost: int) -> dict:
     rho0 = float(p.get("rho", 1.0))
     pr0 = float(p.get("p", 0.1))
     b0 = float(p.get("b0", 1.0))
+    total_b0 = _alfven_reference_bx(deck)
     amp = float(p.get("amplitude", 1.0e-6))
-    n = int(p.get("wavenumber", 1))
-    polarization = str(p.get("polarization", "circular"))
-    if polarization != "circular":
-        raise ValueError(
-            f"alfven_wave: only 'circular' polarization is supported, got "
-            f"{polarization!r}")
-
+    n = _as_exact_int(p.get("wavenumber", 1),
+                      "initial.params.wavenumber")
     xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
     shape = xc.shape
     state = _empty_state(shape)
     k = 2.0 * np.pi * n / deck.domain.lx_m
-    inv_sqrt_rho = 1.0 / math.sqrt(rho0)
+    phase = k * (xc - deck.domain.origin_x_m)
+    # In SI the eigen-relation uses dB/sqrt(mu0*rho); normalized decks already
+    # carry B in mu0=1 units.
+    magnetic_velocity_scale = (1.0 / mhd_units.SQRT_MU0
+                               if deck.units == "SI" else 1.0)
+    inv_sqrt_rho = (math.copysign(magnetic_velocity_scale, total_b0)
+                    / math.sqrt(rho0))
 
     rho = np.full(shape, rho0)
     vx = np.zeros(shape)
     # Transverse velocity perturbations evaluated at cell centers.
-    vy = -amp * inv_sqrt_rho * np.sin(k * xc)
-    vz = -amp * inv_sqrt_rho * np.cos(k * xc)
+    vy = -amp * inv_sqrt_rho * np.sin(phase)
+    vz = -amp * inv_sqrt_rho * np.cos(phase)
     # bx is uniform (background), so the face value equals the cell value.
     bx = np.full(shape, b0)
     # by varies only with x; sample by_face at the bottom face -> same x as cell
     # center is fine for an x-only field. Use cell-center x for consistency with
     # the velocity sampling (div B stays ~0 because Bx is uniform and
     # d(By)/dy = 0).
-    by = amp * np.sin(k * xc)
-    bz = amp * np.cos(k * xc)
+    by = amp * np.sin(phase)
+    bz = amp * np.cos(phase)
     pr = np.full(shape, pr0)
     _set_primitive(state, rho, vx, vy, vz, pr, bx, by, bz, gamma)
     return _pack(state)
@@ -899,11 +1457,12 @@ def _ic_alfven_wave(deck: MhdDeck, nghost: int) -> dict:
 def _ic_orszag_tang(deck: MhdDeck, nghost: int) -> dict:
     """Orszag-Tang vortex (gamma-derived ambient state, b0 = 1/sqrt(4 pi)).
 
-    params: b0. On [0,1]^2::
+    params: b0. In domain-relative coordinates
+    ``xi=(x-origin_x)/lx``, ``eta=(y-origin_y)/ly``::
 
         rho = gamma^2,  p = gamma
-        v = (-sin(2 pi y),  sin(2 pi x),  0)
-        B = b0 * (-sin(2 pi y),  sin(4 pi x),  0)
+        v = (-sin(2 pi eta),  sin(2 pi xi),  0)
+        B = b0 * (-sin(2 pi eta),  sin(4 pi xi),  0)
 
     The in-plane B is seeded at FACE locations (Bx on the left face -> uses
     cell-center y; By on the bottom face -> uses cell-center x) which is the
@@ -917,16 +1476,18 @@ def _ic_orszag_tang(deck: MhdDeck, nghost: int) -> dict:
     xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
     shape = xc.shape
     state = _empty_state(shape)
+    xi = (xc - deck.domain.origin_x_m) / deck.domain.lx_m
+    eta = (yc - deck.domain.origin_y_m) / deck.domain.ly_m
 
     rho = np.full(shape, gamma * gamma)
     pr = np.full(shape, gamma)
-    vx = -np.sin(2.0 * np.pi * yc)
-    vy = np.sin(2.0 * np.pi * xc)
+    vx = -np.sin(2.0 * np.pi * eta)
+    vy = np.sin(2.0 * np.pi * xi)
     vz = np.zeros(shape)
     # Bx = -b0 sin(2 pi y): sample on the left face (x = xf) but it depends only
     # on y, so use cell-center y. By = b0 sin(4 pi x): depends only on x.
-    bx = -b0 * np.sin(2.0 * np.pi * yc)
-    by = b0 * np.sin(4.0 * np.pi * xc)
+    bx = -b0 * np.sin(2.0 * np.pi * eta)
+    by = b0 * np.sin(4.0 * np.pi * xi)
     bz = np.zeros(shape)
     _set_primitive(state, rho, vx, vy, vz, pr, bx, by, bz, gamma)
     return _pack(state)
@@ -954,7 +1515,7 @@ def _ic_blast(deck: MhdDeck, nghost: int) -> dict:
     xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
     shape = xc.shape
     state = _empty_state(shape)
-    r = np.sqrt((xc - cx) ** 2 + (yc - cy) ** 2)
+    r = np.hypot(xc - cx, yc - cy)
 
     rho = np.full(shape, rho_amb)
     pr = np.where(r < r_in, p_core, p_amb)
@@ -996,9 +1557,7 @@ def _ic_rotor(deck: MhdDeck, nghost: int) -> dict:
     state = _empty_state(shape)
     rx = xc - cx
     ry = yc - cy
-    r = np.sqrt(rx * rx + ry * ry)
-    # Avoid divide-by-zero at r=0 for the taper blend direction (v=0 there).
-    r_safe = np.where(r == 0.0, 1.0, r)
+    r = np.hypot(rx, ry)
 
     # Linear taper weight f: 1 inside (r<=r0), 0 outside (r>=r1).
     f = np.clip((r1 - r) / (r1 - r0), 0.0, 1.0)
@@ -1020,7 +1579,6 @@ def _ic_rotor(deck: MhdDeck, nghost: int) -> dict:
     bx = np.full(shape, bx0)
     by = np.full(shape, by0)
     bz = np.full(shape, bz0)
-    _ = r_safe  # documented guard; speed uses rx/ry directly so no division.
     _set_primitive(state, rho, vx, vy, vz, pr, bx, by, bz, gamma)
     return _pack(state)
 

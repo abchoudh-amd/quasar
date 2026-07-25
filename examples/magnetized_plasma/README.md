@@ -3,7 +3,8 @@
 Warm electrons in a uniform out-of-plane magnetic field (1 T) supplied by the
 bound `uniform` field evaluator. Particles gyrate at the cyclotron frequency. The
 deck exercises the SI → internal-unit conversion together with a non-Biot-Savart
-external evaluator selected by registry name.
+external evaluator selected by registry name. A fixed uniform positive
+background neutralizes the periodic electron population.
 
 ## Run
 

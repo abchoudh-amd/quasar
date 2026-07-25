@@ -24,7 +24,7 @@ function(_quasar_define_module_target name sources is_hip registers)
   endif()
 
   # Only the public include tree is on the path. Modules talk to the backend
-  # through installed headers under include/quasar/backend/, never through a
+  # through public headers under include/quasar/backend/, never through a
   # private src/backend/hip/ path. Backend HIP modules, which legitimately
   # include their own private detail headers by `backend/hip/...` relative to
   # src/, opt back in via quasar_add_backend_src_include() below.

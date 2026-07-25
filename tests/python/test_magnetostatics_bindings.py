@@ -1,8 +1,8 @@
 """Smoke test for the pybind11 bindings.
 
 Uses the stdlib ``unittest`` (pytest is not installed on every node) and
-re-uses the analytical references from Phase 1.F to confirm the Python
-surface matches the C++ tests numerically.
+reuses the analytical finite-segment and circular-loop references to confirm
+the Python surface matches the C++ tests numerically.
 """
 
 import math
@@ -91,12 +91,42 @@ class ObservationSetBindingsTest(unittest.TestCase):
 
 class AnalyticEvaluatorBindingsTest(unittest.TestCase):
 
+    def test_registry_names_are_exposed_and_sorted(self):
+        names = _core.magnetostatics.field_evaluator_names()
+        self.assertEqual(names, sorted(names))
+        self.assertTrue({"biot_savart", "uniform", "dipole", "gradient",
+                         "file_grid"}.issubset(names))
+        self.assertTrue(
+            _core.magnetostatics.field_evaluator_provides_vector_potential(
+                "biot_savart"))
+        self.assertFalse(
+            _core.magnetostatics.field_evaluator_provides_vector_potential(
+                "uniform"))
+        for name in ("biot_savart", "uniform", "dipole", "gradient",
+                     "file_grid"):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    _core.magnetostatics.field_evaluator_provides_grad_B(name))
+
+        uniform = _core.magnetostatics.create_field_evaluator("uniform")
+        self.assertTrue(uniform.provides_grad_B)
+
+    def test_uniform_electric_field_is_exposed(self):
+        eval_ = _core.magnetostatics.UniformEvaluator(
+            b0=Vec3(0.0, 0.0, 0.0), e0=Vec3(1.0, -2.0, 3.0))
+        source = ConductorSystem()
+        points = PointCloud()
+        points.add(Vec3(0.5, -1.0, 4.0))
+        field = eval_.evaluate_E(source, points)
+        self.assertEqual(field.shape, (1, 3))
+        self.assertEqual(field[0].tolist(), [1.0, -2.0, 3.0])
+
     def test_gradient_evaluator_uses_bound_matrix_constructor(self):
         eval_ = _core.magnetostatics.GradientEvaluator(
             b0=Vec3(0.0, 0.0, 1.0),
             grad=[[1.0, 0.0, 0.0],
                   [0.0, 2.0, 0.0],
-                  [0.0, 0.0, 3.0]],
+                  [0.0, 0.0, -3.0]],
         )
         cs = ConductorSystem()
         pc = PointCloud()

@@ -1,4 +1,4 @@
-// Phase 3.E: polygon approximations of a smooth current loop converge to the
+// Polygon approximations of a smooth current loop converge to the
 // exact field at O(1/N^2). We verify this at off-axis points where the
 // closed-form B involves complete elliptic integrals - so instead of using a
 // closed form, we treat the N=4096 polygon as the reference and check that

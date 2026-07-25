@@ -1,11 +1,51 @@
 #include "quasar/physics/pic/species.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace quasar::pic {
 
+namespace {
+
+SpeciesConfig validate_species_config(SpeciesConfig cfg) {
+  if (cfg.name.empty()
+      || std::all_of(cfg.name.begin(), cfg.name.end(), [](unsigned char ch) {
+           return std::isspace(ch) != 0;
+         })) {
+    throw std::invalid_argument{
+        "ParticleSpecies: name must contain a non-whitespace character"};
+  }
+  if (!(std::isfinite(cfg.mass) && cfg.mass > Real{0})) {
+    throw std::invalid_argument{
+        "ParticleSpecies: mass must be finite and positive"};
+  }
+  if (!std::isfinite(cfg.charge)) {
+    throw std::invalid_argument{"ParticleSpecies: charge must be finite"};
+  }
+  const Real charge_to_mass = cfg.charge / cfg.mass;
+  if (!std::isfinite(charge_to_mass)
+      || (cfg.charge != Real{0} && charge_to_mass == Real{0})) {
+    throw std::invalid_argument{
+        "ParticleSpecies: charge-to-mass ratio is not representable"};
+  }
+  if (cfg.capacity > std::numeric_limits<unsigned int>::max()) {
+    throw std::invalid_argument{
+        "ParticleSpecies: capacity exceeds the unsigned device-counter range"};
+  }
+  return cfg;
+}
+
+}  // namespace
+
 ParticleSpecies::ParticleSpecies(SpeciesConfig cfg)
+  : ParticleSpecies(validate_species_config(std::move(cfg)),
+                    ValidatedConfigTag{}) {}
+
+ParticleSpecies::ParticleSpecies(SpeciesConfig cfg, ValidatedConfigTag)
   : name_{std::move(cfg.name)},
     charge_{cfg.charge},
     mass_{cfg.mass},
@@ -17,6 +57,7 @@ ParticleSpecies::ParticleSpecies(SpeciesConfig cfg)
     vx_{capacity_},
     vy_{capacity_},
     vz_{capacity_},
+    vphi_deposit_{capacity_},
     weight_{capacity_},
     alive_{capacity_},
     c_x_{capacity_},
@@ -26,14 +67,12 @@ ParticleSpecies::ParticleSpecies(SpeciesConfig cfg)
     c_vx_{capacity_},
     c_vy_{capacity_},
     c_vz_{capacity_},
+    c_vphi_deposit_{capacity_},
     c_weight_{capacity_},
     c_alive_{capacity_},
     c_counter_{1},
-    deposit_overflow_{1} {
-  if (mass_ <= Real{0}) {
-    throw std::invalid_argument{"ParticleSpecies: mass must be positive"};
-  }
-}
+    deposit_overflow_{1},
+    particle_error_{1} {}
 
 void ParticleSpecies::set_count(std::size_t n) {
   if (n > capacity_) {
@@ -55,6 +94,24 @@ void ParticleSpecies::set_host_particles(const std::vector<Real>& x,
   if (n > capacity_) {
     throw std::out_of_range{"ParticleSpecies::set_host_particles exceeds capacity"};
   }
+  for (std::size_t p = 0; p < n; ++p) {
+    if (!(std::isfinite(x[p]) && std::isfinite(y[p]) &&
+          std::isfinite(vx[p]) && std::isfinite(vy[p]) &&
+          std::isfinite(vz[p]) && std::isfinite(weight[p]))) {
+      throw std::invalid_argument{
+          "ParticleSpecies::set_host_particles: all values must be finite"};
+    }
+    if (weight[p] < Real{0}) {
+      throw std::invalid_argument{
+          "ParticleSpecies::set_host_particles: weights must be non-negative"};
+    }
+    const Real speed = std::hypot(std::hypot(vx[p], vy[p]), vz[p]);
+    if (speed >= Real{1}) {
+      throw std::invalid_argument{
+          "ParticleSpecies::set_host_particles: |v| must be < c=1 for the "
+          "nonrelativistic Boris pusher"};
+    }
+  }
   std::vector<std::uint8_t> alive(n, 1);
   x_.copy_from_host(x.data(), n);
   y_.copy_from_host(y.data(), n);
@@ -65,6 +122,7 @@ void ParticleSpecies::set_host_particles(const std::vector<Real>& x,
   vx_.copy_from_host(vx.data(), n);
   vy_.copy_from_host(vy.data(), n);
   vz_.copy_from_host(vz.data(), n);
+  vphi_deposit_.copy_from_host(vz.data(), n);
   weight_.copy_from_host(weight.data(), n);
   alive_.copy_from_host(alive.data(), n);
   count_ = n;

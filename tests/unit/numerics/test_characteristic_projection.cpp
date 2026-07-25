@@ -1,4 +1,4 @@
-// RED-phase tests for the post-port characteristic-projection surface.
+// Tests for the host/device characteristic-projection surface.
 //
 // Targets the committed contract in
 // include/quasar/numerics/characteristic_projection.hpp AFTER the device port:
@@ -8,10 +8,6 @@
 // (Both to_char/from_char become QUASAR_HOST_DEVICE; device-callability is
 // exercised indirectly by the reconstruction path, not asserted here.)
 //
-// This file WILL FAIL TO COMPILE until CharVec7 exists -- that is the intended
-// RED state (failing for the right reason: the CharVec7 symbol is not yet
-// defined). The std::array<Real,7> surface it replaces is deliberately NOT used.
-//
 // OBSERVABLE invariants pinned here:
 //   (1) Round-trip identity: from_char(to_char(delta)) == delta to round-off
 //       for a conserved delta whose NORMAL-B perturbation is zero, for BOTH
@@ -20,6 +16,8 @@
 //       trip is exact only when that component is zero.
 //   (2) CharVec7 carries exactly 7 entries (w[0..6]) and the round-trip is
 //       exercised through it.
+//   (3) A nonzero normal-B delta is deliberately discarded; the CT caller owns
+//       restoring the shared face value.
 
 #include "quasar/numerics/characteristic_projection.hpp"
 #include "quasar/numerics/mhd_eigensystem.hpp"
@@ -140,4 +138,23 @@ TEST(CharacteristicProjection, RoundTripIdentityDirY) {
   EXPECT_NEAR(back.bx, delta.bx, kRoundTripTol);
   EXPECT_NEAR(back.by, delta.by, kRoundTripTol);  // normal-B: 0 in, 0 out
   EXPECT_NEAR(back.bz, delta.bz, kRoundTripTol);
+}
+
+TEST(CharacteristicProjection, NormalFieldDeltaIsDiscarded) {
+  const Real gamma = 5.0 / 3.0;
+  const MhdState ref = make_reference_state(gamma);
+
+  for (int dir : {0, 1}) {
+    MhdEigensystem eig;
+    eig.build(ref, dir, gamma);
+    MhdState delta{};
+    if (dir == 0) {
+      delta.bx = Real{0.25};
+    } else {
+      delta.by = Real{-0.25};
+    }
+    const MhdState back = CharacteristicProjector::from_char(
+        CharacteristicProjector::to_char(delta, eig), eig);
+    EXPECT_EQ((dir == 0) ? back.bx : back.by, Real{0});
+  }
 }

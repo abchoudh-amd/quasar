@@ -5,21 +5,23 @@
 #
 # The confining POLOIDAL field is a field-split background B0 (B = B0 + b)
 # built from coil.npz: the lab-Y vector potential A on the padded cell-corner
-# grid, differenced to a face-staggered
+# grid, differenced with the annular curl to a face-staggered field
 #   b0x_face(i,j) = -(A[j+1,i]-A[j,i])/dy   (B_R, left face)
-#   b0y_face(i,j) =  (A[j,i+1]-A[j,i])/dx   (B_z, bottom face)
-# which is divergence-free by construction and static (never ghost-refilled,
-# so no open BC can corrupt it). The evolving perturbation b starts at zero,
-# so the constrained-transport div(b) stays exactly zero. bz is a uniform
+#   b0y_face(i,j) = (R_hi*A[j,i+1]-R_lo*A[j,i])/int(R dR)
+#                                                   (B_z, bottom face)
+# which is divergence-free by construction and static (never ghost-refilled).
+# The crop cuts through this field, so its edges are open rather than
+# conducting walls; outflow is applied consistently to the fluid and the
+# evolving perturbation b. CT preserves div(b). bz is a uniform
 # toroidal guide field (0.1); B_phi ~ mu0 N I/(2 pi R) ~ 0.040 T from the TF coils.
 #
 # Run coil.yaml FIRST to produce coil.npz, then this deck.
 # Regenerate: python examples/square_toroid_mhd/build_yaml.py
 
-units: normalized
+units: SI
 domain: {nx: 128, ny: 128, lx_m: 0.270000, ly_m: 0.270000, origin_x_m: 0.865000, origin_y_m: -0.135000}
-geometry: cartesian
-numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}
+geometry: cylindrical
+numerics: {gamma: 1.6666667, reconstruction: muscl_minmod, riemann: hlld, integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}
 initial:
   type: confined_blob
   params:
@@ -33,9 +35,11 @@ background_field:
   enabled: true
   a_file: coil.npz       # padded corner-grid A_xyz_grid from coil.yaml
   bz0: 0.0               # toroidal field lives in the state (initial.bz)
-  params: {b_scale: 1.0}   # SI A (T*m) -> normalized field units
+  params:
+    b_scale: 1.0       # dimensionless multiplier of SI A (T*m)
+    vacuum_project: true  # fixed-boundary discrete annular vacuum solve
 time: {dt_s: auto, steps: 400}
 diagnostics: {output_path: out.npz, cadence: 0,
               fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
-boundary: {fluid: [wall, wall, wall, wall],
-           field: [wall, wall, wall, wall]}
+boundary: {fluid: [outflow, outflow, outflow, outflow],
+           field: [outflow, outflow, outflow, outflow]}

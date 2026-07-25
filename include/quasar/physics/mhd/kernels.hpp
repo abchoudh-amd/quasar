@@ -34,15 +34,12 @@ namespace quasar::mhd {
 // never includes a HIP header; the .hip definitions cast it back internally.
 using stream_t = ::quasar::backend::stream_t;
 
-// Per-side non-periodic boundary flags threaded into the reconstruction and CT
-// EMF kernels. The four entries follow the canonical side order
-// [x_lo, x_hi, y_lo, y_hi]; 1 = non-periodic (the device path drops the ghost
-// GRADIENT dependence and uses a one-sided stencil at that boundary), 0 =
-// periodic (the two-sided wrap stencil). The solver computes these from the
-// per-side field-boundary names; an all-zero flags set is the periodic fast
-// path and is bit-identical to the no-flags behavior.
+// Per-side boundary modes threaded into reconstruction and CT.  The entries are
+// [x_lo,x_hi,y_lo,y_hi]: 0 periodic, 1 outflow, 2 conducting wall, 3 r=0 axis.
+// Reconstruction treats every nonzero value as one-sided; CT additionally uses
+// the distinction to pin the tangential EMF on conducting/axis edges.
 struct BoundaryFlags4 {
-  int side[4];  // [x_lo, x_hi, y_lo, y_hi]; 1 = non-periodic, 0 = periodic
+  int side[4];
 };
 
 // -- Flux reconstruction -----------------------------------------------------
@@ -59,9 +56,9 @@ struct BoundaryFlags4 {
 // the scalar MP limiter (quasar/numerics/mp_limiter.hpp) is applied wave-by-wave,
 // and the result is mapped back to conserved variables -- all device-callable, so
 // scheme_order 5/7 run the full high-order characteristic MP reconstruction on
-// device (they achieve their design 5th/7th order; see mp_limiter.hpp for the
-// point-value interpolation-coefficient correction that makes this so -- results
-// are not bit-identical to the pre-port host MP5/MP7 output).
+// device. The evolved state is a finite-volume cell average, and the MP helpers
+// use the matching cell-average-to-face coefficients; the conservative flux
+// residual therefore achieves the requested design order on smooth data.
 //
 // Field-split + one-sided boundary extensions:
 //   `b0` is the static background magnetic field B = B0 + b. When b0.active is
@@ -73,12 +70,19 @@ struct BoundaryFlags4 {
 //   drops the ghost-GRADIENT dependence (ghost VALUES are still read). With
 //   `flags` all-zero and `b0` inactive this is bit-identical to the periodic
 //   no-background path.
+//
+// `rate_only` is reserved for the CFL preflight.  It permits a finite
+// conservative face state whose primitive velocity or physical wave speed is
+// outside binary64, because the CFL kernel evaluates the corresponding
+// speed/spacing rate without materializing either quantity.  The ordinary
+// Riemann path keeps the stricter finite-primitive contract.
 void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                             int dir, quasar::numerics::MhdInterfaceStates<Real>& out,
-                            int scheme_order, BoundaryFlags4 flags, Real gamma, stream_t stream);
+                            int scheme_order, BoundaryFlags4 flags, Real gamma,
+                            stream_t stream, bool rate_only = false);
 
 // -- Riemann flux ------------------------------------------------------------
-// Pointwise numerical flux at every interface normal to `dir` from the L/R
+// Numerical face flux at every interface normal to `dir` from the L/R
 // interface states, written into `flux_out` (the 8 conserved-component buffers
 // of an MhdField2D reused as flux storage: rho,mx,my,mz,energy,bx_face,by_face,
 // bz_cell map to the flux components rho,mx,my,mz,energy,bx,by,bz).
@@ -89,26 +93,74 @@ void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<
 // interface so the build stays divergence-/positivity-safe.
 //
 // `b0` is the static background field (B = B0 + b); inactive => zero-background
-// fast path, bit-identical to the original body.
+// fast path, bit-identical to the original body. `flags` makes the high physical
+// face read the low-face Riemann data on a fully periodic axis, so the two
+// representations of the same periodic face remain bit-identical.
 void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& iface,
                           const MhdBackgroundField<Real>& b0, int dir,
-                          MhdField2D<Real>& flux_out, Real gamma, stream_t stream);
+                          MhdField2D<Real>& flux_out, BoundaryFlags4 flags,
+                          Real gamma, stream_t stream,
+                          bool hll_only = false,
+                          MhdMomentumFluxParts2D<Real>* momentum_parts = nullptr);
 
 // -- Conservative flux difference --------------------------------------------
-// Accumulate the conservative finite-difference flux divergence into `dudt`:
+// Accumulate the conservative finite-volume face-flux divergence into `dudt`:
 //   dudt += -(F_{i+1/2} - F_{i-1/2}) / d(dir)
 // where `flux` holds the interface flux at face (i,j) (the x_lo / y_lo face of
 // cell (i,j), same staggering as the interface states). One call per direction;
 // the caller zeroes dudt before the first direction. `flux` carries the same
 // 8-component MhdField2D layout the Riemann kernel wrote.
 void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
-                                MhdField2D<Real>& dudt, stream_t stream);
+                                MhdField2D<Real>& dudt, stream_t stream,
+                                bool cylindrical = false);
+
+// Add the complete static Maxwell-stress force once per residual. Both
+// directions (plus cylindrical curvature/angular weights) share one
+// common-exponent reduction per momentum component. Inactive B0 is a no-op.
+void launch_mhd_background_stress_correction(
+    const MhdBackgroundField<Real>& b0, MhdField2D<Real>& dudt,
+    BoundaryFlags4 flags, stream_t stream, bool cylindrical = false,
+    int collocation_order = 0);
+
+// Active-background momentum residual.  The two directional face fluxes carry
+// material stress in their momentum slots, while `parts_*` carry a factored
+// background-linear stress and the Riemann wave correction.  This kernel
+// flattens both directions plus the static T0 correction into one exponent
+// reduction per component and overwrites dudt.{mx,my,mz}.  In cylindrical
+// geometry it writes the axial/azimuthal components; the radial tensor
+// residual (which also needs cell-centred curvature) is completed below.
+void launch_mhd_split_momentum_residual(
+    const MhdBackgroundField<Real>& b0,
+    const MhdField2D<Real>& flux_x,
+    const MhdMomentumFluxParts2D<Real>& parts_x,
+    const MhdField2D<Real>& flux_y,
+    const MhdMomentumFluxParts2D<Real>& parts_y,
+    MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
+    bool cylindrical = false, int collocation_order = 0);
+
+// Overwrite the cylindrical radial-momentum rate with the pressure-free tensor
+// form in one common-exponent reduction:
+//   -d_r(F_rr) - d_z(F_zr) + (T_phiphi - T_rr)/r.
+// The split/static tensor difference is expanded before rounding, so gas
+// pressure and axial-field terms cancel symbolically instead of being
+// reintroduced after they may already have rounded out of an aggregate face
+// flux. The maximum active path has 20 terms. This launcher is solver-only;
+// launch_mhd_geometric_source remains the standalone source-term API.
+void launch_mhd_cylindrical_radial_momentum_residual(
+    const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+    const MhdField2D<Real>& flux_r, const MhdField2D<Real>& flux_z,
+    MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
+    int collocation_order = 0,
+    const MhdMomentumFluxParts2D<Real>* parts_r = nullptr,
+    const MhdMomentumFluxParts2D<Real>* parts_z = nullptr);
 
 // -- Constrained-transport EMF -----------------------------------------------
 // Build the corner-staggered EMF (emf.ez_edge at the lower-left corner of cell
-// (i,j)) from the conserved field `u` and the dir=0 / dir=1 interface states,
-// via the kinematic E = -(v x B) averaged from the four surrounding interface
-// upwind values. ex_edge / ey_edge are also populated for parity.
+// (i,j)) from the dir=0 / dir=1 reconstructed interface states. The kernel
+// recomputes the directional HLLD magnetic fluxes, maps them to the two upwind
+// face electric fields, and interpolates those face values to the corner using
+// the requested reconstruction order. ex_edge / ey_edge are also populated for
+// parity.
 //
 // `b0` is the static background field (B = B0 + b); inactive => zero-background
 // fast path. `flags` marks per-side non-periodic boundaries (see
@@ -118,7 +170,9 @@ void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
 void launch_mhd_ct_emf(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                        const quasar::numerics::MhdInterfaceStates<Real>& ifx,
                        const quasar::numerics::MhdInterfaceStates<Real>& ify,
-                       BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma, stream_t stream);
+                       BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
+                       stream_t stream, int scheme_order = 2,
+                       bool cylindrical = false, bool hll_only = false);
 
 // -- Face-B update -----------------------------------------------------------
 // Advance the face-staggered in-plane B from the corner Ez by the discrete curl
@@ -126,13 +180,15 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u, const MhdBackgroundField<Real>
 //   bx_face(i,j) -= dt * (ez(i,j+1) - ez(i,j)) / dy
 //   by_face(i,j) += dt * (ez(i+1,j) - ez(i,j)) / dx
 void launch_mhd_face_b_update(MhdField2D<Real>& u, const EmfField2D<Real>& emf,
-                              Real dt, stream_t stream);
+                              Real dt, stream_t stream,
+                              bool cylindrical = false);
 
 // -- CT EMF curl rate into the residual --------------------------------------
 // Write the CT EMF curl RATE (dB/dt, no dt factor) into ONLY dudt.bx_face /
 // dudt.by_face, OVERWRITING (assign, not accumulate) whatever the Godunov flux
 // difference left in those two slots. Every other dudt component (rho, mx, my,
-// mz, energy, bz_cell) is left exactly as flux_difference wrote it. This routes
+// mz, energy, bz_cell) is left unchanged by this kernel (active-B0 energy is
+// overwritten later by launch_mhd_split_energy_residual). This routes
 // the face-B advance solely through the CT curl + the single rk_stage, so face B
 // is no longer double-updated by both the flux difference and a separate
 // face_b_update.
@@ -146,7 +202,21 @@ void launch_mhd_face_b_update(MhdField2D<Real>& u, const EmfField2D<Real>& emf,
 // path -- the solver advances face B via this rate + rk_stage instead of
 // applying the curl directly to the field.
 void launch_mhd_emf_curl_rate(const EmfField2D<Real>& emf, MhdField2D<Real>& dudt,
-                              Grid2D grid, stream_t stream);
+                              Grid2D grid, stream_t stream,
+                              bool cylindrical = false);
+
+// Overwrite `actual_rate.energy` with the active-background split equation
+//   -D_E(F_E') + v . [(curl B0) x (B0+b)].
+// The Riemann flux already carries F_E'=F_E-B0.F_B. curl(B0) is formed before
+// multiplication, so a curl-free dominant background produces no B0^2
+// intermediate; the flux divergence and expanded Lorentz-power terms share one
+// exponent reduction. Cylindrical D_E is annular in r.
+void launch_mhd_split_energy_residual(
+    const MhdBackgroundField<Real>& b0,
+    const MhdField2D<Real>& state,
+    const MhdField2D<Real>& flux_x, const MhdField2D<Real>& flux_y,
+    MhdField2D<Real>& actual_rate, BoundaryFlags4 flags, stream_t stream,
+    bool cylindrical = false, int collocation_order = 0);
 
 // -- SSP-RK stage combine ----------------------------------------------------
 // Pointwise Shu-Osher stage combine over all 8 conserved components:
@@ -168,6 +238,20 @@ void launch_mhd_rk_stage(MhdField2D<Real>& out, const MhdField2D<Real>& un,
 void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                              Real rho_floor, Real p_floor, Real gamma, stream_t stream);
 
+// Compute the largest global convex fraction theta in [0,1] for which every
+// cell on the segment base + theta*(candidate-base) has rho > rho_floor and
+// p > p_floor. Each cell computes its own density/internal-energy bound; the
+// launcher returns their minimum. The conservative solver passes zero bounds,
+// since strict mathematical positivity (unlike an arbitrary positive floor) is
+// the invariant-domain contract. Pressure admissibility uses the concavity of
+// E-|m|^2/(2 rho)-|b|^2/2 and a bracketed bisection, so no cell state is changed.
+// The caller owns/reuses `scratch` for the block-min reduction.
+void launch_mhd_admissible_fraction(
+    const MhdField2D<Real>& base, const MhdField2D<Real>& candidate,
+    Real rho_floor, Real p_floor, Real gamma,
+    backend::DeviceBuffer<Real>& scratch, Real* host_theta, stream_t stream,
+    int collocation_order = 0);
+
 // -- Cylindrical geometric source --------------------------------------------
 // Accumulate the axisymmetric (r,z) geometric source into `dudt`:
 //   dudt += S(u, r)
@@ -175,33 +259,53 @@ void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>
 // at every cell center (the innermost cell i=0 is at r = 0.5*dr), so the source
 // is applied at every column including the axis column; only a non-positive /
 // non-finite cell-center radius (which a valid grid never produces) is skipped.
-// The solver only calls this in cylindrical mode (it is a pure add, so a
-// Cartesian solver simply never invokes it).
+// The only nonzero component is radial-momentum curvature. Azimuthal momentum
+// is already conservative under its exact int(r^2 dr) flux operator and has no
+// cell-centred geometric source.
+// This is the conventional standalone source-only API. The production solver
+// uses launch_mhd_cylindrical_radial_momentum_residual instead so its tensor
+// derivatives and pressure-free curvature share one reduction.
 void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
-                                 Grid2D grid, Real gamma, stream_t stream);
+                                 const MhdBackgroundField<Real>& b0,
+                                 Grid2D grid, Real gamma, stream_t stream,
+                                 int collocation_order = 0);
 
 // -- CFL maximum signal rate -------------------------------------------------
-// Reduce the maximum ADDITIVE directional signal rate
-//   (|v_x| + c_fast_x)/dx + (|v_y| + c_fast_y)/dy
-// over all INTERIOR cells and write the single scalar into *host_max_rate; the
-// caller's stable step is then dt = cfl / max_rate. This is the multidimensional
-// unsplit Courant condition (the residual sums both directional flux differences
-// into one dudt per RK stage), which is stricter than a per-direction max signal
-// speed over min(dx,dy). The fast speed sees the TOTAL magnetic field B = b + B0
-// (b0-aware): when b0.active is false this is the zero-background fast path (the
-// stored b IS the total field). Cells with non-positive or non-finite density are
-// SKIPPED (they contribute no rate) so a transiently floored cell cannot poison
-// the reduction. The result is read back to the host pointer before this returns.
+// Reduce the maximum finite-volume Courant coefficient from the four incident
+// faces of every interior cell. At each face alpha=max_side(|v_n|+c_fast,n) is
+// evaluated from the exact reconstructed L/R interface states consumed by the
+// Riemann solver, including its shared CT normal B. Thus both a staggered face
+// that cancels in the cell average and an MP-reconstructed face overshoot enter
+// the bound. Cartesian uses
+//   0.5*(alpha_xlo+alpha_xhi)/dx +
+//   0.5*(alpha_ylo+alpha_yhi)/dy.
+// Cylindrical takes the maximum of all three radial operators: the annular
+// fluid rate
+//   0.5*(r_lo*alpha_xlo+r_hi*alpha_xhi)/(r_c*dr),
+// the exact piecewise-constant angular-momentum rate
+//   0.5*(r_lo^2*alpha_xlo+r_hi^2*alpha_xhi)
+//       / [dr*(r_c^2+dr^2/12)],
+// and the metric-free B_phi rate 0.5*(alpha_xlo+alpha_xhi)/dr. The ordinary
+// axial half-sum is then added. At the axis the angular-momentum coefficient is
+// 1.5*alpha_xhi/dr. Cartesian uniform states reduce to the familiar additive
+// (|v_x|+c_fast,x)/dx+(|v_y|+c_fast,y)/dy bound. Rates are formed before any
+// unscaled velocity or fast speed, so a finite rate remains representable even
+// when the corresponding physical speed does not. The fast rate sees total
+// B=b+B0. Invalid/non-finite face states contribute infinity.
 //
 // `scratch` is a caller-owned block-partials buffer reused across calls (the
 // auto-dt loop calls this every step): the launcher (re)sizes it only when it is
 // smaller than the per-launch block count, so the caller avoids a per-step
-// hipMalloc/hipFree. Ownership stays with the caller (the solver), honoring the
-// "solver owns all device scratch" contract; the kernel writes every block slot
+// hipMalloc/hipFree. Ownership stays with the caller, honoring the
+// scratch-ownership contract; the kernel writes every block slot
 // before any read, so a larger reused buffer is safe.
-void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                             Real gamma, backend::DeviceBuffer<Real>& scratch,
-                             Real* host_max_rate, stream_t stream);
+void launch_mhd_cfl_max_rate(
+    const quasar::numerics::MhdInterfaceStates<Real>& ifx,
+    const quasar::numerics::MhdInterfaceStates<Real>& ify,
+    const MhdBackgroundField<Real>& b0, Real gamma,
+    backend::DeviceBuffer<Real>& scratch, Real* host_max_rate,
+    stream_t stream, bool low_order = false, bool cylindrical = false,
+    BoundaryFlags4 flags = BoundaryFlags4{});
 
 // -- Constrained-transport div(B) L-infinity ---------------------------------
 // Reduce the maximum interior |div B| -- the cell-centered divergence of the
@@ -217,7 +321,22 @@ void launch_mhd_cfl_max_rate(const MhdField2D<Real>& u, const MhdBackgroundField
 // too small, so the caller (the CT scheme) avoids a per-call hipMalloc/hipFree.
 void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
                              backend::DeviceBuffer<Real>& scratch,
-                             Real* host_linf, stream_t stream);
+                             Real* host_linf, stream_t stream,
+                             bool cylindrical = false);
+
+// Scale-free discrete-solenoidality diagnostic used by the live-state
+// preflight.  Each cell reports
+//
+//   |sum_k t_k| / sum_k |t_k|,
+//
+// where t_k are the signed face/spacing terms in the exact Cartesian or
+// annular CT divergence stencil.  Forming the ratio at a common binary
+// exponent makes it meaningful for subnormal and near-overflow field scales
+// without introducing a unit-dependent absolute floor.  A zero field reports
+// zero; non-finite face data reports infinity.
+void launch_mhd_ct_divb_relative_linf(
+    const MhdField2D<Real>& u, backend::DeviceBuffer<Real>& scratch,
+    Real* host_linf, stream_t stream, bool cylindrical = false);
 
 // -- Ghost-layer fill (fluid components) -------------------------------------
 // Fill the ghost layers of ONE boundary `side` (canonical order 0=x_lo, 1=x_hi,

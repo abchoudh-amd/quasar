@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <string>
 
-// Backend-neutral device interface. This installed header is deliberately
+// Backend-neutral device interface. This public header is deliberately
 // HIP-free: it exposes an opaque stream handle and free-function memory
 // primitives whose definitions live in src/backend/hip/. Consumers (core,
 // physics, numerics, boundary, bindings, tests) include this without pulling in

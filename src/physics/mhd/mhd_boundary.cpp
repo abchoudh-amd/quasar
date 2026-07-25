@@ -40,6 +40,7 @@ using mhd::MhdField2D;
 constexpr int kPeriodic = 0;
 constexpr int kOutflow = 1;
 constexpr int kWall = 2;  // perfectly-conducting wall: v·n=0, n·B=0
+constexpr int kAxis = 3;  // r=0: (vr,vphi,Br,Bphi) odd; axial/scalars even
 
 // ---------------------------------------------------------------------------
 // Fluid boundaries
@@ -63,6 +64,15 @@ class WallFluidBC final : public IMhdFluidBoundary {
  public:
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kWall, nullptr);
+  }
+};
+
+class AxisFluidBC final : public IMhdFluidBoundary {
+ public:
+  void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
+    if (side == Side::x_lo) {
+      mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kAxis, nullptr);
+    }
   }
 };
 
@@ -91,15 +101,26 @@ class WallFieldBC final : public IMhdFieldBoundary {
   }
 };
 
+class AxisMhdFieldBC final : public IMhdFieldBoundary {
+ public:
+  void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
+    if (side == Side::x_lo) {
+      mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kAxis, nullptr);
+    }
+  }
+};
+
 }  // namespace
 
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("periodic", PeriodicFluidBC)
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("outflow", OutflowFluidBC)
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("wall", WallFluidBC)
+QUASAR_REGISTER_MHD_FLUID_BOUNDARY("axis", AxisFluidBC)
 
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("periodic", PeriodicFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("outflow", OutflowFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("wall", WallFieldBC)
+QUASAR_REGISTER_MHD_FIELD_BOUNDARY("axis", AxisMhdFieldBC)
 
 bool mhd_boundary_is_periodic(const std::string& name) { return name == "periodic"; }
 

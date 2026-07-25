@@ -12,6 +12,7 @@ namespace quasar::magnetostatics {
 // to `axis`, centered at `center`. The polyline has `n_segments` straight
 // edges and (n_segments + 1) vertices; the last vertex coincides with the
 // first to close the loop.
+// Requires `n_segments >= 3`.
 Filament circular_loop(Vec3 center, Vec3 axis, Real radius_m,
                        int  n_segments, Real current_A,
                        std::string name = "loop");
@@ -20,6 +21,7 @@ Filament circular_loop(Vec3 center, Vec3 axis, Real radius_m,
 // is `pitch_m`; the helix is centered on `center`. Discretization is
 // `n_segments_per_turn`, so the polyline has `n_turns * n_segments_per_turn`
 // segments and one more vertex.
+// Requires `n_segments_per_turn >= 3` so a turn is geometrically represented.
 Filament helix(Vec3 center, Vec3 axis, Real radius_m, Real pitch_m,
                int  n_turns, int n_segments_per_turn, Real current_A,
                std::string name = "helix");
@@ -34,6 +36,7 @@ Filament solenoid(Vec3 center, Vec3 axis, Real radius_m, Real length_m,
 // of length `straight_length_m` joined by semicircular ends of radius
 // `arc_radius_m`. `n_arc_segments` controls discretization per semicircle.
 // Closed polyline; total segments = 2*n_arc_segments + 2.
+// `straight_length_m` must be strictly positive.
 Filament racetrack(Vec3 center, Vec3 axis,
                    Real straight_length_m, Real arc_radius_m,
                    int  n_arc_segments, Real current_A,

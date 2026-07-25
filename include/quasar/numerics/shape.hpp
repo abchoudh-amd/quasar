@@ -16,10 +16,16 @@ struct ShapeWeights2D {
   int  ny{0};
 };
 
-QUASAR_HOST_DEVICE inline ShapeWeights2D<2> cic_weights_2d(Real x, Real y,
-                                                           const Grid2D& g) noexcept {
-  const Real gx = (x - g.origin_x) / g.dx() - Real{0.5};
-  const Real gy = (y - g.origin_y) / g.dy() - Real{0.5};
+// Shape weights on an arbitrary Yee sub-lattice. `offset_{x,y}` are measured in
+// cells from the domain origin: 0 denotes a face/node and 1/2 a cell centre.
+// Keeping the offset in the shape primitive avoids the physically incorrect
+// practice of gathering every component from the charge (cell-centred) lattice.
+QUASAR_HOST_DEVICE inline ShapeWeights2D<2> cic_weights_2d_at_offset(
+    Real x, Real y, const Grid2D& g, Real offset_x, Real offset_y) noexcept {
+  const Real gx = quasar::detail::scaled_difference_quotient(
+      x, g.origin_x, g.dx()) - offset_x;
+  const Real gy = quasar::detail::scaled_difference_quotient(
+      y, g.origin_y, g.dy()) - offset_y;
   const int i0 = static_cast<int>(std::floor(gx));
   const int j0 = static_cast<int>(std::floor(gy));
   const Real fx = gx - static_cast<Real>(i0);
@@ -39,6 +45,11 @@ QUASAR_HOST_DEVICE inline ShapeWeights2D<2> cic_weights_2d(Real x, Real y,
   return w;
 }
 
+QUASAR_HOST_DEVICE inline ShapeWeights2D<2> cic_weights_2d(Real x, Real y,
+                                                           const Grid2D& g) noexcept {
+  return cic_weights_2d_at_offset(x, y, g, Real{0.5}, Real{0.5});
+}
+
 QUASAR_HOST_DEVICE inline Real tsc_weight_1d(Real r) noexcept {
   const Real ar = r < Real{0} ? -r : r;
   if (ar < Real{0.5}) {
@@ -51,10 +62,12 @@ QUASAR_HOST_DEVICE inline Real tsc_weight_1d(Real r) noexcept {
   return Real{0};
 }
 
-QUASAR_HOST_DEVICE inline ShapeWeights2D<3> tsc_weights_2d(Real x, Real y,
-                                                           const Grid2D& g) noexcept {
-  const Real gx = (x - g.origin_x) / g.dx() - Real{0.5};
-  const Real gy = (y - g.origin_y) / g.dy() - Real{0.5};
+QUASAR_HOST_DEVICE inline ShapeWeights2D<3> tsc_weights_2d_at_offset(
+    Real x, Real y, const Grid2D& g, Real offset_x, Real offset_y) noexcept {
+  const Real gx = quasar::detail::scaled_difference_quotient(
+      x, g.origin_x, g.dx()) - offset_x;
+  const Real gy = quasar::detail::scaled_difference_quotient(
+      y, g.origin_y, g.dy()) - offset_y;
   const int ic = static_cast<int>(std::floor(gx + Real{0.5}));
   const int jc = static_cast<int>(std::floor(gy + Real{0.5}));
 
@@ -70,12 +83,28 @@ QUASAR_HOST_DEVICE inline ShapeWeights2D<3> tsc_weights_2d(Real x, Real y,
   return w;
 }
 
+QUASAR_HOST_DEVICE inline ShapeWeights2D<3> tsc_weights_2d(Real x, Real y,
+                                                           const Grid2D& g) noexcept {
+  return tsc_weights_2d_at_offset(x, y, g, Real{0.5}, Real{0.5});
+}
+
 template <int ShapeOrder>
 QUASAR_HOST_DEVICE inline auto shape_weights_2d(Real x, Real y, const Grid2D& g) noexcept {
   if constexpr (ShapeOrder == 1) {
     return cic_weights_2d(x, y, g);
   } else {
     return tsc_weights_2d(x, y, g);
+  }
+}
+
+
+template <int ShapeOrder>
+QUASAR_HOST_DEVICE inline auto shape_weights_2d_at_offset(
+    Real x, Real y, const Grid2D& g, Real offset_x, Real offset_y) noexcept {
+  if constexpr (ShapeOrder == 1) {
+    return cic_weights_2d_at_offset(x, y, g, offset_x, offset_y);
+  } else {
+    return tsc_weights_2d_at_offset(x, y, g, offset_x, offset_y);
   }
 }
 

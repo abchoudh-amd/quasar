@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -26,6 +27,7 @@ using quasar::numerics::mp5_interp;
 using quasar::numerics::mp5_reconstruct;
 using quasar::numerics::mp7_interp;
 using quasar::numerics::mp7_reconstruct;
+using quasar::numerics::minmod2;
 
 constexpr Real kTol = 1e-12;
 
@@ -101,6 +103,28 @@ TEST(MpLimiter, Mp5NoNewExtremumOnMonotoneStep) {
     EXPECT_GE(lim, lo - kTol) << "undershoot at i=" << i;
     EXPECT_LE(lim, hi + kTol) << "overshoot at i=" << i;
   }
+}
+
+TEST(MpLimiter, MinmodPreservesSameSignSlopesWhenProductUnderflows) {
+  const Real tiny = std::numeric_limits<Real>::min();
+  EXPECT_EQ(minmod2(tiny, Real{2} * tiny), tiny);
+  EXPECT_EQ(minmod2(-tiny, -Real{2} * tiny), -tiny);
+  EXPECT_EQ(minmod2(tiny, -tiny), Real{0});
+}
+
+TEST(MpLimiter, EarlyAcceptIsInvariantToAmplitudeScaling) {
+  // This is the same overshooting step used above, scaled far below sqrt(eps).
+  // A dimensional `product <= eps` check accepts the raw 1.13e-100 overshoot;
+  // the dimensionless MP test must make the same limiting decision at every
+  // non-zero amplitude.
+  constexpr Real amplitude = 1e-100;
+  const Real raw = mp5_interp(0, 0, amplitude, amplitude, amplitude);
+  const Real lim = mp5_reconstruct(0, 0, amplitude, amplitude, amplitude);
+
+  EXPECT_GT(raw, amplitude);
+  EXPECT_LE(lim, amplitude);
+  EXPECT_GE(lim, Real{0});
+  EXPECT_NEAR(lim / amplitude, Real{1}, 1e-12);
 }
 
 }  // namespace

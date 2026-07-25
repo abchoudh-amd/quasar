@@ -1,8 +1,10 @@
-// Phase 5.E: fp32 instantiation of the Biot-Savart kernels must agree with
+// The fp32 instantiation of the Biot-Savart kernels must agree with
 // the fp64 instantiation at single-precision tolerance on the analytical
 // test set. Both kernels share the same closed-form (Hanson-Hirshman) C++
 // template, so any disagreement above ~few * single-precision rounding
-// reflects either accumulation drift or a real numeric bug.
+// reflects per-segment fp32 evaluation/representation error or a real numeric
+// bug. B, A, and all nine Jacobian components use exponent-scaled expansion
+// accumulation.
 
 #include "quasar/backend/device.hpp"
 #include "quasar/core/types.hpp"
@@ -15,6 +17,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <utility>
 
 using ::quasar::Mat3x3;
 using ::quasar::Mat3x3f;
@@ -32,13 +35,11 @@ using ::quasar::magnetostatics::PointCloud;
 
 namespace {
 
-// Tolerance reflects accumulated single-precision rounding across the test
-// problem (mixed system, up to ~hundreds of segments per filament). Each
-// per-segment Hanson-Hirshman evaluation has ~30 float ops at ~1 ulp each
-// (~1e-7 relative); over ~256-segment accumulations the expected drift is
-// roughly sqrt(256) * 1e-7 ~ 1.6e-6, so 5e-6 is a tight but safe bound for
-// B and 5e-5 is a comparable bound for grad B (where the analytic Jacobian
-// has more ops per segment).
+// Tolerance covers single-precision rounding in each segment's geometry and
+// closed-form field, plus final fp32 representation. Segment sums themselves
+// use a non-overlapping scaled expansion, so the bound does not assume an
+// ordinary O(N eps) reduction. The Jacobian formula has more per-segment
+// operations and therefore uses the wider of the two empirical bounds.
 constexpr Real kAbsToB     = Real{5e-6};
 constexpr Real kAbsToGradB = Real{5e-5};
 
@@ -173,4 +174,65 @@ TEST(Fp32VsFp64, EmptySystemReturnsZeroForBothPrecisions) {
   ASSERT_EQ(B_f.size(), 1u);
   EXPECT_EQ(B_d[0].x, Real{0}); EXPECT_EQ(B_d[0].y, Real{0}); EXPECT_EQ(B_d[0].z, Real{0});
   EXPECT_EQ(B_f[0].x, 0.0f);     EXPECT_EQ(B_f[0].y, 0.0f);     EXPECT_EQ(B_f[0].z, 0.0f);
+}
+
+TEST(Fp32VsFp64, GradientRemainsFiniteAcrossSimilarityScales) {
+  if (!::quasar::backend::has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime";
+  }
+  for (const Real s : {Real{1e-7}, Real{1e-6}, Real{1e5}}) {
+    ConductorSystem cs;
+    cs.add(generic_polyline({Vec3{-s, 0, 0}, Vec3{s, 0, 0}}, Real{1}, "scaled"));
+    PointCloud pc;
+    pc.add(Vec3{0, s, 0});
+
+    const auto gd = BiotSavartEvaluator{}.evaluate_grad_B(cs, pc);
+    const auto gf = BiotSavartEvaluatorF{}.evaluate_grad_B(cs, pc);
+    ASSERT_EQ(gd.size(), 1u);
+    ASSERT_EQ(gf.size(), 1u);
+    const Real ref = std::sqrt(frob_sq(gd[0]));
+    const Real diff = std::sqrt(frob_sq_diff(gd[0], gf[0]));
+    EXPECT_TRUE(std::isfinite(gf[0].r0.x));
+    EXPECT_TRUE(std::isfinite(gf[0].r0.y));
+    EXPECT_TRUE(std::isfinite(gf[0].r0.z));
+    EXPECT_TRUE(std::isfinite(gf[0].r1.x));
+    EXPECT_TRUE(std::isfinite(gf[0].r1.y));
+    EXPECT_TRUE(std::isfinite(gf[0].r1.z));
+    EXPECT_TRUE(std::isfinite(gf[0].r2.x));
+    EXPECT_TRUE(std::isfinite(gf[0].r2.y));
+    EXPECT_TRUE(std::isfinite(gf[0].r2.z));
+    EXPECT_LE(diff / ref, Real{5e-5}) << "similarity scale=" << s;
+  }
+}
+
+TEST(Fp32VsFp64, CommonOriginPreservesRigidTranslation) {
+  if (!::quasar::backend::has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime";
+  }
+  auto evaluate = [](Real offset) {
+    ConductorSystem cs;
+    cs.add(generic_polyline(
+        {Vec3{offset - 1, 0, 0}, Vec3{offset + 1, 0, 0}}, Real{1}, "translated"));
+    PointCloud pc;
+    pc.add(Vec3{offset, 1, 0});
+    BiotSavartEvaluatorF eval;
+    return std::pair{eval.evaluate_B(cs, pc), eval.evaluate_grad_B(cs, pc)};
+  };
+
+  const auto [b0, g0] = evaluate(Real{0});
+  const auto [bt, gt] = evaluate(Real{1e8});
+  ASSERT_EQ(b0.size(), 1u);
+  ASSERT_EQ(bt.size(), 1u);
+  EXPECT_FLOAT_EQ(bt[0].x, b0[0].x);
+  EXPECT_FLOAT_EQ(bt[0].y, b0[0].y);
+  EXPECT_FLOAT_EQ(bt[0].z, b0[0].z);
+  EXPECT_FLOAT_EQ(gt[0].r0.x, g0[0].r0.x);
+  EXPECT_FLOAT_EQ(gt[0].r0.y, g0[0].r0.y);
+  EXPECT_FLOAT_EQ(gt[0].r0.z, g0[0].r0.z);
+  EXPECT_FLOAT_EQ(gt[0].r1.x, g0[0].r1.x);
+  EXPECT_FLOAT_EQ(gt[0].r1.y, g0[0].r1.y);
+  EXPECT_FLOAT_EQ(gt[0].r1.z, g0[0].r1.z);
+  EXPECT_FLOAT_EQ(gt[0].r2.x, g0[0].r2.x);
+  EXPECT_FLOAT_EQ(gt[0].r2.y, g0[0].r2.y);
+  EXPECT_FLOAT_EQ(gt[0].r2.z, g0[0].r2.z);
 }

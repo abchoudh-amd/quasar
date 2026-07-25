@@ -9,7 +9,7 @@ z(phi) = a cos(2 phi)
 ```
 
 with `R = 0.10 m` and `a = 0.02 m`. The polyline rises above the xy-plane
-near `phi = 0, π` ("peaks") and dips below near `phi = π/2, 3π/2"
+near `phi = 0, π` ("peaks") and dips below near `phi = π/2, 3π/2`
 ("valleys"). It carries `I = 1 A`.
 
 This example demonstrates two things:
@@ -50,8 +50,9 @@ for k in range(N + 1):
 
 ## Symmetry check
 
-By the loop's C2 symmetry about the z-axis (φ → φ + π leaves x, y, z all
-invariant), the magnetic field at the origin must satisfy `B_x = B_y = 0`.
+By the loop's C2 symmetry about the z-axis (`φ → φ + π` sends
+`(x, y, z)` to `(-x, -y, z)` and leaves the curve as a set invariant), the
+magnetic field at the origin must satisfy `B_x = B_y = 0`.
 The integration test
 `tests/python/test_examples.py::SaddleCoilExampleTest` asserts this to
 ~1e-10 relative.

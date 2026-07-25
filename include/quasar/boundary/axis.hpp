@@ -18,9 +18,9 @@ class AxisFieldBC final : public IFieldBoundary {
   void correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const override;
 };
 
-// On-axis (r=0) particle boundary: reflects particles that cross the axis back
-// into the domain (r -> -r, vr -> -vr) so the axis approach is reflectionless
-// and conserves energy. fold_current is a no-op (the axis field closure already
+// On-axis (r=0) particle boundary: crossing the axis is an azimuth shift by pi,
+// so r -> -r and both (vr,vphi) change sign while vz is unchanged. fold_current
+// is a no-op (the axis field closure already
 // regularizes the on-axis current via the field parity).
 class AxisParticleBC final : public IParticleBoundary {
  public:

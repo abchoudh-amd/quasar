@@ -16,7 +16,67 @@
 
 #include <hip/hip_runtime.h>
 
+#include <climits>
+
 namespace quasar::backend::pic {
+
+__device__ inline void mark_deposit_error(unsigned int* error) {
+  atomicExch(error, 1u);
+}
+
+__device__ inline bool reduced_coordinate_representable(double value) {
+  constexpr double margin = 16.0;
+  return isfinite(value)
+      && value >= static_cast<double>(INT_MIN) + margin
+      && value <= static_cast<double>(INT_MAX) - margin;
+}
+
+// Exponent-scaled product/ratio accumulator. Kernel formulas such as
+// q*w/(dx*dy) are often finite even when q*w, 1/dx, or dx*dy is not. Keeping a
+// normalized mantissa plus a base-two exponent avoids those false range errors.
+struct ScaledProduct {
+  double mantissa{0.5};
+  int exponent{1};
+  bool zero{false};
+};
+
+__device__ inline void scaled_multiply(ScaledProduct& value, double factor) {
+  if (value.zero) return;
+  if (factor == 0.0) {
+    value.zero = true;
+    return;
+  }
+  int factor_exponent = 0;
+  const double factor_mantissa = frexp(factor, &factor_exponent);
+  value.mantissa *= factor_mantissa;
+  value.exponent += factor_exponent;
+  int adjustment = 0;
+  value.mantissa = frexp(value.mantissa, &adjustment);
+  value.exponent += adjustment;
+}
+
+__device__ inline void scaled_divide(ScaledProduct& value, double factor) {
+  int factor_exponent = 0;
+  const double factor_mantissa = frexp(factor, &factor_exponent);
+  value.mantissa /= factor_mantissa;
+  value.exponent -= factor_exponent;
+  int adjustment = 0;
+  value.mantissa = frexp(value.mantissa, &adjustment);
+  value.exponent += adjustment;
+}
+
+__device__ inline double scaled_value(const ScaledProduct& value) {
+  return value.zero ? 0.0 : scalbn(value.mantissa, value.exponent);
+}
+
+// A nonzero exact product that converts to zero has truly underflowed; silently
+// treating it as an exact zero would drop charge/current and break continuity.
+// Call this after materialising the complete node contribution (not a partial
+// prefactor that a later small shape delta could bring back into range).
+__device__ inline bool scaled_value_representable(const ScaledProduct& scaled,
+                                                   double value) {
+  return isfinite(value) && (value != 0.0 || scaled.zero);
+}
 
 // Local stencil window sized per shape order. CFL keeps |displacement| < ~1 cell,
 // so the window must span the lowest support node of the min endpoint to the

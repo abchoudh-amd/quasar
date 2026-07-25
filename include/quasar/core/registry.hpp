@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -20,10 +21,25 @@ class Registry {
     return singleton;
   }
 
-  // Returns true unconditionally so it can drive a namespace-scope static initializer.
-  // Replaces any prior registration under the same name.
+  // Returns true on success so it can drive a namespace-scope static
+  // initializer. Duplicate names are rejected: silently replacing one makes
+  // the selected implementation depend on cross-translation-unit/plugin load
+  // order, which is unspecified.
   bool register_factory(std::string name, Factory factory) {
-    factories_.insert_or_assign(std::move(name), std::move(factory));
+    if (name.empty()) {
+      throw std::invalid_argument{"quasar::Registry: factory name must not be empty"};
+    }
+    if (!factory) {
+      throw std::invalid_argument{"quasar::Registry: factory must be callable"};
+    }
+    const std::scoped_lock lock{mutex_};
+    const auto [it, inserted] =
+        factories_.try_emplace(std::move(name), std::move(factory));
+    if (!inserted) {
+      throw std::invalid_argument{
+          std::string{"quasar::Registry: duplicate factory name '"}
+          + it->first + "'"};
+    }
     return true;
   }
 
@@ -40,19 +56,36 @@ class Registry {
   }
 
   std::unique_ptr<Base> create(std::string_view name) const {
-    const auto it = factories_.find(std::string{name});
-    if (it == factories_.end()) {
-      throw std::out_of_range{std::string{"quasar::Registry: no factory named '"}
-                              + std::string{name} + "'"};
+    Factory factory;
+    {
+      const std::scoped_lock lock{mutex_};
+      const auto it = factories_.find(std::string{name});
+      if (it == factories_.end()) {
+        throw std::out_of_range{std::string{"quasar::Registry: no factory named '"}
+                                + std::string{name} + "'"};
+      }
+      // Invoke outside the lock: a plugin factory may itself consult another
+      // registry, and user construction must not serialize unrelated lookups.
+      factory = it->second;
     }
-    return (it->second)();
+    auto result = factory();
+    if (!result) {
+      throw std::runtime_error{std::string{"quasar::Registry: factory named '"}
+                               + std::string{name} + "' returned null"};
+    }
+    return result;
   }
 
-  bool contains(std::string_view name) const noexcept {
+  // Looking up a string_view currently materializes a std::string for the
+  // unordered-map key, so allocation failure is allowed to propagate rather
+  // than terminating through a false noexcept promise.
+  bool contains(std::string_view name) const {
+    const std::scoped_lock lock{mutex_};
     return factories_.find(std::string{name}) != factories_.end();
   }
 
   std::vector<std::string> names() const {
+    const std::scoped_lock lock{mutex_};
     std::vector<std::string> out;
     out.reserve(factories_.size());
     for (const auto& kv : factories_) {
@@ -61,7 +94,10 @@ class Registry {
     return out;
   }
 
-  std::size_t size() const noexcept { return factories_.size(); }
+  std::size_t size() const {
+    const std::scoped_lock lock{mutex_};
+    return factories_.size();
+  }
 
  private:
   template <class Derived>
@@ -77,6 +113,7 @@ class Registry {
   Registry& operator=(Registry&&)      = delete;
 
   std::unordered_map<std::string, Factory> factories_{};
+  mutable std::mutex mutex_{};
 };
 
 }  // namespace quasar

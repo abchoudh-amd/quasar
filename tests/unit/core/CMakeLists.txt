@@ -11,7 +11,7 @@ add_test(
   COMMAND quasar_test_core_registry
 )
 
-foreach(_test_name IN ITEMS test_grid_2d test_grid_cylindrical test_normalization test_yee_field)
+foreach(_test_name IN ITEMS test_field test_grid_2d test_grid_cylindrical test_normalization test_types test_yee_field)
   set(_target "quasar_${_test_name}")
   add_executable(${_target} "${_test_name}.cpp")
   if(_test_name STREQUAL "test_yee_field")

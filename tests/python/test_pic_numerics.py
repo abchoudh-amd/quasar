@@ -3,7 +3,21 @@
 import math
 import unittest
 
-from quasar.pic.numerics import C_LIGHT, cfl_dt, cfl_limit
+from quasar.pic.numerics import C_LIGHT, cfl_dt, cfl_limit, j0_zero
+
+
+class BesselZeroTests(unittest.TestCase):
+
+    def test_low_tabulated_and_high_asymptotic_zeros(self):
+        self.assertAlmostEqual(j0_zero(1), 2.404825557695773, places=15)
+        self.assertAlmostEqual(j0_zero(6), 18.071063967910922, places=8)
+        self.assertAlmostEqual(j0_zero(10), 30.634606468431976, places=9)
+
+    def test_rejects_nonpositive_and_noninteger_indices(self):
+        for index in (0, -1, 1.5, True):
+            with self.subTest(index=index):
+                with self.assertRaises(ValueError):
+                    j0_zero(index)
 
 
 class CflLimitTests(unittest.TestCase):
@@ -29,6 +43,27 @@ class CflLimitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cfl_limit(0.01, 0.01, fdtd_order=3)
 
+    def test_rejects_invalid_spacing_and_wave_speed(self):
+        for dx, dy, c in ((0.0, 1.0, 1.0), (1.0, -1.0, 1.0),
+                          (float("inf"), 1.0, 1.0), (1.0, 1.0, 0.0),
+                          (1.0, 1.0, float("nan"))):
+            with self.subTest(dx=dx, dy=dy, c=c):
+                with self.assertRaises(ValueError):
+                    cfl_limit(dx, dy, c=c)
+
+    def test_large_aspect_ratio_does_not_overflow_inverse_square(self):
+        limit = cfl_limit(1.0e-200, 1.0e100, c=1.0)
+        self.assertTrue(math.isfinite(limit))
+        self.assertGreater(limit, 0.0)
+        self.assertAlmostEqual(limit / 1.0e-200, 1.0, places=14)
+
+    def test_maximum_equal_spacing_with_subunit_wave_speed_is_finite(self):
+        maximum = float.fromhex("0x1.fffffffffffffp+1023")
+        limit = cfl_limit(maximum, maximum, c=0.75)
+        expected = (maximum / math.sqrt(2.0)) / 0.75
+        self.assertTrue(math.isfinite(limit))
+        self.assertAlmostEqual(limit / expected, 1.0, places=14)
+
 
 class CflDtTests(unittest.TestCase):
 
@@ -44,6 +79,12 @@ class CflDtTests(unittest.TestCase):
     def test_unsupported_order_raises(self):
         with self.assertRaises(ValueError):
             cfl_dt(0.01, 0.01, fdtd_order=5)
+
+    def test_rejects_invalid_safety_factor(self):
+        for safety in (0.0, -0.1, 1.01, float("inf"), float("nan")):
+            with self.subTest(safety=safety):
+                with self.assertRaises(ValueError):
+                    cfl_dt(0.01, 0.01, safety=safety)
 
 
 if __name__ == "__main__":

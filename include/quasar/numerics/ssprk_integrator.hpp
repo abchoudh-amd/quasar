@@ -9,8 +9,8 @@
 //     solver.compute_residual(<stage-input register>, solver.residual_register());
 //     solver.combine_stage(s, dt);
 //
-// All register routing, the Shu-Osher combine coefficients, the CT face-B update,
-// and the positivity floors live inside the solver's combine_stage(). Keeping the
+// All register routing, the Shu-Osher combine coefficients, the CT face-B rate,
+// and the read-only positivity check live inside the solver. Keeping the
 // integrator a thin host loop means a new time scheme is selectable by registry
 // name without touching the solver's buffer ownership.
 //
@@ -38,7 +38,8 @@ class ISsprkIntegrator {
 
   // Advance the solver's live state by one full step of size `dt`. A thin host
   // loop over the stages calling solver.compute_residual / solver.combine_stage;
-  // it allocates nothing and applies no coefficients itself.
+  // it allocates nothing and applies no coefficients itself. ``dt`` must be
+  // finite and strictly positive.
   virtual void advance(quasar::mhd::MhdSolver2D& solver, Real dt) const = 0;
 };
 

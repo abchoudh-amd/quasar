@@ -1,4 +1,4 @@
-// Phase 3.B: a single straight current-carrying segment of length L approaches
+// A single straight current-carrying segment of length L approaches
 // the infinite-wire azimuthal field
 //
 //     B_phi(d) = mu0 * I / (2 * pi * d)

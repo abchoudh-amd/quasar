@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 
 namespace quasar::mhd {
 
@@ -35,12 +36,15 @@ struct MhdBackgroundField {
 
 // Deck-facing background specification. `profile` is a registry name selecting
 // the background construction scheme (default: a constant uniform vector). The
-// bx0/by0/bz0 fields are the uniform-vector parameters consumed when
-// profile == "uniform".
+// `params` carries scalar parameters for any registry-created analytic profile.
+// The legacy bx0/by0/bz0 fields are the uniform-vector parameters consumed when
+// profile == "uniform"; they override same-named entries in `params` so the
+// native and Python construction paths have identical precedence.
 struct MhdBackgroundSpec {
   bool enabled{false};
   std::string profile{"uniform"};  // registry name (default uniform vector)
   Real bx0{}, by0{}, bz0{};        // uniform-vector params (profile="uniform")
+  std::unordered_map<std::string, Real> params{};
 };
 
 }  // namespace quasar::mhd

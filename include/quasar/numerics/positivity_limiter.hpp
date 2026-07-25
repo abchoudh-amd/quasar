@@ -1,18 +1,19 @@
 #pragma once
 
-// Positivity-preserving limiter interface for the ideal-MHD solver. apply()
-// enforces a density floor and a gas-pressure floor on a conserved MHD field so a
-// stage that produced a non-physical (negative-density or negative-pressure) cell
-// is corrected back to a positive, physically admissible state.
+// Positivity-preserving limiter interface for the ideal-MHD solver. Evolution
+// uses admissible_fraction() to constrain a conservative update before accepting
+// it. apply() remains an explicit repair utility for callers that hand the
+// registry object an already-invalid standalone field; it is not used by the
+// conservative solver path.
 //
-// Two consumers share the SAME floor semantics:
-//   - the solver's per-stage path runs the DEVICE floors
-//     (quasar::mhd::launch_mhd_apply_floors, see physics/mhd/kernels.hpp);
-//   - a registry-created IPositivityLimiter object exposes the equivalent floor
-//     on the host via apply(), so a unit test can construct the limiter by name
-//     and floor an MhdField2D directly.
-// Both clamp rho to rho_floor and re-derive total energy from the floored
-// pressure while holding momentum and B fixed, so the two paths agree.
+// The two operations deliberately have different mutation contracts:
+//   - admissible_fraction() is read-only and drives conservative retry/subcycling;
+//   - apply() is an explicit in-place repair for an already-invalid standalone
+//     field, retained for registry/API compatibility and diagnostic workflows.
+// Conservative evolution passes zero bounds to admissible_fraction(), enforcing
+// strict rho>0 and internal energy>0. Positive configured floors are reserved
+// for explicit repair because they are not invariant sets of the conservative
+// equations; automatic initial-state construction does not clamp to them.
 
 #include "quasar/core/types.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
@@ -25,12 +26,26 @@ class IPositivityLimiter {
  public:
   virtual ~IPositivityLimiter() = default;
 
-  // Floor `u` in place: clamp density below rho_floor up to rho_floor, and raise
+  // Explicitly repair `u` in place: clamp density below rho_floor and raise
   // total energy in any cell whose gas pressure is below p_floor so its pressure
   // becomes exactly p_floor (momentum and B unchanged). Already-positive cells
-  // are left untouched to round-off. `gamma` is the adiabatic index.
+  // are left untouched to round-off. The evolution solver does not call this
+  // nonconservative utility. `gamma` is the adiabatic index.
   virtual void apply(quasar::mhd::MhdField2D<Real>& u, Real rho_floor,
                      Real p_floor, Real gamma) const = 0;
+
+  // Return min_cell theta_cell in [0,1] such that the convex segment from an
+  // admissible `base` state to `candidate` remains strictly above both bounds.
+  // The conservative solver passes zero bounds (mathematical positivity); an
+  // explicit caller may request positive bounds. A return of 1 accepts the
+  // candidate unchanged. The solver uses theta<1 to retry the conservative
+  // SSP-RK update with a smaller CFL-coupled substep; it never applies a
+  // cell-local mass/energy repair to an evolved state.
+  virtual Real admissible_fraction(
+      const quasar::mhd::MhdField2D<Real>& base,
+      const quasar::mhd::MhdField2D<Real>& candidate,
+      Real rho_floor, Real p_floor, Real gamma,
+      int collocation_order = 0) const = 0;
 };
 
 }  // namespace quasar::numerics

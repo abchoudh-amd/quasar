@@ -48,6 +48,7 @@ class ParticleSpecies {
   Real* vx() noexcept { return vx_.device_ptr(); }
   Real* vy() noexcept { return vy_.device_ptr(); }
   Real* vz() noexcept { return vz_.device_ptr(); }
+  Real* vphi_deposit() noexcept { return vphi_deposit_.device_ptr(); }
   Real* weight() noexcept { return weight_.device_ptr(); }
   std::uint8_t* alive() noexcept { return alive_.device_ptr(); }
 
@@ -58,6 +59,7 @@ class ParticleSpecies {
   const Real* vx() const noexcept { return vx_.device_ptr(); }
   const Real* vy() const noexcept { return vy_.device_ptr(); }
   const Real* vz() const noexcept { return vz_.device_ptr(); }
+  const Real* vphi_deposit() const noexcept { return vphi_deposit_.device_ptr(); }
   const Real* weight() const noexcept { return weight_.device_ptr(); }
   const std::uint8_t* alive() const noexcept { return alive_.device_ptr(); }
 
@@ -75,6 +77,7 @@ class ParticleSpecies {
   Real* compact_vx() noexcept { return c_vx_.device_ptr(); }
   Real* compact_vy() noexcept { return c_vy_.device_ptr(); }
   Real* compact_vz() noexcept { return c_vz_.device_ptr(); }
+  Real* compact_vphi_deposit() noexcept { return c_vphi_deposit_.device_ptr(); }
   Real* compact_weight() noexcept { return c_weight_.device_ptr(); }
   std::uint8_t* compact_alive() noexcept { return c_alive_.device_ptr(); }
   unsigned int* compact_counter() noexcept { return c_counter_.device_ptr(); }
@@ -82,16 +85,24 @@ class ParticleSpecies {
   // read-only reduction (alive_count) can reuse it without copying the species.
   unsigned int* compact_counter() const noexcept { return c_counter_.device_ptr(); }
 
-  // Persistent device flag the charge-conserving deposit atomically bumps when a
-  // particle's displacement spills outside the fixed deposition window. Kept
+  // Persistent device flag the charge/current deposit atomically sets when a
+  // particle coordinate/value is nonrepresentable or its displacement spills
+  // outside the fixed deposition window. Kept
   // separate from compact_counter (which the deposit memsets to 0 each call) so
   // the host can read it on a cadence instead of synchronizing every step. The
   // deposit accumulates into it across steps; the solver copies it back
   // periodically and at end-of-run, then clears it. mutable: device scratch read
   // by the logically-const consume path.
   unsigned int* deposit_overflow() const noexcept { return deposit_overflow_.device_ptr(); }
+  // Sticky device flag set by the gather/push kernel when a particle state or
+  // gathered force is non-finite, a coordinate cannot be reduced safely to an
+  // integer stencil index, or the nonrelativistic |v|<1 model is violated.
+  unsigned int* particle_error() const noexcept { return particle_error_.device_ptr(); }
 
  private:
+  struct ValidatedConfigTag {};
+  ParticleSpecies(SpeciesConfig cfg, ValidatedConfigTag);
+
   std::string name_{"species"};
   Real charge_{Real{-1}};
   Real mass_{Real{1}};
@@ -105,6 +116,9 @@ class ParticleSpecies {
   backend::DeviceBuffer<Real> vx_{};
   backend::DeviceBuffer<Real> vy_{};
   backend::DeviceBuffer<Real> vz_{};
+  // Cylindrical path-start v_phi after the Boris force update but before the
+  // coordinate-basis rotation. Together with final vz_ this time-centres J_phi.
+  backend::DeviceBuffer<Real> vphi_deposit_{};
   backend::DeviceBuffer<Real> weight_{};
   backend::DeviceBuffer<std::uint8_t> alive_{};
   // Compaction scratch (capacity-sized, allocated alongside the particle arrays).
@@ -115,6 +129,7 @@ class ParticleSpecies {
   backend::DeviceBuffer<Real> c_vx_{};
   backend::DeviceBuffer<Real> c_vy_{};
   backend::DeviceBuffer<Real> c_vz_{};
+  backend::DeviceBuffer<Real> c_vphi_deposit_{};
   backend::DeviceBuffer<Real> c_weight_{};
   backend::DeviceBuffer<std::uint8_t> c_alive_{};
   // mutable: device scratch reused by the logically-const alive_count reduction.
@@ -122,6 +137,7 @@ class ParticleSpecies {
   // mutable: persistent deposit-overflow flag, accumulated by the deposit kernel
   // and consumed (copied + cleared) by the solver on a cadence.
   mutable backend::DeviceBuffer<unsigned int> deposit_overflow_{};
+  mutable backend::DeviceBuffer<unsigned int> particle_error_{};
 };
 
 }  // namespace quasar::pic

@@ -42,16 +42,15 @@ field drifts in the (x, y) plane become non-trivial. 16 coils gives a
 small toroidal ripple in |B_φ|; for a smoother ring raise `N_TF_COILS`
 in `build_yaml.py`.
 
-### PIC domain = bore cross-section
+### PIC domain = inner 90% of the bore cross-section
 
-The PIC domain is sized to **the right-side bore cross-section only**:
-`a × a` = `0.04 × 0.04` m centered on `(x, y) = (R0, 0) = (0.10, 0.00)` m.
-With `nx = ny = 128`, `dx ≈ 3.1 × 10⁻⁴` m resolves the bore-scale structure;
-the CFL timestep is `dt ≈ 3.68 × 10⁻¹³` s. The absorbing particle BC
-therefore coincides with the toroid's conductor sheet — a particle that
-leaves the PIC domain is, physically, one that hit the magnet wall, so the
-alive-count time series is a direct measurement of confinement loss inside
-the bore.
+The PIC domain covers the inner **90%** of the right-side bore:
+`0.036 × 0.036` m centered on `(x, y) = (R0, 0) = (0.10, 0.00)` m.
+With `nx = ny = 128`, `dx ≈ 2.81 × 10⁻⁴` m resolves the bore-scale structure;
+the CFL timestep is `dt ≈ 3.32 × 10⁻¹³` s. This 2 mm inset is required by the
+ideal-filament model: magnetic field is singular on the zero-radius TF-coil
+polyline at the physical bore wall. The absorbing particle boundary therefore
+measures escape toward that wall without ever sampling an undefined field.
 
 ## Species
 
@@ -64,9 +63,10 @@ At equal temperature the μ⁻ gyroradius is ≈ √(m_μ / m_H) ≈ 0.34 × tha
 H⁺. Both species are seeded into a **0.02 m × 0.02 m block** (the toroid's
 half-width × half-height) centered on the right-side bore at
 (x, y) = (R₀, 0) = (0.10, 0.00) m, with a 10 eV Maxwellian velocity
-distribution. Equal density and matched positions make the patch
-initially quasineutral; the absorbing particle BC then quantifies loss as
-the populations diffuse out of the magnetic bore.
+distribution. Equal densities and opposite equal-magnitude charges make the
+patch globally quasineutral; the independently sampled finite populations still
+carry ordinary local particle noise. The absorbing particle BC then quantifies
+loss as the populations diffuse out of the magnetic bore.
 
 ## Numerical caveats
 
@@ -75,8 +75,9 @@ the populations diffuse out of the magnetic bore.
   bore field is non-monotonic across the bore midline; for a clean 1/R
   toroidal profile, run more loop filaments and/or use a true helical-TF
   geometry.
-- The deck targets **1 µs of physical time** (~2.71M CFL steps at the
-  default 128² grid, `dt ≈ 3.685 × 10⁻¹³` s in the bore-sized domain).
+- The deck targets **exactly 1 µs of physical time** (at most ~3.01M CFL
+  steps at the default 128² grid, `dt ≈ 3.317 × 10⁻¹³` s in the inset bore
+  domain); `t_end_s` clips the last step to the requested end time.
   For quick iteration use `--steps-override` (see below).
 
 ## Run
@@ -90,7 +91,7 @@ PYTHONPATH=build/hip-gfx942-release/python \
   python -m quasar.pic.cli run examples/square_toroid_pic/input.yaml \
     --print-config --steps-override 50
 
-# Full 1 µs run (~360k steps)
+# Full 1 µs run (~3.01M steps)
 PYTHONPATH=build/hip-gfx942-release/python \
   python -m quasar.pic.cli run examples/square_toroid_pic/input.yaml
 

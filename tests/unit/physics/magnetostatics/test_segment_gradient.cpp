@@ -1,4 +1,4 @@
-// Phase 3.A correctness check for segment_gradB.
+// Analytical correctness checks for segment_gradB.
 //
 // Strategy: for a small system of conductors observed at a handful of
 // random-but-fixed off-segment points, compare the analytic

@@ -11,7 +11,8 @@ namespace quasar::boundary {
 // Per-side boundary selection for the MHD vertical slice (order: x_lo, x_hi,
 // y_lo, y_hi). Each name maps directly to a QUASAR_REGISTER_MHD_*_BOUNDARY key,
 // so adding a boundary is a single registration with no enum / switch / binding
-// to update. Names: "periodic" | "outflow" | "wall". The fluid axis
+// to update. Names: "periodic" | "outflow" | "wall" | "axis".  "axis" is
+// the cylindrical r=0 parity closure and is valid only on x_lo. The fluid axis
 // (rho, m, energy) and the magnetic-field axis (bx_face, by_face, bz_cell) have
 // independent selections because a wall imposes different symmetries
 // on momentum than on the magnetic field.

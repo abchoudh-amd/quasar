@@ -40,13 +40,28 @@ def main() -> int:
             "alive": np.array(host["alive"], copy=True).astype(bool),
         })
 
-    steps = deck.time.steps
-    print(f"running {steps} steps at dt={dt_si:.3e} s ...", flush=True)
-    report_every = max(1, steps // 10)
-    for s in range(steps):
-        solver.step(dt)
-        if (s + 1) % report_every == 0:
-            print(f"  step {s + 1}/{steps}", flush=True)
+    step_cap = deck.time.steps
+    t_end = deck.time.t_end_s
+    print(f"running at most {step_cap} steps at dt={dt_si:.3e} s ...", flush=True)
+    report_every = max(1, step_cap // 10)
+    sim_time = 0.0
+    steps_done = 0
+    while steps_done < step_cap and (t_end is None or sim_time < t_end):
+        dt_step_si = dt_si
+        clipped = False
+        if t_end is not None:
+            remaining = t_end - sim_time
+            dt_step_si = min(dt_step_si, remaining)
+            clipped = dt_step_si == remaining
+        if not np.isfinite(dt_step_si) or dt_step_si <= 0.0:
+            raise RuntimeError("PIC plotting run timestep made no forward progress")
+        dt_step = dt if dt_step_si == dt_si else units.time(dt_step_si)
+        solver.step(dt_step)
+        sim_time = t_end if clipped else sim_time + dt_step_si
+        steps_done += 1
+        if steps_done % report_every == 0 or clipped:
+            print(f"  step {steps_done}/{step_cap}", flush=True)
+    solver.finalize()
 
     finals = []
     for idx in indices:
@@ -89,7 +104,7 @@ def main() -> int:
         if m_dead.any():
             ax.scatter(fin["x"][m_dead], fin["y"][m_dead], s=0.5,
                        c="tab:red", alpha=0.4, label=f"lost: {n_lost}")
-        ax.set_title(f"{fin['name']} after {steps} steps: "
+        ax.set_title(f"{fin['name']} after {steps_done} steps: "
                      f"alive={int(n_alive_end)}, lost={n_lost}")
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
@@ -100,8 +115,8 @@ def main() -> int:
         print(f"{init['name']:>4s}: start={int(n_start)} "
               f"alive_end={int(n_alive_end)} lost={n_lost}")
 
-    fig.suptitle(f"square_toroid_pic: {steps} steps, "
-                 f"t_final = {steps * dt_si:.3e} s")
+    fig.suptitle(f"square_toroid_pic: {steps_done} steps, "
+                 f"t_final = {sim_time:.3e} s")
     fig.tight_layout()
     out = HERE / "initial_vs_final.png"
     fig.savefig(out, dpi=130)

@@ -26,6 +26,8 @@ A deposit must honour the per-axis periodicity set via
 ``set_periodic_axes(periodic_x, periodic_y)``: wrap a node only when both sides of
 an axis are periodic, and otherwise deposit boundary-crossing current into the
 ghost cells so the specular fold-back can reflect it into the interior. The
-charge-conserving contract is that the backward-difference divergence of the
-deposited current matches the forward-difference curl of the field solver's
-E-update, which preserves Gauss's law.
+charge-conserving contract is that the **forward face-to-cell divergence** of
+the deposited current exactly cancels the charge change. It is the same
+staggered divergence used by Gauss's law and annihilates the field solver's
+Ampere curl. For fourth-order FDTD, apply the compact compatibility inverse
+``D4+ J = D2+ J_raw`` after the ordinary Esirkepov prefix deposit.

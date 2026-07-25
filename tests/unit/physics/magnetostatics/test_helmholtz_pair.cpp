@@ -1,4 +1,4 @@
-// Phase 3.C: a pair of coaxial circular loops separated by exactly one radius
+// A pair of coaxial circular loops separated by exactly one radius
 // is the Helmholtz configuration. On the symmetry axis at the midpoint:
 //
 //   B_z(0)        =  (4/5)^(3/2) * mu0 * I / R

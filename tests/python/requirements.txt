@@ -1,0 +1,6 @@
+# Runtime dependencies used by the Python front ends and bindings.
+numpy>=1.24
+PyYAML>=6.0
+
+# Optional at runtime, but installed for complete plotting-test coverage.
+matplotlib>=3.7

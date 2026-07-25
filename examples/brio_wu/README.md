@@ -35,8 +35,8 @@ rarefaction, a compound wave (a slow shock fused to a slow rarefaction), a
 contact discontinuity, a slow shock, and a right-moving fast rarefaction. The
 density plateaus near `rho ≈ 1` on the far left and `rho ≈ 0.125` on the far
 right, with intermediate plateaus set by the wave structure. `Bx` stays at
-`0.75` everywhere (`div B = 0` along the tube), and the solution is symmetric
-about the contact in the usual Brio-Wu sense.
+`0.75` everywhere (`div B = 0` along the tube). The solution is not mirror
+symmetric: the left and right initial states have different density and pressure.
 
 The integration test in `tests/python/test_examples.py` runs this deck and
 checks the far-field densities against the left/right input states and verifies

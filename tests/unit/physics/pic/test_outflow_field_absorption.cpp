@@ -43,6 +43,10 @@ quasar::pic::EmPic2D3V make_channel(const quasar::Grid2D& g, int order) {
       "outflow";
   cfg.boundary.field[static_cast<int>(quasar::Side::x_hi)] =
       "outflow";
+  cfg.boundary.particle[static_cast<int>(quasar::Side::x_lo)] =
+      "absorbing";
+  cfg.boundary.particle[static_cast<int>(quasar::Side::x_hi)] =
+      "absorbing";
   return quasar::pic::EmPic2D3V{cfg};
 }
 
@@ -106,14 +110,47 @@ TEST(PicOutflowFieldAbsorption, ChannelBleedsToZeroOrder4) {
   run_channel_bleed(4, 2, 0.05);
 }
 
-// NOTE: an open box with outflow on ALL FOUR sides is intentionally not tested.
-// First-order Mur is weakly unstable where two Mur walls meet at a corner (the
-// two one-way-wave conditions couple through the shared corner node), so an
-// all-outflow box can grow without a dedicated corner-extrapolation closure,
-// which is out of scope here. The supported, stable configurations are an
-// outflow channel (outflow on one axis, periodic/other on the rest) and outflow
-// mixed with PEC walls (the PEC pin breaks the corner feedback) -- both covered
-// above and below. See docs/CHANGELOG for the documented limitation.
+TEST(PicOutflowFieldAbsorption, AllFourSidesOutflowStableAndAbsorbing) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  constexpr int nx = 64, ny = 64;
+  quasar::Grid2D g{nx, ny, 1.0, 1.0, 0.0, 0.0, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
+  for (int side = 0; side < 4; ++side) {
+    cfg.boundary.field[side] = "outflow";
+    cfg.boundary.particle[side] = "absorbing";
+  }
+  quasar::pic::EmPic2D3V solver{cfg};
+
+  // A compact Ez displacement launches equal wave packets toward all four
+  // walls, exercising every face and all four diagonal corner closures.
+  auto& F = solver.fields();
+  std::vector<double> ez(g.storage_size(), 0.0);
+  for (int j = 0; j < ny; ++j) {
+    for (int i = 0; i < nx; ++i) {
+      const double x = (i + 0.5) / nx;
+      const double y = (j + 0.5) / ny;
+      ez[g.index(i, j)] =
+          std::exp(-((x - 0.5) * (x - 0.5) + (y - 0.5) * (y - 0.5)) /
+                   (2.0 * 0.06 * 0.06));
+    }
+  }
+  F.ez.copy_from_host(ez.data(), ez.size());
+
+  const double dt = 0.5 * g.dx();
+  const double e0 = quasar::pic::total_em_energy(solver);
+  double emax = e0;
+  for (int s = 0; s < static_cast<int>(4.0 / dt); ++s) {
+    solver.step(dt);
+    if (s % 32 == 0) {
+      const double e = quasar::pic::total_em_energy(solver);
+      ASSERT_TRUE(std::isfinite(e));
+      emax = std::max(emax, e);
+    }
+  }
+  const double e1 = quasar::pic::total_em_energy(solver);
+  EXPECT_LT(emax, 1.25 * e0) << "four-sided Mur box amplified the pulse";
+  EXPECT_LT(e1, 0.10 * e0) << "four-sided Mur box retained too much energy";
+}
 
 // Mixed corner: PEC on the x walls, outflow on the y walls. The PEC corner must
 // win for the doubly-tangential ez (pinned 0, not Mur'd), the box must never gain
@@ -131,6 +168,9 @@ TEST(PicOutflowFieldAbsorption, PecXOutflowYCornerStable) {
       "outflow";
   cfg.boundary.field[static_cast<int>(quasar::Side::y_hi)] =
       "outflow";
+  for (int side = 0; side < 4; ++side) {
+    cfg.boundary.particle[side] = "absorbing";
+  }
   quasar::pic::EmPic2D3V solver{cfg};
 
   // A pulse with a +y component so the outflow walls actually see flux.

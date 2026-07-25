@@ -24,28 +24,35 @@ __global__ void wrap_particles_kernel(quasar::Grid2D g, std::size_t n, int side,
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
   if (p >= n || alive[p] == 0) return;
   if (side == 0 && x[p] < g.origin_x) {
-    const double sx = g.lx * floor((x[p] - g.origin_x) / g.lx);
-    x[p] -= sx;
-    x_prev[p] -= sx;
+    const double periods = floor(quasar::detail::scaled_difference_quotient(
+        x[p], g.origin_x, g.lx));
+    x[p] = fma(-periods, g.lx, x[p]);
+    x_prev[p] = fma(-periods, g.lx, x_prev[p]);
   } else if (side == 1 && x[p] >= g.origin_x + g.lx) {
-    const double sx = g.lx * floor((x[p] - g.origin_x) / g.lx);
-    x[p] -= sx;
-    x_prev[p] -= sx;
+    const double periods = floor(quasar::detail::scaled_difference_quotient(
+        x[p], g.origin_x, g.lx));
+    x[p] = fma(-periods, g.lx, x[p]);
+    x_prev[p] = fma(-periods, g.lx, x_prev[p]);
   } else if (side == 2 && y[p] < g.origin_y) {
-    const double sy = g.ly * floor((y[p] - g.origin_y) / g.ly);
-    y[p] -= sy;
-    y_prev[p] -= sy;
+    const double periods = floor(quasar::detail::scaled_difference_quotient(
+        y[p], g.origin_y, g.ly));
+    y[p] = fma(-periods, g.ly, y[p]);
+    y_prev[p] = fma(-periods, g.ly, y_prev[p]);
   } else if (side == 3 && y[p] >= g.origin_y + g.ly) {
-    const double sy = g.ly * floor((y[p] - g.origin_y) / g.ly);
-    y[p] -= sy;
-    y_prev[p] -= sy;
+    const double periods = floor(quasar::detail::scaled_difference_quotient(
+        y[p], g.origin_y, g.ly));
+    y[p] = fma(-periods, g.ly, y[p]);
+    y_prev[p] = fma(-periods, g.ly, y_prev[p]);
   }
 }
 
 // Copies a single component's ghost layer on `side` from the opposite interior
-// edge, reproducing periodic wrap. The Yee curl reads only along-axis
-// neighbours, so corner ghosts are never used and are left untouched.
-//   gh in [1, nghost]   line in [0, len)
+// edge, reproducing periodic wrap.  A face component's high sample at n is the
+// periodic duplicate of sample 0, so this same mapping is correct for both
+// centre and face lattices.  `line` spans the *whole padded transverse axis*:
+// high-face Ampere updates and full-lattice Faraday updates can read corner
+// halos on mixed boundaries, and leaving those corners untouched makes their
+// value depend on allocator history.
 __device__ inline void periodic_fill_component(const quasar::Grid2D& g, double* f,
                                                int side, int gh, int line) {
   switch (side) {
@@ -69,7 +76,7 @@ __global__ void periodic_fields_kernel(quasar::Grid2D g, int side, int len,
                                        double* bx, double* by, double* bz) {
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;  // over nghost*len
   const int gh   = tid / len + 1;     // 1..nghost
-  const int line = tid % len;         // 0..len-1
+  const int line = tid % len - g.nghost;
   if (gh > g.nghost || line >= len) return;
   periodic_fill_component(g, ex, side, gh, line);
   periodic_fill_component(g, ey, side, gh, line);
@@ -96,7 +103,7 @@ extern "C" void launch_pic_boundary_periodic_fields(const quasar::Grid2D& g,
                                                     quasar::YeeField2D<quasar::Real>& f,
                                                     int side, quasar_stream_t stream) {
   if (g.nghost <= 0) return;
-  const int len = (side == 0 || side == 1) ? g.ny : g.nx;
+  const int len = (side == 0 || side == 1) ? g.height() : g.pitch();
   const int total = g.nghost * len;
   if (total <= 0) return;
   const dim3 block(quasar::backend::pic::kLaunchBlock);

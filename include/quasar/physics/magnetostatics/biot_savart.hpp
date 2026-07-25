@@ -34,11 +34,15 @@ class BiotSavartEvaluator final : public IFieldEvaluator {
   Field<Vec3>   evaluate_B     (const core::IFieldSource& source,
                                 const PointCloud&         observations) const override;
 
+  bool provides_grad_B() const noexcept override { return true; }
   Field<Mat3x3> evaluate_grad_B(const core::IFieldSource& source,
                                 const PointCloud&         observations) const override;
 
-  // Closed-form magnetic vector potential A (Coulomb gauge), with B = curl A.
-  // Used to seed a discretely divergence-free in-plane field for MHD.
+  // Closed-form line-integral magnetic vector potential A, with B = curl A.
+  // It is in Coulomb gauge for closed/current-continuous conductor systems;
+  // individual open segments retain endpoint divergence terms. Used to seed a
+  // discretely divergence-free in-plane field for MHD.
+  bool provides_vector_potential() const noexcept override { return true; }
   Field<Vec3>   evaluate_A     (const core::IFieldSource& source,
                                 const PointCloud&         observations) const override;
 
@@ -49,8 +53,8 @@ class BiotSavartEvaluator final : public IFieldEvaluator {
 };
 
 // Single-precision sibling of BiotSavartEvaluator. The kernel runs in fp32
-// throughout - segments and observation points are cast from the
-// double-typed host containers to float on upload, the kernel uses the
+// throughout - a common double-precision origin is subtracted from segments and
+// observations before casting the translated coordinates to float, the kernel uses the
 // fp32 instantiation of segment_B / segment_gradB, and the result is
 // returned as Field<Vec3f> / Field<Mat3x3f> so callers see the precision
 // difference directly. The IFieldEvaluator base is intentionally not

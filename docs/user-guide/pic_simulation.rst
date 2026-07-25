@@ -17,6 +17,10 @@ Deck schema (``quasar.pic.io``)
      reference_density_per_m3: 1.0e15
      reference_species: electron
 
+   neutralizing_background: false
+                             # set true for a non-neutral population on a
+                             # doubly periodic domain
+
    domain:
      nx: 128
      ny: 128
@@ -49,6 +53,7 @@ Deck schema (``quasar.pic.io``)
        #   dipole:   {type: dipole,   moment_Am2: [0, 0, 1], origin_xyz_m: [0, 0, 0]}
        #   gradient: {type: gradient, B0_T: [0, 0, 0],
        #              grad_T_per_m: [[1, 0, 0], [0, 1, 0], [0, 0, -2]]}
+       #   file_grid: {type: file_grid, path: field_map.npz}
 
    species:
      - name: H+
@@ -60,15 +65,20 @@ Deck schema (``quasar.pic.io``)
          density_per_m3: 1.0e15
          temperature_eV: 10.0
          drift_v: [0.0, 0.0, 0.0]           # optional
+         # Optional deterministic velocity mode, in the deck's velocity units:
+         velocity_perturbation:
+           amplitude_v: [1.0e-6, 0.0, 0.0]
+           mode: [1, 0]                      # full wavelengths across x and y
+           phase_rad: 0.0
          # maxwellian_block also needs a region (metres):
          # region: {x_min_m: ..., x_max_m: ..., y_min_m: ..., y_max_m: ...}
 
-   fields:                   # optional initial field seed (normalized decks)
+   fields:                   # optional initial field seed
      initial:
-       type: seed_em_wave    # 'seed_perturbation' or 'seed_em_wave'
+       type: seed_em_wave    # also 'seed_perturbation' or 'seed_tm_cavity'
        component: ez         # field component to seed
-       mode: [1, 0]          # spatial mode numbers
-       amplitude: 1.0e-3
+       mode: [1, 0]          # +x propagation; my must be zero
+       amplitude: 1.0e-3     # V/m for E in SI decks; internal units if normalized
 
    boundary:                 # optional, default all-periodic
      particle: [periodic, periodic, specular, specular]
@@ -81,7 +91,8 @@ Deck schema (``quasar.pic.io``)
 
    time:
      dt_s: auto              # float or 'auto' (CFL-limited)
-     steps: 2000
+     steps: 2000             # safety cap
+     t_end_s: 1.0e-8         # optional; final position step is clipped exactly
 
    diagnostics:
      output_path: out.npz
@@ -93,6 +104,96 @@ Conductor specs in ``external_field.evaluator.conductors`` are passed
 through ``quasar.coil.io._build_geometry`` and therefore accept any
 geometry the coil pipeline supports (``circular_loop``, ``helix``,
 ``solenoid``, ``polygon``, ``polyline``, ``racetrack``).
+
+Registered evaluator plugins
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Any name in the live, sorted
+``_core.magnetostatics.field_evaluator_names()`` result can be selected as an
+external evaluator. Evaluators other than the built-ins use a generic
+``params`` mapping:
+
+.. code-block:: yaml
+
+   external_field:
+     evaluator:
+       type: my_plugin
+       params:
+         gain: 2.0
+         axis: [1.0, 0.0, -1.0]
+
+A plugin parameter key must be a non-empty string. Its value must be either a
+finite real scalar or a flat list/tuple of finite reals; a scalar is normalized
+to a one-element list before ``configure`` is called. Booleans, strings/bytes,
+mappings, nested sequences, and non-finite values are rejected. Generic plugin
+parameters are already-resolved values in the deck's declared units and receive
+no aliases or implicit conversion. The built-in evaluators retain the named,
+unit-aware schemas shown in the main deck example.
+
+``file_grid`` loads a path confined to the deck directory. The NumPy archive
+contains ``B_xyz_grid`` with shape ``(nz, ny, nx, 3)``, plus three-element
+``grid_origin`` and ``grid_spacing`` arrays. Spacing must be positive on each
+non-singleton axis; zero is accepted for a singleton axis in a coil-generated
+map and canonicalized internally. The evaluator performs
+trilinear interpolation at the component-specific Yee locations and rejects an
+attempt to sample beyond the map. In ``units: SI`` the coordinates and field are
+metres and tesla; in ``units: normalized`` they are already internal units.
+
+``initial.velocity_perturbation`` adds
+``amplitude_v * sin(2*pi*(mx*x/Lx + my*y/Ly) + phase_rad)`` to every sampled
+particle velocity after the thermal quiet start. It is useful for reproducible
+linear-instability studies: applying the same perturbation to equal
+counter-streaming beams seeds a current mode while leaving their initial charge
+density uniform. At least one mode number and one amplitude component must be
+nonzero, and every mode must lie strictly below the corresponding mesh Nyquist
+limit.  On a cylindrical domain containing ``r = 0``, the physical ``vr`` and
+``vphi`` components must be odd at the axis while axial ``vz`` is even.  The
+loader enforces the compatible radial-mode/phase combinations rather than
+accepting a formally sinusoidal but multivalued axis velocity.
+
+A doubly periodic Maxwell domain is a torus, so the volume integral of
+``div(E)`` is identically zero.  Its initial particle charge must therefore sum
+to zero.  The solver accepts explicitly balanced multispecies populations and
+rejects a resolved nonzero total charge.  Set ``neutralizing_background: true``
+only when the intended model includes a fixed, uniform counter-charge (for
+example an electron-only plasma with immobile ions); the background is never
+inserted implicitly.
+
+Initial electromagnetic seeds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``seed_em_wave`` creates a Cartesian ``+x`` travelling wave and requires
+``mode: [mx, 0]`` with transverse ``Ey`` or ``Ez``.  ``seed_perturbation``
+creates one transverse component varying in ``x`` (or the documented radial
+Bessel profile in cylindrical geometry).  Both interpret ``mode[0]`` as a
+periodic full-wavelength count.  A travelling-wave mode must lie strictly below
+the Cartesian Nyquist limit; at Nyquist, opposite propagation directions alias
+to the same samples.  Cylindrical Bessel indices are likewise restricted to the
+resolved radial spectrum.
+
+``seed_tm_cavity`` instead creates a rectangular Cartesian PEC eigenmode:
+
+.. code-block:: yaml
+
+   boundary:
+     field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
+     particle: {x_lo: specular, x_hi: specular,
+                y_lo: specular, y_hi: specular}
+   fields:
+     initial:
+       type: seed_tm_cavity
+       component: Ez
+       mode: [1, 1]          # positive TM_mn wall-mode indices
+       amplitude: 1.0
+
+Here ``Ez`` is the out-of-plane electric component on cell centres and both
+mode indices must be positive.  The seeder uses
+``sin(m*pi*x/Lx) sin(n*pi*y/Ly)`` on that lattice, the matching ``Bx`` and
+``By`` sine/cosine profiles on their face lattices, and initializes magnetic
+fields at ``t=-dt/2`` from the selected second- or fourth-order Yee modified
+wavenumbers.  Thus its frequency is the leapfrog discrete Maxwell frequency,
+not merely the continuum value.  All four field sides must be ``pec``; other
+boundary topologies and cylindrical geometry are rejected.
 
 CLI
 ---
@@ -125,11 +226,16 @@ Output (``out.npz``)
 
 Top-level keys:
 
-* ``final_step``, ``final_time_s``, ``nx``, ``ny``  — scalars in 1-D arrays.
+* ``final_step``, ``final_time_s``, ``nx``, ``ny``, ``nghost`` — scalars in
+  1-D arrays.
+* ``geometry``, ``origin_x``, ``origin_y``, ``lx``, ``ly``, ``unit_system`` —
+  coordinate metadata, and ``boundary_field`` — the four field-side boundary
+  kinds in ``[x_lo, x_hi, y_lo, y_hi]`` order.
 * ``external_bx``, ``external_by``, ``external_bz`` — sampled external
-  field, flat ``(nx+2*g)*(ny+2*g)`` arrays where ``g = required_nghost(fdtd_order)``
-  (1 for 2nd-order, 2 for 4th-order). Use ``quasar.pic.postprocess.reshape_with_ghost``
-  to recover the interior view.
+  field, flat ``(nx+2*g)*(ny+2*g)`` arrays.  The actual ``g`` is stored in
+  ``nghost`` and is the larger of the FDTD stencil requirement (1 for order 2,
+  2 for order 4) and the particle-shape support (order-2 TSC also requires
+  ``g = 2``).
 * ``field_<name>`` — per-component Yee field at the final step (same layout).
 * ``species_<name>_{x,y,vx,vy,vz,weight,alive}`` — per-species particle
   snapshots when ``per_species: true``.
@@ -139,6 +245,25 @@ Top-level keys:
   series recorded at each ``--log-every`` tick (plus a final row). The
   per-species ``series_alive_<name>`` is the live-particle count, computed by a
   device-side reduction so logging does not copy the full particle arrays.
+
+Although all six C++ component allocations have the same padded size, their
+physical Yee lattices do not.  Use
+``quasar.pic.postprocess.yee_component_view`` to recover a field component and
+``yee_component_coordinates`` to obtain its sample coordinates.  The view
+retains the independent high face/node on a non-periodic axis and removes that
+endpoint only when ``boundary_field`` says both sides of the axis are periodic.
+For legacy archives without boundary metadata it conservatively retains all
+component-valid high faces.  ``reshape_with_ghost`` remains the cell-centred
+``(ny, nx)`` helper and must not be used for a general Yee component.
+
+The reported time labels the integer-time positions and electric field. Raw
+magnetic fields and particle velocities are leapfrog quantities at the preceding
+half time (``final_time_s - dt_last/2``). When the last step is shortened to hit
+``t_end_s`` exactly, the solver uses the variable-step centred update; it does
+not reinterpret those half-step arrays as integer-time diagnostics. If
+``t_end_s`` is shorter than the nominal first step, field initialization uses
+that first clipped width as well, so a seeded travelling wave or cavity mode has
+the magnetic field at the correct preceding half time.
 
 With ``--write-every N`` the same per-step arrays are also emitted as
 self-contained ``out_<step>.npz`` files alongside the end-of-run ``out.npz``.
@@ -155,7 +280,12 @@ Postprocessing
 --------------
 
 ``quasar.pic.postprocess`` renders field heatmaps and per-species
-particle scatter from an ``out.npz``:
+particle scatter from an ``out.npz``. It reads the archived ``plane`` metadata:
+for Cartesian archives, ``plane: xy`` uses the ``(x, y, z)`` frame, while
+``plane: xz`` labels the axes as ``(x, z)`` and the stored right-handed
+component slots as ``(x, z, -y)``. Cylindrical archives retain their physical
+``(r, z, phi)`` labels for either lab-plane embedding. Legacy archives without
+``plane`` default to ``xy``.
 
 .. code-block:: bash
 

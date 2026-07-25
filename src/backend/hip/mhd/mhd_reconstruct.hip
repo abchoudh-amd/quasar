@@ -1,6 +1,8 @@
-// Device flux reconstruction for the conservative-FD ideal-MHD solver.
+// Device face reconstruction for the finite-volume ideal-MHD solver.
 //
 // The kernel HONORS `scheme_order`:
+//   * scheme_order == 1 -> piecewise-constant Godunov fallback used only by the
+//     conservative positivity retry controller.
 //   * scheme_order == 2 -> 2nd-order MUSCL-minmod reconstruction in PRIMITIVE
 //     variables on every interface normal to `dir`. For dir=0, face (i,j) sits
 //     between cells (i-1,j) and (i,j): the LEFT interface state is the
@@ -17,25 +19,28 @@
 //
 // The MP characteristic path MIRRORS the host driver (the registry classes in
 // src/numerics/flux_reconstruction.cpp, now thin launchers): per interface the
-// reference state is the arithmetic mean of the two flanking cells, an
-// MhdEigensystem is built about it, each stencil cell's conserved delta from the
+// reference state is the overflow-safe arithmetic mean of the two flanking
+// cell averages, an MhdEigensystem is built about it, each stencil cell's
+// conserved delta from the
 // reference is projected to the 7 characteristic waves, each wave is scalar-MP
 // reconstructed over the stencil window (mp5_reconstruct / mp7_reconstruct), the
 // reconstructed CharVec7 is mapped back to a conserved delta and added to the
 // reference. The normal magnetic component (Bx for dir=0, By for dir=1) is NEVER
 // passed through the projection -- it is overwritten on BOTH L and R with the
-// constrained-transport interface face value (average of the two adjacent
-// staggered face samples), the SAME rule the MUSCL path uses.
+// constrained-transport interface face value: the one exact staggered sample
+// shared by the two cells, under the SAME rule used by the MUSCL path.
 //
 // FIELD-SPLIT + ONE-SIDED BOUNDARY EXTENSIONS (B = B0 + b):
 //   * The stored state / reconstructed output carry the PERTURBATION b
 //     (u.bx/by/bz). The split EOS (mhd_state.hpp) keeps the energy as the
-//     perturbation-only 0.5|b|^2, so the gas pressure has NO B0 cross term --
-//     to_primitive()/to_conserved() on the perturbation field remain an exact
-//     inverse pair. This kernel computes no sound speed / B0-dependent pressure,
-//     so the B0 buffers are threaded through the ABI but are mathematically inert
-//     here; the wave speeds that DO see the total field live in the Riemann
-//     kernel. With b0 inactive this is bit-identical to the original body.
+//     conserved variable
+//       E'=rho*e+|m|^2/(2*rho)+0.5|b|^2,
+//     so the gas pressure has NO B0 cross term or |B0|^2 baseline.
+//     MP5/MP7 freezes the interface-collocated B0 across its stencil and uses
+//     the corresponding total-field eigensystem. MUSCL reconstructs split
+//     primitives; the Riemann kernel subsequently promotes every order to the
+//     total field for wave speeds and fluxes. With B0 inactive the total/split
+//     transformations reduce to the identity.
 //   * `flags` (BoundaryFlags4, [x_lo,x_hi,y_lo,y_hi]) marks non-periodic sides.
 //     At a non-periodic boundary cell along `dir` the order-2 limited slope drops
 //     the EXTERIOR (ghost) neighbor so the reconstructed slope does not depend on
@@ -52,10 +57,13 @@
 #include "quasar/numerics/mhd_state.hpp"
 #include "quasar/numerics/mp_limiter.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
+#include "quasar/physics/mhd/mhd_staggering.hpp"
 
 #include "backend/hip/hip_check.hpp"
 
 #include <hip/hip_runtime.h>
+
+#include <limits>
 
 namespace {
 
@@ -74,20 +82,18 @@ inline constexpr unsigned kBlock2D = 16;
 // Minmod limiter on two slopes (returns the smaller-magnitude same-sign slope,
 // zero on a sign change). Device-callable, matches the host muscl_minmod logic.
 __device__ inline Real minmod(Real a, Real b) {
-  if (a * b <= Real{0}) return Real{0};
-  return (fabs(a) < fabs(b)) ? a : b;
+  return quasar::numerics::minmod2(a, b);
 }
 
-// Load the cell-centered conserved state at storage index k into a MhdState.
-__device__ inline MhdState load_state(const double* rho, const double* mx,
+__device__ inline MhdState load_state(const quasar::Grid2D& g,
+                                      const double* rho, const double* mx,
                                       const double* my, const double* mz,
                                       const double* energy, const double* bx,
                                       const double* by, const double* bz,
-                                      std::size_t k) {
-  MhdState s;
-  s.rho = rho[k]; s.mx = mx[k]; s.my = my[k]; s.mz = mz[k];
-  s.energy = energy[k]; s.bx = bx[k]; s.by = by[k]; s.bz = bz[k];
-  return s;
+                                      int i, int j,
+                                      int collocation_order = 0) {
+  return quasar::mhd::load_cell_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                                      i, j, collocation_order);
 }
 
 // One-sided slope selector. `drop` encodes which neighbor to discard at a
@@ -137,19 +143,24 @@ __device__ inline int slope_drop(int c, int n, int lo, int hi) {
 // Conserved normal-B accessor/mutator (the CT face quantity), matching the host
 // normal_b / set_normal_b helpers.
 __device__ inline void set_normal_b(MhdState& s, int dir, Real v) {
-  if (dir == 0) s.bx = v; else s.by = v;
+  Real& bn = (dir == 0) ? s.bx : s.by;
+  // The stored split E' contains |b|^2/2. Replacing the reconstructed
+  // normal component by the CT face must preserve gas pressure.  Accumulate
+  // E + v^2/2 - bn^2/2 in one exponent-scaled reduction: either square may
+  // overflow before an exact cancellation even when the final energy is
+  // finite.  It also preserves E exactly when the old and new face values are
+  // identical, which is common on constant states.
+  s.energy = quasar::numerics::product_sum3(
+      s.energy, Real{1}, v, Real{0.5} * v, bn, -Real{0.5} * bn);
+  bn = v;
 }
 
-// Continuous CT interface normal-B = average of the two adjacent staggered face
-// samples (bx_face for dir=0, by_face for dir=1). Mirrors the host
-// interface_normal_b: 0.5*(face[k(i,j)] + face[k(i-1,j)]) for dir=0.
+// Continuous CT interface normal-B is the exact staggered face shared by both
+// Riemann states.
 __device__ inline Real interface_normal_b(const quasar::Grid2D& g, int dir,
                                           int i, int j, const double* bx_face,
                                           const double* by_face) {
-  const std::size_t k0 = g.index(i, j);
-  const std::size_t km = (dir == 0) ? g.index(i - 1, j) : g.index(i, j - 1);
-  const double* face = (dir == 0) ? bx_face : by_face;
-  return Real{0.5} * (static_cast<Real>(face[k0]) + static_cast<Real>(face[km]));
+  return quasar::mhd::normal_face_b(g, dir, bx_face, by_face, i, j);
 }
 
 // Maximum supported MP stencil half-width (MP7 reads 3 each side).
@@ -177,8 +188,14 @@ __device__ inline MhdState recon_char_state(
   CharVec7 chars[kMaxWidth];
   for (int s = 0; s < width; ++s) {
     const int off = center_off + (s - half);
-    const std::size_t k = g.index(i + off * di, j + off * dj);
-    MhdState delta = load_state(rho, mx, my, mz, energy, bx, by, bz, k);
+    const int is = i + off * di;
+    const int js = j + off * dj;
+    // The eigensystem is already transformed to the stored split variables.
+    // Projecting U'-U'_ref directly avoids ever constructing the enormous total
+    // energy E'+B0.b+|B0|^2/2. B0 is frozen at this interface, so prescribed
+    // background gradients are not reconstructed as evolved waves.
+    MhdState delta =
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz, is, js);
     delta.rho    -= ref.rho;
     delta.mx     -= ref.mx;
     delta.my     -= ref.my;
@@ -244,15 +261,15 @@ __device__ inline void muscl_reconstruct_face(
   const int ip = i + di, jp = j + dj;       // plus-cell upper neighbor
 
   // Minus-cell stencil: (imm) (im) (i)  -> face value at +side of (im).
-  const MhdState sm_lo = load_state(rho, mx, my, mz, energy, bx, by, bz,
-                                    g.index(imm, jmm));
-  const MhdState sm_c  = load_state(rho, mx, my, mz, energy, bx, by, bz,
-                                    g.index(im, jm));
-  const MhdState sm_hi = load_state(rho, mx, my, mz, energy, bx, by, bz,
-                                    g.index(i, j));
+  const MhdState sm_lo = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                                    imm, jmm);
+  const MhdState sm_c  = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                                    im, jm);
+  const MhdState sm_hi = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                                    i, j);
   // Plus-cell stencil: (im) (i) (ip) -> face value at -side of (i).
-  const MhdState sp_hi = load_state(rho, mx, my, mz, energy, bx, by, bz,
-                                    g.index(ip, jp));
+  const MhdState sp_hi = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                                    ip, jp);
 
   const MhdPrim wm_lo = to_primitive(sm_lo, gamma);
   const MhdPrim wm_c  = to_primitive(sm_c, gamma);
@@ -272,26 +289,77 @@ __device__ inline void muscl_reconstruct_face(
   ur = to_conserved(wr, gamma);
 }
 
+// Piecewise-constant states from the two cells adjacent to face (i,j).  A
+// configured order-2/5/7 operator uses its ordinary high-order magnetic
+// collocation (order 0): the solver preflight has already proved those live
+// cells admissible.  The global invariant-domain retry passes order 1 instead,
+// matching its bounded two-adjacent-face EOS everywhere else.
+__device__ inline void piecewise_constant_reconstruct_face(
+    const quasar::Grid2D& g, int dir, int i, int j, int collocation_order,
+    const double* rho, const double* mx, const double* my, const double* mz,
+    const double* energy, const double* bx, const double* by, const double* bz,
+    MhdState& ul, MhdState& ur) {
+  const int di = (dir == 0) ? 1 : 0;
+  const int dj = (dir == 0) ? 0 : 1;
+  ul = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                  i - di, j - dj, collocation_order);
+  ur = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                  i, j, collocation_order);
+}
+
 // Per-interface admissibility test for a reconstructed conserved state: density
 // and gas pressure must both be FINITE and strictly POSITIVE. Pressure is taken
 // from to_primitive (the field-split EOS: p = (gamma-1)*(E - 0.5 rho|v|^2 -
 // 0.5|b|^2)), so the test is consistent with the kernel's EOS and with the wave
 // speeds the HLLD solver derives. A NaN fails every comparison (NaN > 0 is
-// false), so this also rejects non-finite reconstructions that the downstream
-// positivity floors cannot recover (NaN < floor is false). isfinite() guards
+// false), so this also rejects non-finite reconstructions before they can reach
+// the Riemann solver or conservative stage-admissibility controller. isfinite() guards
 // against +/-inf, whose sign would otherwise pass the > 0 test.
 __device__ inline bool reconstructed_state_admissible(const MhdState& s, Real gamma) {
   if (!(isfinite(s.rho) && s.rho > Real{0})) return false;
   const MhdPrim w = to_primitive(s, gamma);
-  if (!(isfinite(w.p) && w.p > Real{0})) return false;
+  if (!(isfinite(w.vx) && isfinite(w.vy) && isfinite(w.vz)
+        && isfinite(w.p) && w.p > Real{0})) {
+    return false;
+  }
   // Reject any other non-finite component (momentum / B): a finite rho & p with
   // a NaN velocity or B still poisons the Riemann flux.
   return isfinite(s.mx) && isfinite(s.my) && isfinite(s.mz)
       && isfinite(s.energy) && isfinite(s.bx) && isfinite(s.by) && isfinite(s.bz);
 }
 
+// CFL reconstruction has a deliberately wider numerical domain than the
+// Riemann solve.  A conservative state can have finite rho, momentum, energy,
+// and gas pressure while m/rho (and therefore a physical characteristic
+// speed) lies beyond binary64.  The CFL kernel forms speed/spacing directly at
+// a safe exponent, so rejecting such a face here would turn a representable
+// Courant rate into a spurious infinity.  This predicate still rejects every
+// non-finite conserved component and every non-positive thermodynamic state.
+__device__ inline bool reconstructed_rate_state_admissible(
+    const MhdState& s, Real gamma) {
+  if (!(isfinite(s.rho) && s.rho > Real{0} &&
+        isfinite(s.mx) && isfinite(s.my) && isfinite(s.mz) &&
+        isfinite(s.energy) && isfinite(s.bx) && isfinite(s.by) &&
+        isfinite(s.bz))) {
+    return false;
+  }
+  const Real p = quasar::numerics::pressure(s, gamma);
+  return isfinite(p) && p > Real{0};
+}
+
+// A fixed quiet-NaN state is an explicit reconstruction failure token.  The
+// Riemann/update path propagates it into the candidate, and the conservative
+// admissibility controller deterministically rejects and rolls that candidate
+// back.  Returning an arbitrary finite floor here would silently inject mass or
+// energy and would defeat the solver's retry/error contract.
+__device__ inline MhdState invalid_reconstruction_sentinel() {
+  const Real invalid = std::numeric_limits<Real>::quiet_NaN();
+  return MhdState{invalid, invalid, invalid, invalid,
+                  invalid, invalid, invalid, invalid};
+}
+
 __global__ void reconstruct_kernel(
-    quasar::Grid2D g, int dir, int scheme_order, Real gamma,
+    quasar::Grid2D g, int dir, int scheme_order, Real gamma, int rate_only,
     // Non-periodic boundary flags along this axis: lo/hi correspond to
     // (x_lo,x_hi) for dir==0 and (y_lo,y_hi) for dir==1.
     int side_lo, int side_hi,
@@ -299,6 +367,8 @@ __global__ void reconstruct_kernel(
     const double* __restrict__ my, const double* __restrict__ mz,
     const double* __restrict__ energy, const double* __restrict__ bx,
     const double* __restrict__ by, const double* __restrict__ bz,
+    int b0_active, const double* __restrict__ b0x,
+    const double* __restrict__ b0y, const double* __restrict__ b0z,
     double* __restrict__ Lrho, double* __restrict__ Lmx, double* __restrict__ Lmy,
     double* __restrict__ Lmz, double* __restrict__ Lenergy, double* __restrict__ Lbx,
     double* __restrict__ Lby, double* __restrict__ Lbz,
@@ -323,26 +393,40 @@ __global__ void reconstruct_kernel(
 
   MhdState ul, ur;
 
-  if (scheme_order != 2) {
+  quasar::numerics::MhdBackground bg{};
+  if (b0_active != 0) {
+    bg = quasar::mhd::load_interface_background(
+        g, dir, b0x, b0y, b0z, i, j,
+        scheme_order <= 1 ? 1 : 0);
+  }
+
+  if (scheme_order <= 1) {
+    // Positivity retry fallback: first-order piecewise-constant states. The
+    // shared CT normal field is imposed below, with the energy adjustment that
+    // preserves each cell's gas pressure.
+    piecewise_constant_reconstruct_face(
+        g, dir, i, j, /*collocation_order=*/1,
+        rho, mx, my, mz, energy, bx, by, bz, ul, ur);
+  } else if (scheme_order != 2) {
     // ---- MP5 / MP7 characteristic reconstruction --------------------------
     // Reference state = arithmetic mean of the two cells flanking the face
     // (cell i-1 and cell i for dir=0). Build the eigensystem about it.
-    const std::size_t k_minus = g.index(i - di, j - dj);  // cell i-1
-    const std::size_t k_plus  = g.index(i, j);            // cell i
-    const MhdState cL = load_state(rho, mx, my, mz, energy, bx, by, bz, k_minus);
-    const MhdState cR = load_state(rho, mx, my, mz, energy, bx, by, bz, k_plus);
+    const MhdState cL =
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz, i - di, j - dj);
+    const MhdState cR =
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz, i, j);
     MhdState ref;
-    ref.rho    = Real{0.5} * (cL.rho + cR.rho);
-    ref.mx     = Real{0.5} * (cL.mx + cR.mx);
-    ref.my     = Real{0.5} * (cL.my + cR.my);
-    ref.mz     = Real{0.5} * (cL.mz + cR.mz);
-    ref.energy = Real{0.5} * (cL.energy + cR.energy);
-    ref.bx     = Real{0.5} * (cL.bx + cR.bx);
-    ref.by     = Real{0.5} * (cL.by + cR.by);
-    ref.bz     = Real{0.5} * (cL.bz + cR.bz);
+    ref.rho    = Real{0.5} * cL.rho    + Real{0.5} * cR.rho;
+    ref.mx     = Real{0.5} * cL.mx     + Real{0.5} * cR.mx;
+    ref.my     = Real{0.5} * cL.my     + Real{0.5} * cR.my;
+    ref.mz     = Real{0.5} * cL.mz     + Real{0.5} * cR.mz;
+    ref.energy = Real{0.5} * cL.energy + Real{0.5} * cR.energy;
+    ref.bx     = Real{0.5} * cL.bx     + Real{0.5} * cR.bx;
+    ref.by     = Real{0.5} * cL.by     + Real{0.5} * cR.by;
+    ref.bz     = Real{0.5} * cL.bz     + Real{0.5} * cR.bz;
 
     MhdEigensystem eig;
-    eig.build(ref, dir, gamma);
+    eig.build(ref, bg, dir, gamma);
 
     const int half = (scheme_order == 5) ? 2 : 3;
 
@@ -353,7 +437,6 @@ __global__ void reconstruct_kernel(
     ur = recon_char_state(g, dir, i, j, /*center_off=*/0, /*mirror=*/true,
                           half, eig, ref, rho, mx, my, mz, energy, bx, by, bz);
 
-
     // ---- Per-interface robustness fallback (finiteness / positivity) ------
     // Characteristic MP reconstruction carries NO positivity guarantee: at a
     // strong shock / near-vacuum interface the MP-limited characteristic
@@ -361,8 +444,7 @@ __global__ void reconstruct_kernel(
     // non-finite reconstructed density / pressure, or the eigensystem built about
     // the arithmetic-mean reference (near-coincident fast/slow speeds, near-vacuum
     // reference) can emit non-finite eigenvectors -> NaN in ul/ur. HLLD then
-    // sqrt()s a negative wave speed (-> NaN) and the positivity floor cannot
-    // recover it (NaN < floor is false). If EITHER reconstructed state is
+    // sqrt()s a negative wave speed (-> NaN). If EITHER reconstructed state is
     // inadmissible, DISCARD the high-order result for THIS face only and fall back
     // to the robust 2nd-order MUSCL-minmod reconstruction (bit-identical to the
     // order-2 path). Local, per-thread drop: smooth interfaces keep full MP5/MP7
@@ -388,6 +470,37 @@ __global__ void reconstruct_kernel(
   const Real bn = interface_normal_b(g, dir, i, j, bx, by);
   set_normal_b(ul, dir, bn);
   set_normal_b(ur, dir, bn);
+  // MUSCL is not an invariant-domain reconstruction.  Componentwise primitive
+  // slopes can combine individually admissible extreme cells into a face whose
+  // kinetic energy overflows; a one-sided boundary extrapolation can also leave
+  // the positive-density/pressure set.  Therefore EVERY configured order gets
+  // one final local Godunov fallback after CT normalization.  Keep its magnetic
+  // collocation consistent with the operator whose live state was preflighted:
+  // configured order 2/5/7 -> 0, global low-order retry -> 1.
+  if (!reconstructed_state_admissible(ul, gamma)
+      || !reconstructed_state_admissible(ur, gamma)) {
+    const int fallback_collocation = (scheme_order <= 1) ? 1 : 0;
+    piecewise_constant_reconstruct_face(
+        g, dir, i, j, fallback_collocation,
+        rho, mx, my, mz, energy, bx, by, bz, ul, ur);
+    set_normal_b(ul, dir, bn);
+    set_normal_b(ur, dir, bn);
+  }
+
+  // The exact CT face can itself make a representable cell state impossible to
+  // express at this interface (for example, |B_n|^2/2 may overflow).  Do not
+  // leak a partially finite state into HLLD: emit one unambiguous token that the
+  // conservative solver rejects rather than inventing a thermodynamic floor.
+  const bool final_left_admissible = rate_only != 0
+      ? reconstructed_rate_state_admissible(ul, gamma)
+      : reconstructed_state_admissible(ul, gamma);
+  const bool final_right_admissible = rate_only != 0
+      ? reconstructed_rate_state_admissible(ur, gamma)
+      : reconstructed_state_admissible(ur, gamma);
+  if (!final_left_admissible || !final_right_admissible) {
+    ul = invalid_reconstruction_sentinel();
+    ur = invalid_reconstruction_sentinel();
+  }
 
   const std::size_t k = g.index(i, j);
   Lrho[k] = ul.rho; Lmx[k] = ul.mx; Lmy[k] = ul.my; Lmz[k] = ul.mz;
@@ -400,29 +513,32 @@ __global__ void reconstruct_kernel(
 
 namespace quasar::mhd {
 
-void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& /*b0*/,
+void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                             int dir, quasar::numerics::MhdInterfaceStates<Real>& out,
                             int scheme_order, BoundaryFlags4 flags, Real gamma,
-                            stream_t stream) {
+                            stream_t stream, bool rate_only) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   // Launch over nx+1 x ny+1: the kernel also writes the high-edge face layer
   // (index nx/ny) that flux_difference consumes at the last interior cell.
   const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
                   (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
-  // Select this axis's non-periodic flags: [x_lo,x_hi] for dir==0, [y_lo,y_hi]
-  // for dir==1. The split EOS makes B0 inert in this kernel (no sound speed /
-  // B0-dependent pressure here), so the background buffers are accepted for ABI
-  // parity but not read; the wave speeds that see the total field live in the
-  // HLLD kernel.
+  // Select this axis's non-periodic flags: [x_lo,x_hi] for dir==0, [y_lo,y_hi].
+  // MP characteristic projection uses the interface-collocated total field
+  // B0+b; MUSCL remains a componentwise reconstruction of the split primitives.
   const int side_lo = (dir == 0) ? flags.side[0] : flags.side[2];
   const int side_hi = (dir == 0) ? flags.side[1] : flags.side[3];
+  const int b0_active = b0.active ? 1 : 0;
+  const double* b0x = b0.active ? b0.b0x_face.device_ptr() : nullptr;
+  const double* b0y = b0.active ? b0.b0y_face.device_ptr() : nullptr;
+  const double* b0z = b0.active ? b0.b0z_cell.device_ptr() : nullptr;
   hipLaunchKernelGGL(reconstruct_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), g, dir, scheme_order, gamma,
-                     side_lo, side_hi,
+                     rate_only ? 1 : 0, side_lo, side_hi,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),
+                     b0_active, b0x, b0y, b0z,
                      out.Lrho.device_ptr(), out.Lmx.device_ptr(), out.Lmy.device_ptr(),
                      out.Lmz.device_ptr(), out.Lenergy.device_ptr(), out.Lbx.device_ptr(),
                      out.Lby.device_ptr(), out.Lbz.device_ptr(),

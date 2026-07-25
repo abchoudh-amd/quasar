@@ -6,20 +6,20 @@
 //     update that keeps div(B) at round-off.)
 //   - D. S. Balsara & D. S. Spicer, "A staggered mesh algorithm using high order
 //     Godunov fluxes to ensure solenoidal magnetic fields in MHD simulations",
-//     JCP 149 (1999) 270. (The simple arithmetic corner average of the four
-//     adjacent face EMFs.)
+//     JCP 149 (1999) 270. (Construction of CT electric fields from Godunov
+//     magnetic fluxes.)
 //   - A. J. Christlieb et al., finite-difference CT family -- the corner EMF is
 //     reconstructed from the same interface states the conservative flux uses, so
 //     the induction update is consistent with the fluid update.
 //
 // This translation unit is the registry-facing CT scheme. Its three methods are
-// now THIN LAUNCHERS over the MHD HIP kernels (compute_emf -> launch_mhd_ct_emf,
-// update_face_b -> launch_mhd_face_b_update, divergence_b_linf ->
-// launch_mhd_ct_divb_linf): all CT algebra runs on device. The launchers honor
-// the SAME staggering / div(B) telescoping guarantee as the original host body --
-// the only invariant that matters is that the curl of any corner Ez annihilates
-// div(B), which holds for any EMF, so the cell-centered launch_mhd_ct_emf is a
-// valid (if numerically distinct) CT EMF.
+// thin launchers over the MHD HIP kernels. launch_mhd_ct_emf recomputes HLLD's
+// directional magnetic fluxes at x/y faces, maps them to upwind face Ez, and
+// interpolates them to corners (second order on this registry seam; the solver
+// passes MP5/MP7 order explicitly). update_face_b exposes the direct curl update
+// for standalone callers, while MhdSolver2D uses launch_mhd_emf_curl_rate and
+// advances that rate inside the same SSP-RK stage as the fluid state. Both paths
+// use the identical staggered curl, so div(curl E) telescopes to round-off.
 //
 // ---------------------------------------------------------------------------
 // Staggering (matches mhd_field.hpp; see ct_scheme.hpp):

@@ -47,11 +47,11 @@ Spot values for `R = 0.02`, `L = 0.50`, `n = 400`, `I = 1`:
 
 | z (m)  | B_z (T)            | Notes                  |
 |-------:|--------------------|------------------------|
-|  0.000 | 5.0095e-04          | Midpoint (≈ μ₀nI)      |
-|  0.249 | 4.9908e-04          | Just inside one end    |
-|  0.250 | 2.5077e-04          | Right at the end       |
-|  0.251 | 2.4961e-04   (Δ ≈ ½)| Just outside           |
-|  0.350 | 4.6135e-06          | Well outside           |
+|  0.000 | 5.01054e-04         | Midpoint (≈ μ₀nI)      |
+|  0.249 | 2.63676e-04         | Just inside one end    |
+|  0.250 | 2.51127e-04         | Right at the end       |
+|  0.251 | 2.38577e-04         | Just outside           |
+|  0.350 | 4.74110e-06         | Well outside           |
 
 The integration test (`tests/python/test_examples.py::SolenoidExampleTest`)
 verifies the midpoint within 2% and the "half-field at the end" property

@@ -6,9 +6,10 @@
 // in-plane field on cell faces (MhdField2D::bx_face / by_face) and evolving them
 // from a corner-staggered electromotive force (EMF). The two-step contract is:
 //
-//   1. compute_emf : build the corner Ez (EmfField2D::ez_edge) from the SAME
-//      reconstructed interface states the Riemann flux uses, so the induction
-//      update is consistent with the fluid update.
+//   1. compute_emf : rerun the directional HLLD magnetic fluxes from the SAME
+//      reconstructed interface states as the conservative update, interpret
+//      them as upwind face electric fields, then interpolate those face values
+//      to the shared corner.
 //   2. update_face_b : advance bx_face / by_face by the discrete curl of that
 //      corner Ez. The stencil is chosen so the change in the cell-centered
 //      discrete divergence telescopes to *identically* zero for any Ez field --
@@ -38,8 +39,8 @@ class ICtScheme {
 
   // Build the corner-staggered EMF (emf.ez_edge) from the conserved field `u`
   // and the dir=0 / dir=1 reconstructed interface states. `gamma` is the
-  // adiabatic index (passed for parity with the flux path; the Ez construction
-  // here is purely kinematic, E = v x B).
+  // adiabatic index used by the HLLD flux evaluation. The resulting Ez is a
+  // Godunov/upwind electric field, not a cell-centered kinematic average.
   virtual void compute_emf(const quasar::mhd::MhdField2D<Real>& u,
                            const MhdInterfaceStates<Real>& ifx,   // dir=0 faces
                            const MhdInterfaceStates<Real>& ify,   // dir=1 faces

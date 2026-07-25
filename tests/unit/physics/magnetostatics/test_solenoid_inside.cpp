@@ -1,4 +1,4 @@
-// Phase 3.D: a long thin solenoid produces a nearly uniform axial field
+// A long thin solenoid produces a nearly uniform axial field
 // inside (B_z ~ mu0 * n * I) and a field that drops as 1/r^3 far outside.
 //
 // For a finite solenoid of length L and radius R (with R << L) modelled as

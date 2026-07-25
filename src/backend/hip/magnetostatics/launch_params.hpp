@@ -10,7 +10,7 @@
 //
 // Tuning data: the per-gfx defaults in QuasarLaunchParams.cmake are baseline
 // starting points; refinement against the actual benchmarks/micro/
-// biot_savart_bench.cpp sweep is tracked in Phase 4.B.
+// biot_savart_bench.cpp provides the corresponding tuning sweep.
 
 #ifndef QUASAR_BS_TILE_SEGMENTS
 #  define QUASAR_BS_TILE_SEGMENTS 64

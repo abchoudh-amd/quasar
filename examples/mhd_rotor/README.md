@@ -53,6 +53,11 @@ The `div B` check is **field-relative**: the test asserts `div B * dx / |B|`
 (dimensionless, ~1e-14) is at machine epsilon, not the raw *absolute*
 `divb_linf_final`. The absolute L-inf scales with `|B|` and accumulates
 telescoping round-off that grows with the 4000-step count (~1.4e-10 here), so a
-strict absolute `1e-10` bound would flag a solenoidal field. This deck runs at
-`cfl = 0.2` for headroom with the non-positivity-preserving MP7 reconstruction
-(see the `orszag_tang` example for the full rationale).
+strict absolute `1e-10` bound would flag a solenoidal field. This deck uses
+`cfl = 0.2` for accuracy and stability headroom through the severe rotor
+transient. MP7 reconstruction does not by itself guarantee positive interface
+states, but the complete solver does preserve admissibility conservatively: it
+discards a failed SSP-RK candidate, rolls back the state, and retries the
+interval with smaller substeps and a piecewise-constant HLL anchor as needed.
+No per-cell density clamp or pressure-floor energy repair occurs during
+evolution.

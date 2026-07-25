@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,7 @@ TEST(PicSpecularParticle, ParticleReflectsOffWall) {
   quasar::pic::EmPicConfig cfg{g, 2, "cic"};
   for (int side = 0; side < 4; ++side) {
     cfg.boundary.particle[side] = "specular";
+    cfg.boundary.field[side] = "pec";
   }
   quasar::pic::EmPic2D3V solver{cfg};
 
@@ -35,13 +37,13 @@ TEST(PicSpecularParticle, ParticleReflectsOffWall) {
   // back inside with vx negated and stay alive.
   const std::size_t n = 1;
   quasar::pic::ParticleSpecies sp{quasar::pic::SpeciesConfig{"e", -1.0, 1.0, n}};
-  std::vector<quasar::Real> x{0.95}, y{0.5};
-  std::vector<quasar::Real> vx{2.0}, vy{0.0}, vz{0.0};
+  std::vector<quasar::Real> x{0.99}, y{0.5};
+  std::vector<quasar::Real> vx{0.8}, vy{0.0}, vz{0.0};
   std::vector<quasar::Real> w{1.0};
   sp.set_host_particles(x, y, vx, vy, vz, w);
   solver.add_species(std::move(sp));
 
-  const quasar::Real dt = 0.05;  // 0.95 + 2*0.05 = 1.05 > 1.0 -> crosses x_hi
+  const quasar::Real dt = 0.02;
   solver.step(dt);
 
   auto snap = solver.species()[0].to_host();
@@ -51,5 +53,34 @@ TEST(PicSpecularParticle, ParticleReflectsOffWall) {
   EXPECT_LT(snap.x[0], 1.0);
   EXPECT_GT(snap.x[0], 0.0);
   // Normal velocity flipped (was moving +x, now -x).
+  EXPECT_LT(snap.vx[0], 0.0);
+}
+
+TEST(PicSpecularParticle, LargeTranslatedWallReflectionDoesNotOverflow) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  constexpr double origin = 1.0e308;
+  constexpr double extent = 8.0e292;
+  quasar::Grid2D g{1, 1, extent, extent, origin, 0.0, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
+  cfg.boundary.field[0] = "pec";
+  cfg.boundary.field[1] = "pec";
+  cfg.boundary.particle[0] = "specular";
+  cfg.boundary.particle[1] = "specular";
+  quasar::pic::EmPic2D3V solver{cfg};
+
+  const double wall = origin + extent;
+  const double x0 = std::nextafter(wall, origin);
+  quasar::pic::ParticleSpecies sp{
+      quasar::pic::SpeciesConfig{"neutral", 0.0, 1.0, 1}};
+  sp.set_host_particles(
+      {x0}, {0.5 * extent}, {0.9}, {0.0}, {0.0}, {0.0});
+  solver.add_species(std::move(sp));
+  solver.step(5.0e292);
+
+  const auto snap = solver.species()[0].to_host();
+  ASSERT_TRUE(std::isfinite(snap.x[0]));
+  EXPECT_LT(snap.x[0], wall);
+  EXPECT_GE(snap.x[0], origin);
   EXPECT_LT(snap.vx[0], 0.0);
 }

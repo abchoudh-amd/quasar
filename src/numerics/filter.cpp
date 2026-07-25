@@ -22,28 +22,41 @@ bool is_axis_periodic(const boundary::BoundarySpec& bc, int lo, int hi) {
 }
 }  // namespace
 
-void BinomialFilter::apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const {
-  // Three contiguous storage_size() strips: the filter kernel now smooths jx/jy/jz
-  // in a single fused launch and needs ping-pong scratch for all three at once.
-  Real* scratch = ensure_scratch(scratch_, 3 * current.grid.storage_size());
+void BinomialFilter::apply(JField2D<Real>& current,
+                           const boundary::BoundarySpec& bc,
+                           bool cylindrical) const {
+  // Three contiguous strips are retained for the fused ABI. The kernel smooths
+  // only Jz and copies the continuity-carrying Jx/Jy pair unchanged.
+  const std::size_t scratch_size = backend::detail::checked_size_product(
+      current.grid.storage_size(), 3,
+      "BinomialFilter: scratch element count is not representable");
+  Real* scratch = ensure_scratch(scratch_, scratch_size);
   ::launch_pic_filter_binomial(current.grid, current, scratch, n_passes_,
                                is_axis_periodic(bc, 0, 1) ? 1 : 0,
-                               is_axis_periodic(bc, 2, 3) ? 1 : 0, nullptr);
+                               is_axis_periodic(bc, 2, 3) ? 1 : 0,
+                               cylindrical ? 1 : 0, nullptr);
 }
 
 void CompensatedBinomialFilter::apply(JField2D<Real>& current,
-                                      const boundary::BoundarySpec& bc) const {
-  // Three contiguous storage_size() strips: the filter kernel now smooths jx/jy/jz
-  // in a single fused launch and needs ping-pong scratch for all three at once.
-  Real* scratch = ensure_scratch(scratch_, 3 * current.grid.storage_size());
+                                      const boundary::BoundarySpec& bc,
+                                      bool cylindrical) const {
+  // Three contiguous strips are retained for the fused ABI. The kernel smooths
+  // only Jz and copies the continuity-carrying Jx/Jy pair unchanged.
+  const std::size_t scratch_size = backend::detail::checked_size_product(
+      current.grid.storage_size(), 3,
+      "CompensatedBinomialFilter: scratch element count is not representable");
+  Real* scratch = ensure_scratch(scratch_, scratch_size);
   ::launch_pic_filter_compensated(current.grid, current, scratch, n_passes_,
                                   is_axis_periodic(bc, 0, 1) ? 1 : 0,
-                                  is_axis_periodic(bc, 2, 3) ? 1 : 0, nullptr);
+                                  is_axis_periodic(bc, 2, 3) ? 1 : 0,
+                                  cylindrical ? 1 : 0, nullptr);
 }
 
-void FilterPipeline::apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const {
+void FilterPipeline::apply(JField2D<Real>& current,
+                           const boundary::BoundarySpec& bc,
+                           bool cylindrical) const {
   for (const auto& filter : filters_) {
-    filter->apply(current, bc);
+    filter->apply(current, bc, cylindrical);
   }
 }
 

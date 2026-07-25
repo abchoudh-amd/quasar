@@ -29,11 +29,11 @@ Field boundary mechanisms
 
 .. note::
 
-   The ``outflow`` (first-order Mur) wall is stable for an outflow channel
-   (outflow on one axis) and when mixed with ``pec`` walls, but is **weakly
-   unstable where two outflow walls meet at a corner** (an open box with outflow
-   on all four sides). A dedicated corner-extrapolation closure would be needed
-   for the all-sides-open case.
+   Where two ``outflow`` walls meet, neither independent one-dimensional Mur
+   update may own the shared ``Ez`` sample. The solver assigns that sample to a
+   single inward-diagonal characteristic update with distance
+   ``hypot(dx, dy)``. This keeps boxes open on all four sides stable while each
+   face retains its ordinary one-dimensional Mur update away from the corners.
 
 Ideal-MHD boundaries: one-sided non-periodic stencils
 -----------------------------------------------------

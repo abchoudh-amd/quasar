@@ -7,10 +7,10 @@
 // -----------------------------------------------------------------------------
 // Flux reconstruction schemes (MUSCL-minmod, MP5, MP7) -- THIN REGISTRY LAUNCHERS.
 //
-// Conservative finite-difference reconstruction in the Shu-Osher sense: the
-// stored cell values are treated as point values of the reconstructed variable,
-// and each scheme produces the LEFT-biased and RIGHT-biased interface point
-// values that the (sibling) HLLD Riemann solver consumes.
+// Finite-volume reconstruction: the stored conserved quantities are cell
+// averages, and each scheme produces LEFT/RIGHT face states consumed by the
+// sibling HLLD Riemann solver.  The face-flux difference therefore updates the
+// same cell-average control volume represented by MhdField2D.
 //
 // The actual reconstruction math lives ENTIRELY on the device, in
 // launch_mhd_reconstruct (src/backend/hip/mhd/mhd_reconstruct.hip), which honors

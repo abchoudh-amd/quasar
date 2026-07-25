@@ -22,16 +22,19 @@
 //      nx-1+nghost for layer 1..nghost), identical to the cell-centered hi
 //      convention. Writing nx+layer would overflow by one column at
 //      layer==nghost. Both the cell and the normal-face fill use this same hi
-//      index; the normal face differs only in the symmetry SIGN, never the map.
+//      allocation. A normal face is nevertheless half a cell offset: the
+//      physical faces are 0..n, so slot n is the high boundary face rather than
+//      a derived ghost. Periodic closure identifies it with face 0; wall closure
+//      pins it; outflow leaves its CT-evolved value intact and fills only slots
+//      beyond it. The normal-face map therefore differs from cell-centred data.
 //
-//  (b) CORNER GHOST BLOCKS. y-side fills span the FULL storage width
-//      i in [-ng, nx+ng) (not just the interior [0,nx)). The solver fills
-//      x-sides BEFORE y-sides, so when a y-side runs the x-ghost columns are
-//      already populated; copying them down/up into the y-ghost rows fills the
-//      four CORNER ghost blocks (both i and j in the ghost range). The high-edge
-//      CT corner-EMF reads these corners; an interior-only y-fill leaves them
-//      stale and injects a div(B) leak. x-side fills iterate j over the interior
-//      [0,ny) (the y-side picks up the corners).
+//  (b) CORNER GHOST BLOCKS. Field x-side fills include the physical high-y
+//      face row j=ny, so by_face(i_ghost,ny) is derived from the current
+//      interior face before the y-side pass preserves that normal face. y-side
+//      fills then span the FULL storage width i in [-ng,nx+ng). The solver fills
+//      x-sides BEFORE y-sides, so copying those columns down/up fills all four
+//      corner blocks. Leaving either the high-face row or the full-width y pass
+//      untouched retains stale RK scratch at the high-high corner.
 //
 //  (c) WALL SIGN. The odd (sign-flip) symmetry applies ONLY to the
 //      component normal to the wall -- the normal momentum (mx on an x-side,
@@ -111,7 +114,7 @@ __global__ void fill_ghosts_fluid_kernel(
     rho[kd]    = rho[ks];
     mx[kd]     = s_normal * mx[ks];   // mx is normal on an x-side
     my[kd]     = my[ks];
-    mz[kd]     = mz[ks];
+    mz[kd]     = (mode == 3 ? Real{-1} : Real{1}) * mz[ks];
     energy[kd] = energy[ks];
   } else {
     int gj, sj;
@@ -129,9 +132,11 @@ __global__ void fill_ghosts_fluid_kernel(
 
 // ---------------------------------------------------------------------------
 // Field ghost fill. Same launch/line geometry as the fluid kernel. The normal
-// face-B (bx_face on an x-side, by_face on a y-side) takes `s_normal` (odd at a
-// wall); the tangential face-B and the cell-centered bz_cell are
-// always even. The hi ghost target uses the cell-identical index (rule (a)).
+// face-B (bx_face on an x-side, by_face on a y-side) is odd about its physical
+// wall face (which is pinned to zero); the tangential face-B and cell-centered
+// bz_cell are even. At a high outflow boundary, layer 1 is physical face n: CT
+// owns it, so it must not be overwritten as if it were a cell ghost. Layers 2+
+// extrapolate that face value into the actual face ghosts.
 // ---------------------------------------------------------------------------
 __global__ void fill_ghosts_field_kernel(
     Grid2D g, int side, int mode, Real s_normal,
@@ -145,7 +150,10 @@ __global__ void fill_ghosts_field_kernel(
 
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int line_lo = x_side ? 0 : -ng;
-  const int line_hi = x_side ? ny : (nx + ng);
+  // Unlike cell-centred fluid data, the field has a physical high-y face at
+  // j=ny. Include that row in the x-boundary pass so tangential by is valid in
+  // x-ghost columns before the y-boundary pass sees it as its normal face.
+  const int line_hi = x_side ? (ny + 1) : (nx + ng);
   const int line_count = line_hi - line_lo;
   if (line_count <= 0) return;
   const int total = ng * line_count;
@@ -160,9 +168,30 @@ __global__ void fill_ghosts_field_kernel(
     const int j = line;
     const std::size_t kd = g.index(gi, j);
     const std::size_t ks = g.index(si, j);
-    bx_face[kd] = s_normal * bx_face[ks];  // bx_face is normal on an x-side
     by_face[kd] = by_face[ks];             // tangential -> even
-    bz_cell[kd] = bz_cell[ks];             // cell-centered -> even
+    bz_cell[kd] = (mode == 3 ? Real{-1} : Real{1}) * bz_cell[ks];
+    if (mode == 2 || mode == 3) {
+      // Normal face data mirror about the boundary FACE, not about the first
+      // cell centre.  Pin Bn on the wall/axis itself and antisymmetrically fill
+      // the remaining face ghosts.
+      if (lo) {
+        bx_face[g.index(0, j)] = Real{0};
+        bx_face[g.index(-layer, j)] = -bx_face[g.index(layer, j)];
+      } else if (layer == 1) {
+        bx_face[g.index(nx, j)] = Real{0};
+      } else {
+        const int offset = layer - 1;
+        bx_face[g.index(nx + offset, j)] = -bx_face[g.index(nx - offset, j)];
+      }
+    } else if (mode == 1 && !lo) {
+      // gi==nx at layer 1 is the physical high-x face and was evolved by CT.
+      // Preserve it; only nx+1, nx+2, ... are outflow ghost faces.
+      if (layer > 1) {
+        bx_face[g.index(nx - 1 + layer, j)] = bx_face[g.index(nx, j)];
+      }
+    } else {
+      bx_face[kd] = s_normal * bx_face[ks];
+    }
   } else {
     int gj, sj;
     ghost_indices(ny, layer, lo, mode, gj, sj);
@@ -170,8 +199,25 @@ __global__ void fill_ghosts_field_kernel(
     const std::size_t kd = g.index(i, gj);
     const std::size_t ks = g.index(i, sj);
     bx_face[kd] = bx_face[ks];             // tangential -> even
-    by_face[kd] = s_normal * by_face[ks];  // by_face is normal on a y-side
     bz_cell[kd] = bz_cell[ks];             // cell-centered -> even
+    if (mode == 2) {
+      if (lo) {
+        by_face[g.index(i, 0)] = Real{0};
+        by_face[g.index(i, -layer)] = -by_face[g.index(i, layer)];
+      } else if (layer == 1) {
+        by_face[g.index(i, ny)] = Real{0};
+      } else {
+        const int offset = layer - 1;
+        by_face[g.index(i, ny + offset)] = -by_face[g.index(i, ny - offset)];
+      }
+    } else if (mode == 1 && !lo) {
+      // gj==ny at layer 1 is the physical high-y face and was evolved by CT.
+      if (layer > 1) {
+        by_face[g.index(i, ny - 1 + layer)] = by_face[g.index(i, ny)];
+      }
+    } else {
+      by_face[kd] = s_normal * by_face[ks];
+    }
   }
 }
 
@@ -197,7 +243,7 @@ void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode,
   // Normal momentum (mx on an x-side, my on a y-side) gets the odd sign only on
   // a wall (mode 2); everything else is even.
   const bool x_side = (side == 0 || side == 1);
-  const Real s_normal = (mode == 2) ? Real{-1} : Real{1};
+  const Real s_normal = (mode == 2 || mode == 3) ? Real{-1} : Real{1};
   (void)x_side;  // selection of which component is normal happens in the kernel
   const dim3 block(kBlock);
   const dim3 grid((total + block.x - 1) / block.x);
@@ -211,9 +257,15 @@ void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode,
 void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode,
                                   stream_t stream) {
   const Grid2D g = u.grid;
-  const unsigned total = fill_total_threads(g, side);
+  const bool x_side = (side == 0 || side == 1);
+  const int line_count = x_side ? (g.ny + 1)
+                                : (g.nx + 2 * g.nghost);
+  const long total_long =
+      static_cast<long>(g.nghost) * static_cast<long>(line_count);
+  const unsigned total = total_long > 0
+      ? static_cast<unsigned>(total_long) : 0u;
   if (total == 0) return;
-  const Real s_normal = (mode == 2) ? Real{-1} : Real{1};
+  const Real s_normal = (mode == 2 || mode == 3) ? Real{-1} : Real{1};
   const dim3 block(kBlock);
   const dim3 grid((total + block.x - 1) / block.x);
   hipLaunchKernelGGL(fill_ghosts_field_kernel, grid, block, 0,

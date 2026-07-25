@@ -15,6 +15,7 @@ using ::quasar::Real;
 using ::quasar::Vec3;
 using ::quasar::mu0_over_4pi;
 using ::quasar::magnetostatics::BiotSavartEvaluator;
+using ::quasar::magnetostatics::BiotSavartEvaluatorF;
 using ::quasar::magnetostatics::ConductorSystem;
 using ::quasar::magnetostatics::Filament;
 using ::quasar::magnetostatics::IFieldEvaluator;
@@ -50,6 +51,26 @@ constexpr Real kRelTol  = Real{1e-10};
 constexpr Real kAbsTol  = Real{1e-14};
 
 }  // namespace
+
+TEST(FiniteSegment, NearWireOffFilamentIsNotSuppressed) {
+  if (!::quasar::backend::has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime";
+  }
+  const ConductorSystem cs = make_finite_segment_system(kLength, kCurrent);
+  constexpr Real d = Real{3e-8};
+  PointCloud pc;
+  pc.add(Vec3{d, 0, 0});
+  const Real ref = finite_segment_By_ref(d, kHalfLen, kCurrent);
+
+  const auto Bd = BiotSavartEvaluator{}.evaluate_B(cs, pc);
+  const auto Bf = BiotSavartEvaluatorF{}.evaluate_B(cs, pc);
+  ASSERT_EQ(Bd.size(), 1u);
+  ASSERT_EQ(Bf.size(), 1u);
+  EXPECT_NEAR(Bd[0].y, ref, Real{2e-12} * std::abs(ref));
+  EXPECT_NEAR(static_cast<Real>(Bf[0].y), ref, Real{2e-5} * std::abs(ref));
+  EXPECT_NE(Bd[0].y, Real{0});
+  EXPECT_NE(Bf[0].y, 0.0f);
+}
 
 TEST(FiniteSegment, MatchesClosedFormViaDirectCtor) {
   if (!::quasar::backend::has_hip_runtime()) {

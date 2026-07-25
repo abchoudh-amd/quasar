@@ -13,6 +13,7 @@ namespace {
 
 using ::quasar::magnetostatics::detail::kBlockSize;
 using ::quasar::magnetostatics::detail::kTileSegments;
+using ::quasar::magnetostatics::detail::ScaledAccumulator;
 using ::quasar::magnetostatics::detail::segment_A;
 using ::quasar::magnetostatics::detail::segment_B;
 using ::quasar::magnetostatics::detail::tiled_segment_reduce;
@@ -24,7 +25,8 @@ __global__ void biot_savart_B_kernel(
     const T* __restrict__ I_,   int N,
     const T* __restrict__ px,   const T* __restrict__ py,   const T* __restrict__ pz,
     int M,
-    T* __restrict__ Bx,         T* __restrict__ By,         T* __restrict__ Bz) {
+    T* __restrict__ Bx,         T* __restrict__ By,         T* __restrict__ Bz,
+    int* __restrict__ status) {
   const int m      = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x)
                      + static_cast<int>(threadIdx.x);
   const bool active = (m < M);
@@ -34,19 +36,32 @@ __global__ void biot_savart_B_kernel(
     p = ::quasar::Vec3T<T>{px[m], py[m], pz[m]};
   }
 
-  ::quasar::Vec3T<T> B_acc{T{0}, T{0}, T{0}};
+  ScaledAccumulator<T> B_acc[3];
+  bool singular_local = false;
+  bool numeric_failure_local = false;
   tiled_segment_reduce<T>(ax, ay, az, bx, by, bz, I_, N, active,
       [&](const ::quasar::Vec3T<T>& a_seg, const ::quasar::Vec3T<T>& b_seg, T I) {
-        const ::quasar::Vec3T<T> dB = segment_B<T>(a_seg, b_seg, p, I);
-        B_acc.x += dB.x;
-        B_acc.y += dB.y;
-        B_acc.z += dB.z;
+        const auto dB =
+            segment_B<T>(a_seg, b_seg, p, I, singular_local,
+                         numeric_failure_local);
+        B_acc[0].add(dB.x, numeric_failure_local);
+        B_acc[1].add(dB.y, numeric_failure_local);
+        B_acc[2].add(dB.z, numeric_failure_local);
       });
 
   if (active) {
-    Bx[m] = B_acc.x;
-    By[m] = B_acc.y;
-    Bz[m] = B_acc.z;
+    const T bx = B_acc[0].value(numeric_failure_local);
+    const T by = B_acc[1].value(numeric_failure_local);
+    const T bz = B_acc[2].value(numeric_failure_local);
+    Bx[m] = bx;
+    By[m] = by;
+    Bz[m] = bz;
+    int status_local = singular_local ? 1 : 0;
+    if (numeric_failure_local) status_local |= 2;
+    if (!isfinite(bx) || !isfinite(by) || !isfinite(bz)) {
+      status_local |= 2;
+    }
+    if (status_local != 0) atomicOr(status, status_local);
   }
 }
 
@@ -60,7 +75,8 @@ __global__ void biot_savart_A_kernel(
     const T* __restrict__ I_,   int N,
     const T* __restrict__ px,   const T* __restrict__ py,   const T* __restrict__ pz,
     int M,
-    T* __restrict__ Ax,         T* __restrict__ Ay,         T* __restrict__ Az) {
+    T* __restrict__ Ax,         T* __restrict__ Ay,         T* __restrict__ Az,
+    int* __restrict__ status) {
   const int m      = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x)
                      + static_cast<int>(threadIdx.x);
   const bool active = (m < M);
@@ -70,19 +86,32 @@ __global__ void biot_savart_A_kernel(
     p = ::quasar::Vec3T<T>{px[m], py[m], pz[m]};
   }
 
-  ::quasar::Vec3T<T> A_acc{T{0}, T{0}, T{0}};
+  ScaledAccumulator<T> A_acc[3];
+  bool singular_local = false;
+  bool numeric_failure_local = false;
   tiled_segment_reduce<T>(ax, ay, az, bx, by, bz, I_, N, active,
       [&](const ::quasar::Vec3T<T>& a_seg, const ::quasar::Vec3T<T>& b_seg, T I) {
-        const ::quasar::Vec3T<T> dA = segment_A<T>(a_seg, b_seg, p, I);
-        A_acc.x += dA.x;
-        A_acc.y += dA.y;
-        A_acc.z += dA.z;
+        const auto dA =
+            segment_A<T>(a_seg, b_seg, p, I, singular_local,
+                         numeric_failure_local);
+        A_acc[0].add(dA.x, numeric_failure_local);
+        A_acc[1].add(dA.y, numeric_failure_local);
+        A_acc[2].add(dA.z, numeric_failure_local);
       });
 
   if (active) {
-    Ax[m] = A_acc.x;
-    Ay[m] = A_acc.y;
-    Az[m] = A_acc.z;
+    const T ax_value = A_acc[0].value(numeric_failure_local);
+    const T ay_value = A_acc[1].value(numeric_failure_local);
+    const T az_value = A_acc[2].value(numeric_failure_local);
+    Ax[m] = ax_value;
+    Ay[m] = ay_value;
+    Az[m] = az_value;
+    int status_local = singular_local ? 1 : 0;
+    if (numeric_failure_local) status_local |= 2;
+    if (!isfinite(ax_value) || !isfinite(ay_value) || !isfinite(az_value)) {
+      status_local |= 2;
+    }
+    if (status_local != 0) atomicOr(status, status_local);
   }
 }
 
@@ -92,13 +121,13 @@ void launch_impl(
     const T* bx, const T* by, const T* bz,
     const T* I_, int N,
     const T* px, const T* py, const T* pz, int M,
-    T* Bx, T* By, T* Bz,
+    T* Bx, T* By, T* Bz, int* status,
     hipStream_t stream) {
   if (N <= 0 || M <= 0) return;
   const int block = kBlockSize;
-  const int grid  = (M + block - 1) / block;
+  const int grid  = 1 + (M - 1) / block;
   biot_savart_B_kernel<T><<<dim3(grid), dim3(block), 0, stream>>>(
-      ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, Bx, By, Bz);
+      ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, Bx, By, Bz, status);
 }
 
 template <class T>
@@ -107,13 +136,13 @@ void launch_impl_A(
     const T* bx, const T* by, const T* bz,
     const T* I_, int N,
     const T* px, const T* py, const T* pz, int M,
-    T* Ax, T* Ay, T* Az,
+    T* Ax, T* Ay, T* Az, int* status,
     hipStream_t stream) {
   if (N <= 0 || M <= 0) return;
   const int block = kBlockSize;
-  const int grid  = (M + block - 1) / block;
+  const int grid  = 1 + (M - 1) / block;
   biot_savart_A_kernel<T><<<dim3(grid), dim3(block), 0, stream>>>(
-      ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, Ax, Ay, Az);
+      ax, ay, az, bx, by, bz, I_, N, px, py, pz, M, Ax, Ay, Az, status);
 }
 
 }  // namespace
@@ -127,10 +156,10 @@ void launch_impl_A(
       const T* bx, const T* by, const T* bz,                                 \
       const T* I_, int N,                                                    \
       const T* px, const T* py, const T* pz, int M,                          \
-      T* Bx, T* By, T* Bz,                                                    \
+      T* Bx, T* By, T* Bz, int* status,                                       \
       ::quasar::backend::stream_t stream) {                                   \
     launch_impl<T>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M,             \
-                   Bx, By, Bz, static_cast<hipStream_t>(stream));            \
+                   Bx, By, Bz, status, static_cast<hipStream_t>(stream));    \
     QUASAR_HIP_CHECK(::hipGetLastError());                                    \
   }
 
@@ -146,10 +175,10 @@ QUASAR_BS_DEFINE_B_LAUNCHER(launch_biot_savart_B_f32, float)
       const T* bx, const T* by, const T* bz,                                 \
       const T* I_, int N,                                                    \
       const T* px, const T* py, const T* pz, int M,                          \
-      T* Ax, T* Ay, T* Az,                                                    \
+      T* Ax, T* Ay, T* Az, int* status,                                       \
       ::quasar::backend::stream_t stream) {                                   \
     launch_impl_A<T>(ax, ay, az, bx, by, bz, I_, N, px, py, pz, M,           \
-                     Ax, Ay, Az, static_cast<hipStream_t>(stream));          \
+                     Ax, Ay, Az, status, static_cast<hipStream_t>(stream));  \
     QUASAR_HIP_CHECK(::hipGetLastError());                                    \
   }
 

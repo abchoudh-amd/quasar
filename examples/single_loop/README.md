@@ -32,10 +32,10 @@ With `R = 0.1 m`, `I = 1 A`, evaluated at `z ∈ {0, 0.05, 0.10, 0.15, 0.20}` m:
 | z (m) | B_z (T)            |
 |------:|--------------------|
 | 0.00  | 6.2832e-06          |
-| 0.05  | 4.4951e-06          |
+| 0.05  | 4.4959e-06          |
 | 0.10  | 2.2214e-06          |
-| 0.15  | 9.5493e-07          |
-| 0.20  | 4.5677e-07          |
+| 0.15  | 1.072395e-06        |
+| 0.20  | 5.619852e-07        |
 
 The integration test `tests/python/test_examples.py::SingleLoopExampleTest`
 verifies that the polygon approximation (`n_segments=256`) matches these

@@ -7,12 +7,14 @@
 #   + 16 discrete rectangular TF coils (1000 A each).
 # Sheets give poloidal B (B_x, B_z); TF coils give toroidal
 # B_phi ~ mu_0 N I / (2 pi R) ~ 0.032 T at R = R0.
+# The PIC window covers the inner 90% of the bore so no Yee sample
+# lies on an ideal zero-radius TF-coil filament (where B is singular).
 #
 # Particles are loaded into a 0.020 m square block
 # centered on the right-side bore at (x, y) = (0.100,
 # 0.000) m -- the toroid's half-width x half-height
 # footprint. Total physical time = 1.000 us
-# (2713412 CFL steps at dt ~ 3.685e-13 s).
+# (3014902 CFL steps at dt ~ 3.317e-13 s).
 #
 # Regenerate with:
 #   python examples/square_toroid_pic/build_yaml.py
@@ -22,10 +24,10 @@ units: SI
 domain:
   nx: 128
   ny: 128
-  lx_m: 0.040000
-  ly_m: 0.040000
-  origin_x_m: 0.080000
-  origin_y_m: -0.020000
+  lx_m: 0.036000
+  ly_m: 0.036000
+  origin_x_m: 0.082000
+  origin_y_m: -0.018000
 
 numerics:
   fdtd_order: 2
@@ -2550,7 +2552,8 @@ species:
 
 time:
   dt_s: auto
-  steps: 2713412
+  steps: 3014902
+  t_end_s: 1.000000000000e-06
 
 diagnostics:
   output_path: out.npz
@@ -2560,5 +2563,7 @@ diagnostics:
 
 boundary:
   # Mark particles that drift out of the PIC domain as dead, so we
-  # can count loss. Default (omitted) is 'periodic' = no-op.
+  # can count loss. PEC field walls keep the Maxwell and particle
+  # domains consistently non-periodic while allowing normal E flux.
   particle: absorbing
+  field: pec

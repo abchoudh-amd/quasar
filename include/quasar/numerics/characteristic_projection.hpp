@@ -6,13 +6,11 @@
 // transport B_n is continuous across the interface, so a delta in B_n is not a
 // characteristic degree of freedom.
 //
-// Normal-B handling decision: the normal B component (B_x for dir=0, B_y for
-// dir=1) is carried through to_char/from_char UNCHANGED -- it never enters the
-// L*delta projection and is restored verbatim by from_char. Consequently
-// from_char(to_char(d)) == d exactly for any delta whose normal-B perturbation
-// is zero; for a nonzero normal-B delta the reconstruction is the orthogonal
-// projection onto the 7-wave subspace (normal-B passed through), which is the
-// physically correct treatment for CT.
+// Normal-B handling: CharVec7 has no slot for B_n. to_char therefore discards a
+// normal-field delta and from_char returns that component as zero. Consequently
+// from_char(to_char(d)) == d only on the seven-wave subspace (delta B_n == 0).
+// Reconstruction callers must restore the single shared CT face value after
+// mapping back; silently carrying a nonzero B_n through this type is impossible.
 //
 // The eigensystem is phrased in the rotated 7-vector
 //   U7 = (rho, m_n, m_t1, m_t2, energy, b_t1, b_t2)

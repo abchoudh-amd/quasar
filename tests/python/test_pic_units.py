@@ -42,8 +42,12 @@ class NormalizedIdentityTests(unittest.TestCase):
             self.assertEqual(self.u.charge(v), v)
             self.assertEqual(self.u.mass(v), v)
             self.assertEqual(self.u.density(v), v)
+            self.assertEqual(self.u.temperature_eV(v), v)
+            self.assertEqual(self.u.e_field(v), v)
+            self.assertEqual(self.u.b_field(v), v)
             self.assertEqual(self.u.length_to_si(v), v)
             self.assertEqual(self.u.velocity_to_si(v), v)
+            self.assertEqual(self.u.temperature_eV_to_si(v), v)
 
     def test_external_scales_all_unity(self):
         self.assertEqual(self.u.external_scales(), (1.0, 1.0, 1.0))
@@ -83,6 +87,23 @@ class SiConversionTests(unittest.TestCase):
             self.u.external_scales(),
             (norm.length_scale(), norm.e_field_scale(), norm.b_field_scale()),
         )
+
+    def test_temperature_ev_uses_reference_rest_energy(self):
+        internal = self.u.temperature_eV(1.0)
+        self.assertGreater(internal, 0.0)
+        self.assertLess(internal, 1.0)
+        self.assertAlmostEqual(self.u.temperature_eV_to_si(internal), 1.0,
+                               places=14)
+        self.assertAlmostEqual(
+            self.u.normalization.temperature_eV_scale(),
+            1.0 / internal, places=8)
+
+    def test_field_round_trips(self):
+        for value in (1.0e-3, 2.5, -7.0):
+            self.assertAlmostEqual(
+                self.u.e_field_to_si(self.u.e_field(value)), value, places=12)
+            self.assertAlmostEqual(
+                self.u.b_field_to_si(self.u.b_field(value)), value, places=12)
 
 
 class FieldComponentToSiTests(unittest.TestCase):

@@ -52,8 +52,9 @@ TEST(PicMultiSpeciesExternal, ProtonAndMuonStepInBiotSavartField) {
   quasar::magnetostatics::BiotSavartEvaluator eval;
   quasar::pic::sample_external_field(eval, cs, solver.external_fields());
 
-  solver.add_species(make_species("H+",  +kQE, kMProt, 8, 0.0, 0.0, 1.0e4));
-  solver.add_species(make_species("mu-", -kQE, kMMuon, 8, 0.0, 0.0, 1.0e4));
+  // Particle velocities are in the solver's c=1 internal units.
+  solver.add_species(make_species("H+",  +kQE, kMProt, 8, 0.0, 0.0, 0.1));
+  solver.add_species(make_species("mu-", -kQE, kMMuon, 8, 0.0, 0.0, 0.1));
   ASSERT_EQ(solver.species().size(), 2u);
 
   const quasar::Real dt = 1.0e-12;

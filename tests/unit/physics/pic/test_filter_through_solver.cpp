@@ -22,6 +22,9 @@ namespace {
 double peak_jz_after_step(int n_passes) {
   quasar::Grid2D g{32, 32, 1.0, 1.0, 0.0, 0.0, 1};
   quasar::pic::EmPicConfig cfg{g, 2, "cic"};
+  // The test deliberately uses one charged population on a periodic torus;
+  // provide the physically required fixed counter-charge explicitly.
+  cfg.neutralizing_background = true;
   if (n_passes > 0) {
     cfg.filters.push_back(quasar::pic::FilterSpec{"binomial", n_passes});
   }
@@ -29,10 +32,10 @@ double peak_jz_after_step(int n_passes) {
 
   quasar::pic::ParticleSpecies sp{quasar::pic::SpeciesConfig{"q", 1.0, 1.0, 1}};
   // vz drives Jz, which the binomial filter smooths in-plane.
-  sp.set_host_particles({0.51}, {0.52}, {0.1}, {0.0}, {1.0}, {1.0});
+  sp.set_host_particles({0.51}, {0.52}, {0.1}, {0.0}, {0.7}, {1.0});
   solver.add_species(std::move(sp));
 
-  solver.step(0.05);
+  solver.step(0.015);
 
   auto& J = solver.current();
   std::vector<double> jz(g.storage_size());

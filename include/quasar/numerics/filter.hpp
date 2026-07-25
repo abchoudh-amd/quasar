@@ -18,7 +18,8 @@ namespace quasar::numerics {
 class ICurrentFilter {
  public:
   virtual ~ICurrentFilter() = default;
-  virtual void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const = 0;
+  virtual void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc,
+                     bool cylindrical = false) const = 0;
   // Sets the number of smoothing passes. Registry-created filters are default
   // constructed (one pass); the deck loader calls this to apply the configured
   // pass count without needing a type-specific constructor.
@@ -28,7 +29,8 @@ class ICurrentFilter {
 class BinomialFilter final : public ICurrentFilter {
  public:
   explicit BinomialFilter(int n_passes = 1) { set_passes(n_passes); }
-  void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const override;
+  void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc,
+             bool cylindrical = false) const override;
   void set_passes(int n_passes) override {
     if (n_passes < 1) {
       throw std::invalid_argument{"BinomialFilter: passes must be >= 1"};
@@ -47,7 +49,8 @@ class BinomialFilter final : public ICurrentFilter {
 class CompensatedBinomialFilter final : public ICurrentFilter {
  public:
   explicit CompensatedBinomialFilter(int n_passes = 1) { set_passes(n_passes); }
-  void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const override;
+  void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc,
+             bool cylindrical = false) const override;
   void set_passes(int n_passes) override {
     if (n_passes < 1) {
       throw std::invalid_argument{"CompensatedBinomialFilter: passes must be >= 1"};
@@ -66,7 +69,8 @@ class FilterPipeline {
   void add(std::unique_ptr<ICurrentFilter> filter) { filters_.push_back(std::move(filter)); }
   bool empty() const noexcept { return filters_.empty(); }
   std::size_t size() const noexcept { return filters_.size(); }
-  void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc) const;
+  void apply(JField2D<Real>& current, const boundary::BoundarySpec& bc,
+             bool cylindrical = false) const;
 
  private:
   std::vector<std::unique_ptr<ICurrentFilter>> filters_{};

@@ -21,12 +21,21 @@ from pathlib import Path
 
 import numpy as np
 
+from quasar.pic.postprocess import yee_component_view
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def has_hip_runtime() -> bool:
     return os.environ.get("QUASAR_HAS_HIP_RUNTIME", "0") == "1"
+
+
+def _load_npz(testcase: unittest.TestCase, path: Path):
+    """Open an archive and guarantee closure even if an assertion aborts a test."""
+    archive = np.load(path, allow_pickle=False)
+    testcase.addCleanup(archive.close)
+    return archive
 
 
 def _copy_example(name: str, into: Path) -> Path:
@@ -61,7 +70,7 @@ class SingleLoopExampleTest(unittest.TestCase):
             workdir = _copy_example("single_loop", Path(tmp))
             _run_cli(workdir / "input.yaml")
 
-            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            archive = _load_npz(self, workdir / "out.npz")
             self.assertEqual(archive["observation_kind"].item(), "line")
             B = archive["B_xyz"]
             self.assertEqual(B.shape, (5, 3))
@@ -89,7 +98,7 @@ class SolenoidExampleTest(unittest.TestCase):
             workdir = _copy_example("solenoid", Path(tmp))
             _run_cli(workdir / "input.yaml")
 
-            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            archive = _load_npz(self, workdir / "out.npz")
             B = archive["B_xyz"]
             self.assertEqual(B.shape, (29, 3))
 
@@ -146,7 +155,7 @@ class SaddleCoilExampleTest(unittest.TestCase):
             workdir = _copy_example("saddle_coil", Path(tmp))
             _run_cli(workdir / "input.yaml")
 
-            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            archive = _load_npz(self, workdir / "out.npz")
             B = archive["B_xyz"]
             self.assertEqual(B.shape, (5, 3))
 
@@ -188,7 +197,7 @@ class HelmholtzPairExampleTest(unittest.TestCase):
             workdir = _copy_example("helmholtz_pair", Path(tmp))
             _run_cli(workdir / "input.yaml")
 
-            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            archive = _load_npz(self, workdir / "out.npz")
             B = archive["B_xyz"]
             self.assertEqual(B.shape, (9, 3))
 
@@ -221,7 +230,7 @@ class SquareToroidExampleTest(unittest.TestCase):
             workdir = _copy_example("square_toroid", Path(tmp))
             _run_cli(workdir / "input.yaml")
 
-            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            archive = _load_npz(self, workdir / "out.npz")
             B = archive["B_xyz"]
             mag = archive["B_magnitude"]
             # Field is finite everywhere on the meridional plane.
@@ -292,7 +301,7 @@ class SquareQuadFieldExampleTest(unittest.TestCase):
             workdir = _copy_example("square_quad_field", Path(tmp))
             _run_cli(workdir / "input.yaml")
 
-            archive = np.load(workdir / "out.npz", allow_pickle=False)
+            archive = _load_npz(self, workdir / "out.npz")
             self.assertEqual(archive["observation_kind"].item(), "grid")
             B = archive["B_xyz"]
             dims = archive["dims"]
@@ -317,7 +326,8 @@ class SquareQuadFieldExampleTest(unittest.TestCase):
             self.assertLess(np.max(np.abs(B[:, 2])), 1e-3 * scale,
                             msg=f"B_z not negligible: max={np.max(np.abs(B[:,2]))}")
 
-            # (b) Central null: |B| at the center cell is tiny vs the patch max.
+            # (b) Central null: an even observation count does not sample x=y=0,
+            # so |B| at the nearest central point is merely tiny vs the patch max.
             mag = np.linalg.norm(B, axis=1)
             # center cell index (nx, ny even -> nearest the origin)
             ci = nx // 2 + nx * (ny // 2)
@@ -330,7 +340,7 @@ class SquareQuadFieldExampleTest(unittest.TestCase):
             # near-null cells (tiny |B|) don't blow up the relative check.
             np.testing.assert_allclose(
                 B[:, :2], ref[:, :2], rtol=3e-2, atol=1e-2 * scale,
-                err_msg="transverse B does not match infinite-wire superposition")
+                err_msg="transverse B does not match finite-segment superposition")
 
 
 def _run_pic_cli(yaml_path: Path, steps: int) -> None:
@@ -353,7 +363,7 @@ class SquareToroidPicExampleTest(unittest.TestCase):
             workdir = _copy_example("square_toroid_pic", Path(tmp))
             _run_pic_cli(workdir / "input.yaml", steps=20)
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
 
             for key in data.files:
                 arr = data[key]
@@ -386,7 +396,7 @@ class SquareToroidPic1mExampleTest(unittest.TestCase):
             workdir = _copy_example("square_toroid_pic_1m", Path(tmp))
             _run_pic_cli(workdir / "input.yaml", steps=20)
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
 
             for key in data.files:
                 arr = data[key]
@@ -429,7 +439,7 @@ class SquareQuadPicExampleTest(unittest.TestCase):
                                    "n_particles: 4096", deck.read_text()))
             _run_pic_cli(deck, steps=20)
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
 
             for key in data.files:
                 arr = data[key]
@@ -467,6 +477,7 @@ class SquareQuadPicExampleTest(unittest.TestCase):
 # the same end-to-end run path without depending on any example file.
 _MINIMAL_PIC_DECK = """\
 units: SI
+neutralizing_background: true
 domain: {nx: 16, ny: 16, lx_m: 1.0, ly_m: 1.0}
 numerics: {fdtd_order: 2, shape: cic}
 species:
@@ -491,11 +502,11 @@ def _write_deck(into: Path, text: str) -> Path:
     return deck
 
 
-def _run_example_pic(name: str, steps: int) -> np.ndarray:
+def _run_example_pic(testcase: unittest.TestCase, name: str, steps: int):
     with tempfile.TemporaryDirectory() as tmp:
         workdir = _copy_example(name, Path(tmp))
         _run_pic_cli(workdir / "input.yaml", steps)
-        return np.load(workdir / "out.npz", allow_pickle=False)
+        return _load_npz(testcase, workdir / "out.npz")
 
 
 def _all_finite(data) -> bool:
@@ -505,78 +516,502 @@ def _all_finite(data) -> bool:
         if np.issubdtype(data[k].dtype, np.floating))
 
 
+def _pic_x_mode_amplitude(data, component: str, mode: int) -> np.ndarray:
+    """Return the magnitude of one longitudinal Fourier mode over snapshots."""
+    nx = int(data["nx"][0])
+    ny = int(data["ny"][0])
+    nghost = int(data["nghost"][0])
+    snapshots = data[f"snapshot_field_{component}"]
+    interior = np.stack([
+        _interior_field(frame, nx, ny, nghost) for frame in snapshots])
+    profile = interior.mean(axis=1)
+    return np.abs(np.fft.rfft(profile, axis=1)[:, mode])
+
+
+def _cold_symmetric_two_stream_growth(k: float, drift: float,
+                                      beam_plasma_frequency: float = 1.0) -> float:
+    """Growth rate of the unstable cold, equal-density two-beam root."""
+    a = k * drift
+    wp2 = beam_plasma_frequency ** 2
+    gamma2 = (beam_plasma_frequency * math.sqrt(wp2 + 4.0 * a * a)
+              - wp2 - a * a)
+    if gamma2 <= 0.0:
+        raise ValueError("selected two-stream mode is not linearly unstable")
+    return math.sqrt(gamma2)
+
+
+def _cold_symmetric_filamentation_growth(
+        k: float, drift: float,
+        beam_plasma_frequency: float = 1.0) -> float:
+    """Growth rate of the cold, equal-density counter-streaming mode.
+
+    For two beams with individual plasma frequency ``beam_plasma_frequency``
+    and velocities ``+/- drift`` perpendicular to the wave vector, the
+    transverse dispersion relation is
+
+      omega^4 - (k^2 + omega_p^2) omega^2
+              - k^2 omega_p^2 drift^2 = 0,
+
+    where ``omega_p^2`` is the sum over both beams.  The unstable root has
+    ``omega = i gamma``.  The rationalized expression below avoids subtracting
+    two nearly equal positive values at large ``k``.
+    """
+    total_wp2 = 2.0 * beam_plasma_frequency ** 2
+    a = k * k + total_wp2
+    coupling = k * k * total_wp2 * drift * drift
+    gamma2 = (2.0 * coupling
+              / (math.sqrt(a * a + 4.0 * coupling) + a))
+    if gamma2 <= 0.0:
+        raise ValueError("selected filamentation mode is not unstable")
+    return math.sqrt(gamma2)
+
+
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class PicAspirationalExampleTests(unittest.TestCase):
     """The nine canonical PIC validation decks must load and run end-to-end and
     show their characteristic signature."""
 
     def test_two_stream_field_energy_grows(self):
-        data = _run_example_pic("two_stream", 200)
+        data = _run_example_pic(self, "two_stream", 3200)
         self.assertTrue(_all_finite(data))
-        ex = data["snapshot_field_ex"]
-        energy = (ex ** 2).sum(axis=1)
-        # The two-stream instability grows the longitudinal field energy by orders
-        # of magnitude before saturation.
-        self.assertGreater(energy[-1], 50.0 * energy[0],
-                           msg=f"Ex energy did not grow: {energy[0]} -> {energy[-1]}")
+        amplitude = _pic_x_mode_amplitude(data, "ex", mode=1)
+        times = data["snapshot_times_s"]
+        linear = (times >= 4.0) & (times <= 8.0)
+        self.assertGreaterEqual(int(linear.sum()), 8)
+        measured = float(np.polyfit(
+            times[linear], np.log(amplitude[linear]), 1)[0])
+        expected = _cold_symmetric_two_stream_growth(2.0 * math.pi, 0.2)
+        self.assertAlmostEqual(
+            measured, expected, delta=0.15 * expected,
+            msg=f"two-stream growth rate {measured:.6g} != cold dispersion "
+                f"{expected:.6g}")
+        self.assertGreater(amplitude[-1], 100.0 * amplitude[0])
 
-    def test_filtered_two_stream_runs_and_grows(self):
-        data = _run_example_pic("filtered_two_stream", 200)
-        self.assertTrue(_all_finite(data))
-        ex = data["snapshot_field_ex"]
-        energy = (ex ** 2).sum(axis=1)
-        self.assertGreater(energy[-1], 10.0 * energy[0])
+    def test_filtered_two_stream_preserves_longitudinal_growth(self):
+        # The two decks differ only by the Jz filter pipeline.  Over a short
+        # matched run, verify the promised invariance directly rather than
+        # inferring it merely because both growth rates resemble theory.  The
+        # charge-conserving Jx deposit uses contended GPU atomic additions, so
+        # independent runs can differ by roundoff even though the filter never
+        # reads or writes Jx.  Keep the comparison at a tight, scale-aware
+        # roundoff budget rather than requiring an unsupported bitwise replay.
+        reference = _run_example_pic(self, "two_stream", 16)
+        filtered_short = _run_example_pic(self, "filtered_two_stream", 16)
+        np.testing.assert_array_equal(
+            filtered_short["snapshot_times_s"], reference["snapshot_times_s"],
+            err_msg="Jz filter changed the time grid")
 
-    def test_landau_damping_runs(self):
-        data = _run_example_pic("landau_damping", 60)
-        self.assertTrue(_all_finite(data))
-        self.assertIn("snapshot_field_ex", data.files)
+        invariant_state_keys = [
+            "snapshot_field_ex",
+            "species_electron_beam_left_x",
+            "species_electron_beam_left_vx",
+            "species_electron_beam_right_x",
+            "species_electron_beam_right_vx",
+        ]
+        # Sixteen steps, with a few dozen same-cell atomic contributions per
+        # step, need only a small multiple of machine epsilon.  The absolute
+        # term is scaled to each whole array so near-zero entries do not turn
+        # harmless summation-order noise into a large relative error.
+        roundoff = 512.0 * np.finfo(np.float64).eps
+        for key in invariant_state_keys:
+            filtered_values = filtered_short[key]
+            reference_values = reference[key]
+            scale = max(float(np.max(np.abs(filtered_values))),
+                        float(np.max(np.abs(reference_values))))
+            np.testing.assert_allclose(
+                filtered_values, reference_values,
+                rtol=roundoff, atol=roundoff * scale,
+                err_msg=f"transverse Jz filter changed longitudinal output {key}")
 
-    def test_weibel_grows_transverse_b(self):
-        data = _run_example_pic("weibel", 200)
+        data = _run_example_pic(self, "filtered_two_stream", 3200)
         self.assertTrue(_all_finite(data))
-        bz = data["snapshot_field_bz"]
-        energy = (bz ** 2).sum(axis=1)
-        # Weibel grows a transverse magnetic field from noise.
-        self.assertGreater(energy[-1], energy[0],
-                           msg=f"Bz energy did not grow: {energy[0]} -> {energy[-1]}")
+        amplitude = _pic_x_mode_amplitude(data, "ex", mode=1)
+        times = data["snapshot_times_s"]
+        linear = (times >= 4.0) & (times <= 8.0)
+        measured = float(np.polyfit(
+            times[linear], np.log(amplitude[linear]), 1)[0])
+        expected = _cold_symmetric_two_stream_growth(2.0 * math.pi, 0.2)
+        # The continuity-safe 2D filter acts on Jz only.  This longitudinal
+        # mode deposits Jx, so enabling the pipeline must preserve its physical
+        # growth rather than claiming a smoothing effect it cannot provide.
+        self.assertAlmostEqual(measured, expected, delta=0.15 * expected)
+        self.assertGreater(amplitude[-1], 100.0 * amplitude[0])
 
-    def test_em_wave_energy_stays_bounded(self):
-        data = _run_example_pic("em_wave_propagation", 120)
+    def test_landau_damping_mode_envelope_decays(self):
+        data = _run_example_pic(self, "landau_damping", 2000)
         self.assertTrue(_all_finite(data))
-        ez = data["snapshot_field_ez"]
-        by = data["snapshot_field_by"]
-        energy = (ez ** 2 + by ** 2).sum(axis=1)
-        # Vacuum propagation on a periodic grid: energy bounded (no blow-up). The
-        # instantaneous E^2+B^2 oscillates with the leapfrog half-step staggering.
-        self.assertLess(energy.max(), 2.0 * energy.min())
+        amplitude = _pic_x_mode_amplitude(data, "ex", mode=1)
+        times = data["snapshot_times_s"]
+        peak_indices = np.flatnonzero(
+            (amplitude[1:-1] > amplitude[:-2])
+            & (amplitude[1:-1] >= amplitude[2:])) + 1
+        resolved = peak_indices[
+            (times[peak_indices] >= 3.0) & (times[peak_indices] <= 11.0)]
+        self.assertGreaterEqual(
+            resolved.size, 3,
+            msg=f"fewer than three resolved Landau peaks: "
+                f"{list(zip(times[resolved], amplitude[resolved]))}")
+        resolved = resolved[:3]
+        peak_amplitude = amplitude[resolved]
+        self.assertTrue(
+            np.all(peak_amplitude[1:] < peak_amplitude[:-1]),
+            msg=f"Landau envelope did not decrease: {peak_amplitude}")
+        self.assertLess(peak_amplitude[-1], 0.8 * peak_amplitude[0])
+
+        measured = float(np.polyfit(
+            times[resolved], np.log(peak_amplitude), 1)[0])
+        # Maxwellian electrostatic dispersion root for k*lambda_D=0.5:
+        # omega/omega_p = 1.4156619 - 0.1533595 i.  The tolerance covers the
+        # deliberately modest finite grid and 32 particles/cell while still
+        # rejecting an undamped, growing, or noise-dominated mode.
+        expected = -0.1533594669
+        self.assertAlmostEqual(
+            measured, expected, delta=0.35 * abs(expected),
+            msg=f"Landau damping rate {measured:.6g} differs from Maxwellian "
+                f"reference {expected:.6g}")
+
+    def test_weibel_mode_grows_at_cold_filamentation_rate(self):
+        # A quiet start contains no controlled unstable-mode amplitude: comparing
+        # two instantaneous noise energies can pass or fail solely with plasma-
+        # oscillation phase.  The shipped deck gives both beams the same tiny
+        # sinusoidal vy perturbation: their equilibrium +/- drifts still cancel,
+        # while the common perturbation supplies a deterministic Jy(kx) seed and
+        # introduces no charge-density perturbation.
+        data = _run_example_pic(self, "weibel", 3200)
+        self.assertTrue(_all_finite(data))
+        self.assertEqual(str(data["geometry"][0]), "cartesian")
+        self.assertEqual(
+            tuple(str(value) for value in data["boundary_field"]),
+            ("periodic", "periodic", "periodic", "periodic"))
+
+        nx, ny = int(data["nx"][0]), int(data["ny"][0])
+        g = int(data["nghost"][0])
+        lx, ly = float(data["lx"][0]), float(data["ly"][0])
+        bz = np.stack([
+            yee_component_view(
+                frame, nx, ny, g, "bz", "cartesian",
+                periodic_x=True, periodic_y=True)
+            for frame in data["snapshot_field_bz"]
+        ])
+        self.assertEqual(bz.shape[1:], (ny, nx))
+
+        # Bz lives on x/y nodes.  On a periodic mesh the high endpoints are
+        # duplicates, so the component-aware view above leaves exactly one
+        # degree of freedom per control volume.  This is the physical magnetic
+        # energy (mu0=1 in normalized units), not a sum over padded ghosts.
+        dx, dy = lx / nx, ly / ny
+        magnetic_energy = 0.5 * dx * dy * np.sum(bz * bz, axis=(1, 2))
+        self.assertGreater(
+            magnetic_energy[-1], 50.0 * magnetic_energy[0],
+            msg=f"physical Bz energy failed to grow strongly: "
+                f"{magnetic_energy[0]:.6e} -> {magnetic_energy[-1]:.6e}")
+
+        # Project onto the seeded ky=0, kx=2*pi/Lx filamentation mode.
+        # Averaging in y is the orthogonal ky=0 projection; the rFFT then
+        # returns its real-field amplitude without padded/duplicate nodes.
+        profile = bz.mean(axis=1)
+        coefficient = np.fft.rfft(profile, axis=1)[:, 1]
+        amplitude = 2.0 * np.abs(coefficient) / nx
+        times = np.asarray(data["snapshot_times_s"])
+        linear = (times >= 6.0) & (times <= 15.0)
+        self.assertGreaterEqual(int(linear.sum()), 64)
+        measured = float(np.polyfit(
+            times[linear], np.log(amplitude[linear]), 1)[0])
+        expected = _cold_symmetric_filamentation_growth(
+            2.0 * math.pi / lx, drift=0.3)
+        self.assertAlmostEqual(
+            measured, expected, delta=0.05 * expected,
+            msg=f"filamentation growth rate {measured:.6g} differs from "
+                f"cold dispersion root {expected:.6g}")
+        self.assertGreater(
+            amplitude[linear][-1], 20.0 * amplitude[linear][0])
+
+        # At the end of the linear window, the growing magnetic energy must
+        # actually belong to that physical mode rather than a grid-scale or
+        # ghost-cell artifact.
+        mode_index = int(np.flatnonzero(linear)[-1])
+        phase = 2.0 * np.pi * np.arange(nx) / nx
+        final_mode_row = (2.0 / nx) * np.real(
+            coefficient[mode_index] * np.exp(1j * phase))
+        final_mode = np.broadcast_to(final_mode_row, (ny, nx))
+        mode_fraction = float(
+            np.sum(final_mode * final_mode)
+            / np.sum(bz[mode_index] * bz[mode_index]))
+        self.assertGreater(
+            mode_fraction, 0.99,
+            msg=f"seeded Weibel mode carries only {mode_fraction:.3%} of Bz")
+
+    def test_em_wave_is_discrete_traveling_mode_with_conserved_energy(self):
+        data = _run_example_pic(self, "em_wave_propagation", 120)
+        self.assertTrue(_all_finite(data))
+        self.assertEqual(str(data["geometry"][0]), "cartesian")
+        self.assertEqual(str(data["unit_system"][0]), "normalized")
+        self.assertEqual(
+            tuple(str(value) for value in data["boundary_field"]),
+            ("periodic", "periodic", "periodic", "periodic"))
+
+        nx, ny = int(data["nx"][0]), int(data["ny"][0])
+        g = int(data["nghost"][0])
+        lx, ly = float(data["lx"][0]), float(data["ly"][0])
+        dx, dy = lx / nx, ly / ny
+        steps = np.asarray(data["snapshot_steps"], dtype=float)
+        times = np.asarray(data["snapshot_times_s"], dtype=float)
+        dt_samples = np.diff(times) / np.diff(steps)
+        dt = float(np.median(dt_samples))
+        np.testing.assert_allclose(dt_samples, dt, rtol=2.0e-13, atol=0.0)
+
+        ez = np.stack([
+            yee_component_view(
+                frame, nx, ny, g, "ez", "cartesian",
+                periodic_x=True, periodic_y=True)
+            for frame in data["snapshot_field_ez"]
+        ])
+        by = np.stack([
+            yee_component_view(
+                frame, nx, ny, g, "by", "cartesian",
+                periodic_x=True, periodic_y=True)
+            for frame in data["snapshot_field_by"]
+        ])
+        self.assertEqual(ez.shape[1:], (ny, nx))
+        self.assertEqual(by.shape[1:], (ny, nx))
+
+        # The fourth-order centre-to-face derivative has this modified wave
+        # number.  Its leapfrog dispersion, rather than the continuum omega=k,
+        # determines the exact traveling eigenmode evolved by the solver.
+        theta = math.pi / nx
+        kappa = ((9.0 / 4.0) * math.sin(theta)
+                 - (1.0 / 12.0) * math.sin(3.0 * theta)) / dx
+        omega = (2.0 / dt) * math.asin(0.5 * dt * kappa)
+        k = 2.0 * math.pi / lx
+        ez_x = (np.arange(nx) + 0.5) * dx
+        by_x = np.arange(nx) * dx
+        expected_ez = np.broadcast_to(
+            np.sin(k * ez_x[np.newaxis, np.newaxis, :]
+                   - omega * times[:, np.newaxis, np.newaxis]), ez.shape)
+        # Stored B is at t^(n-1/2), while each snapshot's E is at t^n.
+        expected_by = np.broadcast_to(
+            -np.sin(k * by_x[np.newaxis, np.newaxis, :]
+                    - omega * times[:, np.newaxis, np.newaxis]
+                    + 0.5 * omega * dt), by.shape)
+        np.testing.assert_allclose(
+            ez, expected_ez, rtol=0.0, atol=2.0e-11,
+            err_msg="Ez departed from the fourth-order discrete traveling mode")
+        np.testing.assert_allclose(
+            by, expected_by, rtol=0.0, atol=2.0e-11,
+            err_msg="By departed from the staggered discrete traveling mode")
+
+        # For leapfrog Maxwell, the exactly conserved quadratic form is
+        # <E^n,E^n> + <B^(n-1/2),B^(n+1/2)>, not the simultaneous-looking
+        # E^2+B^2 norm.  Reconstruct the next magnetic half-step with the same
+        # fourth-order periodic Yee derivative and integrate each unique physical
+        # degree of freedom once.
+        dez_dx = (
+            (9.0 / 8.0) * (ez - np.roll(ez, 1, axis=2))
+            - (1.0 / 24.0)
+            * (np.roll(ez, -1, axis=2) - np.roll(ez, 2, axis=2))) / dx
+        by_next = by + dt * dez_dx
+        energy = 0.5 * dx * dy * (
+            np.sum(ez * ez, axis=(1, 2))
+            + np.sum(by * by_next, axis=(1, 2)))
+        self.assertGreater(float(np.min(energy)), 0.0)
+        relative_span = float(np.ptp(energy) / np.mean(energy))
+        self.assertLess(
+            relative_span, 2.0e-11,
+            msg=f"periodic Yee invariant drifted by {relative_span:.3e}")
 
     def test_beam_in_channel_confines_particles(self):
-        data = _run_example_pic("beam_in_channel", 60)
+        data = _run_example_pic(self, "beam_in_channel", 60)
         self.assertTrue(_all_finite(data))
         alive = data["species_electron_beam_alive"].astype(bool)
         # Reflecting y walls keep every particle alive.
         self.assertEqual(int(alive.sum()), alive.size,
                          msg="specular walls lost particles")
 
-    def test_pec_cavity_energy_bounded(self):
-        data = _run_example_pic("pec_cavity", 120)
+    def test_pec_cavity_is_discrete_tm11_eigenmode(self):
+        data = _run_example_pic(self, "pec_cavity", 640)
         self.assertTrue(_all_finite(data))
-        ez = data["snapshot_field_ez"]
-        by = data["snapshot_field_by"]
-        energy = (ez ** 2 + by ** 2).sum(axis=1)
-        # Closed lossless PEC cavity: energy must not blow up.
-        self.assertLess(energy.max(), 2.0 * energy.min())
+
+        nx, ny = int(data["nx"][0]), int(data["ny"][0])
+        g = int(data["nghost"][0])
+        lx, ly = float(data["lx"][0]), float(data["ly"][0])
+        dx, dy = lx / nx, ly / ny
+        steps = np.asarray(data["snapshot_steps"], dtype=float)
+        times = np.asarray(data["snapshot_times_s"], dtype=float)
+        self.assertGreaterEqual(times.size, 16)
+        dt_samples = np.diff(times) / np.diff(steps)
+        dt = float(np.median(dt_samples))
+        np.testing.assert_allclose(dt_samples, dt, rtol=2.0e-13, atol=0.0)
+        self.assertEqual(
+            tuple(str(value) for value in data["boundary_field"]),
+            ("pec", "pec", "pec", "pec"))
+
+        ez_frames = np.asarray(data["snapshot_field_ez"])
+        bx_frames = np.asarray(data["snapshot_field_bx"])
+        by_frames = np.asarray(data["snapshot_field_by"])
+        pitch, height = nx + 2 * g, ny + 2 * g
+
+        def padded(frame):
+            return np.asarray(frame).reshape(height, pitch)
+
+        def physical(frame, component):
+            return yee_component_view(
+                frame, nx, ny, g, component, "cartesian",
+                periodic_x=False, periodic_y=False)
+
+        # Project Ez onto the cell-centred TM_11 sine vector.  A single exact
+        # discrete eigenmode obeys a scalar cosine recurrence at the discrete
+        # Maxwell frequency; this measures frequency without FFT-bin leakage.
+        sx = np.sin(np.pi * (np.arange(nx) + 0.5) / nx)
+        sy = np.sin(np.pi * (np.arange(ny) + 0.5) / ny)
+        tm11 = np.multiply.outer(sy, sx)
+        mode_norm2 = float(np.sum(tm11 * tm11))
+        amplitudes = []
+        mode_residuals = []
+        for frame in ez_frames:
+            ez = physical(frame, "ez")
+            amplitude = float(np.sum(ez * tm11) / mode_norm2)
+            amplitudes.append(amplitude)
+            mode_residuals.append(float(
+                np.linalg.norm(ez - amplitude * tm11)
+                / np.sqrt(mode_norm2)))
+        amplitudes = np.asarray(amplitudes)
+        self.assertLess(max(mode_residuals), 2.0e-11,
+                        msg=f"TM11 leaked into other modes: {max(mode_residuals):.3e}")
+
+        theta_x = np.pi / (2.0 * nx)
+        theta_y = np.pi / (2.0 * ny)
+        kx = ((9.0 / 4.0) * np.sin(theta_x)
+              - (1.0 / 12.0) * np.sin(3.0 * theta_x)) / dx
+        ky = ((9.0 / 4.0) * np.sin(theta_y)
+              - (1.0 / 12.0) * np.sin(3.0 * theta_y)) / dy
+        omega_expected = (2.0 / dt) * np.arcsin(
+            0.5 * dt * np.hypot(kx, ky))
+        snapshot_dt = float(np.median(np.diff(times)))
+        middle = amplitudes[1:-1]
+        recurrence_cos = float(np.dot(
+            middle, amplitudes[:-2] + amplitudes[2:])
+            / (2.0 * np.dot(middle, middle)))
+        omega_measured = float(np.arccos(np.clip(
+            recurrence_cos, -1.0, 1.0)) / snapshot_dt)
+        self.assertAlmostEqual(
+            omega_measured, omega_expected,
+            delta=2.0e-8 * omega_expected,
+            msg=f"TM11 frequency {omega_measured:.12g} != fourth-order Yee "
+                f"dispersion {omega_expected:.12g}")
+        np.testing.assert_allclose(
+            amplitudes, np.cos(omega_expected * times),
+            rtol=0.0, atol=2.0e-10,
+            err_msg="TM11 phase departed from the discrete eigenfrequency")
+
+        # The PEC wall lies halfway between tangential cell-centred Ez samples.
+        # Its odd ghost continuation must therefore cancel exactly at each wall.
+        max_wall_sum = 0.0
+        max_ez = 0.0
+        for frame in ez_frames:
+            ezp = padded(frame)
+            max_ez = max(max_ez, float(np.max(np.abs(ezp))))
+            max_wall_sum = max(
+                max_wall_sum,
+                float(np.max(np.abs(
+                    ezp[g:g + ny, g - 1] + ezp[g:g + ny, g]))),
+                float(np.max(np.abs(
+                    ezp[g:g + ny, g + nx]
+                    + ezp[g:g + ny, g + nx - 1]))),
+                float(np.max(np.abs(
+                    ezp[g - 1, g:g + nx] + ezp[g, g:g + nx]))),
+                float(np.max(np.abs(
+                    ezp[g + ny, g:g + nx]
+                    + ezp[g + ny - 1, g:g + nx]))),
+            )
+        self.assertLessEqual(max_wall_sum, 2.0e-14 * max_ez)
+
+        # Fourth-order node divergence of the staggered in-plane B field.  Use
+        # the live PEC ghosts because those are the values read by Faraday; all
+        # (nx+1)*(ny+1) physical nodes, including wall nodes, are checked.
+        def dx_bwd_nodes(field):
+            return ((9.0 / 8.0)
+                    * (field[g:g + ny + 1, g:g + nx + 1]
+                       - field[g:g + ny + 1, g - 1:g + nx])
+                    - (1.0 / 24.0)
+                    * (field[g:g + ny + 1, g + 1:g + nx + 2]
+                       - field[g:g + ny + 1, g - 2:g + nx - 1])) / dx
+
+        def dy_bwd_nodes(field):
+            return ((9.0 / 8.0)
+                    * (field[g:g + ny + 1, g:g + nx + 1]
+                       - field[g - 1:g + ny, g:g + nx + 1])
+                    - (1.0 / 24.0)
+                    * (field[g + 1:g + ny + 2, g:g + nx + 1]
+                       - field[g - 2:g + ny - 1, g:g + nx + 1])) / dy
+
+        divb_linf = 0.0
+        b_scale = 0.0
+        for bx_frame, by_frame in zip(bx_frames, by_frames):
+            bxp, byp = padded(bx_frame), padded(by_frame)
+            divb_linf = max(
+                divb_linf,
+                float(np.max(np.abs(dx_bwd_nodes(bxp) + dy_bwd_nodes(byp)))))
+            b_scale = max(
+                b_scale, float(np.max(np.abs(physical(bx_frame, "bx")))),
+                float(np.max(np.abs(physical(by_frame, "by")))))
+        self.assertGreater(b_scale, 0.0)
+        self.assertLess(
+            divb_linf * min(dx, dy) / b_scale, 2.0e-11,
+            msg=f"relative fourth-order div(B)={divb_linf * min(dx, dy) / b_scale:.3e}")
+
+        # Exact leapfrog invariant, control-volume weighted on each component's
+        # own Yee lattice.  At a PEC face the independent boundary B sample owns
+        # a half dual cell; ghost slots are excluded.  B^(n+1/2) is reconstructed
+        # by one Faraday update from the stored B^(n-1/2) and E^n.
+        wx = np.full(nx + 1, dx)
+        wy = np.full(ny + 1, dy)
+        wx[[0, -1]] *= 0.5
+        wy[[0, -1]] *= 0.5
+        bx_volume = np.multiply.outer(wy, np.full(nx, dx))
+        by_volume = np.multiply.outer(np.full(ny, dy), wx)
+        cell_volume = dx * dy
+
+        energies = []
+        for ez_frame, bx_frame, by_frame in zip(
+                ez_frames, bx_frames, by_frames):
+            ezp = padded(ez_frame)
+            ez = physical(ez_frame, "ez")
+            bx = physical(bx_frame, "bx")
+            by = physical(by_frame, "by")
+            dez_dy = ((9.0 / 8.0)
+                      * (ezp[g:g + ny + 1, g:g + nx]
+                         - ezp[g - 1:g + ny, g:g + nx])
+                      - (1.0 / 24.0)
+                      * (ezp[g + 1:g + ny + 2, g:g + nx]
+                         - ezp[g - 2:g + ny - 1, g:g + nx])) / dy
+            dez_dx = ((9.0 / 8.0)
+                      * (ezp[g:g + ny, g:g + nx + 1]
+                         - ezp[g:g + ny, g - 1:g + nx])
+                      - (1.0 / 24.0)
+                      * (ezp[g:g + ny, g + 1:g + nx + 2]
+                         - ezp[g:g + ny, g - 2:g + nx - 1])) / dx
+            bx_next = bx - dt * dez_dy
+            by_next = by + dt * dez_dx
+            energies.append(0.5 * (
+                cell_volume * float(np.sum(ez * ez))
+                + float(np.sum(bx_volume * bx * bx_next))
+                + float(np.sum(by_volume * by * by_next))))
+        energies = np.asarray(energies)
+        self.assertGreater(float(np.min(energies)), 0.0)
+        relative_span = float(np.ptp(energies) / np.mean(energies))
+        self.assertLess(
+            relative_span, 2.0e-10,
+            msg=f"control-volume Yee invariant drifted by {relative_span:.3e}")
 
     def test_magnetized_plasma_runs(self):
-        data = _run_example_pic("magnetized_plasma", 40)
+        data = _run_example_pic(self, "magnetized_plasma", 40)
         self.assertTrue(_all_finite(data))
         ext_bz = data["external_bz"]
         # Uniform 1 T field present in the external buffer.
         self.assertGreater(float(np.max(np.abs(ext_bz))), 0.5)
 
     def test_coil_confinement_runs(self):
-        data = _run_example_pic("coil_confinement", 40)
+        data = _run_example_pic(self, "coil_confinement", 40)
         self.assertTrue(_all_finite(data))
         ext_bz = data["external_bz"]
         self.assertGreater(float(np.max(np.abs(ext_bz))), 1.0e-4)
@@ -640,34 +1075,15 @@ def _besselj0(x: np.ndarray) -> np.ndarray:
     return out
 
 
-def _dominant_band_frequency(trace: np.ndarray, dt: float,
-                             f_lo: float, f_hi: float) -> float:
-    """Dominant FFT-peak frequency of ``trace`` within ``[f_lo, f_hi]``.
-
-    DC and the slow envelope are removed (mean subtraction + Hanning window) so
-    the peak reflects an oscillatory resonance rather than a ring-up/ring-down
-    drift; the search is restricted to a physical band so the lowest non-DC bin
-    cannot masquerade as the answer."""
-    sig = (trace - trace.mean()) * np.hanning(trace.size)
-    freqs = np.fft.rfftfreq(trace.size, d=dt)
-    amp = np.abs(np.fft.rfft(sig))
-    band = (freqs >= f_lo) & (freqs <= f_hi)
-    if not band.any():
-        raise AssertionError(
-            f"no FFT bins in band [{f_lo:.3e}, {f_hi:.3e}] Hz "
-            f"(dt={dt:.3e}, n={trace.size}, df={freqs[1] - freqs[0]:.3e})")
-    band_freqs = freqs[band]
-    return float(band_freqs[int(np.argmax(amp[band]))])
-
-
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class CylCavityTm010ExampleTest(unittest.TestCase):
     """Axisymmetric (r, z) pillbox cavity, ``examples/cyl_cavity_tm010``.
 
     Validates the cylindrical FDTD field solver: the seeded cavity must ring at
-    the analytic TM010 eigenfrequency ``f_010 = j01 c / (2 pi R)`` measured as the
-    dominant FFT peak of the near-axis axial-E time series, and the axial-E radial
-    profile must match the ``J0(j01 r/R)`` eigenmode.
+    the analytic TM010 eigenfrequency ``f_010 = j01 c / (2 pi R)`` measured from
+    the mode-amplitude recurrence, its axial-E profile must match
+    ``J0(j01 r/R)``, and the full electric/magnetic leapfrog invariant must be
+    conserved with cylindrical control-volume weights.
 
     Field-slot convention (cylindrical mode): the AXIAL E (TM010's E_z) lives in
     the solver's ``ey`` slot (grid-j is the axial z axis), mirroring the gyro
@@ -675,22 +1091,25 @@ class CylCavityTm010ExampleTest(unittest.TestCase):
     and diagnoses ``ey``, so the npz carries ``field_ey`` / ``snapshot_field_ey``.
     """
 
-    # First zero of J0 and the cavity radius (= domain lx_m); see the README.
-    J01 = 2.40483
+    # First zero of J0; the cavity radius comes from the archive metadata.
+    J01 = 2.404825557695773
     C_LIGHT = 2.99792458e8
 
-    def test_geometry_finite_bounded_and_tm010_resonance(self):
+    def test_geometry_weighted_invariant_and_tm010_resonance(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             workdir = _copy_example("cyl_cavity_tm010", Path(tmp))
-            # The deck's own dt resolves ~1 period in 1024 steps; FFT resolution
-            # needs many periods, so run ~17 periods (the run is GPU-cheap, a few
-            # seconds). cadence=4 (from the deck) gives a dense axial-E series.
-            _run_pic_cli_seeded(workdir / "input.yaml", steps=16000, seed=0)
+            deck_path = workdir / "input.yaml"
+            # Two periods are ample for a recurrence frequency estimate.  This is
+            # both sharper and much less memory-intensive than locating an FFT bin.
+            _run_pic_cli_seeded(deck_path, steps=2048, seed=0)
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
 
-            # Criterion 1/10: the cylindrical run stamps geometry into the npz.
             self.assertEqual(str(data["geometry"][0]), "cylindrical")
+            self.assertEqual(str(data["unit_system"][0]), "SI")
+            self.assertEqual(
+                tuple(str(value) for value in data["boundary_field"]),
+                ("axis", "pec", "pec", "pec"))
 
             # All field buffers finite (no NaN/Inf anywhere).
             for key in data.files:
@@ -701,68 +1120,137 @@ class CylCavityTm010ExampleTest(unittest.TestCase):
             nx = int(data["nx"][0])
             ny = int(data["ny"][0])
             nghost = int(data["nghost"][0])
+            origin_r = float(data["origin_x"][0])
+            radius = float(data["lx"][0])
+            height = float(data["ly"][0])
+            self.assertEqual(origin_r, 0.0)
+            dr, dz = radius / nx, height / ny
 
-            # Axial E (TM010 E_z) is the "ey" slot in cylindrical mode.
-            ey = data["snapshot_field_ey"]
-            times = data["snapshot_times_s"]
-            n_snap = ey.shape[0]
-            self.assertGreater(n_snap, 8, msg="too few axial-E snapshots to FFT")
+            steps = np.asarray(data["snapshot_steps"], dtype=float)
+            times = np.asarray(data["snapshot_times_s"], dtype=float)
+            self.assertGreaterEqual(times.size, 256)
+            dt_samples = np.diff(times) / np.diff(steps)
+            dt = float(np.median(dt_samples))
+            np.testing.assert_allclose(
+                dt_samples, dt, rtol=2.0e-13, atol=0.0)
 
-            # Interior (ny=z, nx=r) axial-E stack with the ghost halo stripped.
-            ey_int = np.stack([_interior_field(ey[k], nx, ny, nghost)
-                               for k in range(n_snap)])
-            self.assertTrue(np.isfinite(ey_int).all())
+            # Cylindrical component-aware views retain independent high PEC faces:
+            # axial Ez is radial-cell-centred and axial-face-located, while Bphi is
+            # face-located in both r and z.
+            ey_frames = np.stack([
+                yee_component_view(
+                    frame, nx, ny, nghost, "ey", "cylindrical",
+                    periodic_x=False, periodic_y=False)
+                for frame in data["snapshot_field_ey"]
+            ])
+            bphi_frames = np.stack([
+                yee_component_view(
+                    frame, nx, ny, nghost, "bz", "cylindrical",
+                    periodic_x=False, periodic_y=False)
+                for frame in data["snapshot_field_bz"]
+            ])
+            self.assertEqual(ey_frames.shape[1:], (ny + 1, nx))
+            self.assertEqual(bphi_frames.shape[1:], (ny + 1, nx + 1))
+            np.testing.assert_array_equal(bphi_frames[:, :, 0], 0.0)
 
-            # Field energy bounded across snapshots: a closed lossless cavity rings
-            # but must not blow up exponentially. A clean single-eigenmode ring has
-            # near-zero instantaneous energy at its sinusoid zero-crossings, so the
-            # physically meaningful bound is against the *mean* (and start) energy,
-            # not the min. max/mean ~2.0 here; 5x catches any real divergence.
-            energy = (ey_int ** 2).sum(axis=(1, 2))
-            self.assertGreater(float(energy.mean()), 0.0)
-            self.assertLess(float(energy.max()), 5.0 * float(energy.mean()),
-                            msg=f"axial-E energy unbounded: mean={energy.mean():.3e} "
-                                f"max={energy.max():.3e}")
-
-            # R from the deck domain (lx_m); analytic TM010 eigenfrequency.
-            R = 0.10
-            f010 = self.J01 * self.C_LIGHT / (2 * math.pi * R)
-
-            # Near-axis axial-E(t) trace (TM010 peaks at r=0), averaged over z to
-            # damp any higher-order axial structure. Search a physical band that
-            # brackets f010 with a healthy margin (0.5..1.6 x) so the measured value
-            # is the genuine cavity resonance, not a spectral-leakage artifact.
-            dt_snap = float(times[1] - times[0])
-            trace = ey_int[:, :, 0:4].mean(axis=(1, 2))
-            f_peak = _dominant_band_frequency(trace, dt_snap, 0.5 * f010, 1.6 * f010)
-
-            rel = abs(f_peak - f010) / f010
-            # Tolerance: the residual is 2nd-order Yee grid dispersion at 128 cells
-            # (measured ~0.5%). 8% is generous headroom but still a true physics
-            # check; do NOT tighten below what the discretization achieves.
+            # Project every Ez frame onto J0(j01*r/R) using the physical r dr dz
+            # inner product.  This simultaneously checks radial mode shape and
+            # uniformity along z; normal-E samples on each PEC endcap carry half
+            # of an axial dual cell.
+            r_centers = (np.arange(nx) + 0.5) * dr
+            radial_e_weight = r_centers * dr
+            axial_face_weight = np.full(ny + 1, dz)
+            axial_face_weight[[0, -1]] *= 0.5
+            j0_ref = _besselj0(self.J01 * r_centers / radius)
+            mode_norm = (float(np.sum(axial_face_weight))
+                         * float(np.sum(radial_e_weight * j0_ref * j0_ref)))
+            amplitudes = np.einsum(
+                "tji,j,i->t", ey_frames, axial_face_weight,
+                radial_e_weight * j0_ref) / mode_norm
+            residual = ey_frames - amplitudes[:, np.newaxis, np.newaxis] * j0_ref
+            leakage = np.sqrt(np.einsum(
+                "tji,j,i->t", residual * residual, axial_face_weight,
+                radial_e_weight) / mode_norm)
             self.assertLess(
-                rel, 0.08,
-                msg=f"cavity resonance off: measured f_peak={f_peak:.6e} Hz vs "
+                float(np.max(leakage)), 3.0e-5,
+                msg=f"TM010 weighted mode leakage reached {np.max(leakage):.3e}")
+
+            # A single standing eigenmode obeys a scalar cosine recurrence.  This
+            # estimates omega continuously (no FFT-bin error) and compares it to
+            # the analytic pillbox frequency; the remaining error is the expected
+            # second-order radial grid dispersion.
+            snapshot_dt = float(np.median(np.diff(times)))
+            middle = amplitudes[1:-1]
+            recurrence_cos = float(np.dot(
+                middle, amplitudes[:-2] + amplitudes[2:])
+                / (2.0 * np.dot(middle, middle)))
+            frequency = float(
+                np.arccos(np.clip(recurrence_cos, -1.0, 1.0))
+                / (2.0 * math.pi * snapshot_dt))
+            f010 = self.J01 * self.C_LIGHT / (2.0 * math.pi * radius)
+            rel = abs(frequency - f010) / f010
+            self.assertLess(
+                rel, 5.0e-4,
+                msg=f"cavity resonance off: measured f={frequency:.6e} Hz vs "
                     f"analytic f_010={f010:.6e} Hz (rel={rel:.3f}); a large error "
                     f"points at the cylindrical FDTD curl / on-axis closure.")
 
-            # Radial-profile correctness: the z-averaged final axial-E field must
-            # match the J0(j01 r/R) TM010 eigenmode. Fit only the amplitude (the
-            # seed sets an arbitrary scale), then check the normalized RMS residual.
-            fey = _interior_field(data["field_ey"], nx, ny, nghost)
-            profile = fey.mean(axis=0)  # mean over z -> Ez(r)
-            dr = R / nx
-            r_centers = (np.arange(nx) + 0.5) * dr
-            j0_ref = _besselj0(self.J01 * r_centers / R)
-            amp = float((profile * j0_ref).sum() / (j0_ref * j0_ref).sum())
-            resid = profile - amp * j0_ref
-            rms = math.sqrt(float((resid ** 2).mean())
-                            / float((profile ** 2).mean()))
+            # A field seeded at the electric-energy maximum t=0 must be a pure
+            # cosine in leapfrog time.  In particular, stored Bphi^{-1/2} cannot
+            # simply be zero: it must be the negative half Faraday increment.
+            # Fitting the projected mode to a*cos(omega*t)+b*sin(omega*t) detects
+            # that half-step initialization error independently of frequency and
+            # energy conservation (the wrong phase still conserves the invariant).
+            basis = np.column_stack((
+                np.cos(2.0 * math.pi * frequency * times),
+                np.sin(2.0 * math.pi * frequency * times)))
+            cosine_coefficient, sine_coefficient = np.linalg.lstsq(
+                basis, amplitudes, rcond=None)[0]
+            phase_lead = math.atan2(
+                -float(sine_coefficient), float(cosine_coefficient))
+            fitted_amplitude = math.hypot(
+                float(cosine_coefficient), float(sine_coefficient))
+            self.assertAlmostEqual(
+                fitted_amplitude, 1.0, delta=5.0e-5,
+                msg=f"TM010 fitted seed amplitude is {fitted_amplitude:.8g}, "
+                    "expected 1 V/m")
             self.assertLess(
-                rms, 0.05,
-                msg=f"axial-E radial profile does not match J0(j01 r/R): "
-                    f"RMS={rms:.4f} (fit amp={amp:.3e}); a poor match points at "
-                    f"the cylindrical radial curl weighting / on-axis closure.")
+                abs(phase_lead), 5.0e-5,
+                msg=f"TM010 seed has a {phase_lead:.6e}-rad temporal phase "
+                    "lead: initialize stored Bphi at t=-dt/2 with the negative "
+                    "half Faraday increment")
+
+            # Exact staggered Maxwell invariant in SI, omitting only the common
+            # positive factor 2*pi*eps0.  The radial quadrature is the mimetic dual
+            # volume of the cylindrical curl: r_c*dr for Ez; r_face*dr for Bphi,
+            # with a half-width outer-wall dual cell.  B^(n+1/2) is reconstructed
+            # from stored B^(n-1/2) using the same second-order Faraday difference.
+            radial_b_weight = np.arange(nx + 1, dtype=float) * dr * dr
+            radial_b_weight[-1] *= 0.5
+            e_volume = np.multiply.outer(axial_face_weight, radial_e_weight)
+            b_volume = np.multiply.outer(axial_face_weight, radial_b_weight)
+            pitch, padded_height = nx + 2 * nghost, ny + 2 * nghost
+            energy = []
+            for ey_frame, bphi, flat_ey in zip(
+                    ey_frames, bphi_frames, data["snapshot_field_ey"]):
+                padded_ey = np.asarray(flat_ey).reshape(padded_height, pitch)
+                radial_difference = (
+                    padded_ey[nghost:nghost + ny + 1,
+                              nghost + 1:nghost + nx + 1]
+                    - padded_ey[nghost:nghost + ny + 1,
+                                nghost:nghost + nx]) / dr
+                bphi_next = bphi.copy()
+                bphi_next[:, 1:] += dt * radial_difference
+                energy.append(0.5 * (
+                    float(np.sum(e_volume * ey_frame * ey_frame))
+                    + self.C_LIGHT ** 2
+                    * float(np.sum(b_volume * bphi * bphi_next))))
+            energy = np.asarray(energy)
+            self.assertGreater(float(np.min(energy)), 0.0)
+            relative_span = float(np.ptp(energy) / np.mean(energy))
+            self.assertLess(
+                relative_span, 2.0e-11,
+                msg=f"cylindrical Yee invariant drifted by {relative_span:.3e}")
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
@@ -770,14 +1258,14 @@ class CylGyroOrbitExampleTest(unittest.TestCase):
     """Electron gyro-orbit in a uniform axial B, ``examples/cyl_gyro_orbit``.
 
     Validates the cylindrical particle pusher against the textbook gyrofrequency
-    and checks that the on-axis closure injects no energy (the bunch kinetic
-    energy never grows above its seeded value)."""
+    and checks that a magnetic-only push preserves perpendicular speed and
+    kinetic energy. This full-domain quiet start does not test axis crossing."""
 
     QE = 1.602176634e-19
     ME = 9.1093837015e-31
     B = 1.0  # T, axial (B_T[1] for plane xy)
 
-    def test_finite_alive_gyrofrequency_and_no_energy_gain(self):
+    def test_finite_alive_gyrofrequency_and_energy_conservation(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             workdir = _copy_example("cyl_gyro_orbit", Path(tmp))
             # The end-of-run npz holds only the final particle state; --write-every
@@ -786,7 +1274,7 @@ class CylGyroOrbitExampleTest(unittest.TestCase):
             # the deck's 512 steps span ~13 gyro-periods, sampled every 2 steps.
             _run_pic_cli_seeded(workdir / "input.yaml", seed=0, write_every=2)
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             self.assertEqual(str(data["geometry"][0]), "cylindrical")
             for key in data.files:
                 arr = data[key]
@@ -798,22 +1286,22 @@ class CylGyroOrbitExampleTest(unittest.TestCase):
             self.assertGreater(len(frames), 16, msg="too few trajectory frames")
             vx, vy, vz, alive, ts = [], [], [], [], []
             for f in frames:
-                a = np.load(f, allow_pickle=False)
-                vx.append(a["species_electron_vx"])
-                vy.append(a["species_electron_vy"])
-                vz.append(a["species_electron_vz"])
-                alive.append(a["species_electron_alive"].astype(bool))
-                ts.append(float(a["final_time_s"][0]))
+                with np.load(f, allow_pickle=False) as a:
+                    vx.append(a["species_electron_vx"])
+                    vy.append(a["species_electron_vy"])
+                    vz.append(a["species_electron_vz"])
+                    alive.append(a["species_electron_alive"].astype(bool))
+                    ts.append(float(a["final_time_s"][0]))
             vx = np.asarray(vx)
             vy = np.asarray(vy)
             vz = np.asarray(vz)
             alive = np.asarray(alive)
             ts = np.asarray(ts)
 
-            # Particles alive and moving: the orbit sits well inside r>0 with a tiny
-            # Larmor radius, so the absorbing walls must not eat any particle.
+            # Particles alive and moving: the Larmor radius is tiny compared with
+            # the domain, so the absorbing walls must not eat any particle.
             self.assertTrue(alive.all(),
-                            msg="absorbing walls / axis closure lost particles")
+                            msg="absorbing walls lost particles")
             self.assertGreater(float(np.max(np.abs(vx))), 0.0, msg="vx all zero")
 
             wc = self.QE * self.B / self.ME  # analytic cyclotron frequency
@@ -821,8 +1309,8 @@ class CylGyroOrbitExampleTest(unittest.TestCase):
 
             # Gyrofrequency: for the axial (by) field the gyration plane is
             # (vr, vphi) = (vx, vz). FFT each particle's complex in-plane velocity
-            # vx + i vz and take the median peak across the bunch (robust to the
-            # 1 eV thermal spread). Band brackets w_c by 0.5..1.6 x.
+            # vx + i vz and take the median peak across the bunch. Band brackets
+            # w_c by 0.5..1.6 x.
             freqs = np.fft.fftfreq(ts.size, d=dt_snap)
             win = np.hanning(ts.size)
             f_lo, f_hi = 0.5 * wc / (2 * math.pi), 1.6 * wc / (2 * math.pi)
@@ -843,28 +1331,24 @@ class CylGyroOrbitExampleTest(unittest.TestCase):
                     f"analytic w_c={wc:.6e} rad/s (rel={rel:.3f}); a large error "
                     f"points at the cylindrical pusher's rotation term.")
 
-            # Larmor radius from the measured perpendicular speed of the
-            # fastest-perp particle (drift + thermal): r_L = m v_perp/(|q|B).
+            # With zero temperature every particle starts at the same transverse
+            # speed. A magnetic-only Boris push must preserve that speed, hence
+            # the inferred analytic Larmor scale r_L = m v_perp/(|q|B).
             vperp = np.sqrt(vx ** 2 + vz ** 2)
-            p = int(np.argmax(vperp[0]))
-            r_L = self.ME * float(vperp[:, p].mean()) / (self.QE * self.B)
-            self.assertGreater(r_L, 0.0)
-            # Sanity: the orbit radius is microscopic vs the 0.10 m domain, so the
-            # guiding centre never reaches a wall.
-            self.assertLess(r_L, 1.0e-4,
-                            msg=f"Larmor radius {r_L:.3e} m implausibly large")
+            np.testing.assert_allclose(vperp, 5.93e5, rtol=1.0e-8, atol=1.0e-6)
+            r_L = self.ME * float(vperp.mean()) / (self.QE * self.B)
+            expected_r_L = self.ME * 5.93e5 / (self.QE * self.B)
+            self.assertAlmostEqual(r_L / expected_r_L, 1.0, delta=1.0e-8)
 
-            # No spurious energy gain (criterion 8 / on-axis heating): the total
-            # bunch kinetic energy must never grow above its seeded value. (A real
-            # plasma cools numerically here; the physics bug we guard against is
-            # *heating*, especially as guiding centres approach r=0.)
+            # Zero-macro-weight test particles deposit no self-field, so the
+            # uniform magnetic field must preserve their total kinetic energy.
             ke = 0.5 * self.ME * (vx ** 2 + vy ** 2 + vz ** 2).sum(axis=1)
             ke0 = float(ke[0])
             self.assertGreater(ke0, 0.0)
             self.assertLess(
                 float(ke.max()) / ke0, 1.10,
                 msg=f"bunch KE grew above seed: max/KE0={ke.max() / ke0:.3f} "
-                    f"(no-energy-gain near axis violated).")
+                    f"(magnetic-only energy conservation violated).")
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
@@ -876,7 +1360,7 @@ class PicGeometryMetadataTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             workdir = _copy_example("cyl_gyro_orbit", Path(tmp))
             _run_pic_cli_seeded(workdir / "input.yaml", steps=4, seed=0)
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             self.assertEqual(str(data["geometry"][0]), "cylindrical")
 
     def test_cartesian_deck_stamps_cartesian(self):
@@ -884,7 +1368,7 @@ class PicGeometryMetadataTest(unittest.TestCase):
             # The minimal SI deck is Cartesian by default (no geometry key).
             deck = _write_deck(Path(tmp) / "case", _MINIMAL_PIC_DECK)
             _run_pic_cli(deck, steps=4)
-            data = np.load(deck.parent / "out.npz", allow_pickle=False)
+            data = _load_npz(self, deck.parent / "out.npz")
             self.assertEqual(str(data["geometry"][0]), "cartesian")
 
 
@@ -900,7 +1384,7 @@ class PicRunSmokeTest(unittest.TestCase):
 
             out = deck.parent / "out.npz"
             self.assertTrue(out.exists(), msg="no out.npz produced")
-            data = np.load(out, allow_pickle=False)
+            data = _load_npz(self, out)
 
             for key in data.files:
                 arr = data[key]
@@ -932,7 +1416,7 @@ class PicCliDiagnosticsTest(unittest.TestCase):
             self.assertEqual(res.returncode, 0,
                              msg=f"cli failed:\n{res.stdout}\n{res.stderr}")
 
-            data = np.load(deck.parent / "out.npz", allow_pickle=False)
+            data = _load_npz(self, deck.parent / "out.npz")
             series_keys = [k for k in data.files if k.startswith("series_")]
             self.assertIn("series_step", series_keys)
             # log-every=2 over 8 steps records at 2,4,6,8 -> 4 samples.
@@ -945,7 +1429,8 @@ class PicCliDiagnosticsTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Ideal-MHD example cases (high-order, mp7 reconstruction).
+# Ideal-MHD example cases (Cartesian cases use high-order MP7; the cylindrical
+# square-toroid case uses the supported second-order MUSCL reconstruction).
 #
 # The MHD CLI is ``python -m quasar.mhd.cli run <input.yaml>`` and writes an
 # ``out.npz`` whose keys are:
@@ -966,10 +1451,9 @@ class PicCliDiagnosticsTest(unittest.TestCase):
 #   * Each deck lives at ``examples/<case>/input.yaml`` with a ``README.md``.
 #   * ``diagnostics.output_path`` MUST be ``out.npz`` (relative to the deck dir),
 #     mirroring every other example, so the loader below finds it.
-#   * The deck's ``time`` runs to the canonical output time / step count for that
-#     problem; the tests below read whatever final state the deck produces and
-#     check structure, so a deck author sets ``time`` to the standard reference
-#     time (documented per-case in the README).
+#   * The deck's ``time`` runs to its documented validation window. Some robust
+#     smoke decks stop before the canonical late-time reference when that state
+#     is not resolved at the shipped grid size.
 #   * ``state_*`` arrays are cell-centered, flattened either as 1D (nx for a
 #     degenerate ny=1 run) or row-major (ny, nx); the reshape helper below copes
 #     with both. ``nx``, ``ny``, ``nghost``, ``gamma`` are scalars stored as
@@ -983,8 +1467,9 @@ class PicCliDiagnosticsTest(unittest.TestCase):
 #     For an exactly-advected smooth wave the analytic final state equals the
 #     initial state (one full period / integer wavelength shift), so the test
 #     uses the deck's own seeded profile recomputed analytically as the
-#     reference. The README must state the wavelength, output time, and that the
-#     output time corresponds to an integer number of wave periods.
+#     reference. The README must state the wavelength, output time, that the
+#     output time corresponds to an integer number of wave periods, and that a
+#     fixed-CFL space-time refinement is ultimately limited by SSPRK3's order.
 
 
 def _run_mhd_cli(yaml_path: Path) -> None:
@@ -1052,7 +1537,7 @@ class BrioWuExampleTest(unittest.TestCase):
             workdir = _copy_example("brio_wu", Path(tmp))
             _run_mhd_cli(workdir / "input.yaml")
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             _mhd_no_nans(self, data)
 
             nx = int(_mhd_scalar(data, "nx"))
@@ -1130,7 +1615,7 @@ class MhdLinearWaveConvergenceTest(unittest.TestCase):
         deck.write_text(text)
 
         _run_mhd_cli(deck)
-        data = np.load(workdir / "out.npz", allow_pickle=False)
+        data = _load_npz(self, workdir / "out.npz")
         _mhd_no_nans(self, data)
         rnx = int(_mhd_scalar(data, "nx"))
         rny = int(_mhd_scalar(data, "ny"))
@@ -1149,17 +1634,16 @@ class MhdLinearWaveConvergenceTest(unittest.TestCase):
     def test_smooth_wave_converges_against_exact_solution(self):
         with tempfile.TemporaryDirectory() as tmp:
             # Both runs end at t = dt*steps = 1.0 (one period). Halving dt with
-            # the grid keeps the run CFL-stable and isolates discretization error.
-            # The fixed dt must stay under the (additive, multidimensional) CFL
-            # limit at the coarse resolution: for this CP-Alfven seed the nx=32
-            # limit is ~4.5e-3, so 1/256 (~3.9e-3) is stable and 1/512 halves it
-            # with the grid refinement.
+            # the grid keeps dt/dx fixed and measures the coupled space-time
+            # discretization error. The corrected multidimensional CFL bound is
+            # additive across incident faces: at nx=32 this seed permits about
+            # 3.004628e-3, so 1/384 is stable (whereas 1/256 is not).
             coarse = _copy_example("mhd_linear_wave", Path(tmp) / "coarse")
-            e_coarse = self._l1_error_vs_seed(coarse, nx=32, dt=1.0 / 256,
-                                              steps=256)
+            e_coarse = self._l1_error_vs_seed(coarse, nx=32, dt=1.0 / 384,
+                                              steps=384)
 
             fine = _copy_example("mhd_linear_wave", Path(tmp) / "fine")
-            e_fine = self._l1_error_vs_seed(fine, nx=64, dt=1.0 / 512, steps=512)
+            e_fine = self._l1_error_vs_seed(fine, nx=64, dt=1.0 / 768, steps=768)
 
             self.assertGreater(e_coarse, 0.0, msg="coarse error vanished")
             self.assertGreater(e_fine, 0.0, msg="fine error vanished")
@@ -1168,6 +1652,12 @@ class MhdLinearWaveConvergenceTest(unittest.TestCase):
                                 f"{e_coarse:.3e} -> {e_fine:.3e}")
 
             rate = math.log(e_coarse / e_fine) / math.log(2.0)
+            print(
+                "mhd_linear_wave convergence: "
+                f"L1(coarse)={e_coarse:.17e}, "
+                f"L1(fine)={e_fine:.17e}, rate={rate:.12f}",
+                flush=True,
+            )
             self.assertGreater(
                 rate, 1.5,
                 msg=f"convergence rate {rate:.2f} too low for a smooth wave "
@@ -1192,14 +1682,15 @@ class OrszagTangExampleTest(unittest.TestCase):
     sums against the analytic seed integrals only loosely (structure only). To
     keep the conservation check meaningful, Task 3.12's deck SHOULD emit the
     initial totals (e.g. ``mass_initial``, ``energy_initial`` scalars) OR a step-0
-    snapshot; the README must document the output time (the canonical t = 0.5)."""
+    snapshot; the README documents both the shipped early-time window and the
+    canonical late-time reference."""
 
     def test_conservation_and_structure(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = _copy_example("orszag_tang", Path(tmp))
             _run_mhd_cli(workdir / "input.yaml")
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             _mhd_no_nans(self, data)
 
             self.assertAlmostEqual(_mhd_scalar(data, "gamma"), 5.0 / 3.0,
@@ -1286,7 +1777,7 @@ class MhdBlastExampleTest(unittest.TestCase):
             workdir = _copy_example("mhd_blast", Path(tmp))
             _run_mhd_cli(workdir / "input.yaml")
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             _mhd_no_nans(self, data)
 
             nx = int(_mhd_scalar(data, "nx"))
@@ -1356,7 +1847,7 @@ class MhdRotorExampleTest(unittest.TestCase):
             workdir = _copy_example("mhd_rotor", Path(tmp))
             _run_mhd_cli(workdir / "input.yaml")
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             _mhd_no_nans(self, data)
 
             nx = int(_mhd_scalar(data, "nx"))
@@ -1447,7 +1938,7 @@ class MhdGuideFieldExampleTest(unittest.TestCase):
             workdir = _copy_example("mhd_guide_field", Path(tmp))
             _run_mhd_cli(workdir / "input.yaml")
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
 
             # (1) Runs end-to-end; output has no NaNs/Infs anywhere.
             _mhd_no_nans(self, data)
@@ -1524,6 +2015,34 @@ class MhdGuideFieldExampleTest(unittest.TestCase):
                         f"mean(state_bx) ~ B0 (see class docstring).")
 
 
+class SquareToroidMhdDeckTest(unittest.TestCase):
+    """The shipped annular deck and its padded coil grid stay synchronized."""
+
+    def test_cylindrical_example_uses_supported_muscl_halo(self):
+        import yaml
+
+        example = REPO_ROOT / "examples" / "square_toroid_mhd"
+        with (example / "input.yaml").open() as fh:
+            mhd_deck = yaml.safe_load(fh)
+        with (example / "coil.yaml").open() as fh:
+            coil_deck = yaml.safe_load(fh)
+
+        self.assertEqual(mhd_deck["geometry"], "cylindrical")
+        self.assertEqual(
+            mhd_deck["numerics"]["reconstruction"], "muscl_minmod")
+        # This 90%-bore box is an artificial crop through a coil field with
+        # nonzero normal component, not an impermeable conducting surface.
+        # Keep the fluid and perturbation-field models consistently open.
+        self.assertEqual(mhd_deck["boundary"]["fluid"], ["outflow"] * 4)
+        self.assertEqual(mhd_deck["boundary"]["field"], ["outflow"] * 4)
+        nx = int(mhd_deck["domain"]["nx"])
+        ny = int(mhd_deck["domain"]["ny"])
+        # MUSCL requires two ghost cells on each side; the vector-potential
+        # observation is the corresponding corner grid (one extra node).
+        self.assertEqual(
+            coil_deck["observation"]["resolution"], [nx + 5, 1, ny + 5])
+
+
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class SquareToroidMhdExampleTest(unittest.TestCase):
     """Coil-seeded ideal-MHD in a square-toroid bore, ``examples/square_toroid_mhd``
@@ -1543,12 +2062,8 @@ class SquareToroidMhdExampleTest(unittest.TestCase):
       * The toroidal guide field bz ~ 0.1 is carried.
       * The plasma responds to the field-split background: the in-plane
         perturbation grows from zero (showing B0 exerts a real Lorentz force).
-      * The final div(B) diagnostic is finite. We do NOT assert it at round-off:
-        like the guide-field example, ``divergence_b_max`` ghost-fills with the
-        open BC before measuring, so the boundary ring of the perturbation against
-        the static B0 edge shows a nonzero divB there. That ring is a measurement
-        artifact -- it does not propagate inward (the CT update keeps the strict
-        interior div(b) at round-off) and the outflow boundary lets b leave."""
+      * The annular CT curl and ring divergence remain a mimetic pair, so the
+        final div(B) diagnostic stays at round-off, including the boundary ring."""
 
     def test_end_to_end_field_split_coil_background(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1560,8 +2075,11 @@ class SquareToroidMhdExampleTest(unittest.TestCase):
             # Stage 2: MHD run (reads coil.npz via background_field.a_file).
             _run_mhd_cli(workdir / "input.yaml")
 
-            data = np.load(workdir / "out.npz", allow_pickle=False)
+            data = _load_npz(self, workdir / "out.npz")
             _mhd_no_nans(self, data)
+            self.assertEqual(str(np.asarray(data["geometry"]).reshape(-1)[0]),
+                             "cylindrical")
+            self.assertEqual(str(np.asarray(data["units"]).reshape(-1)[0]), "SI")
 
             # Seeded div(B) at round-off (field-split: b == 0, B0 = curl A).
             divb_seed = float(np.asarray(data["divb_linf"]).reshape(-1)[0])
@@ -1587,10 +2105,10 @@ class SquareToroidMhdExampleTest(unittest.TestCase):
             self.assertGreater(bpol, 0.0,
                                msg="in-plane perturbation never grew (no B0 force?)")
 
-            # Final div(B) diagnostic is finite (boundary-ring artifact tolerated).
+            # Annular CT preserves the matching ring-divergence at round-off.
             divb_final = _mhd_scalar(data, "divb_linf_final")
-            self.assertTrue(np.isfinite(divb_final),
-                            msg=f"divb_linf_final not finite: {divb_final}")
+            self.assertLess(divb_final, _DIVB_EPS,
+                            msg=f"final div(B) {divb_final} not at round-off")
 
 
 if __name__ == "__main__":

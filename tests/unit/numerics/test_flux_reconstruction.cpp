@@ -1,4 +1,4 @@
-// RED-phase tests for the high-order ideal-MHD flux reconstruction schemes.
+// Accuracy and invariants of the ideal-MHD flux reconstruction schemes.
 //
 // Targets the contract in include/quasar/numerics/flux_reconstruction.hpp:
 //
@@ -24,17 +24,16 @@
 // cells (i-1,j) and (i,j): state_left is the right-biased extrapolation from the
 // left cell, state_right the left-biased extrapolation from the right cell.
 //
-// WHY THESE FAIL NOW (RED): the device reconstruction path currently runs only
-// 2nd-order MUSCL and ignores the requested scheme order, so:
-//   * the mp5/mp7 convergence-order probes do not reach 5th/7th order, and
-//   * an "mp7" deck produces interface states bit-identical (to ~2nd order) to a
-//     "muscl_minmod" deck, so the HighOrderPathIsNotSilentlyDowngraded assertion
-//     (max |mp7 - muscl| > 1e-8) fails. That distinguishability check is the key
-//     RED assertion: it proves the high-order path is genuinely running.
+// The evolved state is a finite-volume cell average.  The accuracy probes seed
+// exact analytic cell averages and check both reconstructed faces and the
+// conservative face-flux difference; the latter prevents point-sample Lagrange
+// coefficients from masquerading as a high-order finite-volume method.
 
 #include "quasar/numerics/flux_reconstruction.hpp"
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/physics/mhd/kernels.hpp"
+#include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/registry.hpp"
@@ -44,6 +43,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,6 +54,7 @@ using quasar::Grid2D;
 using quasar::Real;
 using quasar::numerics::IFluxReconstruction;
 using quasar::numerics::MhdInterfaceStates;
+using quasar::numerics::MhdPrim;
 using quasar::numerics::MhdState;
 
 constexpr Real kPi = static_cast<Real>(3.14159265358979323846);
@@ -63,23 +64,27 @@ std::unique_ptr<IFluxReconstruction> make_scheme(const std::string& name) {
   return quasar::Registry<IFluxReconstruction>::instance().create(name);
 }
 
-// Smooth analytic profiles in x. Density, pressure, the transverse/out-of-plane
-// magnetic components, and the velocity are all nonzero and smooth so that the
-// conserved-to-primitive map and the characteristic eigensystem are well defined.
-Real smooth_rho(Real x) { return Real{2} + Real{0.5} * std::sin(Real{2} * kPi * x); }
-Real smooth_p(Real x) { return Real{3} + Real{0.4} * std::cos(Real{2} * kPi * x); }
-Real smooth_vx(Real x) { return Real{0.3} + Real{0.1} * std::sin(Real{2} * kPi * x); }
-Real smooth_by(Real x) { return Real{0.2} + Real{0.15} * std::cos(Real{2} * kPi * x); }
-Real smooth_bz(Real x) { return Real{0.1} + Real{0.05} * std::sin(Real{4} * kPi * x); }
-
-// Seed a smooth conserved field whose structure varies only in x. The in-plane
-// normal field Bx is seeded UNIFORM (kBxUniform) on the staggered bx_face storage
-// so that the constrained-transport interface normal-B (the average of the two
-// adjacent face samples) equals kBxUniform exactly at every interface; that lets
-// the normal-B passthrough assertion pin to round-off independent of how the
-// scheme samples the face. The transverse By and out-of-plane Bz carry smooth
-// structure so they exercise the full reconstruction path.
+// A smooth entropy wave in x.  Velocity, pressure, and magnetic field are
+// constant while density varies sinusoidally, so every conserved component is
+// either constant or linear in rho. Exact finite-volume cell averages are then
+// available analytically and the nonlinear primitive transform cannot pollute
+// the measured spatial order.
 constexpr Real kBxUniform = Real{0.7};
+constexpr Real kByUniform = Real{0.2};
+constexpr Real kBzUniform = Real{0.1};
+constexpr Real kPressure = Real{3};
+constexpr Real kVx = Real{0.35};
+
+Real smooth_rho(Real x) {
+  return Real{2} + Real{0.5} * std::sin(Real{2} * kPi * x);
+}
+
+Real smooth_rho_average(Real x_center, Real dx) {
+  const Real q = kPi * dx;
+  const Real sinc = (q == Real{0}) ? Real{1} : std::sin(q) / q;
+  return Real{2} + Real{0.5} * sinc
+      * std::sin(Real{2} * kPi * x_center);
+}
 
 void seed_smooth_field(quasar::mhd::MhdField2D<Real>& u, const Grid2D& g, Real gamma) {
   const std::size_t n = g.storage_size();
@@ -89,20 +94,19 @@ void seed_smooth_field(quasar::mhd::MhdField2D<Real>& u, const Grid2D& g, Real g
   for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
     for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
       const Real x = g.x_at_cell_center(i);
-      const Real r = smooth_rho(x);
-      const Real p = smooth_p(x);
-      const Real vx = smooth_vx(x);
-      const Real by = smooth_by(x);
-      const Real bz = smooth_bz(x);
+      const Real r = smooth_rho_average(x, g.dx());
       const std::size_t k = g.index(i, j);
       rho[k] = r;
-      mx[k] = r * vx;
+      mx[k] = r * kVx;
       my[k] = Real{0};
       mz[k] = Real{0};
-      byf[k] = by;
-      bzc[k] = bz;
-      const Real mag = Real{0.5} * (kBxUniform * kBxUniform + by * by + bz * bz);
-      en[k] = p / (gamma - Real{1}) + Real{0.5} * r * vx * vx + mag;
+      byf[k] = kByUniform;
+      bzc[k] = kBzUniform;
+      const Real mag = Real{0.5} * (kBxUniform * kBxUniform
+                                    + kByUniform * kByUniform
+                                    + kBzUniform * kBzUniform);
+      en[k] = kPressure / (gamma - Real{1})
+            + Real{0.5} * r * kVx * kVx + mag;
     }
   }
   u.rho.copy_from_host(rho.data(), rho.size());
@@ -149,6 +153,46 @@ Real observed_order(const std::string& name, int nx_coarse, int nx_fine, Real ga
   const Real e_fine = interface_rho_l1(name, nx_fine, gamma);
   if (!(std::isfinite(e_coarse) && std::isfinite(e_fine)) ||
       e_coarse <= Real{0} || e_fine <= Real{0}) {
+    return Real{-1};
+  }
+  return std::log2(e_coarse / e_fine);
+}
+
+// L1 error of the actual finite-volume density residual for positive constant
+// advection velocity.  HLLD resolves this entropy wave with the upwind left
+// density, so -v*(rho^L_{i+1/2}-rho^L_{i-1/2})/dx is the numerical residual.
+// The exact cell-average residual is the same face difference using analytic
+// rho(x_face). Point-value coefficients fed these cell averages remain O(dx^2)
+// here, even if a separate interface interpolation experiment looks high order.
+Real residual_rho_l1(const std::string& name, int nx, Real gamma) {
+  const int nghost = 4;
+  Grid2D g{nx, 4, Real{1}, Real{1}, Real{0}, Real{0}, nghost};
+  quasar::mhd::MhdField2D<Real> u{g};
+  seed_smooth_field(u, g, gamma);
+
+  auto scheme = make_scheme(name);
+  MhdInterfaceStates<Real> out{g, /*dir=*/0};
+  scheme->reconstruct_faces(u, /*dir=*/0, out, gamma);
+
+  Real sum = Real{0};
+  const int j = g.ny / 2;
+  for (int i = 0; i < g.nx; ++i) {
+    const Real numerical = -kVx
+        * (out.state_left(i + 1, j).rho - out.state_left(i, j).rho) / g.dx();
+    const Real x_lo = g.origin_x + static_cast<Real>(i) * g.dx();
+    const Real x_hi = x_lo + g.dx();
+    const Real exact = -kVx * (smooth_rho(x_hi) - smooth_rho(x_lo)) / g.dx();
+    sum += std::abs(numerical - exact);
+  }
+  return sum / static_cast<Real>(g.nx);
+}
+
+Real observed_residual_order(const std::string& name, int nx_coarse, int nx_fine,
+                             Real gamma) {
+  const Real e_coarse = residual_rho_l1(name, nx_coarse, gamma);
+  const Real e_fine = residual_rho_l1(name, nx_fine, gamma);
+  if (!(std::isfinite(e_coarse) && std::isfinite(e_fine))
+      || e_coarse <= Real{0} || e_fine <= Real{0}) {
     return Real{-1};
   }
   return std::log2(e_coarse / e_fine);
@@ -206,6 +250,137 @@ TEST(MhdFluxReconstruction, EverySchemeRunsAndProducesFiniteStates) {
   }
 }
 
+// A componentwise primitive MUSCL state is not automatically range-admissible.
+// These three source cells are individually finite with positive pressure, but
+// the central cell's left-face extrapolation combines rho ~= 0.5e100 with
+// vx ~= -1.5*sqrt(3.3e208).  Its kinetic energy is about 1.856e308, just beyond
+// binary64, even though the central cell's own kinetic energy is 1.65e308.
+// Reconstruction must discard that overflowing face and return the exact
+// adjacent piecewise-constant cell, rather than feeding Inf to HLLD.
+TEST(MhdFluxReconstruction, MusclExtremeFaceFallsBackToAdjacentCell) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  Grid2D g{8, 2, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/2};
+  const std::size_t n = g.storage_size();
+  constexpr Real internal_energy = Real{1e300};
+  const Real p = (kGamma - Real{1}) * internal_energy;
+  const Real velocity_scale = std::sqrt(Real{3.3e208});
+
+  const MhdState left = quasar::numerics::to_conserved(
+      MhdPrim{Real{1}, -Real{2} * velocity_scale, Real{0}, Real{0}, p,
+              Real{0}, Real{0}, Real{0}}, kGamma);
+  const MhdState center = quasar::numerics::to_conserved(
+      MhdPrim{Real{1e100}, -velocity_scale, Real{0}, Real{0}, p,
+              Real{0}, Real{0}, Real{0}}, kGamma);
+  const MhdState right = quasar::numerics::to_conserved(
+      MhdPrim{Real{2e100}, Real{0}, Real{0}, Real{0}, p,
+              Real{0}, Real{0}, Real{0}}, kGamma);
+
+  for (const MhdState* source : {&left, &center, &right}) {
+    EXPECT_TRUE(std::isfinite(source->rho));
+    EXPECT_TRUE(std::isfinite(source->mx));
+    EXPECT_TRUE(std::isfinite(source->energy));
+    EXPECT_GT(quasar::numerics::pressure(*source, kGamma), Real{0});
+  }
+  EXPECT_TRUE(std::isinf(quasar::numerics::kinetic_from_velocity(
+      Real{0.5e100}, -Real{1.5} * velocity_scale, Real{0}, Real{0})))
+      << "test setup no longer overflows the unlimited face kinetic energy";
+
+  std::vector<Real> rho(n, right.rho), mx(n, right.mx), my(n, Real{0});
+  std::vector<Real> mz(n, Real{0}), en(n, right.energy);
+  std::vector<Real> bxf(n, Real{0}), byf(n, Real{0}), bzc(n, Real{0});
+  const auto store = [&](int i, int j, const MhdState& s) {
+    const std::size_t k = g.index(i, j);
+    rho[k] = s.rho;
+    mx[k] = s.mx;
+    my[k] = s.my;
+    mz[k] = s.mz;
+    en[k] = s.energy;
+  };
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    store(/*i=*/2, j, left);
+    store(/*i=*/3, j, center);
+    store(/*i=*/4, j, right);
+  }
+
+  quasar::mhd::MhdField2D<Real> u{g};
+  u.rho.copy_from_host(rho.data(), n);
+  u.mx.copy_from_host(mx.data(), n);
+  u.my.copy_from_host(my.data(), n);
+  u.mz.copy_from_host(mz.data(), n);
+  u.energy.copy_from_host(en.data(), n);
+  u.bx_face.copy_from_host(bxf.data(), n);
+  u.by_face.copy_from_host(byf.data(), n);
+  u.bz_cell.copy_from_host(bzc.data(), n);
+
+  MhdInterfaceStates<Real> out{g, /*dir=*/0};
+  make_scheme("muscl_minmod")->reconstruct_faces(u, /*dir=*/0, out, kGamma);
+
+  // Face i=3 lies between the left cell i=2 and the central cell i=3; its
+  // RIGHT state is the troubled extrapolation from the central cell.
+  const MhdState recovered = out.state_right(/*i=*/3, /*j=*/0);
+  EXPECT_EQ(recovered.rho, center.rho);
+  EXPECT_EQ(recovered.mx, center.mx);
+  EXPECT_EQ(recovered.my, center.my);
+  EXPECT_EQ(recovered.mz, center.mz);
+  EXPECT_EQ(recovered.energy, center.energy);
+  EXPECT_EQ(recovered.bx, center.bx);
+  EXPECT_EQ(recovered.by, center.by);
+  EXPECT_EQ(recovered.bz, center.bz);
+  EXPECT_GT(quasar::numerics::pressure(recovered, kGamma), Real{0});
+}
+
+// When even the adjacent-cell fallback cannot be normalized to the exact CT
+// face in binary64, reconstruction must return its explicit rejection token.
+// Here the two bounding faces cancel in each low-order cell average, so both
+// source cells have Bx=0 and positive pressure, while the shared interface face
+// itself is DBL_MAX and its magnetic energy is unrepresentable.
+TEST(MhdFluxReconstruction, UnrepresentableCtFaceEmitsDeterministicSentinel) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  Grid2D g{6, 2, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/2};
+  const std::size_t n = g.storage_size();
+  constexpr Real rho0 = Real{1};
+  constexpr Real p0 = Real{1};
+  constexpr Real energy0 = p0 / (kGamma - Real{1});
+  const Real huge = std::numeric_limits<Real>::max();
+
+  std::vector<Real> rho(n, rho0), zero(n, Real{0}), energy(n, energy0);
+  std::vector<Real> bx(n, -huge);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    // Face i=2 is shared by cells 1 and 2.  Each cell's low-order average is
+    // 0.5*(-huge)+0.5*huge or its exact reverse, hence zero.
+    bx[g.index(/*i=*/2, j)] = huge;
+  }
+
+  quasar::mhd::MhdField2D<Real> u{g};
+  u.rho.copy_from_host(rho.data(), n);
+  u.mx.copy_from_host(zero.data(), n);
+  u.my.copy_from_host(zero.data(), n);
+  u.mz.copy_from_host(zero.data(), n);
+  u.energy.copy_from_host(energy.data(), n);
+  u.bx_face.copy_from_host(bx.data(), n);
+  u.by_face.copy_from_host(zero.data(), n);
+  u.bz_cell.copy_from_host(zero.data(), n);
+
+  const quasar::mhd::MhdBackgroundField<Real> background{};
+  const quasar::mhd::BoundaryFlags4 flags{};
+  MhdInterfaceStates<Real> out{g, /*dir=*/0};
+  quasar::mhd::launch_mhd_reconstruct(
+      u, background, /*dir=*/0, out, /*scheme_order=*/1, flags, kGamma,
+      /*stream=*/nullptr);
+  quasar::backend::device_synchronize(nullptr);
+
+  const MhdState left = out.state_left(/*i=*/2, /*j=*/0);
+  const MhdState right = out.state_right(/*i=*/2, /*j=*/0);
+  for (const MhdState* state : {&left, &right}) {
+    for (const Real component : {state->rho, state->mx, state->my, state->mz,
+                                 state->energy, state->bx, state->by, state->bz}) {
+      EXPECT_TRUE(std::isnan(component));
+    }
+  }
+}
+
 // ---- convergence order on a smooth profile --------------------------------
 
 // muscl_minmod is ~2nd order on a smooth profile.
@@ -216,8 +391,7 @@ TEST(MhdFluxReconstruction, MusclConvergesAtSecondOrderOnSmoothProfile) {
   EXPECT_GT(order, Real{2.0} - Real{0.7}) << "observed order " << order << " (design 2)";
 }
 
-// mp5 reaches ~5th order. With the current 2nd-order-only device path this stays
-// near 2 and fails.
+// MP5 reaches its fifth-order finite-volume face accuracy.
 TEST(MhdFluxReconstruction, Mp5ConvergesAtFifthOrderOnSmoothProfile) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
   const Real order = observed_order("mp5", 32, 64, kGamma);
@@ -225,8 +399,7 @@ TEST(MhdFluxReconstruction, Mp5ConvergesAtFifthOrderOnSmoothProfile) {
   EXPECT_GT(order, Real{5.0} - Real{0.7}) << "observed order " << order << " (design 5)";
 }
 
-// mp7 reaches ~7th order. With the current 2nd-order-only device path this stays
-// near 2 and fails.
+// MP7 reaches its seventh-order finite-volume face accuracy.
 TEST(MhdFluxReconstruction, Mp7ConvergesAtSeventhOrderOnSmoothProfile) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
   const Real order = observed_order("mp7", 32, 64, kGamma);
@@ -234,7 +407,21 @@ TEST(MhdFluxReconstruction, Mp7ConvergesAtSeventhOrderOnSmoothProfile) {
   EXPECT_GT(order, Real{7.0} - Real{0.7}) << "observed order " << order << " (design 7)";
 }
 
-// ---- KEY RED ASSERTION: high-order path is genuinely running ---------------
+TEST(MhdFluxReconstruction, Mp5ConservativeResidualConvergesAtFifthOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const Real order = observed_residual_order("mp5", 32, 64, kGamma);
+  ASSERT_GT(order, Real{0}) << "error sequence not usable (order=" << order << ")";
+  EXPECT_GT(order, Real{4.3}) << "observed conservative residual order " << order;
+}
+
+TEST(MhdFluxReconstruction, Mp7ConservativeResidualConvergesAtSeventhOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const Real order = observed_residual_order("mp7", 24, 48, kGamma);
+  ASSERT_GT(order, Real{0}) << "error sequence not usable (order=" << order << ")";
+  EXPECT_GT(order, Real{6.0}) << "observed conservative residual order " << order;
+}
+
+// ---- high-order device path is genuinely running --------------------------
 
 // At a fixed resolution the interface states from an "mp7" deck must differ
 // MEASURABLY from a "muscl_minmod" deck on the same smooth field. If the device
@@ -314,11 +501,11 @@ TEST(MhdFluxReconstruction, NormalByEqualsCtFaceValueDir1) {
     for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
       for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
         const Real y = g.y_at_cell_center(j);
-        const Real r = smooth_rho(y);
-        const Real p = smooth_p(y);
-        const Real vy = smooth_vx(y);
-        const Real bx = smooth_by(y);
-        const Real bz = smooth_bz(y);
+        const Real r = smooth_rho_average(y, g.dy());
+        const Real p = kPressure;
+        const Real vy = kVx;
+        const Real bx = kByUniform;
+        const Real bz = kBzUniform;
         const std::size_t k = g.index(i, j);
         rho[k] = r;
         my[k] = r * vy;

@@ -18,12 +18,15 @@
 namespace quasar::mhd {
 
 void MhdGeometricSource::add(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
-                             const Grid2D& grid, Real gamma) {
+                             const MhdBackgroundField<Real>& b0,
+                             const Grid2D& grid, Real gamma,
+                             int collocation_order) {
   // Accumulate S(u) into dudt on the default stream. The kernel reads the radius
   // from the passed grid (r = grid.r_at_cell_center(i)) and applies the on-axis
-  // guard internally; the solver synchronizes the default stream after the
-  // residual is assembled, so no explicit sync is needed here.
-  launch_mhd_geometric_source(u, dudt, grid, gamma, /*stream=*/nullptr);
+  // guard internally. Like the other launch wrappers this is asynchronous; a
+  // standalone caller synchronizes before reading the accumulated result.
+  launch_mhd_geometric_source(u, dudt, b0, grid, gamma, /*stream=*/nullptr,
+                              collocation_order);
 }
 
 }  // namespace quasar::mhd

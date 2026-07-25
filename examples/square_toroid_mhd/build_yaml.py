@@ -7,23 +7,24 @@ Coordinate mapping (same poloidal cut as examples/square_toroid_pic_1m):
   MHD x = lab X = major radius R,  MHD y = lab Z (cross-section vertical),
   out-of-plane = lab Y, along which the toroidal guide field Bz points.
 
-Why field-split: the constrained-transport solver freezes the discrete div(B) at
-its seeded value, and no open boundary condition can reproduce the exterior coil
-field -- so seeding the coil field into the evolving STATE corrupts div(B) at the
-boundary ring and floods inward. Instead the static, curl-free coil field is a
-field-split background B0 (B = B0 + b): B0 is never ghost-refilled, and the
-evolving perturbation b starts at zero (div(b) = 0 exactly, forever). The
-toroidal guide field is a uniform out-of-plane bz in the state.
+Why field-split: the non-uniform coil field is supplied on the full padded grid
+as a static background B0 (B = B0 + b), so it is never replaced by a generic
+boundary extrapolation. The evolving perturbation b starts at zero and is
+advanced by constrained transport. The 90%-bore box is an artificial crop
+through the vacuum field, not a conducting surface: the coil field has nonzero
+normal component there, so both fluid and perturbation-field boundaries are
+open. The toroidal guide field is a uniform out-of-plane bz in the state.
 
 Two synced decks are emitted:
 
-  * ``coil.yaml`` — the square-toroid current sheets + TF coils sampled on the
+  * ``coil.yaml`` — the axisymmetric square-toroid current sheets sampled on the
     lab Y=0 plane at the cell-corner grid of the FULL PADDED MHD domain (interior
     + nghost ghost layers), writing ``A_xyz_grid`` (the vector potential). The
     background loader differences the corner lab-Y A into face-staggered B0 that
     is discretely divergence-free by construction, defined into the ghosts.
-  * ``input.yaml`` — the MHD run: a confined plasma blob in the bore on a uniform
-    toroidal guide field bz, with the coil poloidal field as background_field.a_file.
+  * ``input.yaml`` — the SI, axisymmetric cylindrical (R,Z) MHD run: a confined
+    plasma blob in the annular bore on a uniform toroidal guide field B_phi,
+    with the coil poloidal field as background_field.a_file.
 
 Workflow (the MHD background reads coil.npz, so run the coil deck first):
 
@@ -35,7 +36,8 @@ Workflow (the MHD background reads coil.npz, so run the coil deck first):
 Regenerate the decks with: python examples/square_toroid_mhd/build_yaml.py
 
 The coil grid spans the PADDED domain, so it depends on the reconstruction halo
-(NGHOST): mp7 needs nghost=4. Keep NGHOST in sync with numerics.reconstruction.
+(NGHOST): cylindrical MUSCL needs nghost=2. Keep NGHOST in sync with
+numerics.reconstruction.
 """
 
 from __future__ import annotations
@@ -62,10 +64,6 @@ N_SEGMENTS = 128
 
 N_TF_COILS = 8
 TF_COIL_CURRENT_A = 25_000.0
-TF_R_INNER_M = R0_M - SIDE_M / 2.0
-TF_R_OUTER_M = R0_M + SIDE_M / 2.0
-TF_Z_MIN_M = -SIDE_M / 2.0
-TF_Z_MAX_M = +SIDE_M / 2.0
 
 # --- MHD grid: the bore interior (90% of the cross-section), centered on R0 ----
 MHD_NX = 128
@@ -75,13 +73,14 @@ MHD_LX_M = MHD_FRACTION * SIDE_M
 MHD_LY_M = MHD_FRACTION * SIDE_M
 MHD_ORIGIN_X_M = R0_M - MHD_LX_M / 2.0
 MHD_ORIGIN_Y_M = -MHD_LY_M / 2.0
-# Reconstruction halo: mp7 -> nghost=4 (mp5 -> 3, muscl -> 2). The coil A grid
-# spans the padded domain so B0 is defined into the ghost layers; keep in sync
-# with numerics.reconstruction below.
-NGHOST = 4
+# Cylindrical ring-volume averages currently support the second-order MUSCL
+# reconstruction path, which requires two ghost layers. The coil A grid spans
+# the padded domain so B0 is defined into those ghosts; keep this in sync with
+# numerics.reconstruction below.
+NGHOST = 2
 
-# Toroidal (out-of-plane) guide field and the poloidal-field normalization. The
-# coil A is in SI (T*m); b_scale maps it into the deck's normalized field units.
+# Toroidal (out-of-plane) guide field. Both decks use SI: the coil A is in T*m
+# and b_scale is a dimensionless optional amplitude multiplier.
 BZ_TOROIDAL = 0.1
 B_SCALE = 1.0
 
@@ -97,34 +96,8 @@ STEPS = 400
 OUTPUT_PATH = "out.npz"
 
 
-def _tf_coil_block(*, indent: int, name: str, theta_rad: float,
-                   current_A: float) -> list[str]:
-    pad = " " * indent
-    inner = " " * (indent + 4)
-    cos_t, sin_t = math.cos(theta_rad), math.sin(theta_rad)
-    corners_Rz = [
-        (TF_R_INNER_M, TF_Z_MIN_M),
-        (TF_R_OUTER_M, TF_Z_MIN_M),
-        (TF_R_OUTER_M, TF_Z_MAX_M),
-        (TF_R_INNER_M, TF_Z_MAX_M),
-        (TF_R_INNER_M, TF_Z_MIN_M),
-    ]
-    pts = [(R * cos_t, R * sin_t, z) for (R, z) in corners_Rz]
-    lines = [
-        f"{pad}- name: {name}",
-        f"{pad}  current_A: {_fmt(current_A)}",
-        f"{pad}  geometry:",
-        f"{inner}type: polyline",
-        f"{inner}points_xyz_m:",
-    ]
-    for (x, y, z) in pts:
-        lines.append(f"{inner}  - [{_fmt(x)}, {_fmt(y)}, {_fmt(z)}]")
-    lines.append("")
-    return lines
-
-
 def _conductor_lines(indent: int) -> list[str]:
-    """Emit the full conductor list (current sheets + TF coils) indented so the
+    """Emit the axisymmetric current-sheet filaments indented so the
     leading ``- name:`` sits at column ``indent``."""
     half_side = SIDE_M / 2.0
     inner_radius = R0_M - half_side
@@ -157,11 +130,10 @@ def _conductor_lines(indent: int) -> list[str]:
     for k, y_m in enumerate(heights):
         lines.extend(loop(f"outer_cylinder_{k:02d}", -filament_current,
                           y_m, outer_radius))
-    lines.append(f"{pad}# Discrete TF coils (rectangular, bore-hugging)")
-    for k in range(N_TF_COILS):
-        theta = 2.0 * math.pi * k / N_TF_COILS
-        lines.extend(_tf_coil_block(indent=indent, name=f"tf_coil_{k:02d}",
-                                    theta_rad=theta, current_A=+TF_COIL_CURRENT_A))
+    # Poloidal TF windings generate the toroidal guide field represented by
+    # initial.bz below. They are deliberately absent here: interpreting their
+    # discrete 3-D A_y slice as axisymmetric A_phi would create a spurious
+    # poloidal background and double-count the guide system.
     return lines
 
 
@@ -189,7 +161,8 @@ def build_coil_yaml() -> str:
         f"# NGHOST={NGHOST} ghost layers). resolution = [Nx+1, 1, Ny+1] with",
         f"# Nx = nx+2*NGHOST = {npx}, Ny = ny+2*NGHOST = {npy}. A_xyz_grid has shape",
         "# (Ny+1, 1, Nx+1, 3); the MHD background_field.a_file loader differences its",
-        "# lab-Y component into a divergence-free face-staggered poloidal B0.",
+        "# lab-Y/A_phi component with the annular curl into a divergence-free",
+        "# face-staggered poloidal B0.",
         "#",
         "# Run BEFORE the MHD deck (which reads the produced coil.npz):",
         "#   python -m quasar.coil.cli run examples/square_toroid_mhd/coil.yaml",
@@ -230,24 +203,26 @@ def build_mhd_yaml() -> str:
         "#",
         "# The confining POLOIDAL field is a field-split background B0 (B = B0 + b)",
         "# built from coil.npz: the lab-Y vector potential A on the padded cell-corner",
-        "# grid, differenced to a face-staggered",
+        "# grid, differenced with the annular curl to a face-staggered field",
         "#   b0x_face(i,j) = -(A[j+1,i]-A[j,i])/dy   (B_R, left face)",
-        "#   b0y_face(i,j) =  (A[j,i+1]-A[j,i])/dx   (B_z, bottom face)",
-        "# which is divergence-free by construction and static (never ghost-refilled,",
-        "# so no open BC can corrupt it). The evolving perturbation b starts at zero,",
-        "# so the constrained-transport div(b) stays exactly zero. bz is a uniform",
+        "#   b0y_face(i,j) = (R_hi*A[j,i+1]-R_lo*A[j,i])/int(R dR)",
+        "#                                                   (B_z, bottom face)",
+        "# which is divergence-free by construction and static (never ghost-refilled).",
+        "# The crop cuts through this field, so its edges are open rather than",
+        "# conducting walls; outflow is applied consistently to the fluid and the",
+        "# evolving perturbation b. CT preserves div(b). bz is a uniform",
         f"# toroidal guide field ({BZ_TOROIDAL}); B_phi ~ mu0 N I/(2 pi R) ~ "
         f"{bphi:.3f} T from the TF coils.",
         "#",
         "# Run coil.yaml FIRST to produce coil.npz, then this deck.",
         "# Regenerate: python examples/square_toroid_mhd/build_yaml.py",
         "",
-        "units: normalized",
+        "units: SI",
         f"domain: {{nx: {MHD_NX}, ny: {MHD_NY}, lx_m: {MHD_LX_M:.6f}, "
         f"ly_m: {MHD_LY_M:.6f}, origin_x_m: {MHD_ORIGIN_X_M:.6f}, "
         f"origin_y_m: {MHD_ORIGIN_Y_M:.6f}}}",
-        "geometry: cartesian",
-        "numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, "
+        "geometry: cylindrical",
+        "numerics: {gamma: 1.6666667, reconstruction: muscl_minmod, riemann: hlld, "
         "integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, "
         "rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}",
         "initial:",
@@ -263,12 +238,14 @@ def build_mhd_yaml() -> str:
         "  enabled: true",
         "  a_file: coil.npz       # padded corner-grid A_xyz_grid from coil.yaml",
         "  bz0: 0.0               # toroidal field lives in the state (initial.bz)",
-        f"  params: {{b_scale: {B_SCALE}}}   # SI A (T*m) -> normalized field units",
+        "  params:",
+        f"    b_scale: {B_SCALE}       # dimensionless multiplier of SI A (T*m)",
+        "    vacuum_project: true  # fixed-boundary discrete annular vacuum solve",
         f"time: {{dt_s: auto, steps: {STEPS}}}",
         "diagnostics: {output_path: out.npz, cadence: 0,",
         "              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}",
-        "boundary: {fluid: [wall, wall, wall, wall],",
-        "           field: [wall, wall, wall, wall]}",
+        "boundary: {fluid: [outflow, outflow, outflow, outflow],",
+        "           field: [outflow, outflow, outflow, outflow]}",
         "",
     ]
     return "\n".join(lines)

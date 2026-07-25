@@ -1,8 +1,11 @@
 # landau_damping
 
-Warm Maxwellian electrons with a small seeded `Ex` perturbation. Collisionless
-Landau damping removes energy from the longitudinal mode (the field decays rather
-than grows as in `two_stream`).
+Warm Maxwellian electrons with a small longitudinal velocity perturbation and a
+fixed uniform ion background. The uniform initial charge and zero electric field
+satisfy Gauss's law; the perturbation excites a Langmuir response whose envelope
+is collisionlessly Landau damped (rather than growing as in `two_stream`).
+The fundamental has `k lambda_D = 0.5`; the Maxwellian dispersion relation gives
+`omega/omega_p = 1.41566 - 0.15336 i`.
 
 ## Run
 
@@ -19,6 +22,8 @@ PYTHONPATH=build/hip-gfx942-release/python \
 
 ## Reference signature
 
-The seeded single-mode `Ex` energy decays over the run (Landau damping). The
-integration test runs a short trajectory and checks the deck loads, seeds, and
-steps to finite output.
+The single-mode `Ex` response grows from zero, then its oscillation envelope
+decays through phase mixing. The 2000-step run resolves three pre-noise-floor
+mode-amplitude peaks. The integration test requires those peaks to decrease and
+fits their logarithmic envelope against the Maxwellian damping rate, with a
+finite-grid/finite-particle tolerance.

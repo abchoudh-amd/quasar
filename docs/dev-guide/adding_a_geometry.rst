@@ -17,11 +17,9 @@ each axis in turn.
 
 .. note::
 
-   Cylindrical ships at ``fdtd_order: 2`` only. The on-axis regularised closure
-   is derived for the 2nd-order staggered Yee curl; an order-4 cylindrical axis
-   closure is out of scope. ``PicDeck._validate_cylindrical`` rejects
-   ``fdtd_order`` 4, and the field-solver name builder hard-codes
-   ``"yee_cyl_o2"`` (see Steps 2 and 3 below).
+   Cylindrical supports ``fdtd_order: 2`` and ``4``. The fourth-order radial
+   derivative acts on the conservative flux ``q=rA``; the even parity of ``q``
+   supplies a regular axis row without evaluating ``1/r`` at zero.
 
 Where each piece lives
 ----------------------
@@ -61,12 +59,13 @@ no new type:
 
 These are harmless (but meaningless) on a Cartesian run, which never calls them.
 
-The stability bound also belongs here. ``cyl_cfl_dt(g, c)`` is phrased
-separately from ``cfl_dt(g, fdtd_order, c)`` so callers select it explicitly in
-cylindrical mode; for the on-axis-regularised 2nd-order scheme the bound is the
-Cartesian 2nd-order Courant limit over ``(dr, dz)`` (the ``1/r`` curl terms do
-not tighten it), and the separate entry point gives a future radius-dependent
-refinement one home.
+The stability bound also belongs here. ``cyl_cfl_dt(g, fdtd_order, c)`` is
+phrased separately from ``cfl_dt(g, fdtd_order, c)`` so callers select it
+explicitly in cylindrical mode. For the mimetic on-axis closure, the ``1/r``
+terms do not increase the volume-weighted operator norm: each supported order
+therefore has the corresponding Cartesian Courant limit over ``(dr, dz)``.
+Order four carries the same ``7/6`` spectral factor as its Cartesian staggered
+derivative and is consequently tighter than order two.
 
 Step 2 - Backend kernels and the ABI
 ------------------------------------
@@ -118,13 +117,14 @@ The cylindrical schemes are the axisymmetric counterparts of the Cartesian
 same ``quasar::numerics::IFieldSolver`` / ``IParticlePusher`` /
 ``IDepositScheme`` interfaces and forward to the cylindrical launch ABI:
 
-* ``YeeFdtdCyl2D`` (2nd order only),
+* ``YeeFdtdCyl2D<2>`` / ``YeeFdtdCyl2D<4>``,
 * ``BorisCylPusher<1>`` / ``BorisCylPusher<2>``,
 * ``EsirkepovCyl2D<1>`` / ``EsirkepovCyl2D<2>``.
 
 They are registered under deck-facing names next to the Cartesian ones::
 
-   QUASAR_REGISTER_FIELD_SOLVER("yee_cyl_o2", ::quasar::numerics::YeeFdtdCyl2D)
+   QUASAR_REGISTER_FIELD_SOLVER("yee_cyl_o2", ::quasar::numerics::YeeFdtdCyl2D<2>)
+   QUASAR_REGISTER_FIELD_SOLVER("yee_cyl_o4", ::quasar::numerics::YeeFdtdCyl2D<4>)
    QUASAR_REGISTER_PUSHER("boris_cyl_cic", ::quasar::numerics::BorisCylPusher<1>)
    QUASAR_REGISTER_PUSHER("boris_cyl_tsc", ::quasar::numerics::BorisCylPusher<2>)
    QUASAR_REGISTER_DEPOSIT("esirkepov_cyl_cic", ::quasar::numerics::EsirkepovCyl2D<1>)
@@ -132,11 +132,11 @@ They are registered under deck-facing names next to the Cartesian ones::
 
 **Geometry-aware name builders.** As with the order/shape vocabulary, the
 deck never builds these registry strings itself. The free functions
-``field_solver_name``, ``pusher_name`` and ``deposit_name`` (anonymous namespace
-in ``pic_solver.cpp``) resolve a geometry + order/shape to a registry name:
-``is_cylindrical(geometry)`` switches to the ``"_cyl_"`` family
-(``"yee_cyl_o2"`` regardless of ``fdtd_order``, ``"boris_cyl_" + shape``,
-``"esirkepov_cyl_" + shape``); a Cartesian run keeps the existing names verbatim.
+``resolve_scheme_family`` (anonymous namespace in ``pic_solver.cpp``) resolves a
+geometry + order/shape to one set of registry names. ``is_cylindrical(geometry)``
+switches to the ``"_cyl_"`` family (``"yee_cyl_o" + fdtd_order``,
+``"boris_cyl_" + shape``, ``"esirkepov_cyl_" + shape``); a Cartesian run keeps
+the existing names verbatim.
 ``EmPic2D3V``'s constructor then calls ``Registry<...>::create(name)`` for each,
 so there is no ``if/else`` ladder over geometry in the driver. A new geometry's
 names appear in exactly one place: register them, then add a branch to these
@@ -144,21 +144,16 @@ three builders.
 
 .. warning::
 
-   **Linker gotcha — keep the registrations in this TU.** The ``pic`` module is
-   plain-linked (``quasar_add_module(pic ...)`` in
-   ``src/physics/pic/CMakeLists.txt``), *not* whole-archived. A namespace-scope
-   static registration carries no externally referenced symbol, so a plain
-   static-archive link would drop a standalone TU's registrations and
-   ``Registry::create`` would throw on the deck name. The cylindrical scheme
-   *definitions and registrations therefore live in*
-   ``src/physics/pic/pic_solver.cpp`` — the same translation unit as the
-   externally-referenced ``EmPic2D3V`` symbols — so the static initializers are
-   pulled in and survive the link. Do **not** split them into a new ``.cpp``.
-   The alternative is the boundary module's approach: it is declared with
-   ``quasar_add_module(boundary REGISTERS ...)``, and the ``REGISTERS`` flag
-   wraps the target in ``$<LINK_LIBRARY:WHOLE_ARCHIVE,...>`` (see
-   ``cmake/QuasarAddModule.cmake``) so every object is forced in. Use one or the
-   other; the axis BC in Step 4 relies on the latter.
+   **Linker gotcha — keep registration sources in a ``REGISTERS`` module.** A
+   namespace-scope static registration carries no externally referenced symbol,
+   so a plain static-archive link can drop it and make ``Registry::create`` fail
+   on a valid deck name. The ``pic`` module is therefore declared with
+   ``quasar_add_module(pic REGISTERS ...)`` in
+   ``src/physics/pic/CMakeLists.txt``. The helper wraps it in
+   ``$<LINK_LIBRARY:WHOLE_ARCHIVE,...>`` (see
+   ``cmake/QuasarAddModule.cmake``), just like the boundary module. Scheme
+   registrations may share ``pic_solver.cpp`` or move to another source, but
+   every such source must remain part of that registration-bearing module.
 
 Step 4 - On-axis boundary condition
 -----------------------------------
@@ -193,13 +188,11 @@ Wire the geometry into the Python deck layer (``python/quasar/pic``):
   the top-level ``geometry`` key in ``parse()``. ``EmPicConfig.geometry`` is set
   from it in ``cli._make_solver``.
 * **Validation** — ``PicDeck.validate`` rejects unknown geometries;
-  ``_validate_cylindrical`` enforces the geometry-specific rules: an inner radius
-  of exactly zero (``domain.origin_x_m == 0``; finite-inner-radius / annular
-  domains are not supported yet), ``fdtd_order == 2``, and a non-periodic
-  outer-radius (``x_hi``) wall for both field and particle boundaries. The inner
-  radius (``x_lo``) is deliberately left alone so the default periodic side can
-  be auto-replaced by the C++ axis condition. The ``'axis'`` boundary name is
-  only valid on ``x_lo`` (``_validate_boundary`` rejects it on any other side).
+  ``_validate_cylindrical`` requires a non-negative inner radius and a
+  non-periodic outer-radius (``x_hi``) wall for fields and particles. At
+  ``origin_x_m == 0`` the default ``x_lo`` side is auto-replaced by the regular
+  axis condition. At positive origin (an annulus), both ``x_lo`` boundaries must
+  instead be explicitly non-periodic. Orders 2 and 4 are supported.
 * **CFL selection** — ``cli.prepare_run`` branches on ``geometry`` to pick
   ``cyl_cfl_dt`` / ``cyl_cfl_limit`` (from ``python/quasar/pic/numerics.py``)
   for both the ``"auto"`` timestep and the explicit-``dt`` stability check,
@@ -220,7 +213,7 @@ After this, a deck of the form
      ly_m: 0.1        # axial length
      origin_x_m: 0.0  # inner radius (0 = domain touches the axis)
    numerics:
-     fdtd_order: 2    # cylindrical ships at order 2 only
+     fdtd_order: 4    # 2 and 4 are supported
      shape: tsc
    boundary:
      field:    [periodic, pec, periodic, periodic]   # x_lo auto-replaced by 'axis'

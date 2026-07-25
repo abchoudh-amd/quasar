@@ -36,6 +36,11 @@
 #include "quasar/boundary/mhd_boundary.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
+#include "quasar/numerics/interface_states.hpp"
+#include "quasar/numerics/mhd_state.hpp"
+#include "quasar/physics/mhd/kernels.hpp"
+#include "quasar/physics/mhd/mhd_background.hpp"
+#include "quasar/physics/mhd/mhd_field.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <cmath>
@@ -85,7 +90,8 @@ quasar::mhd::MhdConfig make_config(const std::string& xlo, const std::string& xh
 
 // Smooth, divergence-free seed: a div-free B from A_z plus a smooth fluid
 // profile. `vx` advects the gas (used to push a profile toward an open edge).
-void seed_smooth(quasar::mhd::MhdSolver2D& solver, const quasar::Grid2D& g, Real vx) {
+void seed_smooth(quasar::mhd::MhdSolver2D& solver, const quasar::Grid2D& g,
+                 Real vx, Real vy = Real{0}) {
   const std::size_t n = g.storage_size();
   std::vector<Real> rho(n, 1.0), mx(n, 0.0), my(n, 0.0), mz(n, 0.0), en(n, 0.0);
   std::vector<Real> bx(n, 0.0), by(n, 0.0), bz(n, 0.0);
@@ -108,9 +114,10 @@ void seed_smooth(quasar::mhd::MhdSolver2D& solver, const quasar::Grid2D& g, Real
       const Real magnetic = 0.5 * (bx[k] * bx[k] + by[k] * by[k]);
       rho[k] = rho_i;
       mx[k] = rho_i * vx;
-      my[k] = 0.0;
+      my[k] = rho_i * vy;
       mz[k] = 0.0;
-      en[k] = p0 / (gamma - 1.0) + 0.5 * rho_i * vx * vx + magnetic;
+      en[k] = p0 / (gamma - 1.0) +
+              0.5 * rho_i * (vx * vx + vy * vy) + magnetic;
     }
   }
 
@@ -142,6 +149,59 @@ TEST(MhdOneSidedBoundary, ClassifierFlagsOnlyPeriodic) {
   EXPECT_FALSE(quasar::boundary::mhd_boundary_is_periodic("wall"));
 }
 
+// The interior-biased slope at the physical low face extrapolates cell zero
+// outward.  With rho(0)=1 and rho(1)=4 that raw order-2 state is
+// 1 - (4-1)/2 = -0.5 even though every source cell is admissible.  The local
+// reconstruction guard must replace both sides with the adjacent cell averages
+// and then reapply the exact CT normal field.
+TEST(MhdOneSidedBoundary, InadmissibleOneSidedFaceFallsBackToAdjacentCells) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{4, 2, Real{1}, Real{1}, Real{0}, Real{0},
+                         /*nghost=*/2};
+  const std::size_t n = g.storage_size();
+  constexpr Real gamma = Real{5} / Real{3};
+  constexpr Real p = Real{1};
+  constexpr Real energy0 = p / (gamma - Real{1});
+
+  std::vector<Real> rho(n, Real{1});
+  std::vector<Real> mx(n, Real{0}), my(n, Real{0}), mz(n, Real{0});
+  std::vector<Real> energy(n, energy0);
+  std::vector<Real> bx(n, Real{0}), by(n, Real{0}), bz(n, Real{0});
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    rho[g.index(/*i=*/1, j)] = Real{4};
+  }
+
+  quasar::mhd::MhdField2D<Real> u{g};
+  u.rho.copy_from_host(rho.data(), n);
+  u.mx.copy_from_host(mx.data(), n);
+  u.my.copy_from_host(my.data(), n);
+  u.mz.copy_from_host(mz.data(), n);
+  u.energy.copy_from_host(energy.data(), n);
+  u.bx_face.copy_from_host(bx.data(), n);
+  u.by_face.copy_from_host(by.data(), n);
+  u.bz_cell.copy_from_host(bz.data(), n);
+
+  const quasar::mhd::MhdBackgroundField<Real> background{};
+  const quasar::mhd::BoundaryFlags4 flags{{/*x_lo=*/1, /*x_hi=*/0,
+                                            /*y_lo=*/0, /*y_hi=*/0}};
+  quasar::numerics::MhdInterfaceStates<Real> out{g, /*dir=*/0};
+  quasar::mhd::launch_mhd_reconstruct(
+      u, background, /*dir=*/0, out, /*scheme_order=*/2, flags, gamma,
+      /*stream=*/nullptr);
+  quasar::backend::device_synchronize(nullptr);
+
+  const auto left = out.state_left(/*i=*/0, /*j=*/0);
+  const auto right = out.state_right(/*i=*/0, /*j=*/0);
+  for (const auto* state : {&left, &right}) {
+    EXPECT_EQ(state->rho, Real{1});
+    EXPECT_EQ(state->mx, Real{0});
+    EXPECT_EQ(state->energy, energy0);
+    EXPECT_EQ(state->bx, Real{0});
+    EXPECT_GT(quasar::numerics::pressure(*state, gamma), Real{0});
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 1. Periodic path unchanged: finite, deterministic, div-B clean.
 // ---------------------------------------------------------------------------
@@ -161,15 +221,9 @@ TEST(MhdOneSidedBoundary, PeriodicPathFiniteDeterministicAndDivBClean) {
   const std::vector<Real> en_a = solver_a.state_component_to_host("energy");
   EXPECT_TRUE(all_finite(rho_a));
   EXPECT_TRUE(all_finite(en_a));
-  // The post-step div-B floor is a property of the constrained-transport scheme,
-  // which is a pre-existing concern in the committed MHD module (the committed
-  // div-free/conservation tests fail on the plain periodic path independently of
-  // the one-sided/background feature). What this feature MUST guarantee is that
-  // the new one-sided code path does not PERTURB the periodic numerics: the seed
-  // is div-free (checked above), the post-step div-B stays finite, and the run is
-  // bit-for-bit deterministic (checked below). We assert finiteness here and the
-  // unperturbed-periodic contract via the determinism comparison.
-  EXPECT_TRUE(std::isfinite(solver_a.divergence_b_max()));
+  // Periodic high faces reuse the matching low-face Riemann/EMF data, so the CT
+  // curl telescopes across the seam and preserves the seeded divergence.
+  EXPECT_LT(solver_a.divergence_b_max(), 1e-9);
 
   // Run B: identical config + seed + dt -> must be bit-for-bit identical
   // (the new one-sided code path must not perturb the periodic numerics).
@@ -195,15 +249,20 @@ TEST(MhdOneSidedBoundary, PeriodicPathFiniteDeterministicAndDivBClean) {
 TEST(MhdOneSidedBoundary, OutflowEdgeStaysBounded) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
-  // Only x_hi is open; the rest periodic so the only non-periodic seam is x_hi.
-  const auto cfg = make_config("periodic", "outflow", "periodic", "periodic");
+  // A periodic axis must wrap at both ends, so use the same physical outflow
+  // closure at x_lo while probing boundedness at the downstream x_hi edge.
+  const auto cfg = make_config("outflow", "outflow", "periodic", "periodic");
   const quasar::Grid2D& g = cfg.grid;
 
   quasar::mhd::MhdSolver2D solver{cfg};
   seed_smooth(solver, g, /*vx=*/0.5);  // drift toward +x (the open edge)
 
+  EXPECT_LT(solver.divergence_b_max(), 1e-10)
+      << "outflow ghost fill must preserve the seeded normal boundary face";
   const Real dt = 0.4 * solver.cfl_limit();
   solver.step(dt);
+  EXPECT_LT(solver.divergence_b_max(), 1e-9)
+      << "outflow ghost fill must not overwrite the CT-evolved high face";
 
   const std::vector<Real> rho = solver.state_component_to_host("rho");
   ASSERT_TRUE(all_finite(rho)) << "outflow run produced NaN/Inf";
@@ -231,6 +290,27 @@ TEST(MhdOneSidedBoundary, OutflowEdgeStaysBounded) {
   }
 }
 
+// The y-normal CT face has the same physical-high-face extent as its x-normal
+// sibling: By(i,ny) is evolved by CT and is not a disposable ghost value. This
+// transposed evolution regression catches a y_hi outflow fill that replaces the
+// authoritative high face with By(i,ny-1), which immediately creates a boundary
+// ring divergence even though the discrete curl update itself telescopes.
+TEST(MhdOneSidedBoundary, YOutflowPreservesCtEvolvedHighFace) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const auto cfg = make_config("periodic", "periodic", "outflow", "outflow");
+  const quasar::Grid2D& g = cfg.grid;
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_smooth(solver, g, /*vx=*/0.0, /*vy=*/0.5);
+
+  EXPECT_LT(solver.divergence_b_max(), 1e-10)
+      << "y-outflow ghost fill must preserve the seeded normal boundary face";
+  const Real dt = Real{0.4} * solver.cfl_limit();
+  ASSERT_NO_THROW(solver.step(dt));
+  EXPECT_LT(solver.divergence_b_max(), 1e-9)
+      << "y_hi outflow must not overwrite the CT-evolved By(i,ny) face";
+}
+
 // ---------------------------------------------------------------------------
 // 3. Wall symmetry preserved across an x_lo wall after a step.
 //    The mirror ghost VALUES that impose the wall closure are still filled and
@@ -243,8 +323,9 @@ TEST(MhdOneSidedBoundary, OutflowEdgeStaysBounded) {
 TEST(MhdOneSidedBoundary, WallSymmetryPreserved) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
-  // x_lo wall for BOTH fluid and field; others periodic.
-  const auto cfg = make_config("wall", "periodic", "periodic", "periodic");
+  // A periodic axis must wrap at both ends, so pair the x_lo wall with an x_hi
+  // wall. The assertion below remains local to the x_lo mirror closure.
+  const auto cfg = make_config("wall", "wall", "periodic", "periodic");
   const quasar::Grid2D& g = cfg.grid;
 
   quasar::mhd::MhdSolver2D solver{cfg};

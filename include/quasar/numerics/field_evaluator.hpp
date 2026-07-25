@@ -6,8 +6,10 @@
 #include "quasar/core/registry.hpp"
 #include "quasar/core/types.hpp"
 
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -17,9 +19,29 @@ namespace quasar::numerics {
 // Each value is a flat Real list: a Vec3 is 3 elements, a Mat3x3 is 9 elements
 // row-major. This lets the registry build any evaluator by name (default
 // construct) and then configure() it from the deck, so a driver never branches on
-// the evaluator type to hand-pick a constructor. Keys an evaluator does not know
-// are ignored; an evaluator validates the arity of keys it consumes.
+// the evaluator type to hand-pick a constructor. Evaluators reject unknown keys
+// and validate the arity of every key they consume.
 using EvaluatorParams = std::unordered_map<std::string, std::vector<Real>>;
+
+inline void reject_unknown_params(
+    const EvaluatorParams& params,
+    std::initializer_list<std::string_view> allowed,
+    std::string_view evaluator_name) {
+  for (const auto& [key, value] : params) {
+    (void)value;
+    bool known = false;
+    for (const std::string_view candidate : allowed) {
+      if (key == candidate) {
+        known = true;
+        break;
+      }
+    }
+    if (!known) {
+      throw std::invalid_argument{
+          std::string{evaluator_name} + ": unknown evaluator parameter '" + key + "'"};
+    }
+  }
+}
 
 // Reads a Vec3 parameter, returning `fallback` if absent. Throws if present with
 // the wrong arity.
@@ -55,26 +77,42 @@ class IFieldEvaluator {
  public:
   virtual ~IFieldEvaluator() = default;
 
+  // Capability query used by deck frontends before requesting an optional
+  // vector potential.  New evaluator plugins remain source-compatible and
+  // truthfully default to B-only until they override both this method and
+  // evaluate_A().
+  virtual bool provides_vector_potential() const noexcept { return false; }
+
   // Applies deck-supplied parameters after the registry default-constructs the
-  // evaluator. The base default ignores all params (so a parameterless evaluator
-  // like Biot-Savart needs no override); parameterized evaluators override to read
-  // the keys they consume via param_vec3 / param_mat3x3. This is the seam that
+  // evaluator. The base default accepts only an empty map (so a parameterless
+  // evaluator like Biot-Savart needs no override); parameterized evaluators
+  // override to declare and read their keys via the helpers above. This is the seam that
   // lets a driver do create_field_evaluator(name) + configure(params) with no
   // per-type branch.
-  virtual void configure(const EvaluatorParams&) {}
+  virtual void configure(const EvaluatorParams& params) {
+    reject_unknown_params(params, {}, "field evaluator");
+  }
 
   virtual Field<Vec3> evaluate_B(const core::IFieldSource& source,
                                  const core::PointCloud& observations) const = 0;
 
-  // Field gradient (grad B)_{ij} = dB_i/dp_j. Defaults to zero so an evaluator
-  // with no analytic Jacobian (uniform, dipole) need not restate it; evaluators
-  // that model a gradient (gradient, Biot-Savart) override.
+  // Capability query for a trustworthy field gradient.  The base
+  // evaluate_grad_B implementation remains the exact zero Jacobian for simple
+  // callers, but a physics validator must not mistake that compatibility
+  // default for evidence that an arbitrary plugin's magnetic field is uniform.
+  // Evaluators that can return their actual Jacobian -- including an exactly
+  // uniform evaluator -- override this together with evaluate_grad_B when
+  // necessary.
+  virtual bool provides_grad_B() const noexcept { return false; }
+
+  // Field gradient (grad B)_{ij} = dB_i/dp_j.
   virtual Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
                                         const core::PointCloud& observations) const {
     return Field<Mat3x3>(observations.size());
   }
 
-  // Magnetic vector potential A (Coulomb gauge), with B = curl A. Defaults to
+  // Magnetic vector potential A, with B = curl A. Its gauge is evaluator- and
+  // source-dependent. Defaults to
   // throwing: most evaluators expose only B, and a caller that needs A (e.g. a
   // divergence-free MHD seed built from a discrete curl of A) must select an
   // evaluator that models it. Biot-Savart overrides with the closed-form

@@ -1,9 +1,9 @@
 // Device-inline cylindrical (m=0) FDTD finite-difference operators shared by the
 // cylindrical E-update and B-update kernels (fdtd_e_cyl_hip.hip and
 // fdtd_b_cyl_hip.hip). These were verbatim-identical in both translation units;
-// extracting them here keeps the adjoint operator pair (the forward face-to-node
-// radial flux radial_flux_fwd and the backward radial difference ddr_bwd, plus
-// the forward/backward axial differences) in one place so the Ampere and Faraday
+// extracting them here keeps the timestep-weighted adjoint operator pair (the
+// forward face-to-node radial flux and the backward radial difference, plus the
+// forward/backward axial differences) in one place so the Ampere and Faraday
 // curls cannot drift apart -- which would silently break the discrete adjointness
 // the cylindrical Yee scheme relies on.
 //
@@ -12,45 +12,101 @@
 #pragma once
 
 #include "quasar/core/grid.hpp"
+#include "quasar/numerics/stencil.hpp"
 
 #include <hip/hip_runtime.h>
 
 namespace quasar::backend::pic {
 
-// Forward radial finite-volume divergence (1/r) d(r f)/dr at node (i,j), valid
-// for ALL i including i=0 (where r_e(0)=0 zeroes the inner-face term, giving the
-// natural axis closure for the even Ez/Bz components). r_c is the node radius;
-// r_e(i)/r_e(i+1) are the lower/upper face radii of the radial cell straddling
-// the node. This is the forward face-to-node flux; the Faraday update of the even
-// component reads the odd face component through it, the adjoint of ddr_bwd.
-__device__ inline double radial_flux_fwd(const double* __restrict__ f,
-                                         const quasar::Grid2D& g, int i, int j) {
-  const double inv_dr = 1.0 / g.dx();
+// Forward radial finite-volume divergence (1/r) d(r f)/dr at cell centre
+// (i,j).  The fourth-order form is the ordinary fourth-order staggered
+// derivative applied to q=r*f, followed by division by r_c. The implementation
+// uses the algebraically equivalent D(f)/dr + M(f)/r form from stencil.hpp, so
+// it never materialises r*f. At the axis q is
+// even (r and the face-centred vector component are both odd), so q(-dr)=q(dr);
+// the axis ghost fill supplies exactly that parity.  This gives, at i=0,
+//   [(7/6) q_1 - (1/24) q_2] / (r_{1/2} dr),
+// the regular fourth-order limit rather than a singular 1/r evaluation.
+template <int Order>
+__device__ inline double radial_flux_fwd_increment(
+    const double* __restrict__ f, const quasar::Grid2D& g, int i, int j,
+    double dt) {
   const double r_c = g.r_at_cell_center(i);
-  const double r_lo = g.r_at_edge(i);
-  const double r_hi = g.r_at_edge(i + 1);
-  const double flux = r_hi * f[g.index(i + 1, j)] - r_lo * f[g.index(i, j)];
-  return flux * inv_dr / r_c;
+  if constexpr (Order == 4) {
+    return quasar::numerics::cylindrical_radial_flux_increment_values<Order>(
+        f[g.index(i - 1, j)], f[g.index(i, j)],
+        f[g.index(i + 1, j)], f[g.index(i + 2, j)], r_c, g.dx(), dt);
+  }
+  return quasar::numerics::cylindrical_radial_flux_increment_values<Order>(
+      0.0, f[g.index(i, j)], f[g.index(i + 1, j)], 0.0, r_c,
+      g.dx(), dt);
 }
 
-// Plain forward axial difference df/dz.
-__device__ inline double ddz_fwd(const double* __restrict__ f, const quasar::Grid2D& g,
-                                 int i, int j) {
-  return (f[g.index(i, j + 1)] - f[g.index(i, j)]) / g.dy();
+template <int Order>
+__device__ inline quasar::numerics::detail::ScaledValue
+radial_flux_fwd_increment_scaled(
+    const double* __restrict__ f, const quasar::Grid2D& g, int i, int j,
+    double dt) {
+  const double r_c = g.r_at_cell_center(i);
+  if constexpr (Order == 4) {
+    return quasar::numerics::cylindrical_radial_flux_increment_scaled_values<Order>(
+        f[g.index(i - 1, j)], f[g.index(i, j)],
+        f[g.index(i + 1, j)], f[g.index(i + 2, j)], r_c, g.dx(), dt);
+  }
+  return quasar::numerics::cylindrical_radial_flux_increment_scaled_values<Order>(
+      0.0, f[g.index(i, j)], f[g.index(i + 1, j)], 0.0, r_c,
+      g.dx(), dt);
 }
 
-// Plain backward axial difference df/dz.
-__device__ inline double ddz_bwd(const double* __restrict__ f, const quasar::Grid2D& g,
-                                 int i, int j) {
-  return (f[g.index(i, j)] - f[g.index(i, j - 1)]) / g.dy();
+// Plain staggered forward/backward axial increments.
+template <int Order>
+__device__ inline double ddz_fwd_increment(const double* __restrict__ f,
+                                           const quasar::Grid2D& g,
+                                           int i, int j, double dt) {
+  return quasar::numerics::ddy_staggered_increment<Order>(f, g, i, j, dt);
 }
 
-// Plain backward radial difference df/dr. The face-located radial derivative of a
-// node quantity (Bz(i)-Bz(i-1)); the discrete adjoint of the forward face-to-node
-// flux radial_flux_fwd, so the Bz/Ephi (and Ez/Bphi) polarisations stay adjoint.
-__device__ inline double ddr_bwd(const double* __restrict__ f, const quasar::Grid2D& g,
-                                 int i, int j) {
-  return (f[g.index(i, j)] - f[g.index(i - 1, j)]) / g.dx();
+template <int Order>
+__device__ inline quasar::numerics::detail::ScaledValue ddz_fwd_increment_scaled(
+    const double* __restrict__ f, const quasar::Grid2D& g,
+    int i, int j, double dt) {
+  return quasar::numerics::ddy_staggered_increment_scaled<Order>(
+      f, g, i, j, dt);
+}
+
+template <int Order>
+__device__ inline double ddz_bwd_increment(const double* __restrict__ f,
+                                           const quasar::Grid2D& g,
+                                           int i, int j, double dt) {
+  return quasar::numerics::ddy_staggered_bwd_increment<Order>(
+      f, g, i, j, dt);
+}
+
+template <int Order>
+__device__ inline quasar::numerics::detail::ScaledValue ddz_bwd_increment_scaled(
+    const double* __restrict__ f, const quasar::Grid2D& g,
+    int i, int j, double dt) {
+  return quasar::numerics::ddy_staggered_bwd_increment_scaled<Order>(
+      f, g, i, j, dt);
+}
+
+// Plain backward radial increment. This face-located derivative of a node
+// quantity is the discrete adjoint of the forward face-to-node flux, so the
+// Bz/Ephi (and Ez/Bphi) polarisations stay adjoint.
+template <int Order>
+__device__ inline double ddr_bwd_increment(const double* __restrict__ f,
+                                           const quasar::Grid2D& g,
+                                           int i, int j, double dt) {
+  return quasar::numerics::ddx_staggered_bwd_increment<Order>(
+      f, g, i, j, dt);
+}
+
+template <int Order>
+__device__ inline quasar::numerics::detail::ScaledValue ddr_bwd_increment_scaled(
+    const double* __restrict__ f, const quasar::Grid2D& g,
+    int i, int j, double dt) {
+  return quasar::numerics::ddx_staggered_bwd_increment_scaled<Order>(
+      f, g, i, j, dt);
 }
 
 }  // namespace quasar::backend::pic

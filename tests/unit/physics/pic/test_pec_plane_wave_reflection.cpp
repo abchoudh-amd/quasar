@@ -31,6 +31,10 @@ void run_reflection(int nghost) {
       "pec";
   cfg.boundary.field[static_cast<int>(quasar::Side::x_hi)] =
       "pec";
+  cfg.boundary.particle[static_cast<int>(quasar::Side::x_lo)] =
+      "specular";
+  cfg.boundary.particle[static_cast<int>(quasar::Side::x_hi)] =
+      "specular";
   quasar::pic::EmPic2D3V solver{cfg};
 
   // Seed a localized Ez/By pulse travelling +x.

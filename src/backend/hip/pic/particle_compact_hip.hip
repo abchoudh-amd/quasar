@@ -27,12 +27,14 @@ __global__ void compact_scatter_kernel(std::size_t n,
                                        const double* __restrict__ vx,
                                        const double* __restrict__ vy,
                                        const double* __restrict__ vz,
+                                       const double* __restrict__ vphi_deposit,
                                        const double* __restrict__ weight,
                                        const unsigned char* __restrict__ alive,
                                        double* __restrict__ ox, double* __restrict__ oy,
                                        double* __restrict__ ox_prev, double* __restrict__ oy_prev,
                                        double* __restrict__ ovx, double* __restrict__ ovy,
                                        double* __restrict__ ovz, double* __restrict__ oweight,
+                                       double* __restrict__ ovphi_deposit,
                                        unsigned char* __restrict__ oalive,
                                        unsigned int* __restrict__ out_count) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
@@ -45,6 +47,7 @@ __global__ void compact_scatter_kernel(std::size_t n,
   ovx[dst] = vx[p];
   ovy[dst] = vy[p];
   ovz[dst] = vz[p];
+  ovphi_deposit[dst] = vphi_deposit[p];
   oweight[dst] = weight[p];
   oalive[dst] = 1;
 }
@@ -79,10 +82,12 @@ extern "C" void launch_pic_particle_compact(quasar::pic::ParticleSpecies& s,
   const dim3 grid((n + block.x - 1) / block.x);
   hipLaunchKernelGGL(compact_scatter_kernel, grid, block, 0, stream, n,
                      s.x(), s.y(), s.x_prev(), s.y_prev(), s.vx(), s.vy(), s.vz(),
+                     s.vphi_deposit(),
                      s.weight(), s.alive(),
                      s.compact_x(), s.compact_y(), s.compact_x_prev(),
                      s.compact_y_prev(), s.compact_vx(), s.compact_vy(),
-                     s.compact_vz(), s.compact_weight(), s.compact_alive(),
+                     s.compact_vz(), s.compact_weight(), s.compact_vphi_deposit(),
+                     s.compact_alive(),
                      s.compact_counter());
   QUASAR_HIP_CHECK(::hipGetLastError());
 
@@ -100,6 +105,8 @@ extern "C" void launch_pic_particle_compact(quasar::pic::ParticleSpecies& s,
     QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vx(), s.compact_vx(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
     QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vy(), s.compact_vy(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
     QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vz(), s.compact_vz(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(s.vphi_deposit(), s.compact_vphi_deposit(),
+                                      bytes_d, ::hipMemcpyDeviceToDevice, stream));
     QUASAR_HIP_CHECK(::hipMemcpyAsync(s.weight(), s.compact_weight(), bytes_d, ::hipMemcpyDeviceToDevice, stream));
     QUASAR_HIP_CHECK(::hipMemcpyAsync(s.alive(), s.compact_alive(),
                                       static_cast<std::size_t>(alive_n) * sizeof(std::uint8_t),

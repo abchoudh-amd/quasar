@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -43,6 +45,54 @@ TEST(DeviceBuffer, RoundTripPattern) {
   for (std::size_t i = 0; i < kRoundTripN; ++i) {
     EXPECT_EQ(host_dst[i], host_src[i]) << "mismatch at i=" << i;
   }
+}
+
+TEST(DeviceBuffer, RejectsByteSizeOverflowBeforeAllocation) {
+  const std::size_t too_many =
+      std::numeric_limits<std::size_t>::max() / sizeof(double) + 1;
+  EXPECT_THROW((quasar::backend::DeviceBuffer<double>{too_many}),
+               std::length_error);
+  EXPECT_THROW((quasar::backend::DeviceBuffer<double>{
+                   too_many, quasar::backend::uninitialized}),
+               std::length_error);
+}
+
+TEST(DeviceMemoryPrimitives, ZeroByteAllocationIsPortableAndDoesNotNeedADevice) {
+  EXPECT_EQ(quasar::backend::device_alloc(0), nullptr);
+  EXPECT_EQ(quasar::backend::device_alloc_uninit(0), nullptr);
+}
+
+TEST(DeviceMemoryPrimitives, ZeroByteOperationsArePortableAndDoNotNeedADevice) {
+  using namespace quasar::backend;
+  EXPECT_NO_THROW(device_memset(nullptr, 0, 0));
+  EXPECT_NO_THROW(device_memset_async(nullptr, 0, 0, nullptr));
+  EXPECT_NO_THROW(device_memcpy_h2d(nullptr, nullptr, 0));
+  EXPECT_NO_THROW(device_memcpy_d2h(nullptr, nullptr, 0));
+  EXPECT_NO_THROW(device_memcpy_h2d_async(nullptr, nullptr, 0, nullptr));
+  EXPECT_NO_THROW(device_memcpy_d2h_async(nullptr, nullptr, 0, nullptr));
+}
+
+TEST(DeviceMemoryPrimitives, CheckedSizeProductRejectsOverflow) {
+  const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+  EXPECT_EQ(quasar::backend::detail::checked_size_product(7, 3, "unused"), 21u);
+  EXPECT_THROW(
+      (void)quasar::backend::detail::checked_size_product(
+          maximum / 3 + 1, 3, "scratch element count is not representable"),
+      std::length_error);
+}
+
+TEST(DeviceBuffer, RejectsOutOfBoundsAndNullHostCopies) {
+  if (!has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime visible";
+  }
+  quasar::backend::DeviceBuffer<double> buffer{4};
+  double host[5]{};
+  EXPECT_THROW(buffer.copy_from_host(host, 5), std::out_of_range);
+  EXPECT_THROW(buffer.copy_to_host(host, 5), std::out_of_range);
+  EXPECT_THROW(buffer.copy_from_host(nullptr, 1), std::invalid_argument);
+  EXPECT_THROW(buffer.copy_to_host(nullptr, 1), std::invalid_argument);
+  EXPECT_NO_THROW(buffer.copy_from_host(nullptr, 0));
+  EXPECT_NO_THROW(buffer.copy_to_host(nullptr, 0));
 }
 
 TEST(DeviceBuffer, EmptyConstructionDoesNotAllocate) {

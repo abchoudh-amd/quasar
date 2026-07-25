@@ -37,10 +37,10 @@ from quasar.pic.io import (
 class _FakeUnits:
     """Identity unit converter: every diagnostic conversion returns its input.
 
-    ``_snapshot`` calls ``field_component_to_si`` and ``_species_to_si`` calls
-    ``length_to_si`` / ``velocity_to_si``; all are linear-through-origin so the
-    identity faithfully exercises the flatten/save path without a real deck's
-    normalization."""
+    ``_run_loop`` calls ``time_to_si``, ``_snapshot`` calls
+    ``field_component_to_si``, and ``_species_to_si`` calls ``length_to_si`` /
+    ``velocity_to_si``. All are linear-through-origin, so the identity faithfully
+    exercises the flatten/save path without a real deck's normalization."""
 
     def field_component_to_si(self, name, v):
         return v
@@ -49,6 +49,9 @@ class _FakeUnits:
         return v
 
     def velocity_to_si(self, v):
+        return v
+
+    def time_to_si(self, v):
         return v
 
 
@@ -171,6 +174,20 @@ class IndexedOutputPathTests(unittest.TestCase):
 # _run_loop behavior tests (per-step snapshot files)
 # ----------------------------------------------------------------------------
 class WriteEveryTests(unittest.TestCase):
+
+    def test_suffixless_aggregate_and_periodic_paths_are_used_exactly(self):
+        with tempfile.TemporaryDirectory() as d:
+            out_path, _, _ = _drive(
+                d, steps=5, write_every=5, output_path="result")
+            periodic = Path(d) / "result_0000000005"
+            self.assertTrue(out_path.is_file())
+            self.assertTrue(periodic.is_file())
+            self.assertFalse((Path(d) / "result.npz").exists())
+            self.assertFalse((Path(d) / "result_0000000005.npz").exists())
+            with np.load(out_path, allow_pickle=False) as archive:
+                self.assertEqual(int(archive["final_step"][0]), 5)
+            with np.load(periodic, allow_pickle=False) as archive:
+                self.assertEqual(int(archive["final_step"][0]), 5)
 
     def test_write_every_creates_one_file_per_multiple(self):
         with tempfile.TemporaryDirectory() as d:

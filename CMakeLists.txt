@@ -6,6 +6,11 @@ project(quasar
   LANGUAGES CXX
 )
 
+# Define CTest's standard BUILD_TESTING option before deriving Quasar's project-
+# specific switch from it.  Without this, a plain (non-preset) configure expands
+# the undefined variable to an empty default and silently omits every test.
+include(CTest)
+
 option(QUASAR_ENABLE_HIP      "Build with HIP (ROCm) support" ON)
 option(QUASAR_BUILD_TESTING   "Build Quasar unit tests" ${BUILD_TESTING})
 option(QUASAR_BUILD_PYTHON    "Build Python bindings (pybind11)" ON)
@@ -14,8 +19,8 @@ option(QUASAR_BUILD_BENCHMARKS
 
 if(NOT QUASAR_ENABLE_HIP)
   message(FATAL_ERROR
-    "Phase 1 of Quasar is HIP-only. Configure with -DQUASAR_ENABLE_HIP=ON. "
-    "Host backends arrive after the magnetostatics vertical slice lands.")
+    "Quasar currently requires the HIP backend. Configure with "
+    "-DQUASAR_ENABLE_HIP=ON; a host-only backend is not implemented.")
 endif()
 
 enable_language(HIP)
@@ -47,12 +52,18 @@ include(QuasarHipRuntime)
 quasar_check_hip_runtime()
 
 if(QUASAR_BUILD_TESTING)
-  include(CTest)
   enable_testing()
 endif()
 
 if(QUASAR_BUILD_PYTHON)
   find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+  # pybind11 2.x otherwise falls back to its legacy FindPythonLibs path, which
+  # can select a different interpreter/ABI from the Python3 package above when
+  # several Python versions are installed (and can even reuse stale cache
+  # entries).  Reuse the modern FindPython result so the extension suffix,
+  # headers, and test interpreter always describe the same Python runtime.
+  set(PYBIND11_FINDPYTHON ON CACHE BOOL
+      "Use CMake FindPython for pybind11" FORCE)
 endif()
 
 add_subdirectory(extern)

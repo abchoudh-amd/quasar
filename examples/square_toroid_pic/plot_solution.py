@@ -13,7 +13,12 @@ import numpy as np
 import yaml
 
 from quasar._plotting import require_pyplot
-from quasar.pic.postprocess import reshape_with_ghost, species_names
+from quasar.pic.postprocess import (
+    field_periodicity,
+    species_names,
+    yee_component_coordinates,
+    yee_component_view,
+)
 
 plt = require_pyplot(agg=True)
 
@@ -57,15 +62,25 @@ def plot_final_state(data, deck: dict) -> Path:
     nx = int(data["nx"].item())
     ny = int(data["ny"].item())
     nghost = int(data["nghost"].item()) if "nghost" in data.files else 0
-    bz = reshape_with_ghost(data["external_bz"], nx, ny, nghost)
+    geometry = (str(data["geometry"].item())
+                if "geometry" in data.files else "cartesian")
+    periodic_x, periodic_y = field_periodicity(data)
+    bz = yee_component_view(
+        data["external_bz"], nx, ny, nghost, "bz", geometry,
+        periodic_x=periodic_x, periodic_y=periodic_y)
+    bz_x, bz_y = yee_component_coordinates(
+        "bz", geometry, nx, ny, x_lo, y_lo, x_hi - x_lo, y_hi - y_lo,
+        periodic_x=periodic_x, periodic_y=periodic_y,
+        view_shape=bz.shape)
     species = species_names(data)
 
     fig, axes = plt.subplots(1, len(species), figsize=(6 * len(species), 6),
                               sharex=True, sharey=True, squeeze=False)
     bz_max = float(np.max(np.abs(bz))) or 1.0
     for ax, sp in zip(axes[0], species):
-        im = ax.imshow(bz, origin="lower", extent=(x_lo, x_hi, y_lo, y_hi),
-                       cmap="RdBu_r", vmin=-bz_max, vmax=bz_max, alpha=0.7)
+        im = ax.pcolormesh(
+            bz_x, bz_y, bz, shading="nearest", cmap="RdBu_r",
+            vmin=-bz_max, vmax=bz_max, alpha=0.7)
         x = data[f"species_{sp}_x"]
         y = data[f"species_{sp}_y"]
         alive = data[f"species_{sp}_alive"].astype(bool)
@@ -92,12 +107,13 @@ def plot_final_state(data, deck: dict) -> Path:
 
 
 def main() -> int:
-    data = np.load(NPZ, allow_pickle=False)
-    with open(DECK) as fh:
+    with open(DECK, encoding="utf-8") as fh:
         deck = yaml.safe_load(fh)
-    print(f"loaded {NPZ}  (final_time = {float(data['final_time_s'].item()):.3e} s)")
-    print(f"wrote {plot_loss(data, deck)}")
-    print(f"wrote {plot_final_state(data, deck)}")
+    with np.load(NPZ, allow_pickle=False) as data:
+        print(f"loaded {NPZ}  "
+              f"(final_time = {float(data['final_time_s'].item()):.3e} s)")
+        print(f"wrote {plot_loss(data, deck)}")
+        print(f"wrote {plot_final_state(data, deck)}")
     return 0
 
 

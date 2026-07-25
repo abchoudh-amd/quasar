@@ -80,10 +80,14 @@ one obtains the **Hanson-Hirshman compact form**
 
 This is the formula implemented (modulo notation) in
 ``segment_B`` in
-``src/physics/magnetostatics/detail/biot_savart_segment.hpp``. The
+``src/backend/hip/magnetostatics/biot_savart_segment.hpp``. The
 denominator vanishes only when :math:`\mathbf{r}` lies on the segment
 itself (the integrand is genuinely singular there); the implementation
-guards against this with the ``kEps`` floor and returns the zero vector.
+reports that point with ``std::domain_error``. It does not replace a finite
+near-wire neighbourhood by zero. Near the filament it evaluates the
+cancellation-prone factor with the identity above; all displacements
+are first normalized by :math:`|\mathbf L|`, which also preserves the similarity
+scaling of the fp32 Jacobian.
 
 Analytic Jacobian
 -----------------
@@ -133,7 +137,9 @@ The scalar gradient :math:`\nabla f` decomposes through
    \end{aligned}
 
 which combine to give :math:`\nabla f` via the quotient rule. The
-implementation lives in ``segment_gradB`` in the same header. Its
+implementation evaluates the equivalent logarithmic derivative
+:math:`\nabla f=f\nabla\log f`, avoiding a denominator-squared intermediate,
+and lives in ``segment_gradB`` in the same header. Its
 correctness is cross-validated against three independent checks
 (``tests/unit/physics/magnetostatics/test_segment_gradient.cpp``):
 
@@ -142,6 +148,28 @@ correctness is cross-validated against three independent checks
 * the Jacobian is exactly zero for a zero-current source, and
 * the trace :math:`\mathrm{tr}(\nabla \mathbf{B}) = \nabla\cdot
   \mathbf{B} \equiv 0` (Maxwell's no-magnetic-monopoles identity).
+
+Magnetic vector potential and gauge
+-----------------------------------
+
+For one straight segment Quasar evaluates
+
+.. math::
+
+   \mathbf A_{\rm seg}(\mathbf r)
+   = \frac{\mu_0 I}{4\pi}\,\hat{\mathbf L}
+     \log\!\left(\frac{R_a+R_b+L}{R_a+R_b-L}\right),
+
+using an equivalent ``log1p`` form for far-field accuracy. It satisfies
+:math:`\nabla\times\mathbf A=\mathbf B`. For an open segment, however,
+
+.. math::
+
+   \nabla\cdot\mathbf A_{\rm seg}
+   = \frac{\mu_0 I}{4\pi}\left(\frac{1}{R_a}-\frac{1}{R_b}\right),
+
+so the Coulomb-gauge statement applies only when endpoint terms cancel in a
+closed loop or a current-continuous conductor network.
 
 Discretization error of polyline conductors
 -------------------------------------------
@@ -155,9 +183,14 @@ on-axis field of the polygon converges to the circular-loop limit at
 
 provided the polygon vertices lie on the smooth curve (the case for
 ``circular_loop`` and ``polygon``). The leading
-constant depends on the geometry and the observation point; for the
-on-axis circular-loop case the error coefficient is roughly
-:math:`(\pi / N)^{2}/6`.
+constant depends on the geometry and the observation point. At the centre of a
+regular :math:`N`-gon inscribed in a circle,
+
+.. math::
+
+   \frac{B_N}{B_\mathrm{circle}}
+   = \frac{N\tan(\pi/N)}{\pi}
+   = 1 + \frac{\pi^2}{3N^2} + \mathcal O(N^{-4}).
 
 The convergence test
 ``tests/unit/physics/magnetostatics/test_circular_loop_on_axis.cpp``
@@ -170,7 +203,7 @@ complete elliptic integrals.
 Floating-point precision
 ------------------------
 
-The kernels are templated on a precision parameter ``T`` (Phase 5) and
+The kernels are templated on a precision parameter ``T`` and
 instantiated for both ``float`` and ``double``. ``Vec3T<T>``,
 ``Mat3x3T<T>`` and the variable-template constants ``pi_v<T>``,
 ``mu0_v<T>``, ``mu0_over_4pi_v<T>``, ``kEps_v<T>`` live in
@@ -185,9 +218,11 @@ Two sibling host classes expose the two precisions:
   :class:`IFieldEvaluator` and is what the registry serves.
 * :class:`BiotSavartEvaluatorF` uses ``float`` throughout and returns
   :class:`Field<Vec3f>` / :class:`Field<Mat3x3f>`. Host-side
-  conductors / observations stay in ``double``; the evaluator casts to
-  ``float`` on upload and the result type makes the precision difference
-  visible to callers.
+  conductors / observations stay in ``double``. The evaluator subtracts one
+  shared origin in double precision before narrowing coordinates to ``float``;
+  this preserves rigid-translation invariance and rejects segments that still
+  collapse in fp32. The result type makes the precision difference visible to
+  callers.
 
 The analytical-reference tolerances are accordingly:
 

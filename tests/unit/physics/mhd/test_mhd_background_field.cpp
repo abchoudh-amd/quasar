@@ -45,6 +45,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
+#include "quasar/physics/mhd/mhd_staggering.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <algorithm>
@@ -90,6 +91,14 @@ quasar::mhd::MhdConfig make_config() {
     cfg.boundary.field[s] = "periodic";
   }
   return cfg;
+}
+
+void set_all_boundaries(quasar::mhd::MhdConfig& cfg,
+                        const std::string& name) {
+  for (int side = 0; side < 4; ++side) {
+    cfg.boundary.fluid[side] = name;
+    cfg.boundary.field[side] = name;
+  }
 }
 
 // The smooth periodic perturbation field b (face-staggered, div-free) and the
@@ -163,14 +172,23 @@ std::vector<Real> assemble_energy(const SeedFields& s, const quasar::Grid2D& g,
                                   bool include_b0) {
   const std::size_t n = g.storage_size();
   std::vector<Real> en(n, 0.0);
-  for (std::size_t k = 0; k < n; ++k) {
-    const Real bx = s.bx[k] + (include_b0 ? kB0x : 0.0);
-    const Real by = s.by[k] + (include_b0 ? kB0y : 0.0);
-    const Real bz = s.bz[k] + (include_b0 ? kB0z : 0.0);
-    const Real kinetic =
-        0.5 * s.rho[k] * (s.vx[k] * s.vx[k] + s.vy[k] * s.vy[k] + s.vz[k] * s.vz[k]);
-    const Real magnetic = 0.5 * (bx * bx + by * by + bz * bz);
-    en[k] = s.p[k] / (kGamma - 1.0) + kinetic + magnetic;
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      // Energy is a cell average, while bx/by are staggered face values. Use the
+      // same face-to-cell collocation as the solver EOS; using the low-face slot
+      // directly gives split and unsplit seeds different gas pressures through
+      // the B0.b cross term before either solver takes a step.
+      const Real bx = quasar::mhd::cell_bx(g, s.bx.data(), i, j)
+                    + (include_b0 ? kB0x : 0.0);
+      const Real by = quasar::mhd::cell_by(g, s.by.data(), i, j)
+                    + (include_b0 ? kB0y : 0.0);
+      const Real bz = s.bz[k] + (include_b0 ? kB0z : 0.0);
+      const Real kinetic = quasar::numerics::kinetic_from_velocity(
+          s.rho[k], s.vx[k], s.vy[k], s.vz[k]);
+      const Real magnetic = quasar::numerics::half_squared_norm3(bx, by, bz);
+      en[k] = s.p[k] / (kGamma - 1.0) + kinetic + magnetic;
+    }
   }
   return en;
 }
@@ -240,6 +258,42 @@ Real max_abs_diff(const std::vector<Real>& a, const std::vector<Real>& b,
   return m;
 }
 
+void seed_uniform_split_state(quasar::mhd::MhdSolver2D& solver,
+                              const quasar::Grid2D& g,
+                              Real vx, Real vy, Real vz,
+                              Real bx, Real by, Real bz) {
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> rho(n, Real{1});
+  const std::vector<Real> mx(n, vx);
+  const std::vector<Real> my(n, vy);
+  const std::vector<Real> mz(n, vz);
+  const std::vector<Real> bx_values(n, bx);
+  const std::vector<Real> by_values(n, by);
+  const std::vector<Real> bz_values(n, bz);
+  const Real energy = Real{1} / (kGamma - Real{1}) +
+      quasar::numerics::kinetic_from_velocity(
+          Real{1}, vx, vy, vz) +
+      quasar::numerics::half_squared_norm3(bx, by, bz);
+  solver.seed_state("rho", rho);
+  solver.seed_state("mx", mx);
+  solver.seed_state("my", my);
+  solver.seed_state("mz", mz);
+  solver.seed_state("energy", std::vector<Real>(n, energy));
+  solver.seed_state("bx", bx_values);
+  solver.seed_state("by", by_values);
+  solver.seed_state("bz", bz_values);
+}
+
+quasar::mhd::MhdConfig dominant_linear_background_config(Real amplitude) {
+  auto cfg = make_config();
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "linear_vacuum";
+  cfg.background.params = {
+      {"gradient", amplitude}, {"shear", Real{0}}};
+  return cfg;
+}
+
 }  // namespace
 
 // has_background() must reflect the config: true when enabled, false otherwise.
@@ -302,6 +356,306 @@ TEST(MhdBackgroundField, NonzeroBackgroundTightensCfl) {
   EXPECT_LT(cfl_on, cfl_off);
 }
 
+TEST(MhdBackgroundField, NativeConfigSamplesUniformBackgroundAtConstruction) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const auto seed = build_seed(make_config().grid);
+  auto cfg_off = make_config();
+  quasar::mhd::MhdSolver2D off{cfg_off};
+  off.seed_state("rho", seed.rho);
+  off.seed_state("mx", seed.mx);
+  off.seed_state("my", seed.my);
+  off.seed_state("mz", seed.mz);
+  off.seed_state("energy", assemble_energy(seed, cfg_off.grid, false));
+  off.seed_state("bx", seed.bx);
+  off.seed_state("by", seed.by);
+  off.seed_state("bz", seed.bz);
+
+  auto cfg_on = make_config();
+  cfg_on.background.enabled = true;
+  cfg_on.background.profile = "uniform";
+  cfg_on.background.bx0 = Real{0.8};
+  quasar::mhd::MhdSolver2D on{cfg_on};
+  // Seed only the evolved perturbation.  No seed_background() call is made:
+  // bx0/by0/bz0 in the native configuration must already have populated B0.
+  on.seed_state("rho", seed.rho);
+  on.seed_state("mx", seed.mx);
+  on.seed_state("my", seed.my);
+  on.seed_state("mz", seed.mz);
+  on.seed_state("energy", assemble_energy(seed, cfg_on.grid, false));
+  on.seed_state("bx", seed.bx);
+  on.seed_state("by", seed.by);
+  on.seed_state("bz", seed.bz);
+
+  const Real dt_off = off.cfl_limit();
+  const Real dt_on = on.cfl_limit();
+  ASSERT_TRUE(std::isfinite(dt_off));
+  ASSERT_TRUE(std::isfinite(dt_on));
+  EXPECT_LT(dt_on, dt_off);
+}
+
+TEST(MhdBackgroundField, NativeConfigAppliesGenericAnalyticProfileParameters) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const auto seed = build_seed(make_config().grid);
+  auto seed_state_only = [&](quasar::mhd::MhdSolver2D& solver,
+                             const quasar::Grid2D& g) {
+    solver.seed_state("rho", seed.rho);
+    solver.seed_state("mx", seed.mx);
+    solver.seed_state("my", seed.my);
+    solver.seed_state("mz", seed.mz);
+    solver.seed_state("energy", assemble_energy(seed, g, false));
+    solver.seed_state("bx", seed.bx);
+    solver.seed_state("by", seed.by);
+    solver.seed_state("bz", seed.bz);
+  };
+
+  auto zero_cfg = make_config();
+  set_all_boundaries(zero_cfg, "outflow");
+  zero_cfg.background.enabled = true;
+  zero_cfg.background.profile = "linear_vacuum";
+  zero_cfg.background.params = {{"gradient", Real{0}}, {"shear", Real{0}}};
+  quasar::mhd::MhdSolver2D zero{zero_cfg};
+  seed_state_only(zero, zero_cfg.grid);
+
+  auto configured_cfg = make_config();
+  set_all_boundaries(configured_cfg, "outflow");
+  configured_cfg.background.enabled = true;
+  configured_cfg.background.profile = "linear_vacuum";
+  configured_cfg.background.params = {
+      {"gradient", Real{1.25}}, {"shear", Real{-0.4}}};
+  quasar::mhd::MhdSolver2D configured{configured_cfg};
+  seed_state_only(configured, configured_cfg.grid);
+
+  const Real dt_zero = zero.cfl_limit();
+  const Real dt_configured = configured.cfl_limit();
+  ASSERT_TRUE(std::isfinite(dt_zero));
+  ASSERT_TRUE(std::isfinite(dt_configured));
+  EXPECT_LT(dt_configured, dt_zero);
+}
+
+TEST(MhdBackgroundField, RejectsBackgroundIncompatibleWithPeriodicSeam) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.background.enabled = true;
+  cfg.background.profile = "linear_vacuum";
+  cfg.background.params = {
+      {"gradient", Real{1.25}}, {"shear", Real{-0.4}}};
+  EXPECT_THROW(quasar::mhd::MhdSolver2D{cfg}, std::invalid_argument);
+}
+
+TEST(MhdBackgroundField, EnforcesWallNormalAndParityCompatibility) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto tangent = make_config();
+  set_all_boundaries(tangent, "outflow");
+  for (int side : {0, 1}) {
+    tangent.boundary.fluid[side] = "wall";
+    tangent.boundary.field[side] = "wall";
+  }
+  tangent.background.enabled = true;
+  tangent.background.profile = "uniform";
+  tangent.background.by0 = Real{0.3};
+  tangent.background.bz0 = Real{-0.2};
+  EXPECT_NO_THROW(quasar::mhd::MhdSolver2D{tangent});
+
+  auto normal = tangent;
+  normal.background.bx0 = Real{0.1};
+  EXPECT_THROW(quasar::mhd::MhdSolver2D{normal}, std::invalid_argument);
+}
+
+TEST(MhdBackgroundField, EnforcesCylindricalAxisBackgroundParity) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto axial = make_config();
+  axial.geometry = "cylindrical";
+  axial.reconstruction = "muscl_minmod";
+  set_all_boundaries(axial, "outflow");
+  axial.boundary.fluid[0] = "axis";
+  axial.boundary.field[0] = "axis";
+  axial.background.enabled = true;
+  axial.background.profile = "uniform";
+  axial.background.by0 = Real{0.3};
+  EXPECT_NO_THROW(quasar::mhd::MhdSolver2D{axial});
+
+  auto radial = axial;
+  radial.background.bx0 = Real{0.1};
+  EXPECT_THROW(quasar::mhd::MhdSolver2D{radial}, std::invalid_argument);
+
+  auto toroidal = axial;
+  toroidal.background.bz0 = Real{-0.2};
+  EXPECT_THROW(quasar::mhd::MhdSolver2D{toroidal}, std::invalid_argument);
+}
+
+TEST(MhdBackgroundField, ExplicitSeedIsRevalidatedBeforeUse) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const auto seed = build_seed(cfg.grid);
+  solver.seed_state("rho", seed.rho);
+  solver.seed_state("mx", seed.mx);
+  solver.seed_state("my", seed.my);
+  solver.seed_state("mz", seed.mz);
+  solver.seed_state("energy", assemble_energy(seed, cfg.grid, false));
+  solver.seed_state("bx", seed.bx);
+  solver.seed_state("by", seed.by);
+  solver.seed_state("bz", seed.bz);
+
+  const std::size_t n = cfg.grid.storage_size();
+  std::vector<Real> b0x(n), b0y(n, Real{0}), b0z(n, Real{1e200});
+  for (int j = -cfg.grid.nghost; j < cfg.grid.ny + cfg.grid.nghost; ++j) {
+    for (int i = -cfg.grid.nghost; i < cfg.grid.nx + cfg.grid.nghost; ++i) {
+      b0x[cfg.grid.index(i, j)] =
+          cfg.grid.origin_x + static_cast<Real>(i) * cfg.grid.dx();
+    }
+  }
+  solver.seed_background("b0x", b0x);
+  solver.seed_background("b0y", b0y);
+  solver.seed_background("b0z", b0z);
+
+  // div(B0)=1. A huge toroidal component must not relax the in-plane
+  // derivative-scaled tolerance, and the post-construction overwrite must be
+  // rejected before a kernel consumes it.
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+}
+
+TEST(MhdBackgroundField,
+     DominantCurlFreeBackgroundHasNoSpuriousSelfForce) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  constexpr Real amplitude = Real{1e100};
+  auto cfg = dominant_linear_background_config(amplitude);
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const auto rho0 = solver.state_component_to_host("rho");
+  const auto mx0 = solver.state_component_to_host("mx");
+  const auto my0 = solver.state_component_to_host("my");
+  const auto mz0 = solver.state_component_to_host("mz");
+  const auto energy0 = solver.state_component_to_host("energy");
+  const auto bx0 = solver.state_component_to_host("bx");
+  const auto by0 = solver.state_component_to_host("by");
+  const auto bz0 = solver.state_component_to_host("bz");
+
+  // B0=(A*x,-A*y,0) is exactly curl-free and divergence-free in the staggered
+  // linear stencil, hence -div(T0)=0. Separate O(A^2) directional reductions
+  // would leave an O(epsilon*A^2) false force; this tiny physical step would
+  // still amplify that defect far above a round-off-level state change.
+  const Real dt = Real{1e-6} / amplitude;
+  ASSERT_LT(dt, solver.cfl_limit());
+  solver.step(dt);
+
+  constexpr Real roundoff_tolerance = Real{2e-12};
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("rho"), rho0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("mx"), mx0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("my"), my0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("mz"), mz0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("energy"), energy0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("bx"), bx0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("by"), by0,
+                         cfg.grid), roundoff_tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("bz"), bz0,
+                         cfg.grid), roundoff_tolerance);
+}
+
+TEST(MhdBackgroundField,
+     DominantBackgroundRetainsFusedSplitEnergySurvivor) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  constexpr Real amplitude = Real{1e100};
+  auto cfg = dominant_linear_background_config(amplitude);
+  quasar::mhd::MhdSolver2D solver{cfg};
+  // b=(0,1,0), v=(0,1,0), rho=p=1. The stored energy is
+  // E'=p/(gamma-1)+rho|v|^2/2+|b|^2/2, with no B0 baseline.
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{1}, Real{0},
+      Real{0}, Real{1}, Real{0});
+  const auto energy0 = solver.state_component_to_host("energy");
+
+  const Real dt = Real{1e-6} / amplitude;
+  ASSERT_LT(dt, solver.cfl_limit());
+  solver.step(dt);
+  const auto energy1 = solver.state_component_to_host("energy");
+
+  // The analytic initial split-energy rate is +A, hence Delta E'=+1e-6.
+  // This is the finite survivor of O(A^2) face/FV/CT cancellations; a
+  // sequential correction rounds it to zero long before the RK update.
+  constexpr Real expected_increment = Real{1e-6};
+  for (int j = 5; j < cfg.grid.ny - 5; ++j) {
+    for (int i = 5; i < cfg.grid.nx - 5; ++i) {
+      const std::size_t k = cfg.grid.index(i, j);
+      EXPECT_NEAR(energy1[k] - energy0[k], expected_increment, Real{2e-10})
+          << "i=" << i << " j=" << j;
+    }
+  }
+}
+
+TEST(MhdBackgroundField,
+     DominantTangentialBackgroundRetainsGasPressureGradient) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  constexpr Real background = Real{1e100};
+  auto cfg = make_config();
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid.nghost = 2;
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.bz0 = background;
+  const auto& g = cfg.grid;
+  const std::size_t n = g.storage_size();
+
+  std::vector<Real> rho(n, Real{1}), zero(n, Real{0});
+  std::vector<Real> pressure(n), energy(n);
+  std::vector<Real> bphi(n, Real{1});
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      pressure[k] = Real{1} + g.x_at_cell_center(i);
+      energy[k] = pressure[k] / (kGamma - Real{1}) + Real{0.5};
+    }
+  }
+
+  quasar::mhd::MhdSolver2D solver{cfg};
+  solver.seed_state("rho", rho);
+  solver.seed_state("mx", zero);
+  solver.seed_state("my", zero);
+  solver.seed_state("mz", zero);
+  solver.seed_state("energy", energy);
+  solver.seed_state("bx", zero);
+  solver.seed_state("by", zero);
+  solver.seed_state("bz", bphi);
+
+  // B0 and b are uniform and purely tangential, so their Maxwell-stress
+  // divergence is exactly zero. The only radial force is -dp/dx=-1. Although
+  // each face F_x,mx contains the common O(B0*b)=1e100 cross stress, its
+  // cancellation across adjacent faces must not erase the O(1) pressure
+  // difference. Starting from mx=0 makes the tiny dt-sized response observable.
+  const Real dt = Real{1e-6} / background;
+  ASSERT_LT(dt, solver.cfl_limit());
+  solver.step(dt);
+  const auto mx = solver.state_component_to_host("mx");
+  for (int j = 5; j < g.ny - 5; ++j) {
+    for (int i = 5; i < g.nx - 5; ++i) {
+      EXPECT_NEAR(mx[g.index(i, j)] / dt, Real{-1}, Real{2e-8})
+          << "i=" << i << " j=" << j;
+    }
+  }
+}
+
 // Guide-field equivalence: a split run (b evolved over a static uniform B0) and an
 // unsplit reference run (total field B0+b evolved directly) agree after one step
 // at the SAME dt on density, momentum, gas pressure, and the TOTAL in-plane field.
@@ -350,17 +704,10 @@ TEST(MhdBackgroundField, GuideFieldEquivalenceAfterOneStep) {
   const auto by_r = ref.state_component_to_host("by");
   const auto bz_r = ref.state_component_to_host("bz");
 
-  // Density and momentum agree directly. The field-split contract is that the
-  // split run (evolve b over static B0) and the unsplit run (evolve total B0+b)
-  // produce the SAME physics after one step. They agree to the precision the
-  // solver's spatial scheme allows for the two different stored-energy
-  // representations; the residual (~1e-5) is dominated by the constrained-
-  // transport scheme's per-step accuracy, a pre-existing property of the
-  // committed MHD module (its own div-free/conservation tests fail on the plain
-  // periodic path independently of this feature). The equivalence tolerance is
-  // therefore set to a physically meaningful 1e-4 (still 3+ orders below the
-  // O(1) field magnitudes), which proves the split is consistent without
-  // re-asserting the unrelated, pre-existing CT accuracy bug.
+  // Density and momentum agree directly. The two formulations reconstruct
+  // different stored energy variables, so the comparison allows their smooth
+  // one-step truncation difference while remaining small relative to O(1)
+  // state magnitudes.
   const Real tol = 1e-4;
   EXPECT_LT(max_abs_diff(rho_s, rho_r, g), tol);
   EXPECT_LT(max_abs_diff(mx_s, mx_r, g), tol);
@@ -416,17 +763,9 @@ TEST(MhdBackgroundField, BackgroundStaticDivergenceAndDeterminism) {
   ASSERT_GT(dt, 0.0);
   run_a.step(dt);
 
-  // After a step, div(B0+b) stays finite. The feature's contract is that a
-  // uniform (discretely divergence-free) static B0 contributes NOTHING to the
-  // divergence stencil, so div(B0+b)=div(b) exactly at the seed (asserted above,
-  // before the step). The ABSOLUTE post-step div-B magnitude is governed by the
-  // constrained-transport scheme, which is a pre-existing concern in the committed
-  // MHD module (its own div-free/conservation tests fail on the plain periodic
-  // path independently of this feature). What this test pins for the background
-  // feature is: the seed div-neutrality (above), post-step finiteness (here), and
-  // that CT introduces no hidden B0 evolution / run-to-run drift (determinism
-  // comparison below) -- i.e. the static background is exactly that, static.
-  EXPECT_TRUE(std::isfinite(run_a.divergence_b_max()));
+  // A static discretely divergence-free B0 contributes exactly zero to the
+  // divergence stencil, while CT keeps div(b) at round-off.
+  EXPECT_LT(run_a.divergence_b_max(), 1e-9);
 
   const auto rho_a = run_a.state_component_to_host("rho");
   const auto en_a = run_a.state_component_to_host("energy");
@@ -448,4 +787,133 @@ TEST(MhdBackgroundField, BackgroundStaticDivergenceAndDeterminism) {
   EXPECT_EQ(max_abs_diff(en_a, en_b, g), 0.0);
   EXPECT_EQ(max_abs_diff(bx_a, bx_b, g), 0.0);
   EXPECT_EQ(max_abs_diff(by_a, by_b, g), 0.0);
+}
+
+TEST(MhdBackgroundField, VariableLinearBackgroundMatchesUnsplitChangeOfVariables) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto split_cfg = make_config();
+  split_cfg.background.enabled = true;
+  split_cfg.background.profile = "linear_vacuum";
+  auto ref_cfg = split_cfg;
+  ref_cfg.background.enabled = false;
+  for (int side = 0; side < 4; ++side) {
+    split_cfg.boundary.fluid[side] = "outflow";
+    split_cfg.boundary.field[side] = "outflow";
+    ref_cfg.boundary.fluid[side] = "outflow";
+    ref_cfg.boundary.field[side] = "outflow";
+  }
+  const auto& g = split_cfg.grid;
+  const std::size_t n = g.storage_size();
+  constexpr Real a = Real{0.12};
+  constexpr Real b = Real{-0.07};
+  constexpr Real bx_pert = Real{0.03};
+  constexpr Real by_pert = Real{-0.02};
+  constexpr Real bz_pert = Real{0.01};
+
+  std::vector<Real> rho(n), mx(n), my(n), mz(n), pressure(n);
+  std::vector<Real> bx(n, bx_pert), by(n, by_pert), bz(n, bz_pert);
+  std::vector<Real> b0x(n), b0y(n), b0z(n, Real{0});
+  std::vector<Real> total_bx(n), total_by(n), total_bz(n, bz_pert);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      const Real xc = g.x_at_cell_center(i);
+      const Real yc = g.y_at_cell_center(j);
+      const Real xf = g.origin_x + static_cast<Real>(i) * g.dx();
+      const Real yf = g.origin_y + static_cast<Real>(j) * g.dy();
+      // B0=(a*x+b*y, b*x-a*y,0): div(B0)=curl(B0)=0 analytically and under the
+      // face-difference CT divergence operator.
+      b0x[k] = a * xf + b * yc;
+      b0y[k] = b * xc - a * yf;
+      total_bx[k] = b0x[k] + bx[k];
+      total_by[k] = b0y[k] + by[k];
+      rho[k] = Real{1} + Real{0.04} * xc;
+      const Real vx = Real{0.11};
+      const Real vy = Real{-0.08};
+      const Real vz = Real{0.03};
+      mx[k] = rho[k] * vx;
+      my[k] = rho[k] * vy;
+      mz[k] = rho[k] * vz;
+      pressure[k] = Real{1} + Real{0.03} * yc;
+    }
+  }
+
+  std::vector<Real> split_energy(n), total_energy(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      const Real kinetic = quasar::numerics::kinetic_from_momentum(
+          mx[k], my[k], mz[k], rho[k]);
+      const Real bc_x = quasar::mhd::cell_bx(g, bx.data(), i, j);
+      const Real bc_y = quasar::mhd::cell_by(g, by.data(), i, j);
+      const Real tc_x = quasar::mhd::cell_bx(g, total_bx.data(), i, j);
+      const Real tc_y = quasar::mhd::cell_by(g, total_by.data(), i, j);
+      split_energy[k] = pressure[k] / (kGamma - Real{1}) + kinetic +
+                        quasar::numerics::half_squared_norm3(
+                            bc_x, bc_y, bz[k]);
+      total_energy[k] = pressure[k] / (kGamma - Real{1}) + kinetic +
+                        quasar::numerics::half_squared_norm3(
+                            tc_x, tc_y, total_bz[k]);
+    }
+  }
+
+  quasar::mhd::MhdSolver2D split{split_cfg};
+  quasar::mhd::MhdSolver2D ref{ref_cfg};
+  for (auto* solver : {&split, &ref}) {
+    solver->seed_state("rho", rho);
+    solver->seed_state("mx", mx);
+    solver->seed_state("my", my);
+    solver->seed_state("mz", mz);
+  }
+  split.seed_state("energy", split_energy);
+  split.seed_state("bx", bx); split.seed_state("by", by); split.seed_state("bz", bz);
+  split.seed_background("b0x", b0x);
+  split.seed_background("b0y", b0y);
+  split.seed_background("b0z", b0z);
+  ref.seed_state("energy", total_energy);
+  ref.seed_state("bx", total_bx);
+  ref.seed_state("by", total_by);
+  ref.seed_state("bz", total_bz);
+
+  const Real dt = Real{0.02} * std::min(split.cfl_limit(), ref.cfl_limit());
+  split.step(dt);
+  ref.step(dt);
+
+  const auto rho_s = split.state_component_to_host("rho");
+  const auto mx_s = split.state_component_to_host("mx");
+  const auto my_s = split.state_component_to_host("my");
+  const auto mz_s = split.state_component_to_host("mz");
+  const auto en_s = split.state_component_to_host("energy");
+  const auto bx_s = split.state_component_to_host("bx");
+  const auto by_s = split.state_component_to_host("by");
+  const auto bz_s = split.state_component_to_host("bz");
+  const auto rho_r = ref.state_component_to_host("rho");
+  const auto mx_r = ref.state_component_to_host("mx");
+  const auto my_r = ref.state_component_to_host("my");
+  const auto mz_r = ref.state_component_to_host("mz");
+  const auto en_r = ref.state_component_to_host("energy");
+  const auto bx_r = ref.state_component_to_host("bx");
+  const auto by_r = ref.state_component_to_host("by");
+  const auto bz_r = ref.state_component_to_host("bz");
+
+  constexpr Real tol = Real{3e-7};
+  for (int j = 5; j < g.ny - 5; ++j) {
+    for (int i = 5; i < g.nx - 5; ++i) {
+      const std::size_t k = g.index(i, j);
+      const Real b0xc = quasar::mhd::cell_bx(g, b0x.data(), i, j);
+      const Real b0yc = quasar::mhd::cell_by(g, b0y.data(), i, j);
+      EXPECT_NEAR(rho_s[k], rho_r[k], tol);
+      EXPECT_NEAR(mx_s[k], mx_r[k], tol);
+      EXPECT_NEAR(my_s[k], my_r[k], tol);
+      EXPECT_NEAR(mz_s[k], mz_r[k], tol);
+      EXPECT_NEAR(bx_s[k] + b0xc, bx_r[k], tol);
+      EXPECT_NEAR(by_s[k] + b0yc, by_r[k], tol);
+      EXPECT_NEAR(bz_s[k], bz_r[k], tol);
+
+      const Real transformed_energy = en_s[k] + b0xc * bx_s[k] + b0yc * by_s[k] +
+          quasar::numerics::half_squared_norm3(b0xc, b0yc, Real{0});
+      EXPECT_NEAR(transformed_energy, en_r[k], tol);
+    }
+  }
 }

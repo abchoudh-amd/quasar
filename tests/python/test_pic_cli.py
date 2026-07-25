@@ -1,4 +1,8 @@
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -8,12 +12,16 @@ from quasar.pic.cli import (
     _apply_external_field,
     _build_parser,
     _flatten_for_npz,
+    _macro_weight,
     _make_solver,
     _seed_fields,
     _seed_species,
     _snapshot,
+    _run_loop,
+    prepare_run,
 )
 from quasar.pic.io import (
+    BoundaryConfig,
     Diagnostics,
     Domain,
     ExternalField,
@@ -24,6 +32,7 @@ from quasar.pic.io import (
     Species,
     SpeciesInitial,
     Time,
+    VelocityPerturbation,
 )
 
 
@@ -50,6 +59,158 @@ def _fields_deck(initial: FieldsInitial) -> PicDeck:
 
 class SeedFieldsTests(unittest.TestCase):
 
+    def test_cylindrical_bessel_seed_initializes_matching_bphi_half_step(self):
+        for order in (2, 4):
+            with self.subTest(order=order):
+                deck = _fields_deck(FieldsInitial(
+                    type="seed_perturbation", component="Ey",
+                    amplitude=1.25, mode=(1, 0)))
+                deck.geometry = "cylindrical"
+                deck.domain = Domain(
+                    nx=8, ny=5, lx_m=2.0, ly_m=1.0, origin_x_m=0.0)
+                deck.numerics = Numerics(fdtd_order=order, shape="cic")
+                deck.boundary = BoundaryConfig(
+                    particle=("axis", "specular", "specular", "specular"),
+                    field=("axis", "pec", "pec", "pec"))
+                deck.validate()
+
+                dt = 0.0125
+                solver = _RecordingSolver()
+                _seed_fields(solver, deck, dt=dt, units=Units(deck))
+                seeded = dict(solver.calls)
+                self.assertEqual(seeded.keys(), {"ey", "bz"})
+
+                nx, ny = deck.domain.nx, deck.domain.ny
+                g = _core.pic.required_nghost(order)
+                pitch, height = nx + 2 * g, ny + 2 * g
+                ey = seeded["ey"].reshape(height, pitch)[
+                    g:g + ny + 1, g:g + nx]
+                bphi_minus = seeded["bz"].reshape(height, pitch)[
+                    g:g + ny + 1, g:g + nx + 1]
+                np.testing.assert_allclose(
+                    ey, np.broadcast_to(ey[0], ey.shape), rtol=0.0, atol=0.0)
+                np.testing.assert_allclose(
+                    bphi_minus, np.broadcast_to(bphi_minus[0], bphi_minus.shape),
+                    rtol=0.0, atol=0.0)
+
+                row = ey[0]
+
+                def sample(cell):
+                    sign = 1.0
+                    while cell < 0 or cell >= nx:
+                        if cell < 0:
+                            cell = -cell - 1
+                        else:
+                            cell = 2 * nx - cell - 1
+                            sign = -sign
+                    return sign * row[cell]
+
+                derivative = np.empty(nx + 1)
+                for face in range(nx + 1):
+                    if order == 4:
+                        derivative[face] = (
+                            (9.0 / 8.0) * (sample(face) - sample(face - 1))
+                            - (1.0 / 24.0)
+                            * (sample(face + 1) - sample(face - 2))) / 0.25
+                    else:
+                        derivative[face] = (
+                            sample(face) - sample(face - 1)) / 0.25
+
+                # One Faraday update takes Bphi^{-1/2} to Bphi^{+1/2}; a
+                # standing mode at its E maximum has exact half-step antisymmetry.
+                bphi_plus = bphi_minus + dt * derivative[np.newaxis, :]
+                np.testing.assert_allclose(
+                    bphi_plus, -bphi_minus, rtol=2.0e-14, atol=2.0e-15)
+                np.testing.assert_allclose(bphi_minus[:, 0], 0.0, atol=0.0)
+                self.assertGreater(float(np.max(np.abs(bphi_minus))), 0.0)
+
+    def test_tm_cavity_seeds_discrete_eigenvector_at_leapfrog_times(self):
+        amp = 2.5
+        deck = _fields_deck(FieldsInitial(
+            type="seed_tm_cavity", component="Ez", amplitude=amp,
+            mode=(2, 3)))
+        deck.domain = Domain(nx=8, ny=6, lx_m=2.0, ly_m=1.5)
+        deck.numerics = Numerics(fdtd_order=4, shape="cic")
+        deck.boundary = BoundaryConfig(
+            particle=("specular",) * 4, field=("pec",) * 4)
+        dt = 0.025
+        deck.validate()
+
+        solver = _RecordingSolver()
+        _seed_fields(solver, deck, dt=dt, units=Units(deck))
+        seeded = {component: values for component, values in solver.calls}
+        self.assertEqual(seeded.keys(), {"ez", "bx", "by"})
+
+        nx, ny = deck.domain.nx, deck.domain.ny
+        g = _core.pic.required_nghost(deck.numerics.fdtd_order)
+        pitch, height = nx + 2 * g, ny + 2 * g
+        padded = {
+            component: values.reshape(height, pitch)
+            for component, values in seeded.items()
+        }
+        ez = padded["ez"][g:g + ny, g:g + nx]
+        bx = padded["bx"][g:g + ny + 1, g:g + nx]
+        by = padded["by"][g:g + ny, g:g + nx + 1]
+
+        mx, my = deck.fields.initial.mode
+        sx = np.sin(np.pi * mx * (np.arange(nx) + 0.5) / nx)
+        sy = np.sin(np.pi * my * (np.arange(ny) + 0.5) / ny)
+        cx = np.cos(np.pi * mx * np.arange(nx + 1) / nx)
+        cy = np.cos(np.pi * my * np.arange(ny + 1) / ny)
+        dx, dy = deck.domain.lx_m / nx, deck.domain.ly_m / ny
+
+        def symbol(mode, count, spacing):
+            theta = np.pi * mode / (2.0 * count)
+            return ((9.0 / 4.0) * np.sin(theta)
+                    - (1.0 / 12.0) * np.sin(3.0 * theta)) / spacing
+
+        kx = symbol(mx, nx, dx)
+        ky = symbol(my, ny, dy)
+        kappa = np.hypot(kx, ky)
+        omega_dt = 2.0 * np.arcsin(0.5 * dt * kappa)
+        half_time = np.sin(0.5 * omega_dt)
+
+        np.testing.assert_allclose(
+            ez, amp * np.multiply.outer(sy, sx), rtol=0.0, atol=2.0e-15)
+        np.testing.assert_allclose(
+            bx, amp * (ky / kappa) * half_time * np.multiply.outer(cy, sx),
+            rtol=2.0e-15, atol=2.0e-15)
+        np.testing.assert_allclose(
+            by, -amp * (kx / kappa) * half_time * np.multiply.outer(sy, cx),
+            rtol=2.0e-15, atol=2.0e-15)
+
+        # No padded/ghost slot is accidentally treated as a physical field DOF.
+        self.assertTrue(np.all(padded["ez"][:g] == 0.0))
+        self.assertTrue(np.all(padded["ez"][:, :g] == 0.0))
+        self.assertTrue(np.all(padded["bx"][g + ny + 1:] == 0.0))
+        self.assertTrue(np.all(padded["by"][:, g + nx + 1:] == 0.0))
+
+    def test_tm_cavity_order2_uses_second_order_dispersion(self):
+        deck = _fields_deck(FieldsInitial(
+            type="seed_tm_cavity", component="Ez", amplitude=1.0,
+            mode=(1, 1)))
+        deck.boundary = BoundaryConfig(
+            particle=("specular",) * 4, field=("pec",) * 4)
+        dt = 0.04
+        solver = _RecordingSolver()
+        _seed_fields(solver, deck, dt=dt, units=Units(deck))
+        seeded = dict(solver.calls)
+
+        nx = ny = 8
+        g = 1
+        bx = seeded["bx"].reshape(ny + 2 * g, nx + 2 * g)[
+            g:g + ny + 1, g:g + nx]
+        theta = np.pi / (2.0 * nx)
+        modified_k = 2.0 * np.sin(theta) / (1.0 / nx)
+        omega_dt = 2.0 * np.arcsin(
+            0.5 * dt * np.hypot(modified_k, modified_k))
+        sx = np.sin(np.pi * (np.arange(nx) + 0.5) / nx)
+        cy = np.cos(np.pi * np.arange(ny + 1) / ny)
+        expected_bx = (np.sin(0.5 * omega_dt) / np.sqrt(2.0)
+                       * np.multiply.outer(cy, sx))
+        np.testing.assert_allclose(
+            bx, expected_bx, rtol=2.0e-15, atol=2.0e-15)
+
     def test_seed_em_wave_rejects_nonzero_my(self):
         deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Ez",
                                           mode=(1, 1)))
@@ -75,34 +236,139 @@ class SeedFieldsTests(unittest.TestCase):
         seeded = {c for c, _ in solver.calls}
         self.assertEqual(seeded, {"ez", "by"})
 
+    def test_si_em_wave_phase_matches_equivalent_normalized_deck(self):
+        initial_si = FieldsInitial(
+            type="seed_em_wave", component="Ez", amplitude=2.5,
+            mode=(2, 0))
+        si_deck = _fields_deck(initial_si)
+        si_deck.units = "SI"
+        si_deck.numerics = Numerics(fdtd_order=4, shape="cic")
+        si_units = Units(si_deck)
+
+        lx_internal = si_units.length(si_deck.domain.lx_m)
+        ly_internal = si_units.length(si_deck.domain.ly_m)
+        amplitude_internal = si_units.e_field(initial_si.amplitude)
+        normalized_deck = _fields_deck(FieldsInitial(
+            type="seed_em_wave", component="Ez",
+            amplitude=amplitude_internal, mode=initial_si.mode))
+        normalized_deck.domain = Domain(
+            nx=si_deck.domain.nx, ny=si_deck.domain.ny,
+            lx_m=lx_internal, ly_m=ly_internal)
+        normalized_deck.numerics = Numerics(fdtd_order=4, shape="cic")
+
+        # Both calls receive the solver-internal timestep.  Their E and
+        # half-time B seeds must therefore be identical after unit conversion.
+        dt_internal = 0.1 * (lx_internal / si_deck.domain.nx)
+        si_solver = _RecordingSolver()
+        normalized_solver = _RecordingSolver()
+        _seed_fields(si_solver, si_deck, dt_internal, si_units)
+        _seed_fields(normalized_solver, normalized_deck, dt_internal,
+                     Units(normalized_deck))
+
+        si_seed = {component: values for component, values in si_solver.calls}
+        normalized_seed = {
+            component: values
+            for component, values in normalized_solver.calls
+        }
+        self.assertEqual(si_seed.keys(), normalized_seed.keys())
+        for component in si_seed:
+            np.testing.assert_allclose(
+                si_seed[component], normalized_seed[component],
+                rtol=2.0e-15, atol=0.0)
+
+    def test_si_tm_cavity_matches_equivalent_normalized_seed(self):
+        walls = BoundaryConfig(
+            particle=("specular",) * 4, field=("pec",) * 4)
+        initial_si = FieldsInitial(
+            type="seed_tm_cavity", component="Ez", amplitude=2.5,
+            mode=(1, 2))
+        si_deck = _fields_deck(initial_si)
+        si_deck.units = "SI"
+        si_deck.numerics = Numerics(fdtd_order=4, shape="cic")
+        si_deck.boundary = walls
+        si_units = Units(si_deck)
+
+        normalized_deck = _fields_deck(FieldsInitial(
+            type="seed_tm_cavity", component="Ez",
+            amplitude=si_units.e_field(initial_si.amplitude),
+            mode=initial_si.mode))
+        normalized_deck.domain = Domain(
+            nx=si_deck.domain.nx, ny=si_deck.domain.ny,
+            lx_m=si_units.length(si_deck.domain.lx_m),
+            ly_m=si_units.length(si_deck.domain.ly_m))
+        normalized_deck.numerics = Numerics(fdtd_order=4, shape="cic")
+        normalized_deck.boundary = walls
+
+        dt_internal = 0.1 * (
+            si_units.length(si_deck.domain.lx_m) / si_deck.domain.nx)
+        si_solver = _RecordingSolver()
+        normalized_solver = _RecordingSolver()
+        _seed_fields(si_solver, si_deck, dt_internal, si_units)
+        _seed_fields(normalized_solver, normalized_deck, dt_internal,
+                     Units(normalized_deck))
+        si_seed = dict(si_solver.calls)
+        normalized_seed = dict(normalized_solver.calls)
+        self.assertEqual(si_seed.keys(), normalized_seed.keys())
+        for component in si_seed:
+            np.testing.assert_allclose(
+                si_seed[component], normalized_seed[component],
+                rtol=2.0e-15, atol=0.0)
+
     def test_seed_perturbation_writes_single_component_sinusoid(self):
         amp, mx = 3.0e-3, 2
-        deck = _fields_deck(FieldsInitial(type="seed_perturbation", component="Ex",
+        deck = _fields_deck(FieldsInitial(type="seed_perturbation", component="By",
                                           amplitude=amp, mode=(mx, 0)))
         solver = _RecordingSolver()
         _seed_fields(solver, deck)
 
-        # Exactly one component is seeded, lowercased from the deck's "Ex".
+        # Exactly one divergence-free transverse component is seeded.
         self.assertEqual(len(solver.calls), 1)
         comp, values = solver.calls[0]
-        self.assertEqual(comp, "ex")
+        self.assertEqual(comp, "by")
 
-        # Reshape the flat ghost-padded buffer and check the interior against the
-        # x-only sinusoid amp*sin(2*pi*mx*(i+0.5)/nx); ghost cells stay zero.
+        # By is x-face staggered: all nx+1 physical faces, including the
+        # independent high face, are seeded at amp*sin(2*pi*mx*i/nx).
         nx = ny = 8
         g = _core.pic.required_nghost(deck.numerics.fdtd_order)
         pitch, height = nx + 2 * g, ny + 2 * g
         buf = values.reshape(height, pitch)
-        i = np.arange(nx)
-        expected_row = amp * np.sin(2 * np.pi * mx * (i + 0.5) / nx)
-        interior = buf[g:g + ny, g:g + nx]
+        i = np.arange(nx + 1)
+        expected_row = amp * np.sin(2 * np.pi * mx * i / nx)
+        interior = buf[g:g + ny, g:g + nx + 1]
         for row in interior:
             np.testing.assert_allclose(row, expected_row, rtol=0, atol=1e-12)
         # Ghost border is untouched (all zero).
         self.assertEqual(buf[:g].sum(), 0.0)
         self.assertEqual(buf[g + ny:].sum(), 0.0)
         self.assertEqual(buf[:, :g].sum(), 0.0)
-        self.assertEqual(buf[:, g + nx:].sum(), 0.0)
+        self.assertEqual(buf[:, g + nx + 1:].sum(), 0.0)
+
+    def test_seed_perturbation_rejects_longitudinal_fields(self):
+        for component in ("Ex", "Bx"):
+            with self.subTest(component=component):
+                deck = _fields_deck(FieldsInitial(
+                    type="seed_perturbation", component=component,
+                    mode=(1, 0)))
+                with self.assertRaisesRegex(ValueError, "Gauss|div\\(B\\)"):
+                    _seed_fields(_RecordingSolver(), deck)
+
+    def test_si_seed_amplitude_is_converted_by_component_units(self):
+        amp_si = 2.5
+        deck = _fields_deck(FieldsInitial(
+            type="seed_perturbation", component="Ey", amplitude=amp_si,
+            mode=(1, 0)))
+        deck.units = "SI"
+        units = Units(deck)
+        solver = _RecordingSolver()
+        _seed_fields(solver, deck, units=units)
+
+        _, values = solver.calls[0]
+        lattice_peak = float(np.max(np.sin(
+            2.0 * np.pi * (np.arange(deck.domain.nx) + 0.5)
+            / deck.domain.nx)))
+        self.assertAlmostEqual(
+            float(np.max(values)),
+            lattice_peak * units.e_field(amp_si), places=12)
 
 
 class BuildParserTests(unittest.TestCase):
@@ -149,6 +415,8 @@ class FlattenForNpzTests(unittest.TestCase):
             "nx": 4,
             "ny": 4,
             "nghost": 1,
+            "boundary_field": ("periodic", "periodic",
+                               "periodic", "periodic"),
             "external_bx": np.zeros(4),
             "external_by": np.zeros(4),
             "external_bz": np.zeros(4),
@@ -169,6 +437,8 @@ class FlattenForNpzTests(unittest.TestCase):
         self.assertEqual(int(flat["final_step"][0]), 10)
         self.assertEqual(int(flat["nx"][0]), 4)
         self.assertEqual(int(flat["nghost"][0]), 1)
+        np.testing.assert_array_equal(
+            flat["boundary_field"], np.array(["periodic"] * 4))
         self.assertIn("field_bz", flat)
         self.assertEqual(flat["field_bz"].shape, (16,))
 
@@ -180,6 +450,128 @@ class FlattenForNpzTests(unittest.TestCase):
         flat = _flatten_for_npz(snaps, self._final(), None)
         self.assertEqual(flat["snapshot_field_bz"].shape, (2, 16))
         np.testing.assert_array_equal(flat["snapshot_steps"], np.array([5, 10]))
+
+
+class ExactEndTimeTests(unittest.TestCase):
+
+    class _Solver:
+        def __init__(self):
+            self.steps = []
+            self.finalized = False
+
+        def step(self, dt):
+            self.steps.append(float(dt))
+
+        def finalize(self):
+            self.finalized = True
+
+        def field_component_to_host(self, _component):
+            return np.zeros(4)
+
+        def external_field_component_to_host(self, _component):
+            return np.zeros(4)
+
+    def test_t_end_clips_last_step_and_output_time_exactly(self):
+        deck = PicDeck(
+            domain=Domain(nx=2, ny=2, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            species=[],
+            time=Time(dt_s=0.4, steps=10, t_end_s=1.0),
+            diagnostics=Diagnostics(fields=[], per_species=False),
+            units="normalized")
+        solver = self._Solver()
+        args = SimpleNamespace(log_every=0, write_every=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "out.npz"
+            _run_loop(solver, deck, [], Units(deck), 0.4, 0.4,
+                      out_path, args)
+            out = np.load(out_path, allow_pickle=False)
+            self.assertEqual(float(out["final_time_s"][0]), 1.0)
+            self.assertEqual(int(out["final_step"][0]), 3)
+        np.testing.assert_allclose(solver.steps, [0.4, 0.4, 0.2],
+                                   rtol=0.0, atol=1.0e-15)
+        self.assertTrue(solver.finalized)
+
+    def test_first_clipped_step_uses_matching_field_half_step_seed(self):
+        class _SeededSolver(self._Solver):
+            def __init__(self):
+                super().__init__()
+                self.seed_calls = []
+
+            def seed_field(self, component, values):
+                self.seed_calls.append((component, np.asarray(values)))
+
+        deck = PicDeck(
+            domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            species=[],
+            fields=Fields(initial=FieldsInitial(
+                type="seed_em_wave", component="Ez", mode=(1, 0))),
+            time=Time(dt_s=0.08, steps=10, t_end_s=0.02),
+            diagnostics=Diagnostics(fields=[], per_species=False),
+            units="normalized")
+        deck.validate()
+        units = Units(deck)
+        solver = _SeededSolver()
+        with patch("quasar.pic.cli._make_solver", return_value=solver):
+            got_solver, indices, dt, dt_si = prepare_run(deck, units)
+        self.assertIs(got_solver, solver)
+        self.assertEqual(indices, [])
+        self.assertEqual(dt, 0.08)  # nominal cadence remains unchanged
+
+        expected = _RecordingSolver()
+        _seed_fields(expected, deck, dt=0.02, units=units)
+        self.assertEqual(
+            [name for name, _ in solver.seed_calls],
+            [name for name, _ in expected.calls])
+        for (_, actual), (_, reference) in zip(solver.seed_calls, expected.calls):
+            np.testing.assert_allclose(actual, reference, rtol=0.0, atol=0.0)
+
+        args = SimpleNamespace(log_every=0, write_every=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            _run_loop(solver, deck, [], units, dt, dt_si,
+                      Path(tmp) / "out.npz", args)
+        self.assertEqual(solver.steps, [0.02])
+        self.assertTrue(solver.finalized)
+
+    def test_t_end_clips_in_solver_units_before_assigning_si_label(self):
+        class _ScaledUnits:
+            factor = np.pi
+
+            def time(self, value):
+                return value * self.factor
+
+            def time_to_si(self, value):
+                return value / self.factor
+
+            @staticmethod
+            def field_component_to_si(_name, value):
+                return value
+
+        deck = PicDeck(
+            domain=Domain(nx=2, ny=2, lx_m=1.0, ly_m=1.0),
+            numerics=Numerics(fdtd_order=2, shape="cic"),
+            species=[],
+            time=Time(dt_s=0.1, steps=10, t_end_s=0.137),
+            diagnostics=Diagnostics(fields=[], per_species=False),
+            units="normalized")
+        units = _ScaledUnits()
+        solver = self._Solver()
+        args = SimpleNamespace(log_every=0, write_every=0)
+        dt_si = 0.1
+        dt = units.time(dt_si)
+        expected_last = units.time(deck.time.t_end_s) - dt
+        # Converting the rounded SI remainder back is observably different; this
+        # is the mismatch the regression guards against.
+        self.assertNotEqual(expected_last,
+                            units.time(deck.time.t_end_s - dt_si))
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "out.npz"
+            _run_loop(solver, deck, [], units, dt, dt_si, out_path, args)
+            out = np.load(out_path, allow_pickle=False)
+            self.assertEqual(float(out["final_time_s"][0]),
+                             deck.time.t_end_s)
+        self.assertEqual(solver.steps, [dt, expected_last])
 
 
 class _ComponentRecordingSolver:
@@ -212,6 +604,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(solver.external_calls, ["bx", "by", "bz"])
         self.assertEqual(snap["nx"], 2)
         self.assertEqual(snap["ny"], 2)
+        self.assertEqual(snap["boundary_field"], tuple(deck.boundary.field))
         self.assertEqual(set(snap["fields"]), {"bz"})
 
     def test_snapshot_applies_si_conversion_per_component(self):
@@ -283,7 +676,7 @@ class _RecordingSpecies:
 
 
 class _SpeciesRecordingSolver:
-    """Stub solver capturing add_species/species_at for _seed_species."""
+    """Stub solver capturing solver-owned particle uploads for _seed_species."""
 
     def __init__(self):
         self.configs = []
@@ -296,6 +689,10 @@ class _SpeciesRecordingSolver:
 
     def species_at(self, idx):
         return self.species[idx]
+
+    def set_species_particles(self, idx, **kwargs):
+        self.species[idx].host = {
+            key: np.asarray(value) for key, value in kwargs.items()}
 
 
 def _species_deck(initial: SpeciesInitial) -> PicDeck:
@@ -318,7 +715,7 @@ class SeedSpeciesTests(unittest.TestCase):
                       region_y_min_m=0.5, region_y_max_m=1.0)
         deck = _species_deck(SpeciesInitial(distribution="maxwellian_block",
                                             density_per_m3=1.0e18,
-                                            temperature_eV=1.0, **region))
+                                            temperature_eV=1.0e-4, **region))
         units = Units(deck)
         solver = _SpeciesRecordingSolver()
         rng = np.random.default_rng(0)
@@ -345,7 +742,7 @@ class SeedSpeciesTests(unittest.TestCase):
     def test_uniform_positions_span_full_domain(self):
         deck = _species_deck(SpeciesInitial(distribution="maxwellian_uniform",
                                             density_per_m3=1.0e18,
-                                            temperature_eV=1.0))
+                                            temperature_eV=1.0e-4))
         units = Units(deck)
         solver = _SpeciesRecordingSolver()
         _seed_species(solver, deck, units, np.random.default_rng(0))
@@ -354,6 +751,34 @@ class SeedSpeciesTests(unittest.TestCase):
         domain_area = units.length(deck.domain.lx_m) * units.length(deck.domain.ly_m)
         expected_w = units.density(1.0e18) * domain_area / 64
         np.testing.assert_allclose(host["weight"], expected_w, rtol=1e-12)
+
+    def test_velocity_perturbation_seeds_the_requested_resolved_mode(self):
+        perturbation = VelocityPerturbation(
+            amplitude_v=(1.0e-3, -2.0e-3, 0.0), mode=(1, 0),
+            phase_rad=0.25)
+        deck = _species_deck(SpeciesInitial(
+            distribution="maxwellian_uniform", density_per_m3=1.0,
+            temperature_eV=0.0, velocity_perturbation=perturbation))
+        deck.validate()
+        units = Units(deck)
+        solver = _SpeciesRecordingSolver()
+        _seed_species(solver, deck, units, np.random.default_rng(0))
+        host = solver.species[0].host
+        phase = 2.0 * np.pi * host["x"] + perturbation.phase_rad
+        np.testing.assert_allclose(
+            host["vx"], perturbation.amplitude_v[0] * np.sin(phase),
+            rtol=0.0, atol=2.0e-18)
+        np.testing.assert_allclose(
+            host["vy"], perturbation.amplitude_v[1] * np.sin(phase),
+            rtol=0.0, atol=2.0e-18)
+        np.testing.assert_array_equal(host["vz"], 0.0)
+
+    def test_macro_weight_rejects_true_underflow_but_not_false_intermediate_range(self):
+        self.assertAlmostEqual(
+            _macro_weight(1.0, 1.0e-300, 1.0e300, "e"), 1.0)
+        with self.assertRaisesRegex(OverflowError, "macro-particle weight"):
+            _macro_weight(
+                1.0, np.nextafter(0.0, 1.0), 0.5, "underflow")
 
 
 class _ExternalRecordingSolver:
@@ -411,7 +836,7 @@ class ApplyExternalFieldTests(unittest.TestCase):
         self.assertEqual(type(ev).__name__, "DipoleEvaluator")
 
     def test_gradient_builds_gradient_evaluator(self):
-        grad = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+        grad = ((1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 0.0))
         ev = self._eval_for(ExternalField(evaluator_type="gradient",
                                           gradient_b0=(0.0, 0.0, 1.0),
                                           gradient_matrix=grad))
@@ -449,7 +874,8 @@ class CartesianCflGuardTests(unittest.TestCase):
             domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0),
             numerics=Numerics(fdtd_order=2, shape="cic"),
             species=[Species(name="e", charge_C=-1.0, mass_kg=1.0,
-                             n_particles=64, initial=SpeciesInitial())],
+                             n_particles=64,
+                             initial=SpeciesInitial(temperature_eV=1.0e-4))],
             time=Time(dt_s=dt_s, steps=4),
             units="normalized",
         )

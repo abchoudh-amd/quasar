@@ -1,9 +1,11 @@
 units: normalized
+neutralizing_background: true
 domain: {nx: 64, ny: 64, lx_m: 1.0, ly_m: 1.0}
 numerics: {fdtd_order: 4, shape: tsc, current_filter: []}
 # Two counter-streaming electron populations drifting along +/-y. The temperature
-# anisotropy / counter-streaming drives the Weibel instability, which grows a
-# transverse magnetic field (Bz) from noise. Velocities are in units of c.
+# anisotropy / counter-streaming drives the Weibel instability.  A common tiny
+# vy(kx) perturbation seeds the kx=2*pi/Lx filamentation eigenmode deterministically
+# without perturbing charge density. Velocities are in units of c.
 species:
   - name: electron_up
     charge_C: -1
@@ -14,6 +16,9 @@ species:
       density_per_m3: 1.0
       temperature_eV: 0.0
       drift_v: [0.0, 0.3, 0.0]
+      velocity_perturbation:
+        amplitude_v: [0.0, 1.0e-6, 0.0]
+        mode: [1, 0]
   - name: electron_down
     charge_C: -1
     mass_kg: 1
@@ -23,5 +28,8 @@ species:
       density_per_m3: 1.0
       temperature_eV: 0.0
       drift_v: [0.0, -0.3, 0.0]
-time: {dt_s: auto, steps: 512}
+      velocity_perturbation:
+        amplitude_v: [0.0, 1.0e-6, 0.0]
+        mode: [1, 0]
+time: {dt_s: auto, steps: 3200}
 diagnostics: {output_path: out.npz, cadence: 16, fields: [bz], per_species: true}

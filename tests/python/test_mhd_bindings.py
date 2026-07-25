@@ -9,9 +9,6 @@ introspection contract of ``bindings/python/bind_pic.cpp``:
 * device-touching construction/step is guarded by the same ``QUASAR_HAS_HIP_RUNTIME``
   skip and an ``(ImportError, RuntimeError)`` fallback skip the PIC tests use.
 
-Until ``_core.mhd`` exists (and the build tree is refreshed) the top-level
-``from quasar import _core`` succeeds but ``_core.mhd`` is absent, so every test
-fails by a clean AttributeError -- the intended RED state.
 """
 
 import os

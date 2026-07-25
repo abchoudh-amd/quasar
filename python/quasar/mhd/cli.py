@@ -22,6 +22,7 @@ import numpy as np
 from .. import _core
 from .._paths import confine_output_path, positive_int as _positive_int
 from . import io as mhd_io
+from . import _units as mhd_units
 
 
 def _make_config(deck: mhd_io.MhdDeck):
@@ -63,6 +64,14 @@ def _make_config(deck: mhd_io.MhdDeck):
     cfg.background.bx0 = deck.background.bx0
     cfg.background.by0 = deck.background.by0
     cfg.background.bz0 = deck.background.bz0
+    # Only analytic mode configures the native registry profile. File and
+    # vector-potential modes override all three buffers immediately after
+    # construction; their params (for example b_scale/vacuum_project) belong to
+    # the Python loaders and are not analytic-profile parameters.
+    if deck.background.file is None and deck.background.a_file is None:
+        cfg.background.params = {
+            key: float(value) for key, value in deck.background.params.items()
+        }
     return cfg
 
 
@@ -126,6 +135,8 @@ def _component_2d(solver, deck: mhd_io.MhdDeck, component: str) -> np.ndarray:
     pitch = deck.domain.nx + 2 * nghost
     height = deck.domain.ny + 2 * nghost
     flat = np.asarray(solver.state_component_to_host(component))
+    if component in ("bx", "by", "bz"):
+        flat = mhd_units.magnetic_to_output(flat, deck.units)
     return flat.reshape(height, pitch)
 
 
@@ -208,6 +219,7 @@ def _flatten_for_npz(solver, deck: mhd_io.MhdDeck, final_step: int,
         "lx_m": np.array([deck.domain.lx_m]),
         "ly_m": np.array([deck.domain.ly_m]),
         "nghost": np.array([nghost]),
+        "units": np.array([deck.units]),
         "geometry": np.array([deck.geometry]),
         "gamma": np.array([deck.numerics.gamma]),
     }
@@ -220,18 +232,26 @@ def _flatten_for_npz(solver, deck: mhd_io.MhdDeck, final_step: int,
     for name in mhd_io.STATE_COMPONENTS:
         padded = _component_2d(solver, deck, name)
         flat[f"state_{name}"] = _interior_slice(padded, nx, ny, nghost)
-    # div B diagnostic: per-snapshot series plus the final scalar.
-    flat["divb_linf"] = np.asarray(divb_series, dtype=np.float64)
-    flat["divb_linf_final"] = np.array(
-        [divb_series[-1] if divb_series else solver.divergence_b_max()])
+    # div B is an opt-in diagnostic because each sample performs a synchronizing
+    # device reduction. When disabled, emit no divergence keys and, critically,
+    # do not sneak in a final reduction while serializing the archive.
+    if deck.diagnostics.divb:
+        divb_out = mhd_units.magnetic_to_output(
+            np.asarray(divb_series, dtype=np.float64), deck.units)
+        flat["divb_linf"] = divb_out
+        flat["divb_linf_final"] = np.array(
+            [divb_out[-1] if divb_series else mhd_units.magnetic_to_output(
+                solver.divergence_b_max(), deck.units)])
     if snapshots:
         flat["snapshot_steps"] = np.array([s["step"] for s in snapshots])
         flat["snapshot_times_s"] = np.array([s["time_s"] for s in snapshots])
         for name in deck.diagnostics.fields:
             flat[f"snapshot_state_{name}"] = np.stack(
                 [s["fields"][name] for s in snapshots])
-        flat["snapshot_divb_linf"] = np.array(
-            [s["divb"] for s in snapshots], dtype=np.float64)
+        if deck.diagnostics.divb:
+            flat["snapshot_divb_linf"] = mhd_units.magnetic_to_output(
+                np.array([s["divb"] for s in snapshots], dtype=np.float64),
+                deck.units)
     for k, v in extra_scalars.items():
         flat[k] = np.array([v])
     return flat
@@ -256,55 +276,92 @@ def _run_loop(solver, deck: mhd_io.MhdDeck, dt: float, dt_is_auto: bool, out_pat
 
     log_every = max(0, int(args.log_every))
 
-    # Record the t=0 div B as the first series sample so the diagnostic captures
-    # the seeded (machine-epsilon) value too.
-    divb_series.append(float(solver.divergence_b_max()))
+    # Record t=0 only when requested. divergence_b_max() synchronizes the device,
+    # so diagnostics.divb=false must avoid even this otherwise invisible cost.
+    if deck.diagnostics.divb:
+        divb_series.append(float(solver.divergence_b_max()))
 
     cadence = deck.diagnostics.cadence
-    for step in range(deck.time.steps):
-        step_done = step + 1
-        is_last = step_done == deck.time.steps
+    step_done = 0
+    t_end = deck.time.t_end
+    while step_done < deck.time.steps and (
+            t_end is None or sim_time < float(t_end)):
         # For "auto" dt the stable step tightens as the flow develops, so refresh
         # it from the live state before each step; an explicit deck dt is held
         # fixed (the solver rejects it if it later exceeds the limit). The auto
         # path uses step_unchecked: cfl_limit() was just computed, so step()'s
         # internal CFL re-reduction would be redundant.
+        dt_limit = float(solver.cfl_limit()) if dt_is_auto else float(dt)
+        if not np.isfinite(dt_limit) or not dt_limit > 0.0:
+            raise RuntimeError(
+                "MHD timestep is not finite and strictly positive")
+        dt_step = dt_limit
+        clipped_to_end = False
+        if t_end is not None:
+            remaining = float(t_end) - sim_time
+            dt_step = min(dt_step, remaining)
+            clipped_to_end = dt_step == remaining
+        if not np.isfinite(dt_step) or not dt_step > 0.0:
+            raise RuntimeError(
+                "MHD timestep cannot make positive finite progress")
+        next_time = None
+        if not clipped_to_end:
+            next_time = sim_time + dt_step
+            if not np.isfinite(next_time) or not next_time > sim_time:
+                raise RuntimeError(
+                    "MHD timestep is too small to advance simulation time")
         if dt_is_auto:
-            dt = solver.cfl_limit()
-            solver.step_unchecked(dt)
+            solver.step_unchecked(dt_step)
         else:
-            solver.step(dt)
-        sim_time += dt
+            solver.step(dt_step)
+        if clipped_to_end:
+            # Assign the requested endpoint only after integrating the exact
+            # residual interval selected above. No epsilon snap may report time
+            # that was never advanced by the solver.
+            sim_time = float(t_end)
+        else:
+            sim_time = next_time
+        step_done += 1
+        is_last = step_done == deck.time.steps or (
+            t_end is not None and sim_time >= float(t_end))
         # divergence_b_max() runs a ghost refill + a syncing device reduction, so
         # sample it only on cadence steps, the final step (for divb_linf_final),
         # and when a progress log needs it -- not every step.
         on_cadence = cadence > 0 and step_done % cadence == 0
-        need_divb = on_cadence or is_last or (
-            log_every > 0 and step_done % log_every == 0)
+        need_divb = deck.diagnostics.divb and (
+            on_cadence or is_last
+            or (log_every > 0 and step_done % log_every == 0))
         divb_now = float(solver.divergence_b_max()) if need_divb else None
         if divb_now is not None:
             divb_series.append(divb_now)
         if on_cadence:
-            snapshots.append({
+            snapshot = {
                 "step": step_done,
                 "time_s": sim_time,
                 "fields": _snapshot_fields(solver, deck),
-                "divb": divb_now,
-            })
+            }
+            if deck.diagnostics.divb:
+                snapshot["divb"] = divb_now
+            snapshots.append(snapshot)
         if log_every > 0 and step_done % log_every == 0:
             elapsed = time.time() - t0
             rate = step_done / elapsed if elapsed > 0 else 0.0
             remaining = (deck.time.steps - step_done) / rate if rate > 0 else float("nan")
-            print(f"step {step_done}/{deck.time.steps}  "
-                  f"t={sim_time:.6e}  rate={rate:.0f} step/s  "
-                  f"eta={remaining:.0f}s  |divB|inf={divb_now:.3e}",
-                  flush=True)
+            message = (f"step {step_done}/{deck.time.steps}  "
+                       f"t={sim_time:.6e}  rate={rate:.0f} step/s  "
+                       f"eta={remaining:.0f}s")
+            if deck.diagnostics.divb:
+                message += f"  |divB|inf={divb_now:.3e}"
+            print(message, flush=True)
 
     flat = _flatten_for_npz(
-        solver, deck, deck.time.steps, sim_time, divb_series, snapshots,
+        solver, deck, step_done, sim_time, divb_series, snapshots,
         extra_scalars)
     flat.update(initial_state)
-    np.savez(out_path, **flat)
+    # Passing a suffixless path to np.savez silently writes to ``path + .npz``.
+    # Open the already-confined path so diagnostics.output_path is exact.
+    with out_path.open("wb") as stream:
+        np.savez(stream, **flat)
 
 
 def _build_parser() -> argparse.ArgumentParser:

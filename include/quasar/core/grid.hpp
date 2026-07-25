@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 
 namespace quasar {
@@ -14,6 +15,71 @@ enum class Side { x_lo, x_hi, y_lo, y_hi };
 struct GhostHalo {
   int nghost{1};
 };
+
+namespace detail {
+
+// Evaluate short products and quotients without letting an intermediate leave
+// Real's exponent range when the final result is representable.  Keeping the
+// mantissas O(1) also works for subnormal inputs on both host and HIP device.
+QUASAR_HOST_DEVICE inline Real scaled_product4(
+    Real a, Real b, Real c, Real d) noexcept {
+  if (a == Real{0} || b == Real{0} || c == Real{0} || d == Real{0}) {
+    return Real{0};
+  }
+  int ea = 0, eb = 0, ec = 0, ed = 0;
+  const Real ma = frexp(a, &ea);
+  const Real mb = frexp(b, &eb);
+  const Real mc = frexp(c, &ec);
+  const Real md = frexp(d, &ed);
+  Real mantissa = ma * mb * mc * md;
+  int adjustment = 0;
+  mantissa = frexp(mantissa, &adjustment);
+  return scalbn(mantissa, ea + eb + ec + ed + adjustment);
+}
+
+QUASAR_HOST_DEVICE inline Real scaled_quotient3(
+    Real numerator, Real denominator_a, Real denominator_b) noexcept {
+  if (numerator == Real{0}) return Real{0};
+  int en = 0, ea = 0, eb = 0;
+  const Real mn = frexp(numerator, &en);
+  const Real ma = frexp(denominator_a, &ea);
+  const Real mb = frexp(denominator_b, &eb);
+  Real mantissa = (mn / ma) / mb;
+  int adjustment = 0;
+  mantissa = frexp(mantissa, &adjustment);
+  return scalbn(mantissa, en - ea - eb + adjustment);
+}
+
+// Evaluate (high-low)/denominator after scaling the subtraction.  Two finite
+// coordinates can have an unrepresentable raw difference even though the
+// dimensionless reduced coordinate is small (for example a translated domain
+// spanning most of Real's range).  Shape, gather, deposit, and periodic-wrap
+// indexing all rely on this quotient.
+QUASAR_HOST_DEVICE inline Real scaled_difference_quotient(
+    Real high, Real low, Real denominator) noexcept {
+  if (high == low) return Real{0};
+  // Same-sign nearby coordinates satisfy Sterbenz's lemma, so their direct
+  // subtraction is both finite and exact.  Normalizing them separately first
+  // can round away part of a local offset on a large translated domain.  Use
+  // the scaled path only for the case it is meant to protect: a raw difference
+  // that leaves the exponent range (typically opposite-sign extremes).
+  const Real direct = high - low;
+  if (std::isfinite(direct)) return direct / denominator;
+  const Real scale = fmax(fabs(high), fabs(low));
+  if (scale == Real{0}) return Real{0};
+  const Real normalized = high / scale - low / scale;
+  if (normalized == Real{0}) return Real{0};
+  int es = 0, en = 0, ed = 0;
+  const Real ms = frexp(scale, &es);
+  const Real mn = frexp(normalized, &en);
+  const Real md = frexp(denominator, &ed);
+  Real mantissa = (ms * mn) / md;
+  int adjustment = 0;
+  mantissa = frexp(mantissa, &adjustment);
+  return scalbn(mantissa, es + en - ed + adjustment);
+}
+
+}  // namespace detail
 
 struct Grid2D {
   int  nx{1};
@@ -63,12 +129,12 @@ struct Grid2D {
     return index(wrap_i(i), wrap_j(j));
   }
 
-  QUASAR_HOST_DEVICE constexpr Real x_at_cell_center(int i) const noexcept {
-    return origin_x + (static_cast<Real>(i) + Real{0.5}) * dx();
+  QUASAR_HOST_DEVICE Real x_at_cell_center(int i) const noexcept {
+    return fma(static_cast<Real>(i) + Real{0.5}, dx(), origin_x);
   }
 
-  QUASAR_HOST_DEVICE constexpr Real y_at_cell_center(int j) const noexcept {
-    return origin_y + (static_cast<Real>(j) + Real{0.5}) * dy();
+  QUASAR_HOST_DEVICE Real y_at_cell_center(int j) const noexcept {
+    return fma(static_cast<Real>(j) + Real{0.5}, dy(), origin_y);
   }
 
   // -- Cylindrical (r,z) accessors -------------------------------------------
@@ -78,20 +144,21 @@ struct Grid2D {
   // meaningless (but harmless) on a Cartesian run, which never calls them.
 
   // Radius at the cell center of column i: r = origin_x + (i + 0.5)*dr.
-  QUASAR_HOST_DEVICE constexpr Real r_at_cell_center(int i) const noexcept {
-    return origin_x + (static_cast<Real>(i) + Real{0.5}) * dx();
+  QUASAR_HOST_DEVICE Real r_at_cell_center(int i) const noexcept {
+    return fma(static_cast<Real>(i) + Real{0.5}, dx(), origin_x);
   }
 
   // Radius at the cell edge (left face) of column i: r = origin_x + i*dr. The
   // i=0 edge sits at origin_x, i.e. r=0 when the domain starts on the axis.
-  QUASAR_HOST_DEVICE constexpr Real r_at_edge(int i) const noexcept {
-    return origin_x + static_cast<Real>(i) * dx();
+  QUASAR_HOST_DEVICE Real r_at_edge(int i) const noexcept {
+    return fma(static_cast<Real>(i), dx(), origin_x);
   }
 
   // Cell volume for column i under the azimuthal 2*pi convention (the axisymmetric
   // m=0 ring of one cell): V_i = 2*pi * r_at_cell_center(i) * dr * dz.
-  QUASAR_HOST_DEVICE constexpr Real cell_volume(int i) const noexcept {
-    return Real{2} * pi_v<Real> * r_at_cell_center(i) * dx() * dy();
+  QUASAR_HOST_DEVICE Real cell_volume(int i) const noexcept {
+    return detail::scaled_product4(
+        Real{2} * pi_v<Real>, r_at_cell_center(i), dx(), dy());
   }
 
   void validate() const {
@@ -107,13 +174,56 @@ struct Grid2D {
     if (nghost < 0) {
       throw std::invalid_argument{"Grid2D: ghost halo must be non-negative"};
     }
+    // pitch()/height() are part of the device ABI and intentionally return int.
+    // Reserve one representable count for the physical high face used by Yee
+    // layouts, then reject halos whose arithmetic would overflow the ABI before
+    // any allocation or index calculation is attempted.
+    constexpr int imax = std::numeric_limits<int>::max();
+    if (nx == imax || ny == imax) {
+      throw std::overflow_error{
+          "Grid2D: dimensions leave no representable physical high face"};
+    }
+    if (nghost > (imax - nx) / 2 || nghost > (imax - ny) / 2) {
+      throw std::overflow_error{"Grid2D: dimensions plus ghost halo exceed int range"};
+    }
+    const Real dx_value = lx / static_cast<Real>(nx);
+    const Real dy_value = ly / static_cast<Real>(ny);
+    if (!(std::isfinite(dx_value) && dx_value > Real{0}
+          && std::isfinite(dy_value) && dy_value > Real{0})) {
+      throw std::overflow_error{"Grid2D: cell spacing is not representable"};
+    }
+    const Real upper_x = origin_x + lx;
+    const Real upper_y = origin_y + ly;
+    if (!(std::isfinite(upper_x) && std::isfinite(upper_y))) {
+      throw std::overflow_error{"Grid2D: upper domain bound is not representable"};
+    }
+    // Coordinates are stored as Real. Distinct logical cells must therefore
+    // remain distinct after rounding at both ends of the domain.
+    // Use the same affine expression as the public coordinate accessors at
+    // both ends.  Reassociating the high centre as upper - dx/2 can round to a
+    // different value for subnormal spacings and miss a centre that actually
+    // collapses onto the high face.
+    if (x_at_cell_center(0) == origin_x
+        || y_at_cell_center(0) == origin_y
+        || x_at_cell_center(nx - 1) == upper_x
+        || y_at_cell_center(ny - 1) == upper_y) {
+      throw std::overflow_error{"Grid2D: cell coordinates collapse in host precision"};
+    }
+    const std::size_t p = static_cast<std::size_t>(nx + 2 * nghost);
+    const std::size_t h = static_cast<std::size_t>(ny + 2 * nghost);
+    if (h != 0 && p > std::numeric_limits<std::size_t>::max() / h) {
+      throw std::overflow_error{"Grid2D: storage size is not representable"};
+    }
   }
 };
 
 // Minimum ghost-cell halo for a given FDTD order: the 2nd-order curl reads one
 // cell past the boundary, the 4th-order curl reads two.
-constexpr int required_nghost(int fdtd_order) noexcept {
-  return fdtd_order == 4 ? 2 : 1;
+inline int required_nghost(int fdtd_order) {
+  if (fdtd_order == 2) return 1;
+  if (fdtd_order == 4) return 2;
+  throw std::invalid_argument{
+      "required_nghost: supported FDTD orders are 2 and 4"};
 }
 
 inline Real cfl_dt(const Grid2D& g, int fdtd_order, Real c = Real{1}) {
@@ -127,19 +237,33 @@ inline Real cfl_dt(const Grid2D& g, int fdtd_order, Real c = Real{1}) {
   } else if (fdtd_order != 2) {
     throw std::invalid_argument{"cfl_dt: supported FDTD orders are 2 and 4"};
   }
-  const Real sx = Real{1} / (g.dx() * g.dx());
-  const Real sy = Real{1} / (g.dy() * g.dy());
-  return Real{1} / (c * factor * std::sqrt(sx + sy));
+  // Algebraically this is 1/(c*factor*hypot(1/dx,1/dy)).  Evaluate it in
+  // scaled form so squaring a very small spacing cannot overflow and a large
+  // aspect ratio does not discard the smaller contribution prematurely.
+  const Real h_min = std::min(g.dx(), g.dy());
+  const Real h_max = std::max(g.dx(), g.dy());
+  const Real ratio = h_min / h_max;
+  const Real spectral_factor = factor * std::sqrt(Real{1} + ratio * ratio);
+  const Real dt = detail::scaled_quotient3(h_min, spectral_factor, c);
+  if (!(std::isfinite(dt) && dt > Real{0})) {
+    throw std::overflow_error{"cfl_dt: stable timestep is not representable"};
+  }
+  return dt;
 }
 
-// Cylindrical (r,z) CFL limit for the 2nd-order m=0 FDTD curl. The radial and
-// axial stencils are the same 2nd-order staggered differences as the Cartesian
-// case, so the stability bound is the Cartesian 2nd-order Courant limit using
-// (dr, dz); the 1/r curl terms do not tighten it for the on-axis-regularized
-// scheme. Phrased separately from cfl_dt so callers select it explicitly in
-// cylindrical mode and so a future radius-dependent refinement has one home.
+// Cylindrical (r,z) CFL limit for the m=0 mimetic curl.  In the radial
+// volume-weighted inner product, (1/r)D+(r .) is the negative adjoint of D-.
+// The regular axis row is the even/odd parity restriction of the same staggered
+// operator, so it cannot increase its norm.  Consequently the maximum symbols
+// are 2/h (order 2) and 7/(3h) (order 4), exactly the Cartesian values; no
+// additional small-r restriction is needed.
+inline Real cyl_cfl_dt(const Grid2D& g, int fdtd_order, Real c) {
+  return cfl_dt(g, fdtd_order, c);
+}
+
+// Backward-compatible order-two spelling.
 inline Real cyl_cfl_dt(const Grid2D& g, Real c = Real{1}) {
-  return cfl_dt(g, 2, c);
+  return cyl_cfl_dt(g, 2, c);
 }
 
 }  // namespace quasar

@@ -9,12 +9,21 @@ field split
 
    \mathbf{B} = \mathbf{B}_0 + \mathbf{b},
 
-where the background :math:`\mathbf{B}_0` is a fixed, curl-free field held
-constant in time and the solver evolves only the perturbation
+where the background :math:`\mathbf{B}_0` is a fixed field held constant in
+time and the solver evolves only the perturbation
 :math:`\mathbf{b}`. Constrained transport advances ``b`` alone;
 :math:`\mathbf{B}_0` never changes. This is the natural way to set up a
 strongly magnetized plasma without paying the cost of resolving the large
 mean field in the evolved state.
+
+The evolved energy is likewise a split variable,
+
+.. math::
+
+   E'=\rho e+\frac{|\mathbf m|^2}{2\rho}+\frac{|\mathbf b|^2}{2}.
+
+It contains neither :math:`|\mathbf B_0|^2/2` nor a
+:math:`\mathbf B_0\cdot\mathbf b` cross term.
 
 When the block is absent, or ``enabled: false``, there is no background
 field and the run is identical to before (default behavior).
@@ -30,10 +39,13 @@ Deck block
      bx0: 0.0                # uniform-vector components (profile == uniform)
      by0: 0.0
      bz0: 1.0
-     params: {}              # free dict for non-uniform named profiles
+     params: {}              # parameters for a registered analytic profile
      # ... OR load B0 from a file instead of an analytic spec:
-     file: b0.npz            # npz with arrays b0x, b0y, b0z, each
+     # file: b0.npz          # npz with arrays b0x, b0y, b0z, each
                              # (ny+2g, nx+2g) or flat (storage,)
+     # ... OR construct a non-uniform field from corner A_phi:
+     # a_file: coil.npz      # npz with padded-corner A_xyz_grid
+     # For a_file mode, params may contain b_scale and vacuum_project.
 
 Keys
 ~~~~
@@ -49,53 +61,118 @@ Key              Meaning
                  default. An unknown name is rejected with an error.
 ``bx0`` ``by0``  Components of the uniform vector :math:`\mathbf{B}_0` when
 ``bz0``          ``profile == uniform``. Default ``0`` each.
-``params``       Free mapping forwarded to non-uniform named profiles. Empty
-                 for ``uniform``.
+``params``       Mapping forwarded to the selected analytic profile. In
+                 ``a_file`` mode, ``b_scale`` scales the potential and
+                 ``vacuum_project`` requests the annular harmonic projection.
 ``file``         Path to an ``.npz`` holding a precomputed :math:`\mathbf{B}_0`
                  (arrays ``b0x``, ``b0y``, ``b0z``). Use this **instead of**
                  the analytic spec above.
+``a_file``       Path to coil output containing ``A_xyz_grid`` on the full
+                 padded corner grid. In cylindrical geometry, lab-``Y`` is
+                 interpreted as :math:`A_\phi` and differenced with the annular
+                 curl. Mutually exclusive with ``file``.
 ================ ==============================================================
 
-You supply **either** an analytic spec (a uniform vector) **or** a ``file:``.
-A ``file`` path is resolved relative to the deck directory; an absolute path is
+You supply an analytic profile, ``file:``, or ``a_file:``. Relative paths
+are resolved against and confined to the deck directory; absolute paths are
 honored as-is.
 
-For a file-loaded background, each of ``b0x``, ``b0y``, ``b0z`` must match
+The built-in ``linear_vacuum`` profile accepts ``gradient`` and ``shear`` and
+samples
+
+.. math::
+
+   B_{0x}=g x+s y,\qquad B_{0y}=s x-g y,\qquad B_{0z}=0.
+
+It is divergence-free and curl-free analytically. For a file-loaded background,
+each of ``b0x``, ``b0y``, ``b0z`` must match
 the grid's storage layout: either the 2-D ghost-padded shape
 ``(ny + 2g, nx + 2g)`` or the equivalent flat ``(storage,)`` array, where
 ``g`` is the scheme's ghost width.
 
 .. important::
 
-   **Only a spatially-uniform** :math:`\mathbf{B}_0` **is supported today.** The
-   solver evolves the perturbation with a conservative-flux-only field split that
-   is exact only for a constant background; a spatially-varying
-   :math:`\mathbf{B}_0` would need extra source terms (a background
-   magnetic-pressure gradient and tension) to conserve energy and momentum, and
-   those are not yet implemented. A non-uniform background — whether from a named
-   profile or a ``file:`` — is **rejected with a clear error**, even if it is
-   divergence-free. Use ``bx0/by0/bz0`` (or a file whose arrays are constant per
-   component) to set a uniform guide field. ``profile``/``params`` for a
-   non-uniform analytic profile are reserved for a future release.
+   Uniform and non-uniform backgrounds are supported, including current-carrying
+   fields, provided their staggered face representation is discretely
+   divergence-free and compatible with the configured periodic, wall, or axis
+   closure. The Riemann solver computes the split momentum and energy fluxes
+   directly, without ever forming an :math:`O(|\mathbf B_0|^2)` state or flux.
+   For a static, divergence-free background the residual discretizes the split
+   conservation law directly,
+
+   .. math::
+
+      \partial_t E' + \nabla\mathbin{\cdot}
+        (\mathbf F_E-\mathbf B_0\mathbin{\cdot}\mathbf F_B)
+      =\mathbf v\mathbin{\cdot}
+        [ (\nabla\mathbin{\times}\mathbf B_0)
+          \mathbin{\times}(\mathbf B_0+\mathbf b) ].
+
+   The curl of :math:`\mathbf B_0` is reduced before it is multiplied by either
+   field. Directional flux terms and the expanded current-work source share a
+   common binary exponent. This retains background-gradient/current work and
+   finite survivors even when much larger background terms cancel, while a
+   curl-free dominant background never creates an
+   :math:`O(|\mathbf B_0|^2)` intermediate.
+
+   ``params.vacuum_project: true`` is an explicit cylindrical-annulus operation.
+   It fixes :math:`A_\phi` on the outer boundary of the **padded** corner grid and
+   solves the discrete vacuum equation for :math:`\psi=rA_\phi` at interior
+   corners. The padded interval must satisfy :math:`r>0`. A
+   Jacobi-preconditioned conjugate-gradient solve is required to reach a
+   field-derivative-scaled vacuum-operator target; failure is a hard setup
+   error.
+   Without the flag, the sampled vector potential is used directly. The
+   projection is optional field preparation, not a requirement of the split
+   equations.
 
 Divergence-free requirement
 ---------------------------
 
-:math:`\mathbf{B}_0` must also be **discretely divergence-free**. A uniform
-vector is trivially solenoidal and is always accepted. A file-loaded
-:math:`\mathbf{B}_0` is checked against the same discrete face-divergence
+:math:`\mathbf{B}_0` must also be **discretely divergence-free**. A compatible
+uniform vector is trivially solenoidal. Every file-loaded or analytically
+sampled :math:`\mathbf{B}_0` is checked against the same discrete face-divergence
 operator constrained transport uses, and is **rejected with a clear error**
-if its divergence exceeds round-off.
+unless every interior cell satisfies the scale-free stencil test
+
+.. math::
+
+   \max_{i,j}
+   \frac{\left|\sum_k t_{k,i,j}\right|}
+        {\sum_k\left|t_{k,i,j}\right|}
+   \le 1024\,\epsilon_{64},
+
+where :math:`t_k` are the four signed Cartesian face/spacing terms (or the
+matching annular-radial and axial terms in cylindrical geometry). A zero stencil
+has zero defect. Numerator and denominator share a common binary exponent, so
+the test is invariant under field-unit, mesh, and power-of-two rescaling and is
+safe near the binary64 exponent limits. Here
+``1024 * epsilon(float64)`` is approximately ``2.274e-13``.
+
+The padded background must also be a fixed point of its configured boundary
+closure: periodic samples wrap, wall-normal fields vanish on the wall face with
+odd normal/even tangential parity, and the cylindrical axis additionally
+requires odd :math:`B_\phi`. Pairwise parity uses the same relative round-off
+tolerance; the wall/axis normal constraint is exact zero.
+
+The native solver enforces the same check for direct API use. If an application
+overwrites any component with ``seed_background``, validation is deferred until
+all components have been staged and then runs before the next operation that
+uses the background. The cell-centred toroidal component ``b0z`` is checked for
+finiteness but does not enter either the divergence or its tolerance scale.
 
 This guarantee matters: because the discrete divergence is linear,
 
 .. math::
 
-   \nabla\cdot(\mathbf{B}_0 + \mathbf{b}) = \nabla\cdot\mathbf{b},
+   \nabla_h\cdot(\mathbf{B}_0 + \mathbf{b})
+   = \nabla_h\cdot\mathbf{B}_0 + \nabla_h\cdot\mathbf{b}
+   = \nabla_h\cdot\mathbf{b} + r_0,
 
-so as long as :math:`\mathbf{B}_0` is divergence-free to round-off, the
-solenoidal constraint on the total field reduces to the one constrained
-transport already enforces on the evolved perturbation.
+so when :math:`\mathbf{B}_0` passes validation, the total-field divergence
+differs from the CT-controlled perturbation divergence only by a fixed
+round-off-level stencil residual. This is a relative cancellation guarantee,
+not a dimensional absolute-error bound.
 
 Physics consequences
 --------------------
@@ -108,7 +185,8 @@ The background field is **not** inert — the total field
   transverse bending;
 * the **magnetic pressure** :math:`\tfrac{1}{2}|\mathbf{B}_0 + \mathbf{b}|^2`
   uses the total field;
-* the conserved **total-energy** budget accounts for the total field; and
+* the total-energy residual is transformed consistently to the stored split
+  energy for any static divergence-free background; and
 * the **fast-magnetosonic speed** that sets the CFL limit is evaluated on
   the total field.
 
@@ -117,7 +195,7 @@ background field **tightens** the stable timestep: an ``auto`` (CFL-limited)
 ``dt`` will be smaller than for the same deck with no background field.
 
 Output convention
-----------------
+-----------------
 
 Constrained transport evolves only the perturbation, so the
 ``state_b*`` arrays in the output ``.npz`` are the evolved **perturbation**
@@ -139,8 +217,9 @@ static uniform guide field :math:`\mathbf{B}_0 = (B_{x0}, 0, 0)` supplied by
 transverse perturbation (its own in-plane background is set to zero), so the
 mean in-plane field comes entirely from the background block. The guide
 field raises the fast speed, so the CFL-limited ``dt`` is tighter than the
-:math:`\mathbf{B}_0 = 0` case, while ``div(B0 + b) = div(b)`` stays at
-round-off.
+:math:`\mathbf{B}_0 = 0` case. The validated background-divergence residual
+stays fixed within the setup acceptance threshold, while the CT-controlled
+perturbation divergence stays at round-off.
 
 Run it with:
 

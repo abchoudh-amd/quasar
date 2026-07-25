@@ -3,8 +3,10 @@
 # A small-amplitude, circularly-polarized Alfven wave traveling along x in a
 # fully periodic box. The wave is an exact nonlinear solution of ideal MHD: after
 # an integer number of wave periods the profile returns EXACTLY to its initial
-# state, so the L1 error against the initial condition measures the scheme's
-# spatial convergence order (~7 for mp7 reconstruction).
+# state, so the L1 error against the initial condition measures the complete
+# scheme's convergence. MP7 is seventh order in space, but under fixed-CFL
+# refinement the third-order SSPRK temporal error eventually controls the
+# coupled rate; this deck does not by itself isolate the spatial order.
 #
 # nx / ny are deliberately PLAIN small integers; a convergence test doubles them
 # programmatically (32 -> 64 -> 128 -> ...) and checks the error ratio.

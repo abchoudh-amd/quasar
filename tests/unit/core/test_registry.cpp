@@ -25,6 +25,11 @@ class DummyB : public IDummy {
   int magic() const override { return 7; }
 };
 
+class INullDummy {
+ public:
+  virtual ~INullDummy() = default;
+};
+
 }  // namespace
 
 QUASAR_REGISTRY_REGISTER(IDummy, "dummy_a", DummyA)
@@ -52,6 +57,32 @@ TEST(Registry, CreatesByNameAndReturnsCorrectType) {
 TEST(Registry, ThrowsOnMissingName) {
   auto& reg = ::quasar::Registry<IDummy>::instance();
   EXPECT_THROW(reg.create("not_here"), std::out_of_range);
+}
+
+TEST(Registry, RejectsInvalidRegistrationsWithoutMutation) {
+  auto& reg = ::quasar::Registry<IDummy>::instance();
+  const auto original_size = reg.size();
+
+  EXPECT_THROW(reg.register_factory("", [] { return std::make_unique<DummyA>(); }),
+               std::invalid_argument);
+  EXPECT_THROW(reg.register_factory("empty_factory", {}), std::invalid_argument);
+  EXPECT_EQ(reg.size(), original_size);
+  EXPECT_FALSE(reg.contains("empty_factory"));
+}
+
+TEST(Registry, RejectsDuplicateNamesWithoutReplacingTheOriginal) {
+  auto& reg = ::quasar::Registry<IDummy>::instance();
+  EXPECT_THROW(reg.register_factory(
+                   "dummy_a", [] { return std::make_unique<DummyB>(); }),
+               std::invalid_argument);
+  EXPECT_EQ(reg.create("dummy_a")->magic(), 42);
+}
+
+TEST(Registry, RejectsAFactoryThatReturnsNull) {
+  auto& reg = ::quasar::Registry<INullDummy>::instance();
+  ASSERT_TRUE(reg.register_factory(
+      "null_factory", [] { return std::unique_ptr<INullDummy>{}; }));
+  EXPECT_THROW((void)reg.create("null_factory"), std::runtime_error);
 }
 
 TEST(Registry, NamesListIncludesBothEntries) {

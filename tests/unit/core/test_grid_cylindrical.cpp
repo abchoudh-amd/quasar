@@ -2,6 +2,7 @@
 #include "quasar/core/types.hpp"
 
 #include <cmath>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -106,6 +107,34 @@ TEST(GridCylindrical, CellVolumeNearAxisIsSmallButNonZero) {
   EXPECT_NEAR(v0, expected, kTol * (Real{1} + std::abs(expected)));
 }
 
+TEST(GridCylindrical, CellVolumeAvoidsIntermediateRangeFailure) {
+  const Grid2D underflow_order{1, 1, Real{1e-200}, Real{1e100},
+                               Real{1e-200}, Real{0}, 0};
+  const long double expected_small =
+      2.0L * static_cast<long double>(quasar::pi)
+      * static_cast<long double>(underflow_order.r_at_cell_center(0))
+      * static_cast<long double>(underflow_order.dx())
+      * static_cast<long double>(underflow_order.dy());
+  const Real small = underflow_order.cell_volume(0);
+  ASSERT_TRUE(std::isfinite(small));
+  ASSERT_GT(small, Real{0});
+  EXPECT_NEAR(small / static_cast<Real>(expected_small), Real{1},
+              Real{8} * std::numeric_limits<Real>::epsilon());
+
+  const Grid2D overflow_order{1, 1, Real{1e200}, Real{1e-100},
+                              Real{1e200}, Real{0}, 0};
+  const long double expected_large =
+      2.0L * static_cast<long double>(quasar::pi)
+      * static_cast<long double>(overflow_order.r_at_cell_center(0))
+      * static_cast<long double>(overflow_order.dx())
+      * static_cast<long double>(overflow_order.dy());
+  const Real large = overflow_order.cell_volume(0);
+  ASSERT_TRUE(std::isfinite(large));
+  ASSERT_GT(large, Real{0});
+  EXPECT_NEAR(large / static_cast<Real>(expected_large), Real{1},
+              Real{8} * std::numeric_limits<Real>::epsilon());
+}
+
 TEST(GridCylindrical, CellVolumeGrowsWithRadius) {
   const Grid2D g{6, 4, Real{3}, Real{2}, Real{0}, Real{0}, 1};
   // Strictly increasing in i (radius grows outboard).
@@ -145,6 +174,10 @@ TEST(GridCylindrical, CflMatchesSecondOrderCartesian) {
   // cyl_cfl_dt is defined as the 2nd-order cfl_dt on the same grid.
   const Grid2D g{10, 7, Real{2.5}, Real{1.4}, Real{1}, Real{0}, 1};
   EXPECT_DOUBLE_EQ(quasar::cyl_cfl_dt(g, Real{2}),
+                   quasar::cfl_dt(g, 2, Real{2}));
+  // Preserve the historical two-argument API even when the wave speed is an
+  // integer literal; it must not be reinterpreted as an FDTD order.
+  EXPECT_DOUBLE_EQ(quasar::cyl_cfl_dt(g, 2),
                    quasar::cfl_dt(g, 2, Real{2}));
 }
 

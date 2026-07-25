@@ -24,7 +24,7 @@ void launch_biot_savart_B_f64(
     const double* bx, const double* by, const double* bz,
     const double* I_, int N,
     const double* px, const double* py, const double* pz, int M,
-    double* Bx, double* By, double* Bz,
+    double* Bx, double* By, double* Bz, int* status,
     quasar_ms_stream_t stream);
 
 void launch_biot_savart_B_f32(
@@ -32,7 +32,7 @@ void launch_biot_savart_B_f32(
     const float* bx, const float* by, const float* bz,
     const float* I_, int N,
     const float* px, const float* py, const float* pz, int M,
-    float* Bx, float* By, float* Bz,
+    float* Bx, float* By, float* Bz, int* status,
     quasar_ms_stream_t stream);
 
 // Vector potential A (B = curl A). Defined in
@@ -43,7 +43,7 @@ void launch_biot_savart_A_f64(
     const double* bx, const double* by, const double* bz,
     const double* I_, int N,
     const double* px, const double* py, const double* pz, int M,
-    double* Ax, double* Ay, double* Az,
+    double* Ax, double* Ay, double* Az, int* status,
     quasar_ms_stream_t stream);
 
 void launch_biot_savart_A_f32(
@@ -51,7 +51,7 @@ void launch_biot_savart_A_f32(
     const float* bx, const float* by, const float* bz,
     const float* I_, int N,
     const float* px, const float* py, const float* pz, int M,
-    float* Ax, float* Ay, float* Az,
+    float* Ax, float* Ay, float* Az, int* status,
     quasar_ms_stream_t stream);
 
 // Defined in src/backend/hip/magnetostatics/biot_savart_grad_hip.hip.
@@ -60,7 +60,7 @@ void launch_biot_savart_gradB_f64(
     const double* bx, const double* by, const double* bz,
     const double* I_, int N,
     const double* px, const double* py, const double* pz, int M,
-    double* G,
+    double* G, int* status,
     quasar_ms_stream_t stream);
 
 void launch_biot_savart_gradB_f32(
@@ -68,7 +68,7 @@ void launch_biot_savart_gradB_f32(
     const float* bx, const float* by, const float* bz,
     const float* I_, int N,
     const float* px, const float* py, const float* pz, int M,
-    float* G,
+    float* G, int* status,
     quasar_ms_stream_t stream);
 
 }  // extern "C"

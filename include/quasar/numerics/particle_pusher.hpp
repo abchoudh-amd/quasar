@@ -20,7 +20,9 @@ class IParticlePusher {
   virtual void push(pic::ParticleSpecies& species,
                     const YeeField2D<Real>& self_fields,
                     const YeeField2D<Real>& external_fields,
-                    Real dt) const = 0;
+                    const BField2D<Real>& previous_b,
+                    Real force_dt, Real position_dt,
+                    Real previous_b_weight, Real current_b_weight) const = 0;
   // Selects per-axis field-gather indexing: a periodic axis wraps, a wall axis
   // clamps the interpolation stencil into the ghost layer (reading the field-BC
   // closure) instead of wrapping. An axis is periodic only when BOTH sides are.
@@ -33,7 +35,9 @@ class BorisPusher final : public IParticlePusher {
   void push(pic::ParticleSpecies& species,
             const YeeField2D<Real>& self_fields,
             const YeeField2D<Real>& external_fields,
-            Real dt) const override;
+            const BField2D<Real>& previous_b,
+            Real force_dt, Real position_dt,
+            Real previous_b_weight, Real current_b_weight) const override;
   void set_periodic_axes(bool periodic_x, bool periodic_y) override {
     periodic_x_ = periodic_x;
     periodic_y_ = periodic_y;

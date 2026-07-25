@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 // One-sided boundary closures must read only interior nodes and reproduce the
@@ -78,4 +80,47 @@ TEST(OneSidedStencil, YAxisMatchesXAxis) {
   EXPECT_NEAR(quasar::numerics::ddy_onesided_bwd1(f.data(), g, 2, kNy - 1), b, 1e-12);
   EXPECT_NEAR(quasar::numerics::ddy_onesided_fwd2(f.data(), g, 2, 0), b, 1e-10);
   EXPECT_NEAR(quasar::numerics::ddy_onesided_bwd2(f.data(), g, 2, kNy - 1), b, 1e-10);
+}
+
+TEST(OneSidedStencil, NearbyHugeOffsetKeepsOneUlpSlope) {
+  const double offset = 0x1.8000000000000p+500;
+  const double h = 0x1.0000000000000p+448;
+  const quasar::Grid2D g{3, 2, 3.0 * h, 2.0, 0.0, 0.0, 1};
+  std::vector<double> f(g.storage_size(), 0.0);
+  const int j = 0;
+  f[g.index(0, j)] = offset;
+  f[g.index(1, j)] = std::nextafter(
+      offset, std::numeric_limits<double>::infinity());
+  f[g.index(2, j)] = f[g.index(1, j)] + h;
+
+  EXPECT_DOUBLE_EQ(quasar::numerics::ddx_onesided_fwd1(
+                       f.data(), g, 0, j),
+                   1.0);
+  EXPECT_DOUBLE_EQ(quasar::numerics::ddx_onesided_fwd2(
+                       f.data(), g, 0, j),
+                   1.0);
+  EXPECT_DOUBLE_EQ(quasar::numerics::ddx_onesided_bwd1(
+                       f.data(), g, 2, j),
+                   1.0);
+  EXPECT_DOUBLE_EQ(quasar::numerics::ddx_onesided_bwd2(
+                       f.data(), g, 2, j),
+                   1.0);
+}
+
+TEST(OneSidedStencil, OppositeExtremeSamplesUseRangeSafeClosure) {
+  const double largest = std::numeric_limits<double>::max();
+  const quasar::Grid2D g{3, 2, 0.75 * largest, 2.0, 0.0, 0.0, 1};
+  std::vector<double> f(g.storage_size(), 0.0);
+  const int j = 0;
+  f[g.index(0, j)] = -largest;
+  f[g.index(1, j)] = 0.0;
+  f[g.index(2, j)] = largest;
+  ASSERT_FALSE(std::isfinite(f[g.index(2, j)] - f[g.index(0, j)]));
+
+  EXPECT_DOUBLE_EQ(quasar::numerics::ddx_onesided_fwd2(
+                       f.data(), g, 0, j),
+                   4.0);
+  EXPECT_DOUBLE_EQ(quasar::numerics::ddx_onesided_bwd2(
+                       f.data(), g, 2, j),
+                   4.0);
 }

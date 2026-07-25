@@ -26,6 +26,14 @@ class UniformBackgroundProfile : public IMhdBackgroundProfile {
     b0z_ = b0z;
   }
 
+  bool set_parameter(std::string_view name, Real value) override {
+    if (name == "bx0") b0x_ = value;
+    else if (name == "by0") b0y_ = value;
+    else if (name == "bz0") b0z_ = value;
+    else return false;
+    return true;
+  }
+
   Real sample(int comp, Real /*x*/, Real /*y*/) const override {
     switch (comp) {
       case 0:  return b0x_;  // b0x on x-faces
@@ -41,6 +49,32 @@ class UniformBackgroundProfile : public IMhdBackgroundProfile {
   Real b0z_{Real{0}};
 };
 
+// Linear gradient of the harmonic potential
+//   phi = 0.5*a*(x^2-y^2) + b*x*y,
+// hence B=(a*x+b*y, b*x-a*y, 0). It is analytically divergence-free and
+// curl-free and provides a small nonuniform profile for registry/deck coverage.
+class LinearVacuumBackgroundProfile : public IMhdBackgroundProfile {
+ public:
+  bool set_parameter(std::string_view name, Real value) override {
+    if (name == "gradient") gradient_ = value;
+    else if (name == "shear") shear_ = value;
+    else return false;
+    return true;
+  }
+
+  Real sample(int comp, Real x, Real y) const override {
+    if (comp == 0) return gradient_ * x + shear_ * y;
+    if (comp == 1) return shear_ * x - gradient_ * y;
+    return Real{0};
+  }
+
+ private:
+  Real gradient_{Real{1}};
+  Real shear_{Real{0}};
+};
+
 }  // namespace quasar::numerics
 
 QUASAR_REGISTER_MHD_BACKGROUND_PROFILE("uniform", ::quasar::numerics::UniformBackgroundProfile)
+QUASAR_REGISTER_MHD_BACKGROUND_PROFILE("linear_vacuum",
+                                       ::quasar::numerics::LinearVacuumBackgroundProfile)

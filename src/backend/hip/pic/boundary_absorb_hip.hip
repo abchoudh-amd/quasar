@@ -9,6 +9,34 @@
 
 namespace {
 
+__global__ void prepare_absorb_kernel(quasar::Grid2D g, std::size_t n,
+                                      int side, int shape_order,
+                                      double* x, double* y,
+                                      const unsigned char* alive) {
+  const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
+  if (p >= n || alive[p] == 0) return;
+
+  // A centred B-spline of order p ceases to overlap a physical cell once its
+  // centre is p/2 cells beyond the boundary (CIC: dx/2, TSC: dx).  Extend only
+  // trajectories whose centres actually crossed; particles merely overlapping
+  // the wall retain their ordinary finite-shape charge.
+  if (side == 0 && x[p] < g.origin_x) {
+    x[p] = fmin(x[p], fma(-0.5 * static_cast<double>(shape_order),
+                          g.dx(), g.origin_x));
+  } else if (side == 1 && x[p] > g.origin_x + g.lx) {
+    const double wall = g.origin_x + g.lx;
+    x[p] = fmax(x[p], fma(0.5 * static_cast<double>(shape_order),
+                          g.dx(), wall));
+  } else if (side == 2 && y[p] < g.origin_y) {
+    y[p] = fmin(y[p], fma(-0.5 * static_cast<double>(shape_order),
+                          g.dy(), g.origin_y));
+  } else if (side == 3 && y[p] > g.origin_y + g.ly) {
+    const double wall = g.origin_y + g.ly;
+    y[p] = fmax(y[p], fma(0.5 * static_cast<double>(shape_order),
+                          g.dy(), wall));
+  }
+}
+
 __global__ void absorb_kernel(quasar::Grid2D g, std::size_t n, int side,
                               const double* x, const double* y, unsigned char* alive) {
   const std::size_t p = blockIdx.x * blockDim.x + threadIdx.x;
@@ -22,6 +50,18 @@ __global__ void absorb_kernel(quasar::Grid2D g, std::size_t n, int side,
 }
 
 }  // namespace
+
+extern "C" void launch_pic_boundary_prepare_absorb(
+    const quasar::Grid2D& g, quasar::pic::ParticleSpecies& s, int side,
+    int shape_order, quasar_stream_t stream) {
+  if (s.size() == 0) return;
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(s.size());
+  hipLaunchKernelGGL(prepare_absorb_kernel, grid, block, 0,
+                     static_cast<hipStream_t>(stream), g, s.size(), side,
+                     shape_order, s.x(), s.y(), s.alive());
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
 
 extern "C" void launch_pic_boundary_absorb_particles(const quasar::Grid2D& g,
                                                      quasar::pic::ParticleSpecies& s,

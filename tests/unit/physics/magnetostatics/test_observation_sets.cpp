@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 
 using ::quasar::Real;
@@ -20,6 +21,20 @@ namespace {
 Real dist(Vec3 a, Vec3 b) noexcept { return length(a - b); }
 
 }  // namespace
+
+TEST(PointCloud, AddManySafelyAcceptsItsOwnStorage) {
+  PointCloud points;
+  points.add(Vec3{1, 2, 3});
+  points.add(Vec3{4, 5, 6});
+  const auto& original = points.points();
+  points.add(std::span<const Vec3>{original.data(), original.size()});
+
+  ASSERT_EQ(points.size(), 4u);
+  EXPECT_EQ(points.points()[0].x, Real{1});
+  EXPECT_EQ(points.points()[1].x, Real{4});
+  EXPECT_EQ(points.points()[2].x, Real{1});
+  EXPECT_EQ(points.points()[3].x, Real{4});
+}
 
 // ----- ObservationGrid -----------------------------------------------------
 
@@ -41,6 +56,15 @@ TEST(ObservationGrid, PointAtMatchesAffineFormula) {
       }
     }
   }
+}
+
+TEST(ObservationGrid, PointAtRejectsIndicesOutsideDeclaredGrid) {
+  ObservationGrid g;
+  g.dims = {2, 3, 4};
+  EXPECT_THROW((void)g.point_at(-1, 0, 0), std::invalid_argument);
+  EXPECT_THROW((void)g.point_at(2, 0, 0), std::invalid_argument);
+  EXPECT_THROW((void)g.point_at(0, 3, 0), std::invalid_argument);
+  EXPECT_THROW((void)g.point_at(0, 0, 4), std::invalid_argument);
 }
 
 TEST(ObservationGrid, ToPointSoaIsXFastestLayout) {
@@ -87,6 +111,36 @@ TEST(ObservationGrid, RejectsZeroOrNegativeDims) {
   EXPECT_THROW(g.to_point_soa(),             std::invalid_argument);
 }
 
+TEST(ObservationGrid, RejectsPointCountOverflowBeforeMaterialization) {
+  ObservationGrid g;
+  g.dims = {std::numeric_limits<int>::max(),
+            std::numeric_limits<int>::max(), 2};
+  EXPECT_THROW(ObservationGrid::validate(g), std::invalid_argument);
+  EXPECT_THROW((void)g.size(), std::invalid_argument);
+}
+
+TEST(ObservationGrid, RejectsCollapsedAdjacentCoordinates) {
+  ObservationGrid g;
+  g.origin = Vec3{1.0e308, 0, 0};
+  g.spacing = Vec3{1, 1, 1};
+  g.dims = {2, 1, 1};
+  EXPECT_THROW(ObservationGrid::validate(g), std::invalid_argument);
+  EXPECT_THROW((void)g.point_at(1, 0, 0), std::invalid_argument);
+}
+
+TEST(ObservationGrid, AffineCancellationAvoidsIntermediateOverflow) {
+  const Real largest = std::numeric_limits<Real>::max();
+  ObservationGrid g;
+  g.origin = Vec3{-largest, 0, 0};
+  g.spacing = Vec3{largest, 1, 1};
+  g.dims = {3, 1, 1};
+  const PointSoA soa = g.to_point_soa();
+  ASSERT_EQ(soa.n_points(), 3u);
+  EXPECT_EQ(soa.px[0], -largest);
+  EXPECT_EQ(soa.px[1], Real{0});
+  EXPECT_EQ(soa.px[2], largest);
+}
+
 // ----- PlaneSlice ----------------------------------------------------------
 
 TEST(PlaneSlice, PointAtMatchesAffineFormula) {
@@ -107,6 +161,15 @@ TEST(PlaneSlice, PointAtMatchesAffineFormula) {
       EXPECT_LT(dist(s.point_at(i, j), want), Real{1e-14});
     }
   }
+}
+
+TEST(PlaneSlice, PointAtRejectsIndicesOutsideDeclaredSlice) {
+  PlaneSlice s;
+  s.nu = 2;
+  s.nv = 3;
+  EXPECT_THROW((void)s.point_at(-1, 0), std::invalid_argument);
+  EXPECT_THROW((void)s.point_at(2, 0), std::invalid_argument);
+  EXPECT_THROW((void)s.point_at(0, 3), std::invalid_argument);
 }
 
 TEST(PlaneSlice, ToPointSoaUsesUFastestLayout) {
@@ -133,6 +196,66 @@ TEST(PlaneSlice, RejectsZeroSize) {
   EXPECT_THROW(PlaneSlice::validate(s), std::invalid_argument);
 }
 
+TEST(PlaneSlice, RejectsPointCountBeyondEvaluatorIndexRange) {
+  PlaneSlice s;
+  s.nu = std::numeric_limits<int>::max();
+  s.nv = 2;
+  EXPECT_THROW(PlaneSlice::validate(s), std::invalid_argument);
+}
+
+TEST(PlaneSlice, RejectsCollapsedSampleStep) {
+  PlaneSlice s;
+  s.origin = Vec3{1.0e308, 0, 0};
+  s.u_step = Vec3{1, 0, 0};
+  s.nu = 2;
+  s.nv = 1;
+  EXPECT_THROW(PlaneSlice::validate(s), std::invalid_argument);
+  EXPECT_THROW((void)s.point_at(1, 0), std::invalid_argument);
+}
+
+TEST(PlaneSlice, RejectsCollinearSamplingAxes) {
+  PlaneSlice s;
+  s.u_step = Vec3{1, 2, 3};
+  s.v_step = Vec3{2, 4, 6};
+  s.nu = 2;
+  s.nv = 2;
+  EXPECT_THROW(PlaneSlice::validate(s), std::invalid_argument);
+}
+
+TEST(PlaneSlice, RejectsCombinedCornerOverflow) {
+  const Real step = Real{0.75} * std::numeric_limits<Real>::max();
+  PlaneSlice s;
+  s.u_step = Vec3{step, 0, 0};
+  s.v_step = Vec3{step, 1, 0};
+  s.nu = 2;
+  s.nv = 2;
+  EXPECT_THROW(PlaneSlice::validate(s), std::invalid_argument);
+}
+
+TEST(PlaneSlice, RejectsBoundaryCollapseAfterOtherAxisTranslation) {
+  PlaneSlice s;
+  s.u_step = Vec3{1, 0, 0};
+  s.v_step = Vec3{1.0e308, 1, 0};
+  s.nu = 2;
+  s.nv = 2;
+  EXPECT_THROW(PlaneSlice::validate(s), std::invalid_argument);
+}
+
+TEST(PlaneSlice, AffineCancellationAvoidsIntermediateOverflow) {
+  const Real largest = std::numeric_limits<Real>::max();
+  PlaneSlice s;
+  s.origin = Vec3{largest, 0, 0};
+  s.u_step = Vec3{-largest, 0, 0};
+  s.v_step = Vec3{};
+  s.nu = 3;
+  s.nv = 1;
+  const PointSoA soa = s.to_point_soa();
+  ASSERT_EQ(soa.n_points(), 3u);
+  EXPECT_EQ(soa.px[0], largest);
+  EXPECT_EQ(soa.px[1], Real{0});
+  EXPECT_EQ(soa.px[2], -largest);
+}
+
 // ----- LineProbe -----------------------------------------------------------
 
 TEST(LineProbe, EndpointsAreIncluded) {
@@ -143,6 +266,13 @@ TEST(LineProbe, EndpointsAreIncluded) {
 
   EXPECT_LT(dist(l.point_at(0), l.start),           Real{1e-14});
   EXPECT_LT(dist(l.point_at(l.n_points - 1), l.end), Real{1e-14});
+}
+
+TEST(LineProbe, PointAtRejectsIndicesOutsideDeclaredProbe) {
+  LineProbe l;
+  l.n_points = 3;
+  EXPECT_THROW((void)l.point_at(-1), std::invalid_argument);
+  EXPECT_THROW((void)l.point_at(3), std::invalid_argument);
 }
 
 TEST(LineProbe, SamplesAreEquallySpaced) {
@@ -156,6 +286,16 @@ TEST(LineProbe, SamplesAreEquallySpaced) {
     EXPECT_NEAR(dist(l.point_at(i), l.point_at(i + 1)), expected_step,
                 Real{1e-12});
   }
+}
+
+TEST(LineProbe, RejectsCollapseAtFinalEndpoint) {
+  LineProbe l;
+  l.start = Vec3{std::nextafter(Real{1},
+                                std::numeric_limits<Real>::infinity()), 0, 0};
+  l.end = Vec3{1, 0, 0};
+  l.n_points = 3;
+  EXPECT_THROW(LineProbe::validate(l), std::invalid_argument);
+  EXPECT_THROW((void)l.point_at(1), std::invalid_argument);
 }
 
 TEST(LineProbe, ToPointCloudAndSoaAgree) {

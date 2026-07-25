@@ -4,9 +4,9 @@ A smooth, small-amplitude **circularly-polarized Alfvén wave** in a fully
 periodic box. The CP Alfvén wave is an exact nonlinear solution of the ideal MHD
 equations: it propagates along the background field without steepening, so after
 an integer number of wave periods the state returns *exactly* to its initial
-condition. This makes it the standard problem for **measuring the spatial
-convergence order** of an MHD scheme — for the mp7 reconstruction used here the
-expected order is ~7.
+condition. This makes it a standard problem for measuring the spatial and
+temporal convergence of an MHD scheme. The reconstruction used here is MP7,
+while the complete method uses third-order SSPRK time integration.
 
 ## Run
 
@@ -26,8 +26,11 @@ The grid is a plain `32 × 32`; a convergence test doubles `nx`/`ny`
 programmatically (32 → 64 → 128 → …) and measures the L1 error of the evolved
 state against the initial condition. Because the analytic reference *is* the
 unchanged initial profile (the wave is periodic in time), the error is purely
-the scheme's truncation error, and the error ratio between successive
-resolutions yields the observed order of accuracy.
+the scheme's truncation error. Under fixed-CFL refinement, `dt` decreases in
+proportion to the cell width, so the third-order SSPRK temporal error eventually
+dominates the seventh-order reconstruction error. The coupled space-time rate is
+therefore expected to approach three, not seven; isolating MP7's spatial order
+would require holding temporal error negligible while refining the grid.
 
 ## Reference setup
 
@@ -43,4 +46,5 @@ dBy =  A sin(k x)   dBz =  A cos(k x)
 One wave period is `T = lx / vA = 1.0`, and `t_end = 1.0` is exactly one period,
 so the analytic reference equals the initial state. The integration test in
 `tests/python/test_examples.py` runs the deck at two or more resolutions and
-checks that the measured convergence order approaches the design order of mp7.
+checks monotone super-first-order convergence against that exact solution. It
+does not claim to measure the isolated seventh-order spatial operator.

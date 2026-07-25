@@ -1,10 +1,13 @@
 # cyl_gyro_orbit
 
-A small bunch of electrons gyrating in a uniform axial magnetic field, solved in
+A small set of zero-macro-weight electron test particles gyrating in a uniform
+axial magnetic field, solved in
 axisymmetric cylindrical `(r, z)` coordinates (`geometry: cylindrical`). The grid
 axes are `i = r` and `j = z`. This deck validates the cylindrical particle
-pusher against the textbook Larmor radius and gyrofrequency, and exercises the
-on-axis behaviour (no spurious energy gain as a guiding centre approaches `r = 0`).
+pusher against the textbook gyrofrequency and checks energy conservation in a
+uniform external magnetic field. The `r = 0` axis boundary is configured because
+the grid is cylindrical, but this full-domain quiet start is not a near-axis
+boundary validation.
 
 ## Physical field spelling (recommended) and the slot convention
 
@@ -41,7 +44,7 @@ Supplying both `B_rzphi` and `B_T` is an error.
 The velocity triad in cylindrical mode maps as `vx -> vr`, `vy -> vz`,
 `vz -> vphi`. The axial field (`by`) is perpendicular to the `vr`–`vphi`
 (`vx`–`vz` slot) plane, so the in-plane velocity components gyrate while the
-parallel (`vz -> vphi`... see note) drift is unaffected. The seeded `drift_v`
+parallel (`vy -> vz`) drift is unaffected. The seeded `drift_v`
 is `(vx, vy, vz) = (5.93e5, 0, 0)`, i.e. a pure `vr` velocity perpendicular to
 the axial `B`, which sets a clean perpendicular speed `v_perp`.
 
@@ -49,8 +52,9 @@ the axial `B`, which sets a clean perpendicular speed `v_perp`.
 
 - Magnetic field: `B = 1.0 T`, axial.
 - Species: electrons, `q = -1.602176634e-19 C`, `m = 9.1093837015e-31 kg`,
-  `n_particles = 64`.
-- Perpendicular drift speed: `v_perp ≈ 5.93e5 m/s` (plus a 1 eV thermal spread).
+  `n_particles = 64`, and `density_per_m3 = 0` (no deposited self-field).
+- Perpendicular drift speed: `v_perp ≈ 5.93e5 m/s`, with zero thermal spread
+  so every particle has the same reference Larmor radius.
 - Grid `128 x 128`, `r ∈ [0.0, 0.10] m`, `z ∈ [-0.05, 0.05] m`, 2nd-order FDTD.
   The axisymmetric `m = 0` scheme requires the radial domain to start at `r = 0`
   (the on-axis closure), so `origin_x_m` is `0`.
@@ -63,12 +67,12 @@ is rejected at deck load. Since `BoundaryConfig` defaults every side to
 
 ```yaml
 boundary:
-  field:    {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
-  particle: {x_lo: absorbing, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
+  field:    {x_lo: axis, x_hi: pec, y_lo: pec, y_hi: pec}
+  particle: {x_lo: axis, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
 ```
 
-`x_lo` is the symmetry axis and is auto-replaced by the solver's on-axis closure,
-so its value is a don't-care (set to `pec`/`absorbing` for clarity). The outer
+`x_lo` is the symmetry axis and is explicitly marked with the on-axis closure.
+The outer
 radial wall and both axial walls use PEC field boundaries; particles that wander
 out of the domain are absorbed (marked dead) rather than wrapped. The orbit is
 placed well inside `r > 0` with a tiny Larmor radius, so particles do not
@@ -107,32 +111,24 @@ drift so the orbit radius is deterministic.)
 
 The integration / post-processing checks:
 
-1. **Larmor radius** — the radial excursion of a particle's orbit about its
-   guiding centre matches `r_L = m v_perp / (|q| B)` to within the documented
-   tolerance (a few percent, covering the finite time step and CIC field
-   interpolation).
-2. **Gyrofrequency** — the orbital period recovered from the trajectory matches
+1. **Perpendicular speed / Larmor scale** — the uniform magnetic field preserves
+   the seeded `v_perp`, so the inferred scale
+   `r_L = m v_perp / (|q| B)` remains the analytic `3.37e-6 m`.
+2. **Gyrofrequency** — the frequency recovered from the velocity trajectory matches
    `T_c = 2*pi*m / (|q| B)` to within the same tolerance.
-3. **No spurious energy gain near the axis** — because some guiding centres sit
-   close to `r = 0`, the cylindrical pusher / on-axis closure must not inject
-   energy as a particle approaches the axis. The total kinetic energy of the
-   bunch stays bounded (no growth beyond the few-% tolerance) over the run.
+3. **No magnetic work** — the total kinetic energy stays constant to the
+   integration tolerance because a static magnetic field does no work.
 
-## A note on energy: this is a self-consistent PIC run, not a single-particle integrator
+## A note on energy and macro-weight
 
-The cylindrical Boris pusher conserves a single particle's speed `|v|` exactly
-(to machine precision) in a uniform axial `B` — the magnetic force does no work.
-This deck, however, is a full self-consistent EM-PIC run: the 64 macro-particles
-deposit current, which sources self-fields that are gathered back and *do* act on
-the particles. Because the Larmor radius (`r_L ≈ 3.4e-6 m`) is far smaller than a
-grid cell (`≈ 7.8e-4 m`), the macro-particles are concentrated within a few cells
-and their under-resolved self-fields exchange real energy with the bunch (the
-familiar PIC grid-heating / finite-grid self-force effect). So per-snapshot bunch
-kinetic energy is *not* expected to be constant here; what is validated is the
-gyrofrequency and Larmor radius (set by the external field) and the absence of an
-*unbounded* energy blow-up. A pure single-particle energy-conservation check would
-disable the deposit/self-fields or resolve `r_L` on the grid; that is intentionally
-out of scope for this minimal example.
+The particles deliberately use `density_per_m3: 0`, which gives them zero
+macro-weight. Their physical charge-to-mass ratio still drives the external-field
+Boris push, but they deposit no charge or current and therefore create no
+self-field. This isolates the cylindrical pusher: an unneutralized finite-density
+electron bunch would introduce a real collective electric field and shift the
+velocity spectrum away from the textbook single-particle cyclotron frequency.
+In the isolated uniform magnetic field the pusher conserves each particle's
+speed `|v|` to roundoff because the magnetic force does no work.
 
 The per-species particle state (positions and velocities) is written to
 `out.npz` under the `species_electron_*` keys; the axial field is available as

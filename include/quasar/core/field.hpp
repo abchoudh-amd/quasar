@@ -16,8 +16,18 @@ class Field {
 
   Field(const Field&)            = delete;
   Field& operator=(const Field&) = delete;
-  Field(Field&&) noexcept            = default;
-  Field& operator=(Field&&) noexcept = default;
+  Field(Field&& other) noexcept
+    : size_{other.size_}, data_{std::move(other.data_)} {
+    other.size_ = 0;
+  }
+  Field& operator=(Field&& other) noexcept {
+    if (this != &other) {
+      size_ = other.size_;
+      data_ = std::move(other.data_);
+      other.size_ = 0;
+    }
+    return *this;
+  }
   ~Field()                       = default;
 
   std::size_t size()  const noexcept { return size_; }
@@ -31,8 +41,13 @@ class Field {
 
   T*       begin()       noexcept { return data_.get(); }
   const T* begin() const noexcept { return data_.get(); }
-  T*       end()         noexcept { return data_.get() + size_; }
-  const T* end()   const noexcept { return data_.get() + size_; }
+  // Avoid pointer arithmetic on a null pointer for an empty field.  Although
+  // adding zero is accepted by many implementations, the standard only defines
+  // pointer arithmetic for a pointer into an array (or one-past it).
+  T*       end()         noexcept { return size_ == 0 ? data_.get() : data_.get() + size_; }
+  const T* end()   const noexcept {
+    return size_ == 0 ? data_.get() : data_.get() + size_;
+  }
 
  private:
   std::size_t          size_{0};

@@ -1,11 +1,8 @@
 """Unit tests for cylindrical (axisymmetric r-z) PIC deck validation.
 
 Covers the ``geometry`` field on ``PicDeck`` and ``_validate_cylindrical``:
-the geometry value whitelist, the start-at-r=0 inner-radius rule (origin_x_m
-must be exactly 0; finite/annular inner radii are rejected), the 2nd-order
-FDTD requirement, and the rejection of a periodic outer-radius (x_hi) wall for
-both field and particle boundaries while leaving the inner-radius (x_lo)
-boundary alone (the C++ solver auto-replaces it with the on-axis closure).
+the geometry value whitelist, axis and annular inner-radius rules, both supported
+FDTD orders, and rejection of periodic radial walls where they are unphysical.
 
 Also covers the cylindrical CFL guard in ``quasar.pic.cli.prepare_run``: an
 explicit ``time.dt_s`` above the cylindrical (r-z) CFL limit is rejected, while
@@ -26,11 +23,14 @@ import unittest
 from quasar.pic.io import (
     BoundaryConfig,
     Domain,
+    Fields,
+    FieldsInitial,
     Numerics,
     PicDeck,
     Species,
     SpeciesInitial,
     Time,
+    _parse_fields,
     parse,
 )
 
@@ -82,7 +82,7 @@ class GeometryDefaultTests(unittest.TestCase):
             "domain": {"nx": 4, "ny": 4, "lx_m": 1.0, "ly_m": 1.0},
             "species": [],
             "external_field": {
-                "evaluator": {"type": "uniform", "B_T": [0.0, 0.0, 1.0]}},
+                "evaluator": {"type": "uniform", "B_T": [0.0, 1.0, 0.0]}},
             "time": {"dt_s": "auto", "steps": 1},
         })
         self.assertEqual(deck.geometry, "cartesian")
@@ -93,6 +93,26 @@ class CylindricalValidTests(unittest.TestCase):
     def test_valid_cylindrical_deck_passes(self):
         _cyl_deck().validate()
 
+    def test_radial_bessel_seed_is_bounded_by_the_mesh_spectrum(self):
+        _cyl_deck(fields=Fields(initial=FieldsInitial(
+            type="seed_perturbation", component="Ey", mode=(8, 0)))).validate()
+
+        with self.assertRaisesRegex(ValueError, "radial Nyquist"):
+            _cyl_deck(fields=Fields(initial=FieldsInitial(
+                type="seed_perturbation", component="Ey",
+                mode=(9, 0)))).validate()
+
+    def test_radial_bessel_seed_requires_the_outer_pec_wall(self):
+        boundary = BoundaryConfig(
+            particle=("axis", "absorbing", "periodic", "periodic"),
+            field=("axis", "outflow", "periodic", "periodic"))
+        with self.assertRaisesRegex(ValueError, "PEC outer-radius"):
+            _cyl_deck(
+                boundary=boundary,
+                fields=Fields(initial=FieldsInitial(
+                    type="seed_perturbation", component="Ey",
+                    mode=(1, 0)))).validate()
+
     def test_parse_geometry_cylindrical_from_yaml(self):
         deck = parse({
             "units": "SI",
@@ -102,7 +122,7 @@ class CylindricalValidTests(unittest.TestCase):
             "numerics": {"fdtd_order": 2, "shape": "cic"},
             "species": [],
             "external_field": {
-                "evaluator": {"type": "uniform", "B_T": [0.0, 0.0, 1.0]}},
+                "evaluator": {"type": "uniform", "B_T": [0.0, 1.0, 0.0]}},
             "time": {"dt_s": "auto", "steps": 1},
             "boundary": {"field": ["periodic", "pec", "periodic", "periodic"],
                          "particle": ["periodic", "absorbing", "periodic",
@@ -129,13 +149,9 @@ class GeometryValueTests(unittest.TestCase):
 class CylindricalInnerRadiusTests(unittest.TestCase):
 
     def test_negative_origin_x_rejected(self):
-        # A non-zero inner radius (negative included) is rejected with the
-        # unified "must be 0" message: the m=0 on-axis scheme requires the
-        # radial domain to start exactly at r=0.
         with self.assertRaisesRegex(
                 ValueError,
-                r"geometry 'cylindrical': domain\.origin_x_m must be 0 .*"
-                r"radial domain to start at r=0"):
+                r"geometry 'cylindrical': domain\.origin_x_m must be >= 0"):
             _cyl_deck(
                 domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0,
                               origin_x_m=-0.5)).validate()
@@ -145,13 +161,16 @@ class CylindricalInnerRadiusTests(unittest.TestCase):
             domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0,
                           origin_x_m=0.0)).validate()
 
-    def test_positive_origin_x_rejected(self):
-        # A finite (annular) inner radius is no longer supported: the m=0 scheme
-        # pins r=0, so a positive origin_x_m is rejected just like a negative one.
-        with self.assertRaisesRegex(
-                ValueError,
-                r"geometry 'cylindrical': domain\.origin_x_m must be 0 .*"
-                r"finite inner radius / annular domains are not supported"):
+    def test_positive_origin_x_annulus_accepted_with_walls(self):
+        _cyl_deck(
+            domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0,
+                          origin_x_m=0.25),
+            boundary=BoundaryConfig(
+                particle=("specular", "absorbing", "periodic", "periodic"),
+                field=("pec", "pec", "periodic", "periodic"))).validate()
+
+    def test_annulus_periodic_inner_radius_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"annulus: boundary\.field x_lo"):
             _cyl_deck(
                 domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0,
                               origin_x_m=0.25)).validate()
@@ -159,13 +178,8 @@ class CylindricalInnerRadiusTests(unittest.TestCase):
 
 class CylindricalFdtdOrderTests(unittest.TestCase):
 
-    def test_fdtd_order_4_rejected(self):
-        with self.assertRaisesRegex(
-                ValueError,
-                r"geometry 'cylindrical': numerics\.fdtd_order must be 2 "
-                r"\(order-4 cylindrical axis closure is not supported yet\)"):
-            _cyl_deck(
-                numerics=Numerics(fdtd_order=4, shape="cic")).validate()
+    def test_fdtd_order_4_accepted(self):
+        _cyl_deck(numerics=Numerics(fdtd_order=4, shape="cic")).validate()
 
     def test_fdtd_order_2_accepted(self):
         _cyl_deck(numerics=Numerics(fdtd_order=2, shape="cic")).validate()
@@ -219,16 +233,17 @@ class CartesianUnaffectedTests(unittest.TestCase):
 
 class CylindricalAxisOverrideTests(unittest.TestCase):
 
-    def test_nondefault_field_x_lo_still_validates(self):
-        # x_lo (inner radius) is don't-care at the Python/deck layer: a cylindrical
-        # deck may set field x_lo to a non-default, non-'axis' value (here 'pec')
-        # and it must still VALIDATE without error. The C++ solver overrides x_lo
-        # with the on-axis closure at construction and emits a std::cerr warning
-        # there -- that cerr warning is not capturable at this io/deck level, so
-        # we only assert silent-at-validation here.
+    def test_explicit_nonaxis_wall_at_r_zero_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"at cylindrical r=0"):
+            _cyl_deck(boundary=BoundaryConfig(
+                particle=("axis", "absorbing", "periodic", "periodic"),
+                field=("pec", "pec", "periodic", "periodic"),
+            )).validate()
+
+    def test_explicit_axis_at_r_zero_is_accepted(self):
         _cyl_deck(boundary=BoundaryConfig(
-            particle=("specular", "absorbing", "periodic", "periodic"),
-            field=("pec", "pec", "periodic", "periodic"),
+            particle=("axis", "absorbing", "periodic", "periodic"),
+            field=("axis", "pec", "periodic", "periodic"),
         )).validate()
 
 
@@ -275,7 +290,7 @@ class CylindricalCflGuardTests(unittest.TestCase):
         self.assertLessEqual(dt, limit)
 
 
-def _cyl_uniform_b_deck(plane="xy", **ev_extra) -> dict:
+def _cyl_uniform_b_deck(plane="xy", origin_x_m=0.0, **ev_extra) -> dict:
     """A minimal valid cylindrical deck dict with a uniform external B field,
     suitable for ``parse``. ``ev_extra`` is merged into the evaluator mapping
     (e.g. B_rzphi / B_T)."""
@@ -286,13 +301,15 @@ def _cyl_uniform_b_deck(plane="xy", **ev_extra) -> dict:
         "geometry": "cylindrical",
         "plane": plane,
         "domain": {"nx": 8, "ny": 8, "lx_m": 1.0, "ly_m": 1.0,
-                   "origin_x_m": 0.0},
+                   "origin_x_m": origin_x_m},
         "numerics": {"fdtd_order": 2, "shape": "cic"},
         "species": [],
         "external_field": {"evaluator": evaluator},
         "time": {"dt_s": "auto", "steps": 1},
-        "boundary": {"field": ["periodic", "pec", "periodic", "periodic"],
-                     "particle": ["periodic", "absorbing", "periodic",
+        "boundary": {"field": ["periodic" if origin_x_m == 0.0 else "pec",
+                                 "pec", "periodic", "periodic"],
+                     "particle": ["periodic" if origin_x_m == 0.0 else "specular",
+                                  "absorbing", "periodic",
                                   "periodic"]},
     }
 
@@ -334,12 +351,13 @@ class CylindricalUniformBRzPhiTests(unittest.TestCase):
                          from_bt.external_field.uniform_b)
 
     def test_brzphi_xz_permutation(self):
-        # plane xz: physical B_rzphi=[B_r, B_z, B_phi] resolves to the lab/slot
-        # vector [B_r, -B_phi, B_z] (the inverse of the xz lab->slot map). Use
-        # three distinct nonzero values to catch any wrong permutation/sign.
+        # The parser still performs the plane map before validation.  A pure
+        # axial physical field is the only globally axisymmetric vector that a
+        # Cartesian lab-uniform evaluator can represent.
         deck = parse(_cyl_uniform_b_deck(
-            plane="xz", B_rzphi=[2.0, 3.0, 5.0]))  # [B_r, B_z, B_phi]
-        self.assertEqual(deck.external_field.uniform_b, (2.0, -5.0, 3.0))
+            plane="xz", origin_x_m=0.25,
+            B_rzphi=[0.0, 3.0, 0.0]))
+        self.assertEqual(deck.external_field.uniform_b, (0.0, 0.0, 3.0))
 
     def test_brzphi_and_b_t_together_rejected(self):
         with self.assertRaisesRegex(
@@ -370,10 +388,36 @@ class CylindricalUniformBRzPhiTests(unittest.TestCase):
             parse(data)
 
     def test_raw_b_t_still_loads_on_cylindrical(self):
-        # Backward compat: a cylindrical deck spelling raw B_T still parses and
-        # the slot vector passes through unchanged.
-        deck = parse(_cyl_uniform_b_deck(plane="xy", B_T=[0.1, 0.2, 0.3]))
-        self.assertEqual(deck.external_field.uniform_b, (0.1, 0.2, 0.3))
+        # Backward compat: the raw spelling remains available for a regular axial
+        # field; non-axial constants are rejected regardless of spelling.
+        deck = parse(_cyl_uniform_b_deck(plane="xy", B_T=[0.0, 0.2, 0.0]))
+        self.assertEqual(deck.external_field.uniform_b, (0.0, 0.2, 0.0))
+
+    def test_uniform_radial_and_toroidal_b_rejected(self):
+        for value in ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]):
+            with self.subTest(B_rzphi=value), self.assertRaisesRegex(
+                    ValueError, r"only axial Bz; Br/Bphi require"):
+                parse(_cyl_uniform_b_deck(B_rzphi=value))
+
+    def test_on_axis_raw_non_axial_b_rejected(self):
+        with self.assertRaisesRegex(
+                ValueError, r"only axial Bz; Br/Bphi require"):
+            parse(_cyl_uniform_b_deck(plane="xy", B_T=[1.0, 0.0, 1.0]))
+
+    def test_annular_lab_uniform_radial_and_toroidal_b_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"only axial Bz; Br/Bphi require"):
+            parse(_cyl_uniform_b_deck(
+                origin_x_m=0.25, B_rzphi=[1.0, 0.0, 0.0]))
+        with self.assertRaisesRegex(ValueError, r"only axial Bz; Br/Bphi require"):
+            parse(_cyl_uniform_b_deck(
+                origin_x_m=0.25, B_rzphi=[0.0, 0.0, 1.0]))
+
+    def test_on_axis_uniform_non_axial_e_rejected(self):
+        with self.assertRaisesRegex(
+                ValueError, r"only axial Ez; Er/Ephi require"):
+            parse(_cyl_uniform_b_deck(
+                plane="xz", B_rzphi=[0.0, 1.0, 0.0],
+                E_V_per_m=[1.0, 1.0, 0.0]))
 
 
 class CylindricalSeedComponentTests(unittest.TestCase):
@@ -385,14 +429,21 @@ class CylindricalSeedComponentTests(unittest.TestCase):
         self.assertEqual(deck.fields.initial.component, "ey")
 
     def test_ephi_resolves_to_ez_slot(self):
-        # Physical azimuthal Ephi resolves to the ez slot.
-        deck = parse(_cyl_seed_deck("Ephi"))
-        self.assertEqual(deck.fields.initial.component, "ez")
+        # The parser resolves the physical name before validation, while the
+        # current cylindrical seed implementation deliberately rejects this
+        # unsupported non-axial eigenmode.
+        fields = _parse_fields(
+            _cyl_seed_deck("Ephi")["fields"], geometry="cylindrical")
+        self.assertEqual(fields.initial.component, "ez")
+        with self.assertRaisesRegex(ValueError, "supports only physical axial Ez"):
+            parse(_cyl_seed_deck("Ephi"))
 
     def test_er_resolves_to_ex_slot(self):
-        # Physical radial Er resolves to the ex slot.
-        deck = parse(_cyl_seed_deck("Er"))
-        self.assertEqual(deck.fields.initial.component, "ex")
+        fields = _parse_fields(
+            _cyl_seed_deck("Er")["fields"], geometry="cylindrical")
+        self.assertEqual(fields.initial.component, "ex")
+        with self.assertRaisesRegex(ValueError, "supports only physical axial Ez"):
+            parse(_cyl_seed_deck("Er"))
 
     def test_raw_slot_name_passthrough_on_cylindrical(self):
         # Backward compat: a raw storage-slot seed name (ey) is accepted verbatim

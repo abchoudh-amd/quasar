@@ -13,7 +13,7 @@ arranged as a square frame and evaluated with the Biot-Savart evaluator.
    -z  o          (null)         o  -z
    -z  o                         o  -z
             o   o   o   o   o   o
-              -z  -z  -z ... -z          y = -0.15 m  (bottom row, +z)
+              +z  +z  +z ... +z          y = -0.15 m  (bottom row, +z)
 
    o = a z-directed wire piercing the page;  current sign as labeled.
    Each side: 64 wires, 234.375 A each (15 kA per side).
@@ -49,7 +49,9 @@ At the z=0 midplane of long z-wires the per-wire field is the 2D form
 `B = mu_0 I / (2 pi d)`, azimuthal about each wire; the total is their
 superposition. Expectations, checked by the integration test:
 
-- `|B| ~ 0` at the central cell (the quadrupole null).
+- `B = 0` at the exact geometric center. Because the even 128-point observation
+  lattice does not contain that point, its nearest four samples are small but
+  nonzero compared with the patch-edge field.
 - The field is transverse: `|B_z| << |B_x|, |B_y|` everywhere on the patch.
 - Sampled points match the infinite-wire superposition within a few percent
   (the wires are long but finite, `z in [-1, +1] m`).

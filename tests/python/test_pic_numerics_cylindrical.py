@@ -2,14 +2,15 @@
 
 Covers ``cyl_cfl_limit`` / ``cyl_cfl_dt`` in :mod:`quasar.pic.numerics`.
 
-The closed form asserted against (read from the source) is::
+The order-two closed form asserted against (read from the source) is::
 
     cyl_cfl_limit(dr, dz) = 1 / (c * sqrt(1/dr^2 + 1/dz^2))
     cyl_cfl_dt(dr, dz)    = safety * cyl_cfl_limit(...)   # safety default 0.5
 
 For the conservative m=0 scheme the volume-weighted curl is mimetic, so the
-stability bound is exactly the planar 2nd-order Yee limit (no near-axis
-tightening); ``cyl_cfl_limit`` therefore delegates to ``cfl_limit(..., order=2)``.
+stability bound is the planar Yee limit of the selected order (no extra
+near-axis tightening). Order four therefore inherits the planar ``7/6``
+spectral factor.
 """
 
 import math
@@ -30,6 +31,15 @@ class CylCflLimitTests(unittest.TestCase):
         dr, dz = 0.01, 0.02
         self.assertAlmostEqual(cyl_cfl_limit(dr, dz),
                                cfl_limit(dr, dz, fdtd_order=2), places=18)
+
+    def test_matches_cartesian_order4_limit_and_is_tighter(self):
+        dr, dz = 0.01, 0.02
+        order2 = cyl_cfl_limit(dr, dz, fdtd_order=2)
+        order4 = cyl_cfl_limit(dr, dz, fdtd_order=4)
+        self.assertAlmostEqual(
+            order4, cfl_limit(dr, dz, fdtd_order=4), places=18)
+        self.assertAlmostEqual(order4, order2 * 6.0 / 7.0, places=18)
+        self.assertLess(order4, order2)
 
     def test_custom_wave_speed_scales_inversely(self):
         dr, dz = 0.01, 0.01
@@ -57,6 +67,12 @@ class CylCflDtTests(unittest.TestCase):
         dr, dz = 0.01, 0.02
         self.assertAlmostEqual(cyl_cfl_dt(dr, dz),
                                0.5 * cyl_cfl_limit(dr, dz), places=18)
+
+    def test_order4_dt_uses_order4_limit(self):
+        dr, dz = 0.01, 0.02
+        self.assertAlmostEqual(
+            cyl_cfl_dt(dr, dz, fdtd_order=4),
+            0.5 * cyl_cfl_limit(dr, dz, fdtd_order=4), places=18)
 
     def test_safety_factor_scales_linearly(self):
         dr, dz = 0.01, 0.02

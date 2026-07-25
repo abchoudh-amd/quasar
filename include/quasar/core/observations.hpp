@@ -19,6 +19,9 @@ struct PointSoA {
   std::vector<Real> px, py, pz;
 
   std::size_t n_points() const noexcept { return px.size(); }
+  // Reject mismatched component planes and non-finite coordinates before a
+  // consumer uses n_points() to size or upload every plane.
+  void validate() const;
 };
 
 // Unstructured list of observation points. Other observation-set variants
@@ -49,11 +52,7 @@ struct ObservationGrid {
   Vec3               spacing{Real{1}, Real{1}, Real{1}};
   std::array<int, 3> dims{1, 1, 1};
 
-  std::size_t size() const noexcept {
-    return static_cast<std::size_t>(dims[0])
-         * static_cast<std::size_t>(dims[1])
-         * static_cast<std::size_t>(dims[2]);
-  }
+  std::size_t size() const;
   Vec3       point_at(int i, int j, int k) const;
   PointCloud to_point_cloud() const;
   PointSoA   to_point_soa()   const;
@@ -71,9 +70,7 @@ struct PlaneSlice {
   int  nu{1};
   int  nv{1};
 
-  std::size_t size() const noexcept {
-    return static_cast<std::size_t>(nu) * static_cast<std::size_t>(nv);
-  }
+  std::size_t size() const;
   Vec3       point_at(int i, int j) const;
   PointCloud to_point_cloud() const;
   PointSoA   to_point_soa()   const;
@@ -88,9 +85,7 @@ struct LineProbe {
   Vec3 end{Real{1}, Real{0}, Real{0}};
   int  n_points{2};
 
-  std::size_t size() const noexcept {
-    return static_cast<std::size_t>(n_points);
-  }
+  std::size_t size() const;
   Vec3       point_at(int i) const;
   PointCloud to_point_cloud() const;
   PointSoA   to_point_soa()   const;

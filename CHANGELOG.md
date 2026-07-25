@@ -7,26 +7,34 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
-- MHD: new high-order ideal-MHD vertical slice — MP5/MP7 monotonicity-preserving
-  characteristic reconstruction, an HLLD Riemann solver, finite-difference
-  constrained transport (FD-CT) for `div(B) = 0`, an SSP-RK3 integrator, and a
-  troubled-cell positivity floor, in Cartesian and axisymmetric cylindrical
-  `(r, z)` geometry. Driven from a new `quasar.mhd` CLI
+- MHD: new ideal-MHD vertical slice — MP5/MP7 monotonicity-preserving
+  characteristic reconstruction on Cartesian grids, second-order MUSCL on
+  axisymmetric cylindrical `(r, z)` grids, an HLLD Riemann solver,
+  finite-difference constrained transport (FD-CT) for `div(B) = 0`, an SSP-RK3
+  integrator, and a conservative troubled-cell positivity control. Driven from a
+  new `quasar.mhd` CLI
   (`python -m quasar.mhd.cli run <input.yaml>`) with `_core.mhd` bindings, and
   shipped with the `brio_wu`, `mhd_blast`, `mhd_rotor`, `orszag_tang`, and
   `mhd_linear_wave` example decks. Every scheme axis self-registers and is
   selected by deck string.
 - MHD: static background magnetic-field split `B = B0 + b` — runs can carry a
-  fixed, curl-free external field `B0` while the solver evolves only the
-  perturbation `b`. Enabled via a `background_field:` deck block (`enabled`,
-  `profile`, uniform `bx0/by0/bz0`, or a `file:` npz). `B0` comes from a new
-  pluggable profile kind `IMhdBackgroundProfile` (built-in `"uniform"`, selected
-  by registry name) or an `.npz` file; a file-loaded `B0` is rejected unless it is
-  discretely divergence-free. The total field `B0 + b` enters the fluxes, total
-  magnetic pressure, conserved energy, and the fast-magnetosonic CFL speed (so a
-  nonzero `B0` tightens the stable timestep), while the stored conserved energy
-  stays the perturbation-only `0.5|b|^2` and constrained transport evolves only
-  `b` (`B0` is never updated, so `div(B0+b) = div(b)`). Exposed through the
+  fixed, discretely divergence-free prescribed field `B0`, including a
+  non-uniform current-carrying field, while evolving the perturbation `b`.
+  Enabled via a `background_field:` deck block (`enabled`, `profile`, uniform
+  `bx0/by0/bz0`, `file:`, or a coil `a_file:`). `B0` comes from the pluggable
+  `IMhdBackgroundProfile` registry (built-ins `"uniform"` and
+  `"linear_vacuum"`) or an `.npz` file. Setup accepts a fixed divergence
+  residual no larger than
+  `1e-9 * max(1, max(||B0x||inf, ||B0y||inf) / min(dx,dy))` and rejects larger
+  residuals. The physical total field `B0 + b` enters the
+  eigensystem, Riemann fluxes, Maxwell stress, and fast-magnetosonic CFL speed
+  (so a nonzero `B0` can tighten the stable timestep). The stored split-energy
+  variable is internal energy plus kinetic energy plus `0.5|b|^2`; it is not the
+  physical total-field energy. After constrained transport supplies `db/dt`, the
+  solver applies the exact discrete change of variables
+  `dE'/dt = dE_total/dt - B0·db/dt`. `B0` remains fixed, and its discrete
+  divergence is validated independently of the CT-preserved divergence of `b`.
+  Exposed through the
   `quasar.mhd` CLI/deck, the `_core.mhd` bindings (`MhdBackgroundSpec`,
   `MhdSolver2D.seed_background`/`has_background`,
   `registered_mhd_background_profiles`), and a new `examples/mhd_guide_field`
@@ -54,10 +62,9 @@ interfaces may still change between entries.
   `Ephi` / `Bphi` use the `ez` / `bz` slots.
 - PIC: `outflow` field boundary kind (`boundary.field: outflow`) — a first-order
   characteristic (Mur) open wall that lets outgoing radiation leave with little
-  reflection, at both 2nd- and 4th-order FDTD. Stable as an outflow channel
-  (outflow on one axis) or mixed with `pec` walls; an open box with outflow on
-  all four sides is not yet stable (first-order Mur corners need a dedicated
-  corner closure).
+  reflection, at both 2nd- and 4th-order FDTD. A diagonal characteristic update
+  owns each outflow/outflow corner, so channels, mixed PEC/outflow boxes, and
+  boxes open on all four sides remain stable and absorb outgoing pulses.
 - PIC: support for `units: normalized` decks and physically consistent `units: SI`
   decks. SI decks are non-dimensionalized through `Normalization` before stepping
   (grid, dt, charge/mass/velocity/density, external field) and diagnostics are
@@ -68,10 +75,25 @@ interfaces may still change between entries.
 - PIC current-smoothing filter pipeline is wired from the deck
   (`numerics.current_filter`: `binomial` / `compensated_binomial`, with passes).
 - Field-evaluator selection by registry name: `external_field.evaluator.type` may
-  be `biot_savart`, `uniform`, `dipole`, or `gradient`; the coil CLI selects its
-  evaluator through the registry too.
-- PIC `fields.initial` seeding (`seed_perturbation`, `seed_em_wave`) and field-only
-  decks (a deck may define species, an external field, or an initial field seed).
+  be `biot_savart`, `uniform`, `dipole`, `gradient`, or `file_grid`; the coil CLI
+  selects its evaluator through the registry too. `file_grid` loads rectilinear
+  NPZ maps in the deck layer (or the portable text format in C++) and provides
+  trilinear B plus its exact piecewise Jacobian. Any other live registered
+  evaluator can receive generic `params`; finite scalar values normalize to
+  one-element vectors and flat finite lists pass through unchanged. Python
+  exposes sorted live evaluator-name introspection plus registry and instance
+  queries for vector-potential capability.
+- PIC `fields.initial` seeding (`seed_perturbation`, `seed_em_wave`, and
+  `seed_tm_cavity`) and field-only decks (a deck may define species, an external
+  field, or an initial field seed). `seed_tm_cavity` initializes the exact
+  order-2/order-4 rectangular-PEC Yee eigenvector, including the magnetic field
+  at its leapfrog half-step, so cavity frequency, `div(B)`, wall parity, and the
+  discrete energy invariant can be validated without startup-mode contamination.
+- PIC species may carry a deterministic sinusoidal
+  `initial.velocity_perturbation` (vector amplitude, integer 2-D mode, and
+  phase). The two-stream examples now use it with a fixed neutralizing
+  background and validate the measured linear growth rate against the cold
+  two-beam dispersion relation instead of depending on random particle noise.
 - All nine PIC example decks (`two_stream`, `filtered_two_stream`, `landau_damping`,
   `weibel`, `em_wave_propagation`, `beam_in_channel`, `pec_cavity`,
   `magnetized_plasma`, `coil_confinement`) are now runnable, documented, and covered
@@ -96,14 +118,54 @@ interfaces may still change between entries.
   six-field dict every snapshot.
 
 ### Fixed
-- MHD: completed the axisymmetric cylindrical `(r, z)` geometric source. The
-  radial flux is differenced in Cartesian form, so every conserved component
-  needs a `1/r` curvature source; previously only a partial radial-momentum term
-  and a spurious toroidal-field term were applied. Mass, energy, axial- and
-  azimuthal-momentum sources are now supplied (the radial-momentum source gains
-  the missing `-(rho v_r^2 - B_r^2)/r` piece and the toroidal-field source is
-  removed, as the `phi` induction is metric-free). Cylindrical runs with radial
-  flow now conserve mass/momentum/energy.
+- MHD: split-background momentum fluxes no longer lose material-pressure and
+  perturbation-stress gradients beside a dominant static field.  Material,
+  background-linear cross, wave-dissipation, and static-background stresses are
+  retained as separately scaled pieces through one fused divergence reduction;
+  this preserves an order-one gas-pressure force even when `|B0|` is near
+  `1e100`, while retaining the same Cartesian and cylindrical balance laws.
+- PIC: doubly periodic Maxwell domains now enforce their integral Gauss-law
+  compatibility. A nonzero total particle charge is rejected unless the deck
+  explicitly selects `neutralizing_background: true`; no implicit ion or fixed
+  background is inserted.
+- PIC: cylindrical prescribed fields are validated as true axisymmetric 3-D
+  evaluators instead of accepting an arbitrary meridional slice. Rotational
+  covariance is checked in the configured lab frame, regular axis parity is
+  enforced, and magnetic solenoidality is checked from the evaluator's analytic
+  gradient. This accepts smooth nonlinear divergence-free fields without
+  confusing finite-difference truncation error with a magnetic monopole.
+- PIC: post-processing now reconstructs every component on its own Cartesian or
+  cylindrical Yee coordinates, keeps independent high faces at non-periodic
+  walls, removes only periodic duplicate endpoints, and reads the persisted
+  field-boundary topology and sampling plane. Cartesian `plane: xz` plots are
+  labelled in the physical `(x,z)` frame with the right-handed component basis
+  `(x,z,-y)`, rather than being silently misidentified as `(x,y)`. Plots and
+  archived component views therefore exclude ghosts without dropping, shifting,
+  or mislabelling physical degrees of freedom.
+- PIC and MHD: runs with `t_end` now shorten the last stable step and land on
+  the requested end time exactly (within the representable floating-point
+  endpoint), rather than overshooting it by one nominal timestep. When `t_end`
+  also shortens the very first PIC update, leapfrog magnetic-field seeds use
+  that clipped width, so their stored `t=-dt/2` phase matches the actual step.
+- PIC: the cylindrical `J0` cavity seed now initializes azimuthal magnetic field
+  at the stored `t=-dt/2` leapfrog time using the selected order's exact radial
+  Yee curl. The old electric-only initialization led the intended standing mode
+  by half a timestep. Radial Bessel indices are supported throughout the
+  resolved spectrum and rejected above its Nyquist bound.
+- PIC: the shipped Weibel case now carries a deterministic, charge-neutral
+  `kx=2*pi/Lx` velocity perturbation. Its physical, ghost-free `Bz` mode follows
+  the cold filamentation growth rate instead of relying on quiet-start noise
+  that did not produce reproducible growth over the documented run.
+- Magnetostatics: ideal-filament observations on a segment now raise a
+  singular-field error consistently for `B`, `A`, and `grad(B)` instead of
+  returning a finite regularized value or allowing backend-dependent NaNs.
+- MHD: corrected the axisymmetric cylindrical `(r, z)` balance. Radial fluid
+  fluxes now use ring-area/ring-volume finite-volume weights. The remaining
+  pointwise curvature terms are only
+  `S_mr = (rho*vphi^2 + p* - Bphi^2)/r` and
+  `S_mphi = -(rho*vr*vphi - Br*Bphi)/r`; mass, axial momentum, and energy need
+  no separate source in this annular conservative form, and toroidal induction
+  remains metric-free.
 - MHD: the HLLD seven-wave algebra is now a single host/device-callable core
   (`numerics/hlld_core.hpp`) shared by the device hot path and the host registry
   solver, so the two can no longer drift in their degeneracy guards or
@@ -114,10 +176,14 @@ interfaces may still change between entries.
   against that exact analytic reference instead of a self-referential harmonic
   fit; the `div(B)` example assertions now read the post-step `divb_linf_final`
   instead of the `t = 0` seed value.
-- MHD: corrected the MP5/MP7 device interpolation coefficients. They were the
-  finite-volume cell-average coefficients, but the scheme reconstructs point
-  values at the faces, so the point-value Lagrange coefficients are now used —
-  this is what restores 5th-/7th-order convergence on device.
+- MHD: corrected Cartesian MP5/MP7 reconstruction to use the finite-volume
+  cell-average-to-face coefficients. Point-sample Lagrange coefficients leave an
+  `O(dx^2)` defect when applied to evolved cell averages. Matching high-order
+  face-to-cell magnetic collocation is used by the EOS and diagnostics. The
+  Cartesian spatial residual reaches the selected MP design order on smooth
+  data; complete time-dependent convergence remains capped at third order by
+  SSP-RK3. Cylindrical grids use ring-volume averages and therefore reject these
+  Cartesian MP coefficients until radius-weighted radial moments are available.
 - MHD: the CFL stable-timestep guard now enforces the additive multidimensional
   Courant condition `dt * ((|v_x|+c_f,x)/dx + (|v_y|+c_f,y)/dy) <= cfl`. The
   unsplit residual sums both directional flux differences into one stage update,
@@ -137,19 +203,16 @@ interfaces may still change between entries.
   physically wrong values for a cylindrical run (axis cells over-weighted,
   large-`r` cells under-weighted).
 - PIC: the explicit-`dt` CFL guard in `EmPic2D3V` now keys off the scheme that
-  actually runs (the 2nd-order cylindrical limit for cylindrical geometry) rather
-  than `fdtd_order`, and `step()` validates `dt` once per distinct value so a
-  driver looping over `step()` directly can no longer silently run an over-CFL
-  (unstable) step. A cylindrical config with `fdtd_order != 2` is now rejected at
-  construction.
+  actually runs. Cylindrical geometry supports both 2nd- and 4th-order curls and
+  uses the matching order-dependent limit; `step()` rejects every over-CFL
+  (unstable) step, including a shortened variable-width final step.
 - PIC: the `axis` boundary name is now rejected on any side other than `x_lo`
   (the `r = 0` inner radius) at deck validation instead of silently doing nothing.
 - PIC: quiet-start macro-particle weighting no longer biases the initial number
-  density when `n_particles` is not a perfect square. The block layout uses
-  `side = ceil(sqrt(N))` points per axis and truncates to `N`; the weight is now
-  `density * cell_area` (one layout cell per particle) instead of
-  `density * block_area / N`, so the seeded density matches the deck value
-  regardless of `N`.
+  density when `n_particles` is not a perfect square. A rank-1 lattice places
+  exactly `N` centred, stratified samples per axis, and every Cartesian particle
+  carries `density * block_area / N`; cylindrical starts use equal ring-volume
+  strata and `density * block_volume / N`.
 - PIC: the particle field gather now honors per-axis boundaries. It previously
   wrapped the interpolation stencil periodically on every axis; on a non-periodic
   (wall) axis it now clamps into the boundary ghost layer (matching the deposit),
@@ -160,19 +223,20 @@ interfaces may still change between entries.
   silently changes the sampled plane size; a zero axis raises a clear error.
 - PIC: charge conservation across particle boundary crossings. The periodic-wrap
   kernel co-shifts the previous particle position, and specular reflection now
-  deposits into ghost cells with an image-charge fold-back instead of mirroring the
-  previous position outside the domain (which had teleported current to the far
-  edge via the periodic wrap).
+  deposits into ghost cells with stagger-aware image-charge/current fold-back
+  instead of mirroring the previous position outside the domain (which had
+  teleported current to the far edge via the periodic wrap). Cylindrical image
+  charge uses ring-volume ratios. Absorbing particles deposit the complete
+  finite-shape loss through the wall before they are killed, and the upper normal
+  electric face advances with that boundary current, preserving Gauss's law.
 - PIC: the FDTD curls are adjoint (forward E-update / backward B-update). With both
   curls forward, a hard field wall was exponentially unstable; the adjoint form is
   the standard Yee scheme and leaves periodic results unchanged.
 - Magnetostatics: `helix`/`solenoid` vertex count is computed in `size_t` with an
   upper bound, fixing signed-int overflow on large `n_turns * n_segments_per_turn`.
-- PIC: the sampled external field is now node-collocated like the rest of the
-  solver. The external-field sampler previously placed `Ex`/`Ey` on the true
-  Yee-staggered edges while the particle gather reads every component from the
-  cell node, biasing the external electric force on every particle by a half-cell
-  interpolation error; all six components are now sampled at the cell node.
+- PIC: external fields are sampled component-by-component at the same Yee
+  sub-lattice used by the internal fields and stagger-aware gather, eliminating
+  half-cell force and magnetic-rotation phase errors.
 - `quasar.pic.cli` persists the Yee ghost width (`nghost`) into `out.npz`, and
   `quasar.pic.postprocess.reshape_with_ghost` strips the halo using that explicit
   value instead of reverse-engineering it from the flat buffer size.
@@ -202,20 +266,26 @@ interfaces may still change between entries.
 - MHD: the ideal-MHD solver hot path now runs entirely on device (HIP, gfx942).
   Previously several pieces staged device buffers back to the host each step and
   computed there; those are now device kernels:
-  * High-order flux reconstruction — the characteristic monotonicity-preserving
+  * High-order Cartesian flux reconstruction — the characteristic
+    monotonicity-preserving
     MP5 (5th-order) and MP7 (7th-order) schemes now run in the device
     reconstruction kernel, and the device path honors the selected scheme order.
     Previously the device kernel silently ran 2nd-order MUSCL-minmod for *all*
-    orders, so `mp5`/`mp7` decks were not actually high-order on device; they now
-    achieve their design order. This required making the MHD characteristic
+    orders, so `mp5`/`mp7` decks were not actually high-order on device; their
+    smooth Cartesian spatial residual now reaches the selected MP design order
+    (the full method remains third-order in time under SSPRK3). This required
+    making the MHD characteristic
     eigensystem and characteristic projection device-callable
     (`QUASAR_HOST_DEVICE`) and extracting the scalar Suresh–Huynh MP limiter
     helpers into a shared `QUASAR_HOST_DEVICE` header
     (`include/quasar/numerics/mp_limiter.hpp`).
   * MHD boundary ghost fills (fluid and magnetic-field; `periodic` / `outflow` /
     `wall`) now run as device kernels instead of host-staged fills.
-  * The positivity floor (`troubled_cell`) now runs through the device floors
-    kernel.
+  * The positivity controller (`troubled_cell`) computes per-cell convex
+    density/internal-energy bounds on device. An inadmissible SSP-RK stage is
+    rolled back and conservatively CFL-subcycled with a piecewise-constant HLL
+    anchor, avoiding floor-driven mass/energy injection. The old device floor is
+    retained only as an explicit standalone repair API.
   * The CFL stable-timestep scan and the `div(B)` L-infinity diagnostic now run
     as device reductions instead of staging the whole field to the host.
   The registry-facing scheme/boundary classes are now thin launchers over the
@@ -226,6 +296,15 @@ interfaces may still change between entries.
   for any single interface whose high-order reconstructed state is non-finite or
   non-positive (a per-interface positivity guard), so a few troubled interfaces
   cannot poison the whole sweep.
+- MHD: axisymmetric constrained transport and radial fluid fluxes now use exact
+  annular face/volume weights, so the discrete cylindrical divergence
+  ``(1/r)d(r B_r)/dr + dB_z/dz`` telescopes with the CT curl. Finite-inner-radius
+  annular domains and total-field cylindrical curvature sources (including a
+  static ``B0``) are supported.
+- MHD: cylindrical decks now explicitly require `muscl_minmod`. MP5/MP7 use
+  uniform-measure Cartesian finite-volume moments, while radial conserved values
+  are averaged with the `r dr` measure; both native and Python validation reject
+  that combination instead of silently degrading its advertised design order.
 - PIC field boundaries are now imposed by one-sided / characteristic node
   corrections after each curl rather than by filling a ghost halo. `pec` keeps
   its reflecting, energy-conserving behavior (tangential E / normal B pinned;
@@ -238,8 +317,8 @@ interfaces may still change between entries.
   `src/backend/hip/` tree (the blanket `src/` include path was removed from the
   module CMake helper and re-granted only to the backend HIP modules). The PIC
   ABI now lives at `include/quasar/physics/pic/kernels.hpp` (a per-physics seam)
-  so the backend axis stays physics-neutral; `magnetostatics_kernels.hpp` keeps
-  its raw-pointer form under `include/quasar/backend/`.
+  so the backend axis stays physics-neutral; the magnetostatics raw-pointer ABI
+  likewise lives at `include/quasar/physics/magnetostatics/kernels.hpp`.
 - The numerics `IFieldEvaluator` takes an axis-neutral `core::IFieldSource`
   (implemented by `magnetostatics::ConductorSystem`) instead of naming the
   magnetostatics type directly, so the analytic-field evaluators no longer depend
@@ -251,6 +330,10 @@ interfaces may still change between entries.
   every external-field evaluator purely by registry name and configures it from
   the deck — the previous per-type `if/elif` ladder in `quasar.pic.cli` that
   hand-picked a constructor is gone, matching the registry-only coil CLI.
+- Registry registration now rejects empty names, empty factories, and duplicate
+  names with `std::invalid_argument`. A duplicate can no longer silently replace
+  the original factory, and registry registration, lookup, and introspection are
+  synchronized for concurrent callers.
 - Backend headers under `include/quasar/backend/` are now HIP-free: an opaque
   `stream_t` and backend-neutral device-memory free functions, with all HIP calls
   confined to `src/backend/hip/`. The kernel-launch ABIs no longer leak
@@ -303,21 +386,3 @@ interfaces may still change between entries.
 - Magnetostatics: transient Biot–Savart output buffers skip the allocation
   zero-fill (the kernel overwrites them in full), via a new
   `device_alloc_uninit` / `DeviceBuffer(n, uninitialized)` path.
-
-### Known issues
-- MHD: on under-resolved turbulent / low-beta decks (Orszag–Tang vortex, rotor)
-  genuine high-order MP7 can drive cells to the pressure floor. The floor
-  re-derives energy and is not yet energy-conserving; a floor-aware
-  positivity-preserving limiter is a planned follow-up.
-- MHD: cylindrical `(r, z)` constrained transport uses the Cartesian `div(B)`
-  stencil (`dBx/dx + dBy/dz`), not the cylindrical form
-  `(1/r) d(r B_r)/dr + dB_z/dz`. It holds the Cartesian divergence at round-off
-  (exact for a radius-independent `B_r`, `O(dr/r)` otherwise); a fully
-  area-weighted cylindrical CT that annihilates the true cylindrical `div(B)` is
-  a planned follow-up (it would replace the bit-exact telescoping cancellation
-  the Cartesian curl provides).
-
-### Upcoming changes
-- A `file_grid` field evaluator name is reserved in the registry but not yet
-  implemented (it throws and is intentionally not deck-selectable) pending the
-  file-backed grid loader.

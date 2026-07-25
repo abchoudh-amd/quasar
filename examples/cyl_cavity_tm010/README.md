@@ -14,6 +14,8 @@ conductors (PEC). There are no particles — this is a field-only validation dec
 - Grid `128 x 128`, 2nd-order FDTD, CIC shape.
 - An axial-`Ez` `seed_perturbation` excites the cavity at `t = 0` (the deck spells
   the component with the physical name `Ez`; see "Component convention" below).
+  It also initializes `Bphi` at the stored `t = -dt/2` leapfrog time from the
+  matching Yee curl, so the standing wave begins at its electric-field maximum.
 
 ## Run
 
@@ -60,8 +62,7 @@ accepted and is equivalent; in cylindrical mode `Ez` is the *physical* axial
 field, not the literal `ez` slot — use `Ephi` for the azimuthal `ez` slot.)
 
 The TM010 mode couples the axial `Ez` (`ey` slot) with the azimuthal `Bphi`
-(`bz` slot), so the deck seeds the axial `Ez` and the diagnostic reads the `ey`
-slot.
+(`bz` slot), so the diagnostics record both storage slots.
 
 ## Reference signature
 
@@ -69,16 +70,22 @@ For a cylindrical deck the `seed_perturbation` is the axisymmetric radial
 eigenmode `J0(j01 r/R)` (uniform in `z`), the physically appropriate TM010
 excitation — a plain `sin(2 pi r/R)` would be dominated by higher radial Bessel
 modes (TM020) and ring at the wrong line. The resonant frequency is **measured
-as the dominant FFT peak of the near-axis axial-E (`ey`) time series**, and the
-radial profile is checked against `J0(j01 r/R)`. The post-processing:
+from the cosine recurrence of the weighted TM010 amplitude**, avoiding FFT-bin
+error. The post-processing:
 
-1. Reads the axial-E snapshots from `out.npz` (`snapshot_field_ey`, with the
-   final field in `field_ey`), sampled every `cadence = 4` steps.
-2. Takes a representative near-axis `Ez(t)` trace (and/or projects the radial
-   profile onto `J0(j01 r/R)`).
-3. FFTs that trace and locates the dominant peak frequency `f_peak`.
+1. Reads axial-E and azimuthal-B snapshots from `out.npz`
+   (`snapshot_field_ey` / `snapshot_field_bz`, with final `field_ey` /
+   `field_bz`), sampled every `cadence = 4` steps.
+2. Projects each full axial-E field onto `J0(j01 r/R)` with the cylindrical
+   `r dr dz` control-volume weights and measures off-mode leakage.
+3. Fits the projected amplitude to its cosine recurrence, checking both
+   frequency and the absence of a half-timestep startup phase error.
+4. Reconstructs `Bphi^(n+1/2)` with the same radial Yee curl and verifies the
+   full staggered electric/magnetic leapfrog invariant, including half dual-cell
+   weights at PEC faces.
 
-The measured `f_peak` matches the analytic `f_010 ≈ 1.1473 GHz` to within a few
-percent (≈5% at `128 x 128`: the residual is the 2nd-order Yee grid dispersion of
-the cylindrical Bessel operator plus the finite FFT bin width), and the radial
-profile matches `J0(j01 r/R)` to sub-percent RMS.
+The measured frequency is about `1.14741635 GHz`, versus
+`f_010 ≈ 1.14742528 GHz`; the remaining `7.8e-6` relative difference is the
+expected second-order radial-grid dispersion. The integration bound remains
+looser than one observed run for portability while still rejecting a wrong curl,
+axis closure, radial measure, or leapfrog initialization.

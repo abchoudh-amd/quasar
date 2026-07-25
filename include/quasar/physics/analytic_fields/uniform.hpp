@@ -7,7 +7,7 @@ namespace quasar::analytic_fields {
 class UniformEvaluator final : public numerics::IFieldEvaluator {
  public:
   UniformEvaluator() = default;
-  explicit UniformEvaluator(Vec3 b0, Vec3 e0 = Vec3{0, 0, 0}) : b0_{b0}, e0_{e0} {}
+  explicit UniformEvaluator(Vec3 b0, Vec3 e0 = Vec3{0, 0, 0});
 
   // Deck params: "b0" (Vec3 tesla), "e0" (Vec3 V/m). Both default to zero.
   void configure(const numerics::EvaluatorParams& p) override;
@@ -16,7 +16,8 @@ class UniformEvaluator final : public numerics::IFieldEvaluator {
                          const core::PointCloud& observations) const override;
   Field<Vec3> evaluate_E(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
-  // evaluate_grad_B uses the base-class zero default (no analytic Jacobian).
+  // The base-class zero Jacobian is the exact gradient of this evaluator.
+  bool provides_grad_B() const noexcept override { return true; }
 
  private:
   Vec3 b0_{0, 0, 0};

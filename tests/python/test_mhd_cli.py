@@ -7,12 +7,11 @@ its keys. The end-to-end stepping run is guarded by the same
 ``QUASAR_HAS_HIP_RUNTIME`` skip the PIC example tests use; the invalid-deck path
 exits non-zero *before* stepping, so it needs no device.
 
-Until the ``quasar.mhd`` package exists, ``python -m quasar.mhd.cli`` exits
-non-zero (ModuleNotFoundError), so the run tests fail rather than error -- the
-intended RED state.
 """
 
+import argparse
 import os
+import math
 import subprocess
 import sys
 import tempfile
@@ -21,6 +20,9 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+
+from quasar.mhd import cli as mhd_cli
+from quasar.mhd.io import parse as parse_mhd_deck
 
 
 def has_hip_runtime() -> bool:
@@ -34,6 +36,7 @@ EXPECTED_KEYS = (
     "nx",
     "ny",
     "nghost",
+    "units",
     "geometry",
     "gamma",
     "state_rho",
@@ -88,6 +91,33 @@ def _run_cli(yaml_path: Path):
     )
 
 
+class MhdNativeBackgroundConfigTests(unittest.TestCase):
+
+    def test_make_config_forwards_analytic_profile_params(self):
+        data = _small_deck()
+        data["background_field"] = {
+            "enabled": True,
+            "profile": "linear_vacuum",
+            "params": {"gradient": 1.25, "shear": -0.4},
+        }
+        cfg = mhd_cli._make_config(parse_mhd_deck(data))
+        self.assertEqual(cfg.background.params,
+                         {"gradient": 1.25, "shear": -0.4})
+
+    def test_make_config_does_not_treat_file_params_as_profile_params(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "background.npz"
+            path.touch()
+            data = _small_deck()
+            data["background_field"] = {
+                "enabled": True,
+                "file": str(path),
+                "params": {"b_scale": 2.0},
+            }
+            cfg = mhd_cli._make_config(parse_mhd_deck(data))
+        self.assertEqual(cfg.background.params, {})
+
+
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class MhdCliRunTests(unittest.TestCase):
 
@@ -122,6 +152,8 @@ class MhdCliRunTests(unittest.TestCase):
                 float(np.asarray(data["gamma"]).ravel()[0]), 1.6666667, places=5)
             self.assertEqual(
                 str(np.asarray(data["geometry"]).ravel()[0]), "cartesian")
+            self.assertEqual(
+                str(np.asarray(data["units"]).ravel()[0]), "normalized")
 
     def test_run_state_arrays_finite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -158,6 +190,30 @@ class MhdCliRunTests(unittest.TestCase):
             res = _run_cli(deck)
             self.assertEqual(res.returncode, 0, msg=f"stderr: {res.stderr}")
             self.assertTrue((workdir / "result.npz").exists())
+
+    def test_run_uses_suffixless_output_path_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            deck = _write_deck(workdir, _small_deck(output_path="result"))
+            res = _run_cli(deck)
+            self.assertEqual(res.returncode, 0, msg=f"stderr: {res.stderr}")
+            self.assertTrue((workdir / "result").is_file())
+            self.assertFalse((workdir / "result.npz").exists())
+            with np.load(workdir / "result", allow_pickle=False) as archive:
+                self.assertIn("final_time_s", archive.files)
+
+    def test_t_end_clips_the_last_step_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            data = _small_deck()
+            data["time"] = {"dt_s": "auto", "steps": 100, "t_end": 1.0e-8}
+            deck = _write_deck(workdir, data)
+            res = _run_cli(deck)
+            self.assertEqual(res.returncode, 0, msg=f"stderr: {res.stderr}")
+            out = np.load(workdir / "out.npz", allow_pickle=False)
+            self.assertEqual(float(np.asarray(out["final_time_s"]).ravel()[0]),
+                             data["time"]["t_end"])
+            self.assertEqual(int(np.asarray(out["final_step"]).ravel()[0]), 1)
 
 
 class MhdCliInvalidDeckTests(unittest.TestCase):
@@ -204,6 +260,94 @@ class MhdCliInvalidDeckTests(unittest.TestCase):
         data = _small_deck()
         data["initial"]["type"] = "not_a_real_ic"
         self._run_expect_failure(data)
+
+
+class MhdCliTimeAccountingTests(unittest.TestCase):
+    class _Grid:
+        nghost = 0
+
+    class _Solver:
+        def __init__(self, nx, ny, limits):
+            self._state = np.zeros(nx * ny, dtype=np.float64)
+            self._limits = iter(limits)
+            self.dts = []
+            self.divergence_calls = 0
+
+        def grid(self):
+            return MhdCliTimeAccountingTests._Grid()
+
+        def state_component_to_host(self, _component):
+            return self._state.copy()
+
+        def divergence_b_max(self):
+            self.divergence_calls += 1
+            return 0.0
+
+        def cfl_limit(self):
+            return next(self._limits)
+
+        def step_unchecked(self, dt):
+            self.dts.append(float(dt))
+
+        def step(self, dt):
+            self.dts.append(float(dt))
+
+    @staticmethod
+    def _deck(t_end, steps=8):
+        data = _small_deck()
+        data["domain"] = {"nx": 2, "ny": 2, "lx_m": 1.0, "ly_m": 1.0}
+        data["initial"] = {"type": "blast", "params": {}}
+        data["time"] = {"dt_s": "auto", "steps": steps, "t_end": t_end}
+        data["diagnostics"] = {
+            "output_path": "out.npz", "cadence": 0, "fields": [], "divb": True}
+        return parse_mhd_deck(data)
+
+    @staticmethod
+    def _args():
+        return argparse.Namespace(log_every=0)
+
+    def test_exact_endpoint_is_the_sum_of_actual_solver_steps(self):
+        # 0.3 is deliberately not an integer multiple of binary64 0.1. The
+        # final call must receive the exact floating residual, not report an
+        # epsilon-snapped endpoint after three nominal 0.1 steps.
+        deck = self._deck(0.3)
+        solver = self._Solver(2, 2, [0.1, 0.1, 0.1, 0.1])
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "out.npz"
+            mhd_cli._run_loop(
+                solver, deck, 0.1, True, out_path, self._args())
+            out = np.load(out_path, allow_pickle=False)
+            final_time = float(np.asarray(out["final_time_s"]).ravel()[0])
+        self.assertEqual(len(solver.dts), 3)
+        self.assertEqual(solver.dts[-1], 0.3 - (solver.dts[0] + solver.dts[1]))
+        self.assertEqual(math.fsum(solver.dts), 0.3)
+        self.assertEqual(final_time, 0.3)
+
+    def test_unrepresentable_nonfinal_time_progress_raises(self):
+        deck = self._deck(2.0e16)
+        solver = self._Solver(2, 2, [1.0e16, 0.5])
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(RuntimeError, "too small to advance"):
+                mhd_cli._run_loop(
+                    solver, deck, 1.0e16, True, Path(tmp) / "out.npz",
+                    self._args())
+        self.assertEqual(solver.dts, [1.0e16])
+
+    def test_disabled_divb_performs_no_reductions_and_emits_no_keys(self):
+        deck = self._deck(0.2, steps=2)
+        deck.diagnostics.divb = False
+        deck.diagnostics.cadence = 1
+        solver = self._Solver(2, 2, [0.1, 0.1])
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "out.npz"
+            mhd_cli._run_loop(
+                solver, deck, 0.1, True, out_path,
+                argparse.Namespace(log_every=1))
+            with np.load(out_path, allow_pickle=False) as out:
+                for key in ("divb_linf", "divb_linf_final",
+                            "snapshot_divb_linf"):
+                    self.assertNotIn(key, out.files)
+        self.assertEqual(solver.divergence_calls, 0)
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")

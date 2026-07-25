@@ -26,6 +26,7 @@
 #include "quasar/numerics/mhd_state.hpp"
 
 #include <cmath>
+#include <limits>
 
 namespace quasar::numerics {
 
@@ -36,6 +37,27 @@ class MhdEigensystem {
   // `gamma`. Degeneracies (B_perp -> 0, coincident speeds) are regularized with
   // the Roe/Balsara renormalization so L,R stay finite and L*R = I (loosened tol).
   QUASAR_HOST_DEVICE void build(const MhdState& s, int dir, Real gamma) {
+    build_impl(s, MhdBackground{}, dir, gamma, false);
+  }
+
+  // Field-split eigenstructure. The stored state contains the perturbation b
+  // and E'=e+K+|b|^2/2, while the waves propagate in the total field B=B0+b.
+  // Keeping the affine energy transformation in the Jacobian (rather than
+  // constructing E=E'+B0.b+|B0|^2/2) is essential when |B0| dominates the gas
+  // energy: the latter representation can round the pressure out of existence.
+  QUASAR_HOST_DEVICE void build(const MhdState& s, const MhdBackground& b0,
+                                int dir, Real gamma) {
+    if (b0.b0x == Real{0} && b0.b0y == Real{0} && b0.b0z == Real{0}) {
+      build(s, dir, gamma);
+      return;
+    }
+    build_impl(s, b0, dir, gamma, true);
+  }
+
+ private:
+  QUASAR_HOST_DEVICE void build_impl(const MhdState& s,
+                                     const MhdBackground& b0, int dir,
+                                     Real gamma, bool split_energy) {
     dir_ = dir;
 
     const MhdPrim w = to_primitive(s, gamma);
@@ -50,46 +72,46 @@ class MhdEigensystem {
     // L,R are returned in the canonical (rho,mn,mt1,mt2,E,bt1,bt2) ordering, and
     // the projector applies the same rotation on the conserved delta.
     Real bn, bt1, bt2;
+    Real bpert_t1, bpert_t2;
     if (dir == 0) {
-      bn = w.bx; bt1 = w.by; bt2 = w.bz;
+      bn = w.bx + b0.b0x;
+      bt1 = w.by + b0.b0y;
+      bt2 = w.bz + b0.b0z;
+      bpert_t1 = w.by;
+      bpert_t2 = w.bz;
     } else {
-      bn = w.by; bt1 = w.bz; bt2 = w.bx;
+      bn = w.by + b0.b0y;
+      bt1 = w.bz + b0.b0z;
+      bt2 = w.bx + b0.b0x;
+      bpert_t1 = w.bz;
+      bpert_t2 = w.bx;
     }
 
-    // Sound speed, Alfven speeds.
-    const Real a2 = gamma * p / rho;             // a^2
-    const Real a  = sqrt(a2);
-    const Real bn2 = bn * bn;
-    const Real bt_sq = bt1 * bt1 + bt2 * bt2;    // |B_perp|^2
-    const Real cax2 = bn2 / rho;                 // normal Alfven speed^2
-    const Real cax  = sqrt(cax2);
-    const Real ca2  = (bn2 + bt_sq) / rho;       // total Alfven speed^2 (b^2/rho)
-
-    // Fast/slow magnetosonic speeds.
-    const Real sum = a2 + ca2;
-    Real disc = sum * sum - Real{4} * a2 * cax2;
-    if (disc < Real{0}) disc = Real{0};
-    const Real sqrt_disc = sqrt(disc);
-    Real cf2 = Real{0.5} * (sum + sqrt_disc);
-    Real cs2 = Real{0.5} * (sum - sqrt_disc);
-    if (cf2 < Real{0}) cf2 = Real{0};
-    if (cs2 < Real{0}) cs2 = Real{0};
-    const Real cf = sqrt(cf2);
-    const Real cs = sqrt(cs2);
+    // Sound, Alfven, and magnetosonic speeds.  The shared root helper scales
+    // the quadratic before squaring and obtains the slow root from the product
+    // relation, so extreme but finite fields cannot turn the eigensystem into
+    // NaN through B^2 or discriminant overflow.
+    Real cf, cs, a, cax, ca;
+    magnetosonic_speeds(rho, p, bn, bt1, bt2, /*dir=*/0, gamma,
+                        cf, cs, a, cax, ca);
 
     // Roe/Balsara normalization coefficients alpha_f, alpha_s. Guard the
     // cf^2-cs^2 denominator: when fast and slow coincide (e.g. B_perp=0 and
     // a==cax) split the weight evenly.
     Real alpha_f, alpha_s;
     {
-      const Real denom = cf2 - cs2;
-      const Real eps = static_cast<Real>(1e-12);
-      if (denom <= eps * (cf2 + cs2 + eps)) {
+      const Real speed_scale = (cf > Real{0}) ? cf : Real{1};
+      const Real cfn = cf / speed_scale;
+      const Real csn = cs / speed_scale;
+      const Real an = a / speed_scale;
+      const Real denom = cfn * cfn - csn * csn;
+      constexpr Real eps = Real{64} * std::numeric_limits<Real>::epsilon();
+      if (denom <= eps * (cfn * cfn + csn * csn)) {
         alpha_f = Real{1} / sqrt(Real{2});
         alpha_s = Real{1} / sqrt(Real{2});
       } else {
-        Real af2 = (a2 - cs2) / denom;
-        Real as2 = (cf2 - a2) / denom;
+        Real af2 = (an * an - csn * csn) / denom;
+        Real as2 = (cfn * cfn - an * an) / denom;
         if (af2 < Real{0}) af2 = Real{0};
         if (as2 < Real{0}) as2 = Real{0};
         alpha_f = sqrt(af2);
@@ -102,9 +124,12 @@ class MhdEigensystem {
     // magnetosonic eigenvectors finite at B_perp -> 0.
     Real beta1, beta2;
     {
-      const Real bt = sqrt(bt_sq);
-      const Real eps = static_cast<Real>(1e-12) * (a + sqrt(ca2) + static_cast<Real>(1e-30));
-      if (bt < eps) {
+      const Real bt = scaled_norm3(bt1, bt2, Real{0});
+      const Real bt_speed = bt / sqrt_rho;
+      const Real field_scale = (a > ca) ? a : ca;
+      constexpr Real eps = Real{64} * std::numeric_limits<Real>::epsilon();
+      if (bt == Real{0}
+          || bt_speed <= eps * (field_scale + std::numeric_limits<Real>::min())) {
         beta1 = Real{1} / sqrt(Real{2});
         beta2 = Real{1} / sqrt(Real{2});
       } else {
@@ -141,7 +166,11 @@ class MhdEigensystem {
     const Real qs = cs * alpha_s * sbn;
     const Real Af = a * alpha_f * sqrt_rho;
     const Real As = a * alpha_s * sqrt_rho;
-    const Real Nf = Real{0.5} / (a2 > Real{0} ? a2 : static_cast<Real>(1e-300));  // 1/(2 a^2) normalization
+    const Real inv_a2 = (a > Real{0}) ? (Real{1} / a) / a : Real{0};
+    const Real Nf = Real{0.5} * inv_a2;  // 1/(2 a^2) normalization
+    // rho*a^2 == gamma*p, evaluated in the form that does not divide by a tiny
+    // rho and then multiply it back into the primitive pressure eigenvector.
+    const Real rho_a2 = gamma * p;
 
     // Right eigenvectors in primitive space, columns Rp[wave][var].
     // var index: 0=rho,1=vn,2=vt1,3=vt2,4=p,5=bt1,6=bt2.
@@ -159,7 +188,7 @@ class MhdEigensystem {
       Rp[0][1] = -alpha_f * cf;
       Rp[0][2] = qs * beta1;
       Rp[0][3] = qs * beta2;
-      Rp[0][4] = rho * alpha_f * a2;
+      Rp[0][4] = alpha_f * rho_a2;
       Rp[0][5] = As * beta1;
       Rp[0][6] = As * beta2;
 
@@ -167,7 +196,7 @@ class MhdEigensystem {
       Rp[6][1] = alpha_f * cf;
       Rp[6][2] = -qs * beta1;
       Rp[6][3] = -qs * beta2;
-      Rp[6][4] = rho * alpha_f * a2;
+      Rp[6][4] = alpha_f * rho_a2;
       Rp[6][5] = As * beta1;
       Rp[6][6] = As * beta2;
     }
@@ -202,7 +231,7 @@ class MhdEigensystem {
       Rp[2][1] = -alpha_s * cs;
       Rp[2][2] = -qf * beta1;
       Rp[2][3] = -qf * beta2;
-      Rp[2][4] = rho * alpha_s * a2;
+      Rp[2][4] = alpha_s * rho_a2;
       Rp[2][5] = -Af * beta1;
       Rp[2][6] = -Af * beta2;
 
@@ -210,7 +239,7 @@ class MhdEigensystem {
       Rp[4][1] = alpha_s * cs;
       Rp[4][2] = qf * beta1;
       Rp[4][3] = qf * beta2;
-      Rp[4][4] = rho * alpha_s * a2;
+      Rp[4][4] = alpha_s * rho_a2;
       Rp[4][5] = -Af * beta1;
       Rp[4][6] = -Af * beta2;
     }
@@ -289,7 +318,7 @@ class MhdEigensystem {
       Lp[3][1] = Real{0};
       Lp[3][2] = Real{0};
       Lp[3][3] = Real{0};
-      Lp[3][4] = -Real{1} / a2;
+      Lp[3][4] = -inv_a2;
       Lp[3][5] = Real{0};
       Lp[3][6] = Real{0};
 
@@ -308,7 +337,7 @@ class MhdEigensystem {
     //        + dp/(g-1) + bt1 dbt1 + bt2 dbt2
     // ---------------------------------------------------------------------
     const Real gm1 = gamma - Real{1};
-    const Real v2 = vn * vn + vt1 * vt1 + vt2 * vt2;
+    const Real half_v2 = half_squared_norm3(vn, vt1, vt2);
 
     // M = dU/dW (7x7).
     Real M[7][7] = {{0}};
@@ -316,10 +345,15 @@ class MhdEigensystem {
     M[1][0] = vn;   M[1][1] = rho;                       // mn
     M[2][0] = vt1;  M[2][2] = rho;                       // mt1
     M[3][0] = vt2;  M[3][3] = rho;                       // mt2
-    M[4][0] = Real{0.5} * v2;
+    M[4][0] = half_v2;
     M[4][1] = rho * vn; M[4][2] = rho * vt1; M[4][3] = rho * vt2;
     M[4][4] = Real{1} / gm1;
-    M[4][5] = bt1; M[4][6] = bt2;                        // E
+    // For an ordinary state dE/db_t=B_t. For the split state
+    // E'=e+K+|b|^2/2, dE'/db_t=b_t. This is exactly the affine transform
+    // dE=dE'+B0_t.db_t applied to the total-field right eigenvectors.
+    const Real energy_bt1 = split_energy ? bpert_t1 : bt1;
+    const Real energy_bt2 = split_energy ? bpert_t2 : bt2;
+    M[4][5] = energy_bt1; M[4][6] = energy_bt2;            // E or E'
     M[5][5] = Real{1};                                   // bt1
     M[6][6] = Real{1};                                   // bt2
 
@@ -335,13 +369,13 @@ class MhdEigensystem {
     // expressed in U: dv_i = (dm_i - v_i drho)/rho, so rho v.dv = v.dm - v^2 drho.
     //   dp = (g-1)[ dE - 0.5 v^2 drho - (v.dm - v^2 drho) - bt.dbt ]
     //      = (g-1)[ dE + 0.5 v^2 drho - v.dm - bt.dbt ]
-    Minv[4][0] = gm1 * Real{0.5} * v2;
+    Minv[4][0] = gm1 * half_v2;
     Minv[4][1] = -gm1 * vn;
     Minv[4][2] = -gm1 * vt1;
     Minv[4][3] = -gm1 * vt2;
     Minv[4][4] = gm1;
-    Minv[4][5] = -gm1 * bt1;
-    Minv[4][6] = -gm1 * bt2;
+    Minv[4][5] = -gm1 * energy_bt1;
+    Minv[4][6] = -gm1 * energy_bt2;
     Minv[5][5] = Real{1};                                // bt1
     Minv[6][6] = Real{1};                                // bt2
 
@@ -360,8 +394,43 @@ class MhdEigensystem {
         L_[k * 7 + var] = lacc;   // L_[k,var]
       }
     }
+
+    // Conserved-variable eigenvectors can become numerically singular even when
+    // every physical characteristic speed is finite (for example when energy is
+    // O(1e299) while momentum is O(1)). In that regime an analytic L/R pair may
+    // contain finite entries yet lose biorthogonality by many absolute orders
+    // through cancellation, making characteristic projection actively unsafe.
+    // Detect that loss using the same arithmetic projection consumes and fall
+    // back to an exactly invertible component basis. Wave speeds remain the
+    // physical magnetosonic speeds; only limiting becomes componentwise for this
+    // ill-conditioned state, which is safer than amplifying round-off through a
+    // nominal but unusable characteristic basis.
+    bool usable = true;
+    for (int i = 0; i < 7 && usable; ++i) {
+      for (int j = 0; j < 7; ++j) {
+        Real dot = Real{0};
+        for (int k = 0; k < 7; ++k) dot += L_[i * 7 + k] * R_[k * 7 + j];
+        const Real expected = (i == j) ? Real{1} : Real{0};
+        if (!std::isfinite(dot)
+            || std::fabs(dot - expected) > Real{1024} *
+                std::numeric_limits<Real>::epsilon()) {
+          usable = false;
+          break;
+        }
+      }
+    }
+    if (!usable) {
+      for (int i = 0; i < 7; ++i) {
+        for (int j = 0; j < 7; ++j) {
+          const Real value = (i == j) ? Real{1} : Real{0};
+          L_[i * 7 + j] = value;
+          R_[i * 7 + j] = value;
+        }
+      }
+    }
   }
 
+ public:
   // Pointer to length-7 left eigenvector k (row k of L). w_k = L_row(k) . delta.
   QUASAR_HOST_DEVICE const Real* left_row(int k) const { return &L_[k * 7]; }
 

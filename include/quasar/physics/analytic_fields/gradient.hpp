@@ -7,15 +7,17 @@ namespace quasar::analytic_fields {
 class GradientEvaluator final : public numerics::IFieldEvaluator {
  public:
   GradientEvaluator() = default;
-  GradientEvaluator(Vec3 b0, Mat3x3 grad, Vec3 origin = Vec3{0, 0, 0})
-    : b0_{b0}, grad_{grad}, origin_{origin} {}
+  GradientEvaluator(Vec3 b0, Mat3x3 grad, Vec3 origin = Vec3{0, 0, 0});
 
   // Deck params: "b0" (Vec3 tesla), "grad" (Mat3x3 row-major T/m), "origin"
-  // (Vec3 m). All default to zero.
+  // (Vec3 m). All default to zero. Maxwell's div(B)=0 requires trace(grad)=0;
+  // non-solenoidal matrices are rejected. Symmetry is not required because a
+  // general region may carry current (curl(B) != 0).
   void configure(const numerics::EvaluatorParams& p) override;
 
   Field<Vec3> evaluate_B(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
+  bool provides_grad_B() const noexcept override { return true; }
   Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
                                 const core::PointCloud& observations) const override;
 

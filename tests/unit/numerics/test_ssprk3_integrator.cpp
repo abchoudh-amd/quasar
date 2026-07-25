@@ -1,4 +1,4 @@
-// RED-phase tests for the SSP-RK3 time integrator.
+// Tests for the SSP-RK3 time integrator.
 //
 // Targets the blind contract in include/quasar/numerics/ssprk_integrator.hpp:
 //
@@ -43,6 +43,7 @@
 
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,20 @@ TEST(MhdSsprk3Integrator, IsRegistered) {
 
 TEST(MhdSsprk3Integrator, HasThreeStages) {
   EXPECT_EQ(make_integrator()->n_stages(), 3);
+}
+
+TEST(MhdSsprk3Integrator, RejectsNonpositiveAndNonfiniteTimestep) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  auto cfg = tiny_config();
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform(solver, cfg.grid, cfg.gamma);
+  auto integ = make_integrator();
+  EXPECT_THROW(integ->advance(solver, Real{0}), std::invalid_argument);
+  EXPECT_THROW(integ->advance(solver, Real{-1}), std::invalid_argument);
+  EXPECT_THROW(integ->advance(
+      solver, std::numeric_limits<Real>::quiet_NaN()), std::invalid_argument);
+  EXPECT_THROW(integ->advance(
+      solver, std::numeric_limits<Real>::infinity()), std::invalid_argument);
 }
 
 // A spatially-uniform constant state is a fixed point of the residual, so one

@@ -3,16 +3,12 @@
 # Configure-time detection of a usable HIP runtime device. Sets the cache
 # variable QUASAR_HAS_HIP_RUNTIME to ON when the HIP toolchain can both
 # compile a probe program *and* run it successfully reporting at least one
-# visible device.  CTest uses this to decide whether HIP-launching unit tests
-# should be active or marked DISABLED.
+# visible device. CTest exports the result to the Python tests' runtime skip
+# guards; native device tests also query the runtime and skip when unavailable.
 
 include_guard(GLOBAL)
 
 function(quasar_check_hip_runtime)
-  if(DEFINED CACHE{QUASAR_HAS_HIP_RUNTIME})
-    return()
-  endif()
-
   set(_dir "${CMAKE_BINARY_DIR}/cmake-probes/hip_runtime")
   set(_probe "${_dir}/probe.hip")
   file(MAKE_DIRECTORY "${_dir}")
@@ -27,8 +23,8 @@ function(quasar_check_hip_runtime)
   )
 
   try_run(_run_result _compile_result
-    "${_dir}"
     SOURCES "${_probe}"
+    NO_CACHE
     RUN_OUTPUT_VARIABLE _hip_out
     COMPILE_OUTPUT_VARIABLE _hip_log
   )

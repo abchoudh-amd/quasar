@@ -41,10 +41,32 @@ void accumulate_rho(std::vector<double>& rho, const quasar::Grid2D& g,
   }
 }
 
+template <int ShapeOrder>
+void accumulate_rho_reflecting(std::vector<double>& rho,
+                               const quasar::Grid2D& g, double q, double w,
+                               double x, double y) {
+  const auto sw = quasar::numerics::shape_weights_2d<ShapeOrder>(x, y, g);
+  for (int b = 0; b < sw.ny; ++b) {
+    int jj = sw.iy[b];
+    if (jj < 0) jj = -jj - 1;
+    if (jj >= g.ny) jj = 2 * g.ny - 1 - jj;
+    if (jj < 0 || jj >= g.ny) continue;
+    for (int a = 0; a < sw.nx; ++a) {
+      int ii = sw.ix[a];
+      if (ii < 0) ii = -ii - 1;
+      if (ii >= g.nx) ii = 2 * g.nx - 1 - ii;
+      if (ii < 0 || ii >= g.nx) continue;
+      rho[g.index(ii, jj)] +=
+          q * w * sw.wx[a] * sw.wy[b] / (g.dx() * g.dy());
+    }
+  }
+}
+
 quasar::pic::EmPicConfig specular_config(const quasar::Grid2D& g, int shape_order) {
   quasar::pic::EmPicConfig cfg{g, 2, shape_order == 1 ? "cic" : "tsc"};
   for (int side = 0; side < 4; ++side) {
     cfg.boundary.particle[side] = "specular";
+    cfg.boundary.field[side] = "pec";
   }
   return cfg;
 }
@@ -66,7 +88,7 @@ TEST(PicSpecularChargeConservation, BulkDepositStillSatisfiesContinuity) {
   sp.set_host_particles({x0}, {y0}, {vx}, {vy}, {vz}, {w});
   solver.add_species(std::move(sp));
 
-  const double dt = 0.05;
+  const double dt = 0.03;
   solver.step(dt);
 
   const double x1 = x0 + dt * vx;
@@ -85,10 +107,10 @@ TEST(PicSpecularChargeConservation, BulkDepositStillSatisfiesContinuity) {
   for (int j = 0; j < g.ny; ++j) {
     for (int i = 0; i < g.nx; ++i) {
       const std::size_t k = g.periodic_index(i, j);
-      const std::size_t kxm = g.periodic_index(i - 1, j);
-      const std::size_t kym = g.periodic_index(i, j - 1);
       const double drho = (rho_new[k] - rho_old[k]) / dt / (g.dx() * g.dy());
-      const double divJ = (jx[k] - jx[kxm]) / g.dx() + (jy[k] - jy[kym]) / g.dy();
+      const double divJ =
+          (jx[g.periodic_index(i + 1, j)] - jx[k]) / g.dx()
+        + (jy[g.periodic_index(i, j + 1)] - jy[k]) / g.dy();
       max_resid = std::max(max_resid, std::abs(drho + divJ));
       max_jmag = std::max(max_jmag, std::max(std::abs(jx[k]), std::abs(jy[k])));
     }
@@ -106,10 +128,10 @@ TEST(PicSpecularChargeConservation, WallCrossingDepositsNoFarEdgeCurrent) {
   quasar::pic::EmPic2D3V solver{specular_config(g, 1)};
 
   quasar::pic::ParticleSpecies sp{quasar::pic::SpeciesConfig{"e", -1.0, 1.0, 1}};
-  sp.set_host_particles({0.97}, {0.5}, {2.0}, {0.0}, {0.0}, {1.0});
+  sp.set_host_particles({0.96}, {0.5}, {0.99}, {0.0}, {0.0}, {1.0});
   solver.add_species(std::move(sp));
 
-  const double dt = 0.05;  // 0.97 + 2*0.05 = 1.07 > 1.0 -> crosses x_hi
+  const double dt = 0.044;
   solver.step(dt);
 
   auto& J = solver.current();
@@ -141,4 +163,42 @@ TEST(PicSpecularChargeConservation, WallCrossingDepositsNoFarEdgeCurrent) {
   EXPECT_LT(snap.x[0], 1.0);
   EXPECT_GT(snap.x[0], 0.0);
   EXPECT_LT(snap.vx[0], 0.0);
+}
+
+TEST(PicSpecularChargeConservation, WallCrossingSatisfiesCellwiseContinuity) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
+  quasar::pic::EmPic2D3V solver{specular_config(g, 1)};
+  constexpr double q = 1.0, w = 1.0, x0 = 0.96, y0 = 0.5;
+  quasar::pic::ParticleSpecies sp{
+      quasar::pic::SpeciesConfig{"q", q, 1.0, 1}};
+  sp.set_host_particles({x0}, {y0}, {0.99}, {0.0}, {0.0}, {w});
+  solver.add_species(std::move(sp));
+
+  constexpr double dt = 0.044;
+  solver.step(dt);
+  const auto snap = solver.species()[0].to_host();
+
+  std::vector<double> rho_old(g.storage_size(), 0.0);
+  std::vector<double> rho_new(g.storage_size(), 0.0);
+  accumulate_rho_reflecting<1>(rho_old, g, q, w, x0, y0);
+  accumulate_rho_reflecting<1>(rho_new, g, q, w, snap.x[0], snap.y[0]);
+
+  std::vector<double> jx(g.storage_size()), jy(g.storage_size());
+  solver.current().jx.copy_to_host(jx.data(), jx.size());
+  solver.current().jy.copy_to_host(jy.data(), jy.size());
+  double max_resid = 0.0;
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const auto k = g.index(i, j);
+      const double residual =
+          (rho_new[k] - rho_old[k]) / dt
+        + (jx[g.index(i + 1, j)] - jx[k]) / g.dx()
+        + (jy[g.index(i, j + 1)] - jy[k]) / g.dy();
+      max_resid = std::max(max_resid, std::abs(residual));
+    }
+  }
+  EXPECT_LT(max_resid, 2.0e-9)
+      << "reflecting-wall continuity residual " << max_resid;
 }

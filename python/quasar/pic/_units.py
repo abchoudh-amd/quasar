@@ -88,6 +88,16 @@ class Units:
     def density(self, v):
         return v * self._factor_in(self._tag.density)
 
+    def temperature_eV(self, v):
+        """Convert an SI temperature in eV to dimensionless kinetic energy."""
+        return v * self._factor_in(self._tag.temperature_eV)
+
+    def e_field(self, v):
+        return v * self._factor_in(self._tag.e_field)
+
+    def b_field(self, v):
+        return v * self._factor_in(self._tag.b_field)
+
     # -- internal solver units -> SI (for output / diagnostics) --------------
     def length_to_si(self, v):
         return v * self._factor_out(self._tag.length)
@@ -103,6 +113,9 @@ class Units:
 
     def b_field_to_si(self, v):
         return v * self._factor_out(self._tag.b_field)
+
+    def temperature_eV_to_si(self, v):
+        return v * self._factor_out(self._tag.temperature_eV)
 
     def field_component_to_si(self, name: str, v):
         """Scale a Yee field component to SI by its name: ex/ey/ez use the E-field

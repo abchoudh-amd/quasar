@@ -34,25 +34,34 @@ void periodic_fill(std::vector<double>& f, const quasar::Grid2D& g) {
   }
 }
 
-// The pre-switch stencil: identical expression but reading via periodic_index.
+// The same range-safe arithmetic as the production stencil, but with every
+// sample read through periodic_index. This isolates the ghost-copy/indexing
+// equivalence without making a historical, differently rounded formula the
+// floating-point oracle.
 template <int Order>
 double wrap_ddx(const double* f, const quasar::Grid2D& g, int i, int j) {
   if constexpr (Order == 4) {
-    return (9.0 / 8.0) * (f[g.periodic_index(i + 1, j)] - f[g.periodic_index(i, j)]) / g.dx()
-         - (1.0 / 24.0) * (f[g.periodic_index(i + 2, j)] - f[g.periodic_index(i - 1, j)]) / g.dx();
-  } else {
-    return (f[g.periodic_index(i + 1, j)] - f[g.periodic_index(i, j)]) / g.dx();
+    return quasar::numerics::staggered_derivative_values<Order>(
+        f[g.periodic_index(i - 1, j)], f[g.periodic_index(i, j)],
+        f[g.periodic_index(i + 1, j)], f[g.periodic_index(i + 2, j)],
+        g.dx());
   }
+  return quasar::numerics::staggered_derivative_values<Order>(
+      0.0, f[g.periodic_index(i, j)], f[g.periodic_index(i + 1, j)],
+      0.0, g.dx());
 }
 
 template <int Order>
 double wrap_ddy(const double* f, const quasar::Grid2D& g, int i, int j) {
   if constexpr (Order == 4) {
-    return (9.0 / 8.0) * (f[g.periodic_index(i, j + 1)] - f[g.periodic_index(i, j)]) / g.dy()
-         - (1.0 / 24.0) * (f[g.periodic_index(i, j + 2)] - f[g.periodic_index(i, j - 1)]) / g.dy();
-  } else {
-    return (f[g.periodic_index(i, j + 1)] - f[g.periodic_index(i, j)]) / g.dy();
+    return quasar::numerics::staggered_derivative_values<Order>(
+        f[g.periodic_index(i, j - 1)], f[g.periodic_index(i, j)],
+        f[g.periodic_index(i, j + 1)], f[g.periodic_index(i, j + 2)],
+        g.dy());
   }
+  return quasar::numerics::staggered_derivative_values<Order>(
+      0.0, f[g.periodic_index(i, j)], f[g.periodic_index(i, j + 1)],
+      0.0, g.dy());
 }
 
 template <int Order>

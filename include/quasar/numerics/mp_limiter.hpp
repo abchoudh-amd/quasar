@@ -10,18 +10,12 @@
 // device reconstruct kernel (src/backend/hip/mhd/mhd_reconstruct.hip) and the
 // host registry classes call ONE shared implementation.
 //
-// The Suresh-Huynh MP limiter machinery (minmod2/minmod4/median3/mp_limit) is
-// the unchanged historical math. The base interface INTERPOLATION coefficients
-// in mp5_interp / mp7_interp, however, were CORRECTED during the device port:
-// this is a Shu-Osher POINT-VALUE finite-difference scheme (the stored cell
-// values are point samples, and the reconstructed face value is a point value),
-// so mp5_interp / mp7_interp use the point-value Lagrange weights
-// ((3,-20,90,60,-5)/128 and (-5,42,-175,700,525,-70,7)/1024) rather than the
-// finite-VOLUME cell-average->face weights the original host code carried. The
-// FV weights were a latent bug: fed point data they were only 2nd-order, so the
-// pre-port host "MP5/MP7" silently ran ~2nd order. With the corrected point-value
-// weights MP5/MP7 achieve their design 5th/7th order. Consequence: results are
-// NOT bit-identical to any pre-port host MP5/MP7 output.
+// The evolved MHD state is a finite-volume cell average and the residual is a
+// conservative difference of face fluxes.  Accordingly mp5_interp/mp7_interp
+// use the finite-volume cell-average-to-face coefficients.  Point-sample
+// Lagrange interpolation at x_{i+1/2} is not interchangeable here: when fed
+// cell averages it leaves an O(dx^2) defect in the conservative residual even
+// though a point-interpolation-only test can appear high order.
 //
 // All host-only `std::` math (`std::abs`, `std::min`, `std::max`) is replaced by
 // the device-callable `fabs`/`fmin`/`fmax` so every helper compiles in both host
@@ -36,7 +30,14 @@ namespace quasar::numerics {
 // --- scalar limiter helpers --------------------------------------------------
 
 QUASAR_HOST_DEVICE inline Real minmod2(Real a, Real b) {
-  if (a * b <= Real{0}) return Real{0};
+  // Do not infer the sign from a*b: two same-sign, non-zero slopes can have a
+  // product that underflows to zero, incorrectly flattening a perfectly valid
+  // monotone profile.  Direct comparisons are also safe when the product would
+  // overflow for very large slopes.
+  if (a == Real{0} || b == Real{0}
+      || ((a < Real{0}) != (b < Real{0}))) {
+    return Real{0};
+  }
   return (fabs(a) < fabs(b)) ? a : b;
 }
 
@@ -79,22 +80,50 @@ QUASAR_HOST_DEVICE inline Real mp_limit(Real vl, Real vm2, Real vm1, Real v0,
 
   // Cheap early accept: if the candidate already lies in [v0, vmp] (Eq. 2.30
   // condition), it is monotonicity preserving and no further work is needed.
-  if ((vl - v0) * (vl - vmp) <= eps) {
+  const Real candidate_from_cell = vl - v0;
+  const Real candidate_from_mp   = vl - vmp;
+  const bool candidate_is_between =
+      (candidate_from_cell <= Real{0} && candidate_from_mp >= Real{0})
+      || (candidate_from_cell >= Real{0} && candidate_from_mp <= Real{0});
+
+  // Suresh--Huynh's small early-accept tolerance is dimensionless.  Applying
+  // it directly to the dimensional product makes the limiter depend on the
+  // arbitrary amplitude scale: a sufficiently small copy of a discontinuity
+  // would always be accepted and retain its overshoot.  Normalize by the local
+  // variation before forming the product; this also prevents overflow and
+  // underflow in the acceptance test.
+  const Real variation = fmax(
+      fmax(fabs(d_minus), fabs(d_plus)),
+      fmax(fabs(candidate_from_cell), fabs(candidate_from_mp)));
+  const bool within_roundoff = variation > Real{0}
+      && (fabs(candidate_from_cell) / variation)
+             * (fabs(candidate_from_mp) / variation) <= eps;
+  if (candidate_is_between || within_roundoff) {
     return vl;
   }
 
   // Second differences (curvature), Eq. 2.19.
-  const Real dm = vm2 - Real{2} * vm1 + v0;   // d_{j-1}
-  const Real d0 = vm1 - Real{2} * v0 + vp1;   // d_j
-  const Real dp = v0 - Real{2} * vp1 + vp2;   // d_{j+1}
+  const Real dm = (vm2 - vm1) - (vm1 - v0);   // d_{j-1}
+  const Real d0 = (vm1 - v0) - (v0 - vp1);    // d_j
+  const Real dp = (v0 - vp1) - (vp1 - vp2);   // d_{j+1}
 
   // Curvature-limited differences (Eq. 2.27): 4-arg minmod blends.
-  const Real d_m4_jph = minmod4(Real{4} * d0 - dp, Real{4} * dp - d0, d0, dp);
-  const Real d_m4_jmh = minmod4(Real{4} * d0 - dm, Real{4} * dm - d0, d0, dm);
+  const Real curvature_scale = fmax(fabs(dm), fmax(fabs(d0), fabs(dp)));
+  Real d_m4_jph = Real{0};
+  Real d_m4_jmh = Real{0};
+  if (curvature_scale > Real{0}) {
+    const Real dms = dm / curvature_scale;
+    const Real d0s = d0 / curvature_scale;
+    const Real dps = dp / curvature_scale;
+    d_m4_jph = curvature_scale
+        * minmod4(Real{4} * d0s - dps, Real{4} * dps - d0s, d0s, dps);
+    d_m4_jmh = curvature_scale
+        * minmod4(Real{4} * d0s - dms, Real{4} * dms - d0s, d0s, dms);
+  }
 
   // Candidate bounds (Eqs. 2.24-2.26).
   const Real v_ul = v0 + alpha * d_minus;                          // upper-limit
-  const Real v_av = Real{0.5} * (v0 + vp1);                        // average
+  const Real v_av = Real{0.5} * v0 + Real{0.5} * vp1;              // average
   const Real v_md = v_av - Real{0.5} * d_m4_jph;                   // median
   const Real v_lc = v0 + Real{0.5} * d_minus + (Real{4} / Real{3}) * d_m4_jmh;  // large-curv.
 
@@ -108,27 +137,34 @@ QUASAR_HOST_DEVICE inline Real mp_limit(Real vl, Real vm2, Real vm1, Real v0,
   return median3(vl, vmin, vmax);
 }
 
-// 5th-order LEFT-biased interface interpolation at the right face of cell v0.
-// Point-value (Lagrange) interpolation: the stored cell values are POINT samples
-// at the cell centers x_{i-2..i+2}, and this returns the interpolated point value
-// at the face x_{i+1/2}. Finite-VOLUME (cell-average -> face) coefficients are
-// only 2nd-order accurate when fed point samples; these point-value weights are
-// the correct high-order interpolant for the point-value reconstruction the
-// Riemann solver consumes. Coefficients (sum = 128): (3, -20, 90, 60, -5)/128.
+// 5th-order LEFT-biased interface reconstruction at the right face of cell v0
+// from finite-volume cell averages. Coefficients (sum = 60):
+// (2, -13, 47, 27, -3)/60.
 QUASAR_HOST_DEVICE inline Real mp5_interp(Real vm2, Real vm1, Real v0,
                                           Real vp1, Real vp2) {
-  return (Real{3} * vm2 - Real{20} * vm1 + Real{90} * v0
-          + Real{60} * vp1 - Real{5} * vp2) / Real{128};
+  const Real scale = fmax(fmax(fabs(vm2), fabs(vm1)),
+                          fmax(fabs(v0), fmax(fabs(vp1), fabs(vp2))));
+  if (scale == Real{0}) return Real{0};
+  const Real sum = Real{2} * (vm2 / scale) - Real{13} * (vm1 / scale)
+                 + Real{47} * (v0 / scale) + Real{27} * (vp1 / scale)
+                 - Real{3} * (vp2 / scale);
+  return (sum / Real{60}) * scale;
 }
 
-// 7th-order LEFT-biased interface interpolation at the right face of cell v0.
-// Point-value (Lagrange) interpolation on the cell-center point samples
-// x_{i-3..i+3}, evaluated at the face x_{i+1/2}. NOT finite-volume cell-average
-// coefficients. Coefficients (sum = 1024): (-5, 42, -175, 700, 525, -70, 7)/1024.
+// 7th-order LEFT-biased interface reconstruction at the right face of cell v0
+// from finite-volume cell averages. Coefficients (sum = 420):
+// (-3, 25, -101, 319, 214, -38, 4)/420.
 QUASAR_HOST_DEVICE inline Real mp7_interp(Real vm3, Real vm2, Real vm1, Real v0,
                                           Real vp1, Real vp2, Real vp3) {
-  return (-Real{5} * vm3 + Real{42} * vm2 - Real{175} * vm1 + Real{700} * v0
-          + Real{525} * vp1 - Real{70} * vp2 + Real{7} * vp3) / Real{1024};
+  const Real scale = fmax(fmax(fmax(fabs(vm3), fabs(vm2)),
+                               fmax(fabs(vm1), fabs(v0))),
+                          fmax(fabs(vp1), fmax(fabs(vp2), fabs(vp3))));
+  if (scale == Real{0}) return Real{0};
+  const Real sum = -Real{3} * (vm3 / scale) + Real{25} * (vm2 / scale)
+                 - Real{101} * (vm1 / scale) + Real{319} * (v0 / scale)
+                 + Real{214} * (vp1 / scale) - Real{38} * (vp2 / scale)
+                 + Real{4} * (vp3 / scale);
+  return (sum / Real{420}) * scale;
 }
 
 // MP5 reconstruction: left-biased interface value at the right face of v[0] from

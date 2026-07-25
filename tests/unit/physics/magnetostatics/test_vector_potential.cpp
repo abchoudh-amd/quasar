@@ -1,6 +1,6 @@
 // Correctness check for BiotSavartEvaluator::evaluate_A.
 //
-// Strategy: the Coulomb-gauge vector potential A satisfies B = curl A. For a
+// Strategy: the line-integral vector potential A satisfies B = curl A. For a
 // small system of conductors observed at a handful of off-segment points,
 // central-difference evaluate_A in each Cartesian direction, assemble the
 // discrete curl, and compare against the analytic evaluate_B.
@@ -22,6 +22,7 @@
 using ::quasar::Real;
 using ::quasar::Vec3;
 using ::quasar::magnetostatics::BiotSavartEvaluator;
+using ::quasar::magnetostatics::BiotSavartEvaluatorF;
 using ::quasar::magnetostatics::circular_loop;
 using ::quasar::magnetostatics::ConductorSystem;
 using ::quasar::magnetostatics::generic_polyline;
@@ -129,4 +130,24 @@ TEST(VectorPotential, IsExactlyZeroForZeroCurrent) {
   EXPECT_EQ(a[0].x, Real{0});
   EXPECT_EQ(a[0].y, Real{0});
   EXPECT_EQ(a[0].z, Real{0});
+}
+
+TEST(VectorPotential, Fp32FarFieldLogarithmRetainsSignal) {
+  if (!::quasar::backend::has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime";
+  }
+  ConductorSystem cs;
+  cs.add(generic_polyline(
+      {Vec3{-1, 0, 0}, Vec3{1, 0, 0}}, /*I=*/1.0, "segment"));
+  PointCloud pc;
+  pc.add(Vec3{0, Real{1e8}, 0});
+
+  const auto ad = BiotSavartEvaluator{}.evaluate_A(cs, pc);
+  const auto af = BiotSavartEvaluatorF{}.evaluate_A(cs, pc);
+  ASSERT_EQ(ad.size(), 1u);
+  ASSERT_EQ(af.size(), 1u);
+  EXPECT_GT(ad[0].x, Real{0});
+  EXPECT_GT(af[0].x, 0.0f);
+  EXPECT_NEAR(static_cast<Real>(af[0].x), ad[0].x,
+              Real{2e-5} * std::abs(ad[0].x));
 }

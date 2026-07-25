@@ -3,10 +3,31 @@
 #include "quasar/backend/device.hpp"
 
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace quasar::backend {
+
+namespace detail {
+
+inline std::size_t checked_size_product(std::size_t a, std::size_t b,
+                                        const char* message) {
+  if (a != 0 && b > std::numeric_limits<std::size_t>::max() / a) {
+    throw std::length_error{message};
+  }
+  return a * b;
+}
+
+template <class T>
+std::size_t checked_buffer_bytes(std::size_t n) {
+  return checked_size_product(
+      n, sizeof(T), "DeviceBuffer: element count overflows byte size");
+}
+
+}  // namespace detail
 
 // Tag selecting an uninitialized device allocation (skips the zero-fill) for a
 // buffer a kernel overwrites in full before any read.
@@ -21,7 +42,8 @@ class DeviceBuffer {
  public:
   DeviceBuffer() noexcept = default;
 
-  explicit DeviceBuffer(std::size_t n) : size_{n}, bytes_{n * sizeof(T)} {
+  explicit DeviceBuffer(std::size_t n)
+    : size_{n}, bytes_{detail::checked_buffer_bytes<T>(n)} {
     if (n != 0) {
       // device_alloc zero-initializes, so freshly constructed fields/particles
       // never observe recycled device memory from a prior allocation.
@@ -31,7 +53,8 @@ class DeviceBuffer {
 
   // Allocate without the zero-fill. Only valid when the caller writes every
   // element before reading (transient scratch / kernel-output buffers).
-  DeviceBuffer(std::size_t n, uninitialized_t) : size_{n}, bytes_{n * sizeof(T)} {
+  DeviceBuffer(std::size_t n, uninitialized_t)
+    : size_{n}, bytes_{detail::checked_buffer_bytes<T>(n)} {
     if (n != 0) {
       ptr_ = device_alloc_uninit(bytes_);
     }
@@ -69,19 +92,38 @@ class DeviceBuffer {
   bool        empty()      const noexcept { return size_ == 0; }
 
   void copy_from_host(const T* host_src, std::size_t n) {
+    validate_copy(host_src, n, "copy_from_host");
+    if (n == 0) return;
     device_memcpy_h2d(ptr_, host_src, n * sizeof(T));
   }
   void copy_from_host_async(const T* host_src, std::size_t n, stream_t stream) {
+    validate_copy(host_src, n, "copy_from_host_async");
+    if (n == 0) return;
     device_memcpy_h2d_async(ptr_, host_src, n * sizeof(T), stream);
   }
   void copy_to_host(T* host_dst, std::size_t n) const {
+    validate_copy(host_dst, n, "copy_to_host");
+    if (n == 0) return;
     device_memcpy_d2h(host_dst, ptr_, n * sizeof(T));
   }
   void copy_to_host_async(T* host_dst, std::size_t n, stream_t stream) const {
+    validate_copy(host_dst, n, "copy_to_host_async");
+    if (n == 0) return;
     device_memcpy_d2h_async(host_dst, ptr_, n * sizeof(T), stream);
   }
 
  private:
+  void validate_copy(const void* host, std::size_t n, const char* operation) const {
+    if (n > size_) {
+      throw std::out_of_range{std::string{"DeviceBuffer::"} + operation
+                              + ": copy exceeds buffer size"};
+    }
+    if (n != 0 && host == nullptr) {
+      throw std::invalid_argument{std::string{"DeviceBuffer::"} + operation
+                                  + ": host pointer is null"};
+    }
+  }
+
   void release() noexcept {
     if (ptr_ != nullptr) {
       device_free(ptr_);  // noexcept; swallows free errors

@@ -36,6 +36,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -207,4 +209,37 @@ TEST(MhdSolverConservation, AdvanceConservesMass) {
   const Real mass1 = interior_sum(solver.state_component_to_host("rho"), g);
 
   EXPECT_NEAR(mass1, mass0, 1e-10 * std::abs(mass0) + 1e-12);
+}
+
+TEST(MhdSolverConservation, RejectsNonfiniteTimeArguments) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const auto cfg = make_periodic_config();
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_smooth_state(solver, cfg.grid);
+  const Real nan = std::numeric_limits<Real>::quiet_NaN();
+  const Real inf = std::numeric_limits<Real>::infinity();
+
+  EXPECT_THROW(solver.step(nan), std::invalid_argument);
+  EXPECT_THROW(solver.step_unchecked(nan), std::invalid_argument);
+  EXPECT_THROW(solver.advance(nan, Real{1e-4}), std::invalid_argument);
+  EXPECT_THROW(solver.advance(inf, Real{1e-4}), std::invalid_argument);
+  EXPECT_THROW(solver.advance(Real{-1}, Real{1e-4}), std::invalid_argument);
+  EXPECT_THROW(solver.advance(Real{1}, inf), std::invalid_argument);
+}
+
+TEST(MhdSolverConservation, AdvanceClipsExactlyToFinalStep) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const auto cfg = make_periodic_config();
+  quasar::mhd::MhdSolver2D via_advance{cfg};
+  quasar::mhd::MhdSolver2D via_step{cfg};
+  seed_smooth_state(via_advance, cfg.grid);
+  seed_smooth_state(via_step, cfg.grid);
+
+  const Real clipped = Real{0.5} * via_advance.cfl_limit();
+  via_advance.advance(clipped, Real{2} * clipped);
+  via_step.step(clipped);
+  EXPECT_EQ(via_advance.state_component_to_host("rho"),
+            via_step.state_component_to_host("rho"));
+  EXPECT_EQ(via_advance.state_component_to_host("energy"),
+            via_step.state_component_to_host("energy"));
 }

@@ -52,11 +52,11 @@ On-axis boundary
 
 The ``r = 0`` side (``x_lo``) is **always** the on-axis condition in cylindrical
 mode, regardless of what the deck specifies there. The solver replaces both the
-field and particle ``x_lo`` boundary with its registered ``axis`` closure. If the
-deck set a non-default, non-``axis`` value on ``x_lo``, the solver prints a
-warning that it is being overridden; a default (periodic) ``x_lo`` — the no-op
-normal case — is replaced silently. You may set ``x_lo`` to ``pec`` /
-``absorbing`` purely for documentation, knowing the value is a don't-care.
+field and particle ``x_lo`` boundary with its registered ``axis`` closure. The
+default ``periodic`` placeholder is replaced automatically for C++ API
+convenience; an explicit non-axis wall at ``r=0`` is rejected because silently
+replacing it would change the requested physics. Writing ``axis`` explicitly is
+recommended.
 
 The remaining sides are deck-driven:
 
@@ -71,8 +71,8 @@ The remaining sides are deck-driven:
 .. code-block:: yaml
 
    boundary:
-     field:    {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
-     particle: {x_lo: specular, x_hi: specular, y_lo: specular, y_hi: specular}
+     field:    {x_lo: axis, x_hi: pec, y_lo: pec, y_hi: pec}
+     particle: {x_lo: axis, x_hi: specular, y_lo: specular, y_hi: specular}
 
 Specifying fields by physical component (recommended)
 -----------------------------------------------------
@@ -93,7 +93,19 @@ places this matters: the uniform external field and the initial field seed.
 ``B_rzphi`` is cylindrical-only (using it on a Cartesian deck is an error) and
 the deck loader translates it to the solver's storage layout in one place
 (``quasar.pic.io._rzphi_to_uniform_lab``), accounting for the ``plane`` you
-chose.
+chose.  The built-in ``uniform`` evaluator is constant in the Cartesian lab
+basis, so in cylindrical geometry it may contain only the axial component.
+Nonzero ``B_r`` or ``B_phi`` directions rotate with azimuth and cannot be made
+axisymmetric by reinterpreting one meridional slice, even on an annulus.  Use an
+actually axisymmetric nonuniform evaluator or field map for poloidal/toroidal
+profiles.  The sampler verifies quarter-turn covariance for both E and B and
+an additional non-commensurate rotation (so fourfold symmetry cannot masquerade
+as axisymmetry). For a nonzero prescribed magnetic field, the evaluator must
+advertise a trustworthy ``grad B`` and the sampler checks
+``trace(grad B) = 0``. The external field is gathered only by the particle
+pusher, not advanced by FDTD, so this continuous Maxwell check correctly allows
+smooth nonlinear solenoidal fields whose sampled Yee divergence has ordinary
+finite-difference truncation error.
 
 **Initial field seed — physical component names.** In cylindrical mode the
 ``fields.initial.component`` names ``Er`` / ``Ez`` / ``Ephi`` (and ``Br`` /
@@ -128,12 +140,24 @@ as ``vx → vr``, ``vy → vz`` (axial), ``vz → vφ``, so a pure radial drift 
 Numerics and time step
 ----------------------
 
-* ``numerics.fdtd_order`` must be ``2`` in cylindrical mode. The order-4
-  cylindrical axis closure is not implemented yet, so an order-4 cylindrical deck
-  is rejected at load.
-* When ``time.dt_s: auto``, a cylindrical deck uses a **cylindrical** CFL limit
-  (which accounts for the inner radius) rather than the Cartesian one. Supply a
-  fixed ``dt_s`` if you want to override the automatic value.
+* ``numerics.fdtd_order`` may be ``2`` or ``4``. At order 4 the solver applies
+  the staggered fourth-order derivative to the conservative radial flux
+  ``q = r A_r``. Even parity of ``q`` supplies the regular axis row
+  ``[(7/6) q1 - q2/24] / (r_(1/2) dr)``; current compatibility is solved in
+  ``r Jr`` so the same operator preserves Gauss's law.
+* ``domain.origin_x_m: 0`` selects the regular axis boundary automatically.
+  A positive origin defines an annulus; both inner-radius ``x_lo`` field and
+  particle boundaries must then be explicitly non-periodic. Negative radius is
+  rejected.
+* When ``time.dt_s: auto``, a cylindrical PIC deck goes through the cylindrical
+  PIC CFL helper. For its conservative axisymmetric ``m = 0`` Yee FDTD
+  formulation, the stability bound is the same directional spectral bound as
+  the planar Yee scheme with ``(dx, dy) -> (dr, dz)``; there is no extra ad-hoc
+  ``1/r`` tightening near the axis. This statement is specific to PIC/FDTD and
+  does not apply to cylindrical MHD: the exact-moment MHD ``m_phi``
+  Lax--Friedrichs rate has the axis coefficient ``1.5 * alpha / dr``. Supply a
+  fixed ``dt_s`` if you want to override the automatic PIC value (the same PIC
+  bound is still enforced).
 
 Output
 ------
@@ -143,7 +167,10 @@ The output ``out.npz`` records the deck's coordinate system under the top-level
 ``"cylindrical"``), alongside the field, particle, and series keys documented in
 :doc:`pic_simulation`. Field components are recorded under their storage-slot
 names (``field_ey`` for the axial ``Ez``, ``field_by`` for the axial ``Bz``, and
-so on), following the slot mapping noted above.
+so on), following the slot mapping noted above.  The PIC postprocessor uses the
+cylindrical Yee staggering for those slots: radial-face components retain the
+outer-radius face, axial periodic endpoints are removed only for a periodic
+pair, and plot coordinates are labelled as physical ``(r, z)`` locations.
 
 Worked example: TM010 cavity resonance
 ---------------------------------------
@@ -160,8 +187,8 @@ the symmetry axis; the outer radial wall and both axial walls are PEC:
    domain: {nx: 128, ny: 128, lx_m: 0.10, ly_m: 0.10, origin_x_m: 0.0, origin_y_m: 0.0}
    numerics: {fdtd_order: 2, shape: cic, current_filter: []}
    boundary:
-     field:    {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
-     particle: {x_lo: specular, x_hi: specular, y_lo: specular, y_hi: specular}
+     field:    {x_lo: axis, x_hi: pec, y_lo: pec, y_hi: pec}
+     particle: {x_lo: axis, x_hi: specular, y_lo: specular, y_hi: specular}
    fields:
      initial: {type: seed_perturbation, component: Ez, mode: [1, 0], amplitude: 1.0}
    time: {dt_s: auto, steps: 1024}
@@ -185,7 +212,17 @@ With ``R = 0.10 m`` this gives ``f_010 ≈ 1.1473 GHz``.
    ``J0(j_{0,mx} · r/R)`` (uniform in ``z``), where ``mx`` is ``mode[0]``. A plain
    ``sin(2π r/R)`` overlaps mostly with the TM020 mode and would ring at the
    wrong line; the Bessel seed excites the TM0,``mx``,0 mode cleanly
-   (``mode: [1, 0]`` → TM010).
+   (``mode: [1, 0]`` → TM010). Any positive radial index may be requested as
+   long as ``mx <= nx``; this is exactly the set with
+   ``j_{0,mx}/R < π/Δr``, below the radial mesh Nyquist wavenumber.
+   The outer-radius field boundary must be PEC. The loader seeds both
+   ``Ez(t=0)`` and the matching ``Bphi(t=-Δt/2)`` obtained from the selected
+   order's Yee curl, so the leapfrog standing wave starts at its electric-field
+   maximum without a half-step phase error.
+
+   ``seed_em_wave`` is rejected in cylindrical geometry: a Cartesian plane wave
+   translating radially is not a regular axisymmetric mode at ``r = 0``. Use
+   the axial ``seed_perturbation`` Bessel mode above for an axisymmetric cavity.
 
 Run it and inspect the result:
 
@@ -204,10 +241,11 @@ post-processing recipe.
 Worked example: electron gyro-orbit
 -----------------------------------
 
-``examples/cyl_gyro_orbit/`` pushes a small bunch of electrons in a uniform axial
-magnetic field and checks the Larmor radius and gyrofrequency, including the
-near-axis behaviour. The radial domain starts on the axis (``origin_x_m: 0.0``),
-and the tiny Larmor radius keeps each guiding centre well inside its cell:
+``examples/cyl_gyro_orbit/`` pushes zero-macro-weight electron test particles in
+a uniform axial magnetic field and checks gyrofrequency, perpendicular-speed,
+and kinetic-energy conservation. The radial domain starts on the axis
+(``origin_x_m: 0.0``), as required by the configured axis boundary, but the
+full-domain quiet start is not an axis-crossing validation:
 
 .. code-block:: yaml
 
@@ -216,8 +254,8 @@ and the tiny Larmor radius keeps each guiding centre well inside its cell:
    domain: {nx: 128, ny: 128, lx_m: 0.10, ly_m: 0.10, origin_x_m: 0.0, origin_y_m: -0.05}
    numerics: {fdtd_order: 2, shape: cic, current_filter: []}
    boundary:
-     field:    {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
-     particle: {x_lo: absorbing, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
+     field:    {x_lo: axis, x_hi: pec, y_lo: pec, y_hi: pec}
+     particle: {x_lo: axis, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
    external_field:
      evaluator: {type: uniform, B_rzphi: [0.0, 1.0, 0.0]}   # B_z = 1.0 T, axial
    species:
@@ -227,8 +265,8 @@ and the tiny Larmor radius keeps each guiding centre well inside its cell:
        n_particles: 64
        initial:
          distribution: maxwellian_uniform
-         density_per_m3: 1.0e18
-         temperature_eV: 1.0
+         density_per_m3: 0.0       # test particles: no deposited self-field
+         temperature_eV: 0.0       # deterministic perpendicular speed
          drift_v: [5.93e5, 0.0, 0.0]   # (vr, vz, vφ) — a pure vr perpendicular drift
    time: {dt_s: auto, steps: 512}
    diagnostics: {output_path: out.npz, cadence: 8, fields: [by], per_species: true}
@@ -252,8 +290,7 @@ Run it and check the trajectory:
 
 The per-species particle state (positions and velocities) is written under the
 ``species_electron_*`` keys, and the axial field is available as ``external_by``
-/ ``field_by``. The orbit radius and period recovered from the trajectory should
-match ``r_L`` and ``T_c`` to within a few percent, and the bunch kinetic energy
-should stay bounded as guiding centres approach the axis (no spurious on-axis
-energy gain). See ``examples/cyl_gyro_orbit/README.md`` for the detailed
-reference signature.
+/ ``field_by``. The velocity trajectory recovers ``T_c``; its preserved
+perpendicular speed implies the analytic ``r_L`` scale above, and total kinetic
+energy remains constant because the magnetic field does no work. See
+``examples/cyl_gyro_orbit/README.md`` for the detailed reference signature.

@@ -11,7 +11,8 @@ Pins the ``bindings/python/bind_mhd.cpp`` surface added for the
 * ``_core.mhd.MhdSolver2D.seed_background(component, values)`` for
   ``component in {"b0x","b0y","b0z"}`` and a storage-sized float sequence,
 * ``_core.mhd.MhdSolver2D.has_background()`` mirroring ``background.enabled``,
-* ``_core.mhd.registered_mhd_background_profiles()`` listing ``"uniform"``.
+* native background-profile registry and array sampler, including the built-in
+  ``"uniform"`` and ``"linear_vacuum"`` profiles.
 
 Mirrors ``tests/python/test_mhd_bindings.py``:
 
@@ -22,11 +23,6 @@ Mirrors ``tests/python/test_mhd_bindings.py``:
   idiom (``_core.pic.Grid2D(... nghost=0)``, auto-sized ghost halo, storage
   size read back from ``solver.grid()``).
 
-Until ``bind_mhd.cpp`` gains these symbols (and the build tree is refreshed)
-``_core.mhd`` loads but ``MhdBackgroundSpec`` / ``MhdConfig.background`` /
-``seed_background`` / ``has_background`` / ``registered_mhd_background_profiles``
-are absent, so every test fails by a clean AttributeError -- the intended RED
-state.
 """
 
 import os
@@ -58,6 +54,7 @@ class MhdBackgroundSpecTests(unittest.TestCase):
         self.assertEqual(spec.bx0, 0.0)
         self.assertEqual(spec.by0, 0.0)
         self.assertEqual(spec.bz0, 0.0)
+        self.assertEqual(spec.params, {})
 
     def test_attributes_are_read_write(self):
         spec = _core.mhd.MhdBackgroundSpec()
@@ -66,11 +63,13 @@ class MhdBackgroundSpecTests(unittest.TestCase):
         spec.bx0 = 0.25
         spec.by0 = -0.5
         spec.bz0 = 1.0
+        spec.params = {"gradient": 2.0, "shear": -0.25}
         self.assertIs(spec.enabled, True)
         self.assertEqual(spec.profile, "uniform")
         self.assertEqual(spec.bx0, 0.25)
         self.assertEqual(spec.by0, -0.5)
         self.assertEqual(spec.bz0, 1.0)
+        self.assertEqual(spec.params, {"gradient": 2.0, "shear": -0.25})
 
 
 class MhdConfigBackgroundRoundTripTests(unittest.TestCase):
@@ -88,12 +87,14 @@ class MhdConfigBackgroundRoundTripTests(unittest.TestCase):
         spec.enabled = True
         spec.bz0 = 1.0
         spec.profile = "uniform"
+        spec.params = {"bx0": 99.0}
         cfg.background = spec
 
         got = cfg.background
         self.assertIs(got.enabled, True)
         self.assertEqual(got.bz0, 1.0)
         self.assertEqual(got.profile, "uniform")
+        self.assertEqual(got.params, {"bx0": 99.0})
         # untouched components keep their defaults
         self.assertEqual(got.bx0, 0.0)
         self.assertEqual(got.by0, 0.0)
@@ -101,7 +102,7 @@ class MhdConfigBackgroundRoundTripTests(unittest.TestCase):
 
 class MhdBackgroundProfileRegistryTests(unittest.TestCase):
     """``registered_mhd_background_profiles()`` returns a sequence of strings
-    that includes the built-in ``"uniform"`` profile."""
+    that includes the built-in analytic profiles."""
 
     def test_accessor_present(self):
         self.assertTrue(hasattr(_core.mhd, "registered_mhd_background_profiles"),
@@ -111,6 +112,23 @@ class MhdBackgroundProfileRegistryTests(unittest.TestCase):
         names = _core.mhd.registered_mhd_background_profiles()
         self.assertTrue(all(isinstance(n, str) for n in names))
         self.assertIn("uniform", names)
+        self.assertIn("linear_vacuum", names)
+
+    def test_linear_profile_sampler_uses_parameters_and_array_shape(self):
+        x = np.array([[0.0, 1.0], [-2.0, 0.5]])
+        y = np.array([[3.0, -1.0], [0.25, 2.0]])
+        params = {"gradient": 2.0, "shear": -0.5}
+        bx = _core.mhd.sample_mhd_background_profile(
+            "linear_vacuum", 0, x, y, params)
+        by = _core.mhd.sample_mhd_background_profile(
+            "linear_vacuum", 1, x, y, params)
+        np.testing.assert_array_equal(bx, 2.0 * x - 0.5 * y)
+        np.testing.assert_array_equal(by, -0.5 * x - 2.0 * y)
+
+    def test_sampler_rejects_nonfinite_coordinates(self):
+        with self.assertRaises(ValueError):
+            _core.mhd.sample_mhd_background_profile(
+                "uniform", 0, np.array([np.nan]), np.array([0.0]), {})
 
 
 # State components seeded for a trivial valid (quiescent magnetized vacuum)

@@ -11,9 +11,9 @@ ships three physics vertical slices:
 * **electromagnetic PIC** - a 2D3V particle-in-cell module (Yee FDTD fields,
   charge-conserving current deposition, Boris push) driven from the
   ``quasar.pic`` front-end.
-* **ideal MHD** - a high-order conservative finite-difference + constrained-
-  transport module (MP5/MP7 reconstruction, HLLD Riemann solver, SSP-RK3,
-  Cartesian and axisymmetric cylindrical ``(r, z)``) driven from the
+* **ideal MHD** - a finite-volume + constrained-transport module (high-order
+  Cartesian MP5/MP7 or second-order axisymmetric cylindrical ``(r, z)`` MUSCL
+  reconstruction, HLLD Riemann solver, and SSP-RK3) driven from the
   ``quasar.mhd`` front-end.
 
 .. toctree::

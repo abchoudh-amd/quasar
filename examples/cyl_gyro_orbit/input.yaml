@@ -1,6 +1,6 @@
 units: SI
 normalization: {reference_density_per_m3: 1.0e18, reference_species: electron}
-# Single-/few-particle electron gyro-orbit in a uniform axial magnetic field,
+# Test-particle electron gyro-orbit in a uniform axial magnetic field,
 # in axisymmetric cylindrical (r, z) coordinates. geometry: cylindrical makes
 # the grid axes i = r and j = z, and the velocity triad maps as
 #   vx -> vr,  vy -> vz,  vz -> vphi.
@@ -19,10 +19,9 @@ domain:
   ny: 128
   # r in [0.0, 0.10] m, z in [-0.05, 0.05] m. The axisymmetric m=0 scheme
   # requires the radial domain to start at r=0 (the on-axis closure), so
-  # origin_x_m is 0. The Larmor radius (~3.4e-5 m for 100 eV electrons) is tiny
-  # compared to the cell size, so each particle's guiding center stays in its
-  # cell; the on-axis condition is reflectionless for any orbit that approaches
-  # r=0 and absorbing walls remove particles that wander out.
+  # origin_x_m is 0. The seeded-drift Larmor radius (~3.4e-6 m) is tiny compared
+  # with the cell size and domain, so the quiet-start particles remain far from
+  # the absorbing outer walls during this gyrofrequency/energy check.
   lx_m: 0.10
   ly_m: 0.10
   origin_x_m: 0.0
@@ -30,12 +29,11 @@ domain:
 numerics: {fdtd_order: 2, shape: cic, current_filter: []}
 # A cylindrical deck must NOT use a periodic outer radius (x_hi); BoundaryConfig
 # defaults all sides to periodic, so set them explicitly. x_lo is the symmetry
-# axis (auto-replaced by the on-axis closure in C++, so its value is don't-care,
-# but set for clarity). Outer radius and axial walls are PEC for the field;
+# axis and is marked explicitly here. Outer radius and axial walls are PEC;
 # particles that wander out are absorbed (marked dead) rather than wrapped.
 boundary:
-  field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
-  particle: {x_lo: absorbing, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
+  field: {x_lo: axis, x_hi: pec, y_lo: pec, y_hi: pec}
+  particle: {x_lo: axis, x_hi: absorbing, y_lo: absorbing, y_hi: absorbing}
 external_field:
   evaluator: {type: uniform, B_rzphi: [0.0, 1.0, 0.0]}   # [B_r, B_z, B_phi]; axial B_z = 1.0 T
 species:
@@ -45,12 +43,15 @@ species:
     n_particles: 64
     initial:
       distribution: maxwellian_uniform
-      density_per_m3: 1.0e18
-      # Perpendicular (r/phi-plane) drift gives a well-defined v_perp so the
-      # Larmor radius is deterministic; a small temperature adds a thermal
-      # spread. drift_v is (vx, vy, vz) -> (vr, vz, vphi); the in-plane
+      # Zero macro-weight makes these test particles: q/m and the external-field
+      # push remain physical, while their own unneutralized charge/current do
+      # not create self-fields that would shift the measured gyrofrequency.
+      density_per_m3: 0.0
+      # Perpendicular (r/phi-plane) drift gives a deterministic v_perp and
+      # Larmor radius; zero temperature isolates that single-particle reference.
+      # drift_v is (vx, vy, vz) -> (vr, vz, vphi); the in-plane
       # components vx (=vr) and vz (=vphi) are perpendicular to the axial B.
-      temperature_eV: 1.0
+      temperature_eV: 0.0
       drift_v: [5.93e5, 0.0, 0.0]
 # dt auto (CFL); several gyro-periods. T_c = 2*pi/omega_c ~ 3.57e-11 s.
 time: {dt_s: auto, steps: 512}

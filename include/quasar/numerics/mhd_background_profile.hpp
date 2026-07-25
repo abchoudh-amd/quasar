@@ -14,6 +14,8 @@
 
 #include "quasar/core/types.hpp"
 
+#include <string_view>
+
 namespace quasar::numerics {
 
 class IMhdBackgroundProfile {
@@ -27,6 +29,14 @@ class IMhdBackgroundProfile {
   // The caller supplies the appropriate staggered (x, y) for the requested
   // component; the profile only maps position+component to a field value.
   virtual Real sample(int comp, Real x, Real y) const = 0;
+
+  // Optional scalar configuration hook used by the Python deck's ``params``
+  // mapping. Returning false reports an unknown parameter. Profiles with no
+  // parameters inherit the default rejection; this keeps registry creation
+  // default-constructible while making named analytic profiles fully usable.
+  virtual bool set_parameter(std::string_view /*name*/, Real /*value*/) {
+    return false;
+  }
 };
 
 }  // namespace quasar::numerics

@@ -23,8 +23,7 @@ using Size = std::size_t;
 //
 // All physical constants are available both as a precision-specific
 // variable template (e.g. `mu0_v<float>`) and as a plain `double` alias
-// (e.g. `mu0`). The aliases preserve every call site that existed before
-// Phase 5 verbatim.
+// (e.g. `mu0`). The aliases preserve the default double-precision API.
 
 template <class T>
 inline constexpr T pi_v = static_cast<T>(3.141592653589793238462643383279502884L);
@@ -109,11 +108,31 @@ QUASAR_HOST_DEVICE constexpr inline T length_squared(Vec3T<T> a) noexcept {
 }
 template <class T>
 QUASAR_HOST_DEVICE inline T length(Vec3T<T> a) noexcept {
-  return std::sqrt(length_squared(a));
+  // Scale before squaring so a finite vector does not spuriously underflow or
+  // overflow merely because its norm is far from unity.
+  const T scale = fmax(fabs(a.x), fmax(fabs(a.y), fabs(a.z)));
+  // Match hypot's IEEE special-value semantics: an infinite component
+  // dominates a NaN, while a NaN with no infinite component propagates.  fmax
+  // intentionally suppresses a lone NaN, so test for it after the infinity
+  // case and before treating the resulting zero scale as a zero vector.
+  if (scale == std::numeric_limits<T>::infinity()) return scale;
+  if (std::isnan(a.x) || std::isnan(a.y) || std::isnan(a.z)) {
+    return std::numeric_limits<T>::quiet_NaN();
+  }
+  if (scale == T{0}) return T{0};
+  const Vec3T<T> scaled = a / scale;
+  return scale * std::sqrt(dot(scaled, scaled));
 }
 template <class T>
 QUASAR_HOST_DEVICE inline Vec3T<T> normalized(Vec3T<T> a) noexcept {
-  return a / length(a);
+  // Normalize in scaled coordinates. Dividing by length(a) would turn a
+  // perfectly finite vector such as (DBL_MAX, DBL_MAX, 0) into zero when its
+  // Euclidean norm itself overflows, even though the unit direction is fully
+  // representable. Preserve the historical NaN result for the zero vector.
+  const T scale = fmax(fabs(a.x), fmax(fabs(a.y), fabs(a.z)));
+  if (scale == T{0}) return a / scale;
+  const Vec3T<T> scaled = a / scale;
+  return scaled / std::sqrt(dot(scaled, scaled));
 }
 
 // -- Mat3x3T ---------------------------------------------------------------
@@ -138,8 +157,7 @@ operator*(const Mat3x3T<T>& m, Vec3T<T> v) noexcept {
 // -- Backward-compat aliases -----------------------------------------------
 //
 // Existing call sites use `Vec3` and `Mat3x3` and expect them to be the
-// double-precision instantiation. `Vec3f` / `Mat3x3f` are the fp32 siblings
-// introduced in Phase 5.
+// double-precision instantiation. `Vec3f` / `Mat3x3f` are the fp32 siblings.
 
 using Vec3    = Vec3T<Real>;
 using Vec3f   = Vec3T<float>;

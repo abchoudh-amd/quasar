@@ -1,12 +1,10 @@
 #pragma once
 
-// High-order flux reconstruction for the conservative finite-difference ideal-MHD
-// solver. Given the cell-stored conserved state, each scheme reconstructs the
-// LEFT-biased and RIGHT-biased interface point-values (in the Shu-Osher
-// conservative-FD sense) on every interface normal to `dir`. A sibling Riemann
-// solver (HLLD) then consumes these L/R interface states to form the numerical
-// flux; CT/EMF handling is owned elsewhere. The schemes here produce only the
-// interface L/R conserved states, not the flux difference.
+// High-order finite-volume reconstruction for ideal MHD. Given cell-average
+// conserved states, each scheme reconstructs LEFT/RIGHT states on every face
+// normal to `dir`. A sibling Riemann solver (HLLD) consumes them to form the
+// numerical face flux whose control-volume difference advances those averages;
+// CT/EMF handling is owned elsewhere.
 //
 // Three concrete schemes self-register by name (defined in
 // src/numerics/flux_reconstruction.cpp):

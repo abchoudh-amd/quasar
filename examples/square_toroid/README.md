@@ -4,9 +4,9 @@ A square-cross-section toroidal magnet modeled as four toroidal current
 sheets. The top and bottom faces carry current in the `+phi` direction; the
 inner and outer cylindrical faces carry current in the `-phi` direction.
 
-The example uses `R0 = 0.10 m`, square side `a = 0.04 m`, and `1 A` total
-current per sheet. Each sheet is represented by 16 thin circular filaments, so
-the full model contains 64 circular loops and 16 384 straight Biot-Savart
+The example uses `R0 = 0.10 m`, square side `a = 0.04 m`, and `1.5 kA` total
+current per sheet. Each sheet is represented by 256 thin circular filaments, so
+the full model contains 1 024 circular loops and 262 144 straight Biot–Savart
 segments after discretization.
 
 ## Run
@@ -20,9 +20,9 @@ PYTHONPATH=build/hip-gfx942-release/python \
 
 The output is written next to `input.yaml` as `out.npz`. Keys:
 
-- `B_xyz` - `(11041, 3)` flat array of magnetic flux density in tesla.
-- `B_magnitude` - `(11041,)` array, `|B|` per observation point.
-- `dims` - `(2,)` array `[181, 61]` for the meridional plane.
+- `B_xyz` - `(66049, 3)` flat array of magnetic flux density in tesla.
+- `B_magnitude` - `(66049,)` array, `|B|` per observation point.
+- `dims` - `(2,)` array `[257, 257]` for the meridional plane.
 - `observation_kind` - string `"plane"`.
 
 ## Geometry
@@ -66,9 +66,10 @@ visible field is the poloidal vector field `(B_x, B_z)`.
 
 Additional symmetry checks:
 
-- `B_x = 0` on the z-axis (`x = 0` in the plane slice).
+- `B_x = 0` on the z-axis (outside the bore-window slice used by this deck).
 - `B_x = 0` on the mid-plane (`z = 0`) by mirror symmetry.
-- `|B|` is on the order of `1e-5 T` near the bore for this 1 A lab-scale setup.
+- The field is finite and non-zero throughout the sampled bore window; its
+  magnitude scales linearly with the configured sheet current.
 
 The top and bottom sheets behave like two pancake coils and contribute a
 positive `B_z` near the center. The inner and outer cylindrical sheets behave
@@ -86,14 +87,13 @@ import numpy as np
 from quasar.coil.postprocess import magnitude
 
 path = Path("examples/square_toroid/out.npz")
-archive = np.load(path, allow_pickle=False)
-
-nu, nv = archive["dims"]
-B = archive["B_xyz"].reshape((nv, nu, 3))
+with np.load(path, allow_pickle=False) as archive:
+    nu, nv = archive["dims"]
+    B = archive["B_xyz"].reshape((nv, nu, 3))
 Bmag = magnitude(B)
 
-x = np.linspace(-0.18, 0.18, int(nu))
-z = np.linspace(-0.06, 0.06, int(nv))
+x = np.linspace(0.085, 0.115, int(nu))
+z = np.linspace(-0.015, 0.015, int(nv))
 X, Z = np.meshgrid(x, z)
 
 fig, ax = plt.subplots()
@@ -112,13 +112,9 @@ ax.quiver(
     B[::stride, ::stride, 0],
     B[::stride, ::stride, 2],
     color="white",
-    scale=3e-4,
 )
 
 ax.plot([0.08, 0.12, 0.12, 0.08, 0.08],
-        [-0.02, -0.02, 0.02, 0.02, -0.02],
-        color="black")
-ax.plot([-0.08, -0.12, -0.12, -0.08, -0.08],
         [-0.02, -0.02, 0.02, 0.02, -0.02],
         color="black")
 ax.set_xlabel("x (m)")

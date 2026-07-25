@@ -3,8 +3,8 @@
 //
 // The integrator is a THIN, state-free host loop. It owns no buffers and applies
 // no Shu-Osher coefficients: the solver's combine_stage() owns the Shu-Osher
-// combine, the CT face-B update, and the positivity floors (mhd_solver.hpp lines
-// 85-92, 111). The integrator only sequences the seam.
+// combine, the CT face-B rate, and the positivity admissibility check. The
+// integrator only sequences the seam.
 //
 // Register routing (mhd_solver.hpp: "rk_[0] is the live state U; rk_[1], rk_[2]
 // are the SSP-RK3 stage registers."). The solver's combine_stage writes:
@@ -27,6 +27,9 @@
 #include "quasar/core/registry.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
+#include <cmath>
+#include <stdexcept>
+
 namespace quasar::numerics {
 
 // Three-stage third-order SSP-RK (Shu & Osher 1988). Registered "ssprk3".
@@ -35,6 +38,9 @@ class Ssprk3 : public ISsprkIntegrator {
   int n_stages() const override { return 3; }
 
   void advance(quasar::mhd::MhdSolver2D& solver, Real dt) const override {
+    if (!(dt > Real{0}) || !std::isfinite(dt)) {
+      throw std::invalid_argument{"Ssprk3::advance: dt must be finite and positive"};
+    }
     const int stages = n_stages();
     for (int s = 0; s < stages; ++s) {
       // The stage-input register index equals the stage index (see header note

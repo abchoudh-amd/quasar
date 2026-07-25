@@ -12,9 +12,10 @@ import numpy as np
 
 C_LIGHT = 299792458.0
 
-# First several positive zeros of the Bessel function J0, j_{0,n}. Used to seed
-# the axisymmetric radial eigenmode J0(j_{0,n} r/R) for cylindrical cavity decks.
-# Hardcoded so the front-end stays dependency-free (numpy + yaml only, no scipy).
+# First several positive zeros of the Bessel function J0, j_{0,n}.  These make
+# the common low modes exact to binary64 precision.  Higher zeros are evaluated
+# with the convergent-in-practice McMahon asymptotic expansion below, keeping the
+# front-end dependency-free (numpy + yaml only, no scipy).
 J0_ZEROS = (
     2.404825557695773,
     5.520078110286311,
@@ -74,11 +75,35 @@ def besselj0(x: np.ndarray | float) -> np.ndarray:
 
 def j0_zero(n: int) -> float:
     """The n-th positive zero of J0 (1-indexed): j0_zero(1) ~= 2.4048."""
-    if n < 1 or n > len(J0_ZEROS):
-        raise ValueError(
-            f"J0 zero index {n} out of range; only the first {len(J0_ZEROS)} "
-            f"zeros are tabulated (request a radial mode <= {len(J0_ZEROS)})")
-    return J0_ZEROS[n - 1]
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError("J0 zero index must be a positive integer")
+    if n <= len(J0_ZEROS):
+        return J0_ZEROS[n - 1]
+
+    # DLMF 10.21.19 (McMahon expansion) for nu=0, with
+    # beta=(n-1/4)*pi.  Starting at n=6, the first omitted beta^-7 term is
+    # below 3e-9 in absolute value and rapidly decreases; this is comfortably
+    # below the ~1.5e-8 approximation error of besselj0 used to build the seed.
+    beta = (float(n) - 0.25) * math.pi
+    beta2 = beta * beta
+    return beta + (1.0 / beta) * (
+        1.0 / 8.0
+        + (1.0 / beta2) * (
+            -31.0 / 384.0
+            + (1.0 / beta2) * (3779.0 / 15360.0)))
+
+
+def _scaled_quotient3(numerator: float, denominator_a: float,
+                      denominator_b: float) -> float:
+    """Evaluate numerator/(denominator_a*denominator_b) by exponents."""
+    mn, en = math.frexp(numerator)
+    ma, ea = math.frexp(denominator_a)
+    mb, eb = math.frexp(denominator_b)
+    mantissa, adjustment = math.frexp((mn / ma) / mb)
+    try:
+        return math.ldexp(mantissa, en - ea - eb + adjustment)
+    except OverflowError as exc:
+        raise OverflowError("CFL timestep is not representable") from exc
 
 
 def cfl_limit(dx: float, dy: float, c: float = C_LIGHT, fdtd_order: int = 2) -> float:
@@ -93,29 +118,60 @@ def cfl_limit(dx: float, dy: float, c: float = C_LIGHT, fdtd_order: int = 2) -> 
         factor = 7.0 / 6.0
     else:
         raise ValueError("fdtd_order must be 2 or 4")
-    return 1.0 / (c * factor * math.sqrt(1.0 / (dx * dx) + 1.0 / (dy * dy)))
+    dx = float(dx)
+    dy = float(dy)
+    c = float(c)
+    if not (math.isfinite(dx) and dx > 0.0
+            and math.isfinite(dy) and dy > 0.0):
+        raise ValueError("dx and dy must be finite and positive")
+    if not (math.isfinite(c) and c > 0.0):
+        raise ValueError("c must be finite and positive")
+    # Stable form of 1/(c*factor*hypot(1/dx,1/dy)).  The direct expression
+    # squares inverse spacings and can overflow even when the CFL step itself is
+    # representable.
+    h_min = min(dx, dy)
+    h_max = max(dx, dy)
+    ratio = h_min / h_max
+    spectral_factor = factor * math.sqrt(1.0 + ratio * ratio)
+    dt = _scaled_quotient3(h_min, spectral_factor, c)
+    if not (math.isfinite(dt) and dt > 0.0):
+        raise OverflowError("CFL timestep is not representable")
+    return dt
 
 
 def cfl_dt(dx: float, dy: float, c: float = C_LIGHT, fdtd_order: int = 2,
            safety: float = 0.5) -> float:
     """A safe timestep: the CFL limit scaled by ``safety`` (default 0.5)."""
-    return safety * cfl_limit(dx, dy, c, fdtd_order)
+    safety = float(safety)
+    if not (math.isfinite(safety) and 0.0 < safety <= 1.0):
+        raise ValueError("safety must be finite and in (0, 1]")
+    dt = safety * cfl_limit(dx, dy, c, fdtd_order)
+    if not (math.isfinite(dt) and dt > 0.0):
+        raise OverflowError("safe CFL timestep is not representable")
+    return dt
 
 
-def cyl_cfl_limit(dr: float, dz: float, c: float = C_LIGHT) -> float:
+def cyl_cfl_limit(dr: float, dz: float, c: float = C_LIGHT,
+                  fdtd_order: int = 2) -> float:
     """The axisymmetric (r-z, m=0) Yee CFL stability limit.
 
     For the m=0 azimuthal mode the conservative (volume-weighted) curl operator
     is mimetic: the small on-axis cell volume cancels the apparent 1/r
     amplification, so the spectral radius — and hence the stability bound — is
-    exactly the planar 2nd-order Yee limit with (dx, dy) -> (dr, dz). This is the
+    exactly the planar Yee limit of the same order with (dx, dy) -> (dr, dz). This is the
     geometry-named selector (mirroring C++ ``quasar::cyl_cfl_dt``); it delegates
     to :func:`cfl_limit` so the formula lives in one place.
     """
-    return cfl_limit(dr, dz, c, fdtd_order=2)
+    return cfl_limit(dr, dz, c, fdtd_order=fdtd_order)
 
 
 def cyl_cfl_dt(dr: float, dz: float, c: float = C_LIGHT,
-               safety: float = 0.5) -> float:
+               safety: float = 0.5, fdtd_order: int = 2) -> float:
     """A safe axisymmetric timestep: ``cyl_cfl_limit`` scaled by ``safety``."""
-    return safety * cyl_cfl_limit(dr, dz, c)
+    safety = float(safety)
+    if not (math.isfinite(safety) and 0.0 < safety <= 1.0):
+        raise ValueError("safety must be finite and in (0, 1]")
+    dt = safety * cyl_cfl_limit(dr, dz, c, fdtd_order=fdtd_order)
+    if not (math.isfinite(dt) and dt > 0.0):
+        raise OverflowError("safe cylindrical CFL timestep is not representable")
+    return dt

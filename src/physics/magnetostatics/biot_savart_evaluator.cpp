@@ -10,7 +10,10 @@
 #include "quasar/core/types.hpp"
 
 #include <cstddef>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -30,35 +33,81 @@ namespace {
 template <class T>
 class UploadSrc {
  public:
-  explicit UploadSrc(const std::vector<Real>& src) {
+  explicit UploadSrc(const std::vector<Real>& src, Real origin = Real{0},
+                     const char* label = "input") {
     if constexpr (std::is_same_v<T, Real>) {
       view_ = &src;
     } else {
       owned_.reserve(src.size());
-      for (Real v : src) owned_.push_back(static_cast<T>(v));
+      for (Real v : src) {
+        const T narrowed = static_cast<T>(v - origin);
+        if (!std::isfinite(narrowed)) {
+          throw std::invalid_argument{
+              std::string{"BiotSavartEvaluatorF: "} + label
+              + " is not representable after fp32 origin shifting"};
+        }
+        owned_.push_back(narrowed);
+      }
       view_ = &owned_;
     }
   }
   const T* data() const noexcept { return view_->data(); }
+  const T& operator[](std::size_t i) const noexcept { return (*view_)[i]; }
 
  private:
   std::vector<T> owned_{};
   const std::vector<T>* view_{nullptr};
 };
 
+int checked_kernel_count(std::size_t n, const char* what) {
+  constexpr auto max_count = static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (n > max_count) {
+    throw std::length_error{
+        std::string{"BiotSavartEvaluator: "} + what
+        + " exceeds the signed kernel-index limit"};
+  }
+  return static_cast<int>(n);
+}
+
+struct KernelCounts {
+  int segments{0};
+  int points{0};
+};
+
+KernelCounts checked_input_counts(const SegmentSoA& seg, const PointSoA& pts) {
+  // Validate every public SoA plane before sizing a device buffer from only the
+  // leading component. Otherwise a shorter plane would be read past its host
+  // allocation by the asynchronous upload.
+  seg.validate();
+  pts.validate();
+  return {checked_kernel_count(seg.n_segments(), "segment count"),
+          checked_kernel_count(pts.n_points(), "observation count")};
+}
+
+std::size_t checked_staging_size(int count, std::size_t components,
+                                 const char* what) {
+  const std::size_t n = static_cast<std::size_t>(count);
+  if (n != 0 && components > std::numeric_limits<std::size_t>::max() / n) {
+    throw std::length_error{
+        std::string{"BiotSavartEvaluator: "} + what
+        + " exceeds the host size limit"};
+  }
+  return n * components;
+}
+
 template <class T>
 void dispatch_launch_B(const T* ax, const T* ay, const T* az,
                        const T* bx, const T* by, const T* bz,
                        const T* I_, int N,
                        const T* px, const T* py, const T* pz, int M,
-                       T* Bx, T* By, T* Bz,
+                       T* Bx, T* By, T* Bz, int* status,
                        stream_t stream) {
   if constexpr (std::is_same_v<T, double>) {
     ::launch_biot_savart_B_f64(ax, ay, az, bx, by, bz, I_, N,
-                                px, py, pz, M, Bx, By, Bz, stream);
+                                px, py, pz, M, Bx, By, Bz, status, stream);
   } else {
     ::launch_biot_savart_B_f32(ax, ay, az, bx, by, bz, I_, N,
-                                px, py, pz, M, Bx, By, Bz, stream);
+                                px, py, pz, M, Bx, By, Bz, status, stream);
   }
 }
 
@@ -67,14 +116,14 @@ void dispatch_launch_A(const T* ax, const T* ay, const T* az,
                        const T* bx, const T* by, const T* bz,
                        const T* I_, int N,
                        const T* px, const T* py, const T* pz, int M,
-                       T* Ax, T* Ay, T* Az,
+                       T* Ax, T* Ay, T* Az, int* status,
                        stream_t stream) {
   if constexpr (std::is_same_v<T, double>) {
     ::launch_biot_savart_A_f64(ax, ay, az, bx, by, bz, I_, N,
-                                px, py, pz, M, Ax, Ay, Az, stream);
+                                px, py, pz, M, Ax, Ay, Az, status, stream);
   } else {
     ::launch_biot_savart_A_f32(ax, ay, az, bx, by, bz, I_, N,
-                                px, py, pz, M, Ax, Ay, Az, stream);
+                                px, py, pz, M, Ax, Ay, Az, status, stream);
   }
 }
 
@@ -83,14 +132,14 @@ void dispatch_launch_gradB(const T* ax, const T* ay, const T* az,
                            const T* bx, const T* by, const T* bz,
                            const T* I_, int N,
                            const T* px, const T* py, const T* pz, int M,
-                           T* G,
+                           T* G, int* status,
                            stream_t stream) {
   if constexpr (std::is_same_v<T, double>) {
     ::launch_biot_savart_gradB_f64(ax, ay, az, bx, by, bz, I_, N,
-                                    px, py, pz, M, G, stream);
+                                    px, py, pz, M, G, status, stream);
   } else {
     ::launch_biot_savart_gradB_f32(ax, ay, az, bx, by, bz, I_, N,
-                                    px, py, pz, M, G, stream);
+                                    px, py, pz, M, G, status, stream);
   }
 }
 
@@ -105,19 +154,44 @@ struct UploadedInputs {
   int N{0};
   int M{0};
 
-  UploadedInputs(const SegmentSoA& seg, const PointSoA& pts, stream_t stream)
+  UploadedInputs(const SegmentSoA& seg, const PointSoA& pts,
+                 int n_segments, int n_points, stream_t stream)
       : ax(seg.n_segments()), ay(seg.n_segments()), az(seg.n_segments()),
         bx(seg.n_segments()), by(seg.n_segments()), bz(seg.n_segments()),
         I(seg.n_segments()),
         px(pts.n_points()), py(pts.n_points()), pz(pts.n_points()),
-        N(static_cast<int>(seg.n_segments())),
-        M(static_cast<int>(pts.n_points())) {
+        N(n_segments), M(n_points) {
     // UploadSrc keeps each narrowed/aliased host buffer alive until the sync that
     // the caller performs after the kernel launch.
-    const UploadSrc<T> s_ax{seg.ax}, s_ay{seg.ay}, s_az{seg.az};
-    const UploadSrc<T> s_bx{seg.bx}, s_by{seg.by}, s_bz{seg.bz};
-    const UploadSrc<T> s_I{seg.I};
-    const UploadSrc<T> s_px{pts.px}, s_py{pts.py}, s_pz{pts.pz};
+    // fp32 inputs are translated by one common origin while still in double
+    // precision. This makes a rigid translation (for example, from x=0 to
+    // x=1e8 m) invisible to the narrowing conversion instead of collapsing a
+    // short segment into one float coordinate.
+    Real ox = Real{0}, oy = Real{0}, oz = Real{0};
+    if constexpr (!std::is_same_v<T, Real>) {
+      ox = seg.ax.front();
+      oy = seg.ay.front();
+      oz = seg.az.front();
+    }
+    const UploadSrc<T> s_ax{seg.ax, ox, "segment x-coordinate"};
+    const UploadSrc<T> s_ay{seg.ay, oy, "segment y-coordinate"};
+    const UploadSrc<T> s_az{seg.az, oz, "segment z-coordinate"};
+    const UploadSrc<T> s_bx{seg.bx, ox, "segment x-coordinate"};
+    const UploadSrc<T> s_by{seg.by, oy, "segment y-coordinate"};
+    const UploadSrc<T> s_bz{seg.bz, oz, "segment z-coordinate"};
+    const UploadSrc<T> s_I{seg.I, Real{0}, "current"};
+    const UploadSrc<T> s_px{pts.px, ox, "observation x-coordinate"};
+    const UploadSrc<T> s_py{pts.py, oy, "observation y-coordinate"};
+    const UploadSrc<T> s_pz{pts.pz, oz, "observation z-coordinate"};
+
+    if constexpr (!std::is_same_v<T, Real>) {
+      for (std::size_t i = 0; i < seg.n_segments(); ++i) {
+        if (s_ax[i] == s_bx[i] && s_ay[i] == s_by[i] && s_az[i] == s_bz[i]) {
+          throw std::invalid_argument{
+              "BiotSavartEvaluatorF: a segment collapses after fp32 narrowing"};
+        }
+      }
+    }
     ax.copy_from_host_async(s_ax.data(), N, stream);
     ay.copy_from_host_async(s_ay.data(), N, stream);
     az.copy_from_host_async(s_az.data(), N, stream);
@@ -148,8 +222,9 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
 
   const SegmentSoA& seg = cs.segments_soa();
   const PointSoA    pts = obs.to_point_soa();
-  const int N = static_cast<int>(seg.n_segments());
-  const int M = static_cast<int>(pts.n_points());
+  const KernelCounts counts = checked_input_counts(seg, pts);
+  const int N = counts.segments;
+  const int M = counts.points;
 
   Field<Vec3T<T>> result(static_cast<std::size_t>(M));
   if (N == 0 || M == 0) {
@@ -159,11 +234,12 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
     return result;
   }
 
-  const UploadedInputs<T> in{seg, pts, cfg.stream};
+  const UploadedInputs<T> in{seg, pts, N, M, cfg.stream};
   // The kernel writes every observation-point entry, so skip the zero-fill.
   DeviceBuffer<T> d_Bx(M, ::quasar::backend::uninitialized);
   DeviceBuffer<T> d_By(M, ::quasar::backend::uninitialized);
   DeviceBuffer<T> d_Bz(M, ::quasar::backend::uninitialized);
+  DeviceBuffer<int> d_status(1);  // zero-initialized bit field
 
   dispatch_launch_B<T>(
       in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
@@ -171,17 +247,31 @@ Field<Vec3T<T>> evaluate_B_impl(const BiotSavartConfig&  cfg,
       in.I.device_ptr(), N,
       in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_Bx.device_ptr(), d_By.device_ptr(), d_Bz.device_ptr(),
+      d_status.device_ptr(),
       cfg.stream);
 
   // One host staging buffer (SoA, three M-length component planes) instead of
   // three separate allocations; the device outputs are SoA and Field is AoS, so
   // a single transpose pass into the result is still required.
   const std::size_t MM = static_cast<std::size_t>(M);
-  std::vector<T> hB(std::size_t{3} * MM);
+  std::vector<T> hB(checked_staging_size(M, 3, "vector staging size"));
   d_Bx.copy_to_host_async(hB.data(),           M, cfg.stream);
   d_By.copy_to_host_async(hB.data() + MM,      M, cfg.stream);
   d_Bz.copy_to_host_async(hB.data() + 2 * MM,  M, cfg.stream);
+  int status = 0;
+  d_status.copy_to_host_async(&status, 1, cfg.stream);
   ::quasar::backend::device_synchronize(cfg.stream);
+
+  if ((status & 1) != 0) {
+    throw std::domain_error{
+        "BiotSavartEvaluator: ideal-filament field is singular at an "
+        "observation point"};
+  }
+  if ((status & 2) != 0) {
+    throw std::overflow_error{
+        "BiotSavartEvaluator: magnetic field is not representable in the "
+        "working precision"};
+  }
 
   for (std::size_t i = 0; i < MM; ++i) {
     result[i] = Vec3T<T>{hB[i], hB[MM + i], hB[2 * MM + i]};
@@ -199,8 +289,9 @@ Field<Vec3T<T>> evaluate_A_impl(const BiotSavartConfig&  cfg,
 
   const SegmentSoA& seg = cs.segments_soa();
   const PointSoA    pts = obs.to_point_soa();
-  const int N = static_cast<int>(seg.n_segments());
-  const int M = static_cast<int>(pts.n_points());
+  const KernelCounts counts = checked_input_counts(seg, pts);
+  const int N = counts.segments;
+  const int M = counts.points;
 
   Field<Vec3T<T>> result(static_cast<std::size_t>(M));
   if (N == 0 || M == 0) {
@@ -210,11 +301,12 @@ Field<Vec3T<T>> evaluate_A_impl(const BiotSavartConfig&  cfg,
     return result;
   }
 
-  const UploadedInputs<T> in{seg, pts, cfg.stream};
+  const UploadedInputs<T> in{seg, pts, N, M, cfg.stream};
   // The kernel writes every observation-point entry, so skip the zero-fill.
   DeviceBuffer<T> d_Ax(M, ::quasar::backend::uninitialized);
   DeviceBuffer<T> d_Ay(M, ::quasar::backend::uninitialized);
   DeviceBuffer<T> d_Az(M, ::quasar::backend::uninitialized);
+  DeviceBuffer<int> d_status(1);
 
   dispatch_launch_A<T>(
       in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
@@ -222,14 +314,28 @@ Field<Vec3T<T>> evaluate_A_impl(const BiotSavartConfig&  cfg,
       in.I.device_ptr(), N,
       in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_Ax.device_ptr(), d_Ay.device_ptr(), d_Az.device_ptr(),
+      d_status.device_ptr(),
       cfg.stream);
 
   const std::size_t MM = static_cast<std::size_t>(M);
-  std::vector<T> hA(std::size_t{3} * MM);
+  std::vector<T> hA(checked_staging_size(M, 3, "vector staging size"));
   d_Ax.copy_to_host_async(hA.data(),           M, cfg.stream);
   d_Ay.copy_to_host_async(hA.data() + MM,      M, cfg.stream);
   d_Az.copy_to_host_async(hA.data() + 2 * MM,  M, cfg.stream);
+  int status = 0;
+  d_status.copy_to_host_async(&status, 1, cfg.stream);
   ::quasar::backend::device_synchronize(cfg.stream);
+
+  if ((status & 1) != 0) {
+    throw std::domain_error{
+        "BiotSavartEvaluator: ideal-filament vector potential is singular at "
+        "an observation point"};
+  }
+  if ((status & 2) != 0) {
+    throw std::overflow_error{
+        "BiotSavartEvaluator: vector potential is not representable in the "
+        "working precision"};
+  }
 
   for (std::size_t i = 0; i < MM; ++i) {
     result[i] = Vec3T<T>{hA[i], hA[MM + i], hA[2 * MM + i]};
@@ -245,8 +351,9 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
 
   const SegmentSoA& seg = cs.segments_soa();
   const PointSoA    pts = obs.to_point_soa();
-  const int N = static_cast<int>(seg.n_segments());
-  const int M = static_cast<int>(pts.n_points());
+  const KernelCounts counts = checked_input_counts(seg, pts);
+  const int N = counts.segments;
+  const int M = counts.points;
 
   Field<Mat3x3T<T>> result(static_cast<std::size_t>(M));
   if (N == 0 || M == 0) {
@@ -256,23 +363,37 @@ Field<Mat3x3T<T>> evaluate_grad_B_impl(const BiotSavartConfig& cfg,
     return result;
   }
 
-  const UploadedInputs<T> in{seg, pts, cfg.stream};
+  const UploadedInputs<T> in{seg, pts, N, M, cfg.stream};
   // The kernel writes every (component, point) entry, so skip the zero-fill.
-  DeviceBuffer<T> d_G(static_cast<std::size_t>(9) * static_cast<std::size_t>(M),
-                      ::quasar::backend::uninitialized);
+  const std::size_t gradient_values =
+      checked_staging_size(M, 9, "gradient staging size");
+  DeviceBuffer<T> d_G(gradient_values, ::quasar::backend::uninitialized);
+  DeviceBuffer<int> d_status(1);
 
   dispatch_launch_gradB<T>(
       in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
       in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
       in.I.device_ptr(), N,
       in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
-      d_G.device_ptr(),
+      d_G.device_ptr(), d_status.device_ptr(),
       cfg.stream);
 
-  std::vector<T> hG(static_cast<std::size_t>(9)
-                    * static_cast<std::size_t>(M));
+  std::vector<T> hG(gradient_values);
   d_G.copy_to_host_async(hG.data(), hG.size(), cfg.stream);
+  int status = 0;
+  d_status.copy_to_host_async(&status, 1, cfg.stream);
   ::quasar::backend::device_synchronize(cfg.stream);
+
+  if ((status & 1) != 0) {
+    throw std::domain_error{
+        "BiotSavartEvaluator: ideal-filament field gradient is singular at "
+        "an observation point"};
+  }
+  if ((status & 2) != 0) {
+    throw std::overflow_error{
+        "BiotSavartEvaluator: magnetic-field gradient is not representable in "
+        "the working precision"};
+  }
 
   for (int i = 0; i < M; ++i) {
     const std::size_t mi = static_cast<std::size_t>(i);

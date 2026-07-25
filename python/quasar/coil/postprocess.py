@@ -14,6 +14,8 @@ from typing import Sequence
 
 import numpy as np
 
+from .._deck import as_integer as _as_integer
+
 
 # ---------------------------------------------------------------------------
 # data shaping (no matplotlib needed)
@@ -24,9 +26,21 @@ def magnitude(B: np.ndarray) -> np.ndarray:
     """``|B|`` along the last axis of ``B`` (works for flat ``(M, 3)`` or
     reshaped ``(..., 3)``)."""
     arr = np.asarray(B)
-    if arr.shape[-1] != 3:
+    if arr.ndim == 0 or arr.shape[-1] != 3:
         raise ValueError(f"expected last axis of size 3, got shape {arr.shape}")
-    return np.linalg.norm(arr, axis=-1)
+    try:
+        finite = bool(np.all(np.isfinite(arr)))
+    except TypeError:
+        finite = False
+    if np.iscomplexobj(arr) or not finite:
+        raise ValueError("B must contain only finite real values")
+    # hypot scales its operands and therefore avoids the false overflow from
+    # squaring components near sqrt(DBL_MAX), while retaining subnormal terms.
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = np.hypot(np.hypot(arr[..., 0], arr[..., 1]), arr[..., 2])
+    if not np.all(np.isfinite(result)):
+        raise ValueError("B magnitude is not representable in output precision")
+    return result
 
 
 def reshape_to_grid(B_flat: np.ndarray, dims: Sequence[int]) -> np.ndarray:
@@ -43,7 +57,12 @@ def reshape_to_grid(B_flat: np.ndarray, dims: Sequence[int]) -> np.ndarray:
             f"reshape_to_grid expects shape (M, 3); got {arr.shape}")
     if len(dims) != 3:
         raise ValueError(f"dims must be length 3, got {dims!r}")
-    nx, ny, nz = int(dims[0]), int(dims[1]), int(dims[2])
+    nx, ny, nz = (
+        _as_integer(dims[0], "dims[0]"),
+        _as_integer(dims[1], "dims[1]"),
+        _as_integer(dims[2], "dims[2]"))
+    if nx <= 0 or ny <= 0 or nz <= 0:
+        raise ValueError("dims entries must be positive")
     if arr.shape[0] != nx * ny * nz:
         raise ValueError(
             f"M={arr.shape[0]} does not match nx*ny*nz={nx*ny*nz}")
@@ -71,7 +90,8 @@ def _slice_axis(B_grid: np.ndarray, axis: int, index: int) -> np.ndarray:
     if arr.ndim != 4 or arr.shape[-1] != 3:
         raise ValueError(
             f"expected grid shape (nz, ny, nx, 3); got {arr.shape}")
-    return np.take(arr, index, axis=axis)
+    exact_index = _as_integer(index, "slice index")
+    return np.take(arr, exact_index, axis=axis)
 
 
 # ---------------------------------------------------------------------------
@@ -118,15 +138,15 @@ def plot_magnitude_slice(
 
     nz, ny, nx = arr.shape[0], arr.shape[1], arr.shape[2]
     if axis == "z":
-        idx = nz // 2 if index is None else int(index)
+        idx = nz // 2 if index is None else _as_integer(index, "slice index")
         slab = slice_xy(arr, idx)        # (ny, nx, 3)
         title_default = f"|B| at z-slice idx={idx}"
     elif axis == "y":
-        idx = ny // 2 if index is None else int(index)
+        idx = ny // 2 if index is None else _as_integer(index, "slice index")
         slab = slice_xz(arr, idx)        # (nz, nx, 3)
         title_default = f"|B| at y-slice idx={idx}"
     elif axis == "x":
-        idx = nx // 2 if index is None else int(index)
+        idx = nx // 2 if index is None else _as_integer(index, "slice index")
         slab = slice_yz(arr, idx)        # (nz, ny, 3)
         title_default = f"|B| at x-slice idx={idx}"
     else:
@@ -170,22 +190,66 @@ def plot_line_profile(
     B = np.asarray(B)
     if B.ndim != 2 or B.shape[1] != 3:
         raise ValueError(f"B must be shape (M, 3); got {B.shape}")
+    try:
+        b_finite = bool(np.all(np.isfinite(B)))
+    except TypeError:
+        b_finite = False
+    if np.iscomplexobj(B) or not b_finite:
+        raise ValueError("B must contain only finite real values")
 
     pos = np.asarray(positions)
+    try:
+        positions_finite = bool(np.all(np.isfinite(pos)))
+    except TypeError:
+        positions_finite = False
+    if np.iscomplexobj(pos) or not positions_finite:
+        raise ValueError("positions must contain only finite real values")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            plot_positions = np.asarray(pos, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(
+            "positions must be representable as real plot coordinates") from None
+    if not np.all(np.isfinite(plot_positions)):
+        raise ValueError(
+            "positions must be representable as real plot coordinates")
     if pos.ndim == 2 and pos.shape[1] == 3:
-        diffs = np.diff(pos, axis=0)
-        s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(diffs, axis=1))])
+        with np.errstate(over="ignore", invalid="ignore"):
+            # Convert before differencing: np.diff on signed/unsigned integer
+            # coordinates wraps at the dtype boundary (INT64_MIN -> INT64_MAX
+            # would otherwise appear to be a unit-length segment).
+            diffs = np.diff(plot_positions, axis=0)
+            segment_lengths = np.hypot(
+                np.hypot(diffs[:, 0], diffs[:, 1]), diffs[:, 2])
+            s = np.concatenate([[0.0], np.cumsum(segment_lengths)])
+        if not np.all(np.isfinite(s)):
+            raise ValueError(
+                "cumulative position arc length is not representable")
+    elif pos.ndim == 1:
+        s = plot_positions.ravel()
     else:
-        s = pos.ravel()
+        raise ValueError("positions must have shape (M,) or (M, 3)")
     if s.shape[0] != B.shape[0]:
         raise ValueError("positions and B size mismatch")
 
-    comp_map = {"x": B[:, 0], "y": B[:, 1], "z": B[:, 2],
-                "magnitude": magnitude(B)}
-    if component not in comp_map:
+    component_index = {"x": 0, "y": 1, "z": 2}
+    if component in component_index:
+        y = B[:, component_index[component]]
+    elif component == "magnitude":
+        y = magnitude(B)
+    else:
         raise ValueError(
-            f"component must be one of {list(comp_map)}; got {component!r}")
-    y = comp_map[component]
+            "component must be one of ['x', 'y', 'z', 'magnitude']; "
+            f"got {component!r}")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            y = np.asarray(y, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(
+            "selected B component is not representable for plotting") from None
+    if not np.all(np.isfinite(y)):
+        raise ValueError(
+            "selected B component is not representable for plotting")
 
     fig = None
     if ax is None:
@@ -205,5 +269,5 @@ def plot_line_profile(
 
 def load_npz(path: str | Path) -> dict[str, np.ndarray]:
     """Load an ``out.npz`` produced by ``quasar coil run`` into a plain dict."""
-    archive = np.load(path, allow_pickle=False)
-    return {name: archive[name] for name in archive.files}
+    with np.load(path, allow_pickle=False) as archive:
+        return {name: archive[name] for name in archive.files}

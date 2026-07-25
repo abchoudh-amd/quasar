@@ -1,4 +1,5 @@
 units: SI
+neutralizing_background: true
 normalization: {reference_density_per_m3: 1.0e18, reference_species: electron}
 domain: {nx: 64, ny: 64, lx_m: 1.0e-2, ly_m: 1.0e-2}
 external_field:

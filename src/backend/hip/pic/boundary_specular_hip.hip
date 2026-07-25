@@ -23,60 +23,175 @@ __global__ void specular_kernel(quasar::Grid2D g, std::size_t n, int side,
   // put the start point outside the domain and the deposit teleported current to
   // the opposite edge via the periodic wrap.
   if (side == 0 && x[p] < g.origin_x) {
-    x[p] = 2.0 * g.origin_x - x[p];
+    // FMA evaluates 2*wall-position with one final rounding. Materialising
+    // 2*wall first can overflow for a large finite translated domain even when
+    // the reflected coordinate is close to the wall and representable.
+    x[p] = fma(2.0, g.origin_x, -x[p]);
     vx[p] = -vx[p];
   } else if (side == 1 && x[p] > g.origin_x + g.lx) {
     const double w = g.origin_x + g.lx;
-    x[p] = 2.0 * w - x[p];
+    x[p] = fma(2.0, w, -x[p]);
     vx[p] = -vx[p];
   } else if (side == 2 && y[p] < g.origin_y) {
-    y[p] = 2.0 * g.origin_y - y[p];
+    y[p] = fma(2.0, g.origin_y, -y[p]);
     vy[p] = -vy[p];
   } else if (side == 3 && y[p] > g.origin_y + g.ly) {
     const double w = g.origin_y + g.ly;
-    y[p] = 2.0 * w - y[p];
+    y[p] = fma(2.0, w, -y[p]);
     vy[p] = -vy[p];
   }
 }
 
-// Folds current deposited into the ghost cells of one reflecting side back into
-// the interior as image-charge current, conserving charge at the wall. The image
-// of ghost node (relative offset gh past the boundary) is the interior node gh-1
-// short of it; the deposit's continuity stencil places the boundary-crossing
-// current there. The normal component (Jx for an x-wall, Jy for a y-wall) is
-// added with a sign flip so net normal current at the wall vanishes (a perfect
-// reflector carries no current through itself); tangential and out-of-plane
-// components fold with the same sign. After folding, ghost cells are zeroed so a
-// subsequent (interior-only) read never double-counts them.
+__device__ inline double radial_volume_ratio(const quasar::Grid2D& g,
+                                             int ghost_i, int image_i,
+                                             bool cylindrical) {
+  if (!cylindrical) return 1.0;
+  // The common 2*pi*dr*dz factors cancel exactly. Avoid forming either ring
+  // volume: both may overflow on a large-radius thin annulus while their radius
+  // ratio remains close to one and perfectly representable.
+  const double ri = g.r_at_cell_center(image_i);
+  return ri > 0.0 ? g.r_at_cell_center(ghost_i) / ri : 0.0;
+}
+
+// Fold centred/tangential current densities from ghost cells to their mirror.
+// The normal current lives on faces and is handled separately below: its value
+// on the wall is zero, while faces beyond the wall mirror antisymmetrically.
 __global__ void foldback_kernel(quasar::Grid2D g, int side,
+                                bool cylindrical,
                                 double* jx, double* jy, double* jz) {
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int len = (side < 2) ? g.ny : g.nx;
+  const int len = (side < 2) ? g.height() : g.pitch();
   const int total = g.nghost * len;
   if (tid >= total) return;
   const int gh = tid / len + 1;     // ghost layer, 1..nghost
-  const int line = tid % len;       // index along the wall
+  const int line = tid % len;
 
-  int gi, gj, ii, ij;               // ghost node and its interior image
-  bool normal_is_x;
-  if (side == 0) {                  // x_lo: ghost col -gh, image col gh-1
-    gi = -gh; gj = line; ii = gh - 1; ij = line; normal_is_x = true;
-  } else if (side == 1) {           // x_hi: ghost col nx-1+gh, image col nx-gh
-    gi = g.nx - 1 + gh; gj = line; ii = g.nx - gh; ij = line; normal_is_x = true;
-  } else if (side == 2) {           // y_lo
-    gi = line; gj = -gh; ii = line; ij = gh - 1; normal_is_x = false;
-  } else {                          // y_hi
-    gi = line; gj = g.ny - 1 + gh; ii = line; ij = g.ny - gh; normal_is_x = false;
+  int gi, gj, ii, ij;
+  if (side < 2) {
+    const int j = line - g.nghost;
+    gi = side == 0 ? -gh : g.nx - 1 + gh;
+    ii = side == 0 ? gh - 1 : g.nx - gh;
+    gj = ij = j;
+  } else {
+    const int i = line - g.nghost;
+    gj = side == 2 ? -gh : g.ny - 1 + gh;
+    ij = side == 2 ? gh - 1 : g.ny - gh;
+    gi = ii = i;
   }
 
   const std::size_t kg = g.index(gi, gj);
   const std::size_t ki = g.index(ii, ij);
-  const double gx = jx[kg], gy = jy[kg], gz = jz[kg];
-  // Normal component flips sign; tangential + Jz keep sign.
-  jx[ki] += normal_is_x ? -gx : gx;
-  jy[ki] += normal_is_x ? gy : -gy;
-  jz[ki] += gz;
-  jx[kg] = 0.0; jy[kg] = 0.0; jz[kg] = 0.0;
+  if (side < 2) {
+    const double ratio = radial_volume_ratio(g, gi, ii, cylindrical);
+    jy[ki] += ratio * jy[kg];
+    jy[kg] = 0.0;
+    if (!cylindrical) {
+      jz[ki] += jz[kg];
+      jz[kg] = 0.0;
+    } else {
+      // Jphi is radial-face centred. Its true ghosts mirror about the wall face
+      // (i=0 or i=nx), and its density is normalized by a face dual annulus,
+      // whose common 2*pi*dr*dz factors again reduce to a radius ratio. The high
+      // physical face itself is not a ghost; with the uniform padded allocation
+      // there are nghost-1 true high face ghosts versus nghost low ghosts.
+      const bool has_face_ghost = side == 0 || gh < g.nghost;
+      if (has_face_ghost) {
+        const int src_face = side == 0 ? -gh : g.nx + gh;
+        const int dst_face = side == 0 ? gh : g.nx - gh;
+        const double rs = fabs(g.r_at_edge(src_face));
+        const double rd = fabs(g.r_at_edge(dst_face));
+        const auto ks = g.index(src_face, gj);
+        const auto kd = g.index(dst_face, ij);
+        if (rd > 0.0) jz[kd] += (rs / rd) * jz[ks];
+        jz[ks] = 0.0;
+      }
+    }
+
+    // Radial/Cartesian-x face current: odd parity about the wall face.
+    if (side == 0) {
+      const int src_face = -gh;
+      const int dst_face = gh;
+      const auto ks = g.index(src_face, gj);
+      const auto kd = g.index(dst_face, ij);
+      if (cylindrical) {
+        const double rd = g.r_at_edge(dst_face);
+        if (rd != 0.0) {
+          jx[kd] -= (g.r_at_edge(src_face) / rd) * jx[ks];
+        }
+      } else {
+        jx[kd] -= jx[ks];
+      }
+      jx[ks] = 0.0;
+      if (gh == 1) jx[g.index(0, gj)] = 0.0;
+    } else if (gh == 1) {
+      jx[g.index(g.nx, gj)] = 0.0;
+    } else {
+      const int src_face = g.nx + gh - 1;
+      const int dst_face = g.nx - gh + 1;
+      const auto ks = g.index(src_face, gj);
+      const auto kd = g.index(dst_face, ij);
+      if (cylindrical) {
+        const double rd = g.r_at_edge(dst_face);
+        if (rd != 0.0) {
+          jx[kd] -= (g.r_at_edge(src_face) / rd) * jx[ks];
+        }
+      } else {
+        jx[kd] -= jx[ks];
+      }
+      jx[ks] = 0.0;
+    }
+  } else {
+    // z/y reflection: radial metric is unchanged at a fixed i.
+    jx[ki] += jx[kg];
+    jz[ki] += jz[kg];
+    jx[kg] = 0.0;
+    jz[kg] = 0.0;
+
+    if (side == 2) {
+      const auto ks = g.index(gi, -gh);
+      const auto kd = g.index(ii, gh);
+      jy[kd] -= jy[ks];
+      jy[ks] = 0.0;
+      if (gh == 1) jy[g.index(gi, 0)] = 0.0;
+    } else if (gh == 1) {
+      jy[g.index(gi, g.ny)] = 0.0;
+    } else {
+      const int src_face = g.ny + gh - 1;
+      const int dst_face = g.ny - gh + 1;
+      const auto ks = g.index(gi, src_face);
+      const auto kd = g.index(ii, dst_face);
+      jy[kd] -= jy[ks];
+      jy[ks] = 0.0;
+    }
+  }
+}
+
+__global__ void foldback_charge_kernel(quasar::Grid2D g, int side,
+                                       bool cylindrical, double* rho) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int len = (side < 2) ? g.height() : g.pitch();
+  const int total = g.nghost * len;
+  if (tid >= total) return;
+  const int gh = tid / len + 1;
+  const int line = tid % len;
+  int gi, gj, ii, ij;
+  if (side < 2) {
+    const int j = line - g.nghost;
+    gi = side == 0 ? -gh : g.nx - 1 + gh;
+    ii = side == 0 ? gh - 1 : g.nx - gh;
+    gj = ij = j;
+  } else {
+    const int i = line - g.nghost;
+    gj = side == 2 ? -gh : g.ny - 1 + gh;
+    ij = side == 2 ? gh - 1 : g.ny - gh;
+    gi = ii = i;
+  }
+  const auto kg = g.index(gi, gj);
+  const auto ki = g.index(ii, ij);
+  const double ratio = side < 2
+      ? radial_volume_ratio(g, gi, ii, cylindrical) : 1.0;
+  rho[ki] += ratio * rho[kg];
+  rho[kg] = 0.0;
 }
 
 }  // namespace
@@ -95,13 +210,30 @@ extern "C" void launch_pic_boundary_specular_particles(const quasar::Grid2D& g,
 
 extern "C" void launch_pic_boundary_specular_foldback(const quasar::Grid2D& g,
                                                       quasar::JField2D<quasar::Real>& j,
-                                                      int side, quasar_stream_t stream) {
-  const int len = (side < 2) ? g.ny : g.nx;
+                                                      int side, int cylindrical,
+                                                      quasar_stream_t stream) {
+  const int len = (side < 2) ? g.height() : g.pitch();
   const int total = g.nghost * len;
   if (total <= 0) return;
   const dim3 block(quasar::backend::pic::kLaunchBlock);
   const dim3 grid = quasar::backend::pic::grid_1d(static_cast<std::size_t>(total));
   hipLaunchKernelGGL(foldback_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, side, j.jx.device_ptr(), j.jy.device_ptr(), j.jz.device_ptr());
+                     g, side, cylindrical != 0, j.jx.device_ptr(),
+                     j.jy.device_ptr(), j.jz.device_ptr());
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+extern "C" void launch_pic_boundary_specular_foldback_charge(
+    const quasar::Grid2D& g, quasar::ScalarGrid2D<quasar::Real>& rho,
+    int side, int cylindrical, quasar_stream_t stream) {
+  const int len = (side < 2) ? g.height() : g.pitch();
+  const int total = g.nghost * len;
+  if (total <= 0) return;
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(
+      static_cast<std::size_t>(total));
+  hipLaunchKernelGGL(foldback_charge_kernel, grid, block, 0,
+                     static_cast<hipStream_t>(stream), g, side,
+                     cylindrical != 0, rho.values.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }

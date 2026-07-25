@@ -1,9 +1,10 @@
 # Square-toroid magnet: vector potential A on the lab Y=0 poloidal slice,
 # sampled at the cell-corner grid of the PADDED MHD domain (interior +
-# NGHOST=4 ghost layers). resolution = [Nx+1, 1, Ny+1] with
-# Nx = nx+2*NGHOST = 136, Ny = ny+2*NGHOST = 136. A_xyz_grid has shape
+# NGHOST=2 ghost layers). resolution = [Nx+1, 1, Ny+1] with
+# Nx = nx+2*NGHOST = 132, Ny = ny+2*NGHOST = 132. A_xyz_grid has shape
 # (Ny+1, 1, Nx+1, 3); the MHD background_field.a_file loader differences its
-# lab-Y component into a divergence-free face-staggered poloidal B0.
+# lab-Y/A_phi component with the annular curl into a divergence-free
+# face-staggered poloidal B0.
 #
 # Run BEFORE the MHD deck (which reads the produced coil.npz):
 #   python -m quasar.coil.cli run examples/square_toroid_mhd/coil.yaml
@@ -2319,104 +2320,15 @@ conductors:
       radius_m: +1.15000000
       n_segments: 128
 
-  # Discrete TF coils (rectangular, bore-hugging)
-  - name: tf_coil_00
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [+0.85000000, +0.00000000, -0.15000000]
-        - [+1.15000000, +0.00000000, -0.15000000]
-        - [+1.15000000, +0.00000000, +0.15000000]
-        - [+0.85000000, +0.00000000, +0.15000000]
-        - [+0.85000000, +0.00000000, -0.15000000]
-
-  - name: tf_coil_01
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [+0.60104076, +0.60104076, -0.15000000]
-        - [+0.81317280, +0.81317280, -0.15000000]
-        - [+0.81317280, +0.81317280, +0.15000000]
-        - [+0.60104076, +0.60104076, +0.15000000]
-        - [+0.60104076, +0.60104076, -0.15000000]
-
-  - name: tf_coil_02
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [+0.00000000, +0.85000000, -0.15000000]
-        - [+0.00000000, +1.15000000, -0.15000000]
-        - [+0.00000000, +1.15000000, +0.15000000]
-        - [+0.00000000, +0.85000000, +0.15000000]
-        - [+0.00000000, +0.85000000, -0.15000000]
-
-  - name: tf_coil_03
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [-0.60104076, +0.60104076, -0.15000000]
-        - [-0.81317280, +0.81317280, -0.15000000]
-        - [-0.81317280, +0.81317280, +0.15000000]
-        - [-0.60104076, +0.60104076, +0.15000000]
-        - [-0.60104076, +0.60104076, -0.15000000]
-
-  - name: tf_coil_04
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [-0.85000000, +0.00000000, -0.15000000]
-        - [-1.15000000, +0.00000000, -0.15000000]
-        - [-1.15000000, +0.00000000, +0.15000000]
-        - [-0.85000000, +0.00000000, +0.15000000]
-        - [-0.85000000, +0.00000000, -0.15000000]
-
-  - name: tf_coil_05
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [-0.60104076, -0.60104076, -0.15000000]
-        - [-0.81317280, -0.81317280, -0.15000000]
-        - [-0.81317280, -0.81317280, +0.15000000]
-        - [-0.60104076, -0.60104076, +0.15000000]
-        - [-0.60104076, -0.60104076, -0.15000000]
-
-  - name: tf_coil_06
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [-0.00000000, -0.85000000, -0.15000000]
-        - [-0.00000000, -1.15000000, -0.15000000]
-        - [-0.00000000, -1.15000000, +0.15000000]
-        - [-0.00000000, -0.85000000, +0.15000000]
-        - [-0.00000000, -0.85000000, -0.15000000]
-
-  - name: tf_coil_07
-    current_A: +25000.00000000
-    geometry:
-      type: polyline
-      points_xyz_m:
-        - [+0.60104076, -0.60104076, -0.15000000]
-        - [+0.81317280, -0.81317280, -0.15000000]
-        - [+0.81317280, -0.81317280, +0.15000000]
-        - [+0.60104076, -0.60104076, +0.15000000]
-        - [+0.60104076, -0.60104076, -0.15000000]
-
 observation:
   type: grid
   # x = radial window (corners), y fixed at 0 (the poloidal slice plane),
   # z = cross-section vertical (corners). Padded-domain corner grid.
   bounds_m:
-    - [0.856563, 1.143438]
+    - [0.860781, 1.139219]
     - [0.0, 0.0]
-    - [-0.143437, 0.143437]
-  resolution: [137, 1, 137]
+    - [-0.139219, 0.139219]
+  resolution: [133, 1, 133]
 
 output:
   format: npz

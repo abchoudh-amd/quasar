@@ -1,11 +1,14 @@
 units: normalized
+neutralizing_background: true
 domain: {nx: 128, ny: 16, lx_m: 1.0, ly_m: 0.125}
-# Same counter-streaming setup as two_stream, but with a binomial current filter
-# (plus a compensation pass) to damp short-wavelength grid noise. Demonstrates the
-# current-smoothing pipeline; the instability still grows, with cleaner spectra.
+# Same deterministically perturbed longitudinal setup as two_stream, with the
+# transverse-current filter pipeline enabled as an invariance check.  This mode
+# deposits Jx; the continuity-preserving 2D filter intentionally smooths only
+# Jz, so it must leave the physical two-stream growth unchanged.  The fixed
+# background neutralizes the equilibrium.
 numerics:
   fdtd_order: 2
-  shape: tsc
+  shape: cic
   current_filter:
     - {type: binomial, n_passes: 4}
     - {type: compensated_binomial, n_passes: 1}
@@ -19,6 +22,7 @@ species:
       density_per_m3: 1.0
       temperature_eV: 0.0
       drift_v: [0.2, 0.0, 0.0]
+      velocity_perturbation: {amplitude_v: [1.0e-6, 0.0, 0.0], mode: [1, 0]}
   - name: electron_beam_right
     charge_C: -1
     mass_kg: 1
@@ -28,5 +32,6 @@ species:
       density_per_m3: 1.0
       temperature_eV: 0.0
       drift_v: [-0.2, 0.0, 0.0]
-time: {dt_s: auto, steps: 256}
+      velocity_perturbation: {amplitude_v: [1.0e-6, 0.0, 0.0], mode: [1, 0]}
+time: {dt_s: auto, steps: 3200}
 diagnostics: {output_path: out.npz, cadence: 8, fields: [ex], per_species: true}

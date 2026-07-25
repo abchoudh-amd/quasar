@@ -1,6 +1,6 @@
 #pragma once
 
-// Ideal-MHD solver driver for the 2D conservative finite-difference + CT vertical
+// Ideal-MHD solver driver for the 2D finite-volume + CT vertical
 // slice. This is the MHD analogue of pic::EmPic2D3V: a thin driver that resolves
 // every pluggable scheme (flux reconstruction, Riemann solver, CT scheme, SSP-RK
 // integrator, positivity limiter, per-side fluid/field boundaries) by deck-facing
@@ -49,6 +49,11 @@ struct MhdConfig {
   std::string integrator{"ssprk3"};
   std::string ct{"fd_ct_christlieb"};
   std::string positivity{"troubled_cell"};
+  // Positive thresholds retained for the explicit repair kernel and deck/API
+  // compatibility. Neither automatic initial-state construction nor
+  // conservative evolution clamps to them. Evolution preserves the invariant
+  // domain rho>0 and internal energy>0; it cannot make an arbitrary nonzero
+  // floor invariant without adding/removing conserved quantities.
   Real rho_floor{Real{1e-8}};
   Real p_floor{Real{1e-9}};
   // CFL safety factor (deck: numerics.cfl). The C++ contract carried no cfl
@@ -69,7 +74,14 @@ class MhdSolver2D {
 
   Grid2D grid() const noexcept { return grid_; }
   MhdField2D<Real>& state() noexcept { return rk_[0]; }
+  const MhdField2D<Real>& state() const noexcept { return rk_[0]; }
   const MhdConfig& config() const noexcept { return cfg_; }
+  // Number of conservative substeps accepted while advancing the most recent
+  // requested interval. Exposed as a diagnostic so invariant-domain regression
+  // tests can prove that conservation holds across actual positivity subcycling.
+  int last_positivity_substeps() const noexcept {
+    return last_positivity_substeps_;
+  }
 
   // Stage a host buffer (sized grid.storage_size()) into the named live-state
   // component. Magnetic spellings accept both the staggered name and the short
@@ -81,7 +93,9 @@ class MhdSolver2D {
   // Spellings mirror seed_state's magnetic aliases: "b0x"/"b0x_face",
   // "b0y"/"b0y_face", "b0z"/"b0z_cell". Requires the background to be enabled
   // (b0_ allocated); throws std::invalid_argument on a size mismatch or unknown
-  // component, and std::logic_error if the background is inactive.
+  // component, and std::logic_error if the background is inactive. Components
+  // may be staged in any order; the completed field is checked for finite,
+  // discretely solenoidal samples before the next solver operation consumes it.
   void seed_background(std::string_view component, const std::vector<Real>& host_buf);
 
   // True iff the field-split background B0 is enabled (cfg_.background.enabled).
@@ -107,13 +121,17 @@ class MhdSolver2D {
   Real divergence_b_max() const;
 
   // Read a state component back to host (sized grid.storage_size()). The "bx"/
-  // "by"/"bz" spellings sample the face/cell B to cell centers for the .npz.
+  // "by" spellings use the same working-halo-selected face-to-cell collocation
+  // as the EOS (the automatic halo matches the reconstruction scheme);
+  // "bx_face"/"by_face" return the raw CT arrays and "bz" is already
+  // cell-centred.
   std::vector<Real> state_component_to_host(std::string_view component) const;
 
   // -- SSP-RK integrator seam (the integrator only calls these) ---------------
   // dudt := L(u): the conservative residual (-div F + geometric source).
   void compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& dudt);
-  // Apply the Shu-Osher combine + CT face-B update + positivity for `stage`.
+  // Apply the Shu-Osher combine (including CT face-B rate) and verify positivity
+  // for `stage`; an inadmissible candidate triggers a conservative retry.
   void combine_stage(int stage, Real dt);
   MhdField2D<Real>& rk_register(int k);
   MhdField2D<Real>& residual_register() { return residual_; }
@@ -124,8 +142,14 @@ class MhdSolver2D {
   static backend::DeviceBuffer<Real>& component_buffer(MhdField2D<Real>& f,
                                                        std::string_view component);
   void check_cfl(Real dt) const;
+  Real cfl_limit_for_collocation(int collocation_order) const;
+  void ensure_background_solenoidal() const;
+  void ensure_live_state_solenoidal() const;
+  void ensure_live_state_admissible(int collocation_order = 0) const;
   bool is_cylindrical() const noexcept { return cfg_.geometry == "cylindrical"; }
   void fill_ghosts(MhdField2D<Real>& u) const;
+  void copy_state(const MhdField2D<Real>& src, MhdField2D<Real>& dst);
+  void advance_positive(Real dt);
   int reconstruction_order() const;
   // Per-side one-sided boundary flags ([x_lo, x_hi, y_lo, y_hi]) derived from
   // cfg_.boundary.field via boundary::mhd_boundary_is_periodic (0 = periodic,
@@ -142,8 +166,23 @@ class MhdSolver2D {
   Grid2D grid_{};
   // rk_[0] is the live state U; rk_[1], rk_[2] are the SSP-RK3 stage registers.
   std::array<MhdField2D<Real>, kNumRkRegisters> rk_{};
+  // Snapshot of U^n for conservative positivity retries. A rejected SSP-RK
+  // candidate is rolled back exactly, then retried with a smaller substep.
+  MhdField2D<Real> step_backup_{};
+  // Snapshot of the complete public step request. Internal positivity
+  // substeps may commit one by one, but any later exception restores this
+  // interval-start state so a failed step never advances unreported time.
+  MhdField2D<Real> request_backup_{};
   MhdField2D<Real> residual_{};  // dudt accumulator (the L(u) register)
-  MhdField2D<Real> flux_{};      // per-direction interface flux scratch
+  // Retain both directional fluxes through the CT phase so an active B0 can
+  // assemble its complete energy invariant in one common-exponent reduction.
+  MhdField2D<Real> flux_x_{};
+  MhdField2D<Real> flux_y_{};
+  // Active-background momentum fluxes remain decomposed as material stress H
+  // (in flux_x_/flux_y_), Riemann wave correction W, and a factored effective
+  // perturbation field for C(B0,b) until the two-direction fused divergence.
+  MhdMomentumFluxParts2D<Real> momentum_flux_x_{};
+  MhdMomentumFluxParts2D<Real> momentum_flux_y_{};
   numerics::MhdInterfaceStates<Real> ifx_;  // dir=0 reconstructed interface states
   numerics::MhdInterfaceStates<Real> ify_;  // dir=1 reconstructed interface states
   EmfField2D<Real> emf_{};       // corner-staggered CT EMF
@@ -154,6 +193,25 @@ class MhdSolver2D {
   // reused across steps so cfl_limit() does not hipMalloc/hipFree per call.
   // mutable because cfl_limit() is const (it only reads the state).
   mutable backend::DeviceBuffer<Real> cfl_scratch_{};
+  mutable backend::DeviceBuffer<Real> divb_scratch_{};
+  // 0 selects the configured high-order reconstruction; 1 is the conservative
+  // piecewise-constant retry path for a positivity-troubled substep.
+  int positivity_reconstruction_order_{0};
+  // True only while advance_positive() owns a rollback snapshot. Direct calls
+  // through the public integrator registry exercise the RK method without the
+  // solver-level retry controller and therefore must not compare against an
+  // uninitialized step_backup_.
+  bool positivity_control_active_{false};
+  // True when the rollback base is admissible under adjacent-face magnetic
+  // collocation. While true, a completed high-order substep must preserve that
+  // fallback domain so a later rejection always has a valid low-order anchor.
+  bool positivity_low_order_anchor_available_{false};
+  int last_positivity_substeps_{0};
+  // Analytic constructor samples are validated once. Explicit component seeds
+  // invalidate that proof; the next operation that consumes or diagnoses B0
+  // validates the complete three-component field after callers have staged all
+  // components.
+  mutable bool background_validated_{true};
 
   std::unique_ptr<numerics::IRiemannSolver> riemann_{};
   std::unique_ptr<numerics::ICtScheme> ct_{};

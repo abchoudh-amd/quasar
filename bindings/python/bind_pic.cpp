@@ -10,6 +10,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "numpy_utils.hpp"
+
 #include "quasar/backend/memory.hpp"
 #include "quasar/boundary/boundary_condition.hpp"
 #include "quasar/core/grid.hpp"
@@ -35,18 +37,8 @@ namespace py = pybind11;
 namespace {
 
 using ::quasar::Real;
-
-// Forces a contiguous, correctly-typed array at the binding boundary so the raw
-// data()+shape(0) copy below never reads strided/wrong-type memory.
-using RealArray = py::array_t<Real, py::array::c_style | py::array::forcecast>;
-
-std::vector<Real> numpy_to_real_vector(const RealArray& arr, const char* what) {
-  if (arr.ndim() != 1) {
-    throw std::invalid_argument(std::string{what} + ": expected 1-D NumPy array");
-  }
-  const auto* data = arr.data();
-  return std::vector<Real>{data, data + arr.shape(0)};
-}
+using ::quasar::python_detail::numpy_to_finite_real_vector;
+using ::quasar::python_detail::numpy_to_real_vector;
 
 py::array_t<Real> buffer_to_numpy(const quasar::backend::DeviceBuffer<Real>& buf) {
   const py::ssize_t n = static_cast<py::ssize_t>(buf.size());
@@ -161,8 +153,10 @@ void bind_pic(py::module_& m) {
 
   py::class_<quasar::Normalization>(pic, "Normalization")
       .def(py::init<>())
+      .def_static("identity", &quasar::Normalization::identity)
       .def_static("plasma", &quasar::Normalization::plasma,
                   py::arg("n_ref"), py::arg("q_ref"), py::arg("m_ref"))
+      .def("is_identity", &quasar::Normalization::is_identity)
       .def("to_internal", &quasar::Normalization::to_internal,
            py::arg("value"), py::arg("tag"))
       .def("to_si", &quasar::Normalization::to_si,
@@ -171,6 +165,7 @@ void bind_pic(py::module_& m) {
       .def("time_scale", &quasar::Normalization::time_scale)
       .def("e_field_scale", &quasar::Normalization::e_field_scale)
       .def("b_field_scale", &quasar::Normalization::b_field_scale)
+      .def("temperature_eV_scale", &quasar::Normalization::temperature_eV_scale)
       .def_readonly("n_ref", &quasar::Normalization::n_ref)
       .def_readonly("q_ref", &quasar::Normalization::q_ref)
       .def_readonly("m_ref", &quasar::Normalization::m_ref)
@@ -232,7 +227,9 @@ void bind_pic(py::module_& m) {
       .def_readwrite("geometry", &quasar::pic::EmPicConfig::geometry)
       .def_readwrite("boundary", &quasar::pic::EmPicConfig::boundary)
       .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization)
-      .def_readwrite("filters", &quasar::pic::EmPicConfig::filters);
+      .def_readwrite("filters", &quasar::pic::EmPicConfig::filters)
+      .def_readwrite("neutralizing_background",
+                     &quasar::pic::EmPicConfig::neutralizing_background);
 
   // -- Species --------------------------------------------------------------
 
@@ -248,27 +245,15 @@ void bind_pic(py::module_& m) {
       .def_readwrite("capacity", &quasar::pic::SpeciesConfig::capacity);
 
   // NOTE: ParticleSpecies is move-only (DeviceBuffer is non-copyable). Python
-  // users never construct one directly — the solver owns the species and you
-  // access it via EmPic2D3V.species_at(idx) after add_species(config).
+  // users never construct or mutate one directly. The solver owns uploads so it
+  // can validate the physical domain and invalidate charge/background caches;
+  // species_at(idx) below is a read-only snapshot/count handle.
   py::class_<quasar::pic::ParticleSpecies>(pic, "ParticleSpecies")
       .def_property_readonly("name", &quasar::pic::ParticleSpecies::name)
       .def_property_readonly("charge", &quasar::pic::ParticleSpecies::charge)
       .def_property_readonly("mass", &quasar::pic::ParticleSpecies::mass)
       .def_property_readonly("size", &quasar::pic::ParticleSpecies::size)
       .def_property_readonly("capacity", &quasar::pic::ParticleSpecies::capacity)
-      .def("set_host_particles",
-           [](quasar::pic::ParticleSpecies& self,
-              const RealArray& x, const RealArray& y,
-              const RealArray& vx, const RealArray& vy,
-              const RealArray& vz, const RealArray& w) {
-             self.set_host_particles(
-                 numpy_to_real_vector(x, "x"), numpy_to_real_vector(y, "y"),
-                 numpy_to_real_vector(vx, "vx"), numpy_to_real_vector(vy, "vy"),
-                 numpy_to_real_vector(vz, "vz"), numpy_to_real_vector(w, "weight"));
-           },
-           py::arg("x"), py::arg("y"),
-           py::arg("vx"), py::arg("vy"), py::arg("vz"),
-           py::arg("weight"))
       .def("to_host",
            [](const quasar::pic::ParticleSpecies& self) {
              auto snap = self.to_host();
@@ -298,6 +283,22 @@ void bind_pic(py::module_& m) {
              return self.species().size() - 1;  // index of the new species
            },
            py::arg("config"))
+      .def("set_species_particles",
+           [](quasar::pic::EmPic2D3V& self, std::size_t index,
+              const py::object& x, const py::object& y,
+              const py::object& vx, const py::object& vy,
+              const py::object& vz, const py::object& w) {
+             self.set_species_particles(
+                 index, numpy_to_real_vector(x, "x"),
+                 numpy_to_real_vector(y, "y"),
+                 numpy_to_real_vector(vx, "vx"),
+                 numpy_to_real_vector(vy, "vy"),
+                 numpy_to_real_vector(vz, "vz"),
+                 numpy_to_real_vector(w, "weight"));
+           },
+           py::arg("index"), py::arg("x"), py::arg("y"),
+           py::arg("vx"), py::arg("vy"), py::arg("vz"),
+           py::arg("weight"))
       .def("species_count",
            [](const quasar::pic::EmPic2D3V& self) { return self.species().size(); })
       .def("species_alive_count",
@@ -309,8 +310,8 @@ void bind_pic(py::module_& m) {
            },
            py::arg("index"))
       .def("species_at",
-           [](quasar::pic::EmPic2D3V& self, std::size_t idx)
-               -> quasar::pic::ParticleSpecies& {
+           [](const quasar::pic::EmPic2D3V& self, std::size_t idx)
+               -> const quasar::pic::ParticleSpecies& {
              if (idx >= self.species().size()) {
                throw std::out_of_range("species_at: index out of range");
              }
@@ -326,21 +327,23 @@ void bind_pic(py::module_& m) {
              quasar::pic::sample_external_field(evaluator, conductors,
                                                 self.external_fields(),
                                                 length_scale, e_field_scale,
-                                                b_field_scale, plane);
+                                                b_field_scale, plane,
+                                                self.config().geometry,
+                                                self.config().fdtd_order);
            },
            py::arg("evaluator"), py::arg("conductors"),
            py::arg("length_scale") = 1.0, py::arg("e_field_scale") = 1.0,
            py::arg("b_field_scale") = 1.0, py::arg("plane") = "xy")
       .def("seed_field",
            [](quasar::pic::EmPic2D3V& self, const std::string& component,
-              const RealArray& values) {
+              const py::object& values) {
              // Writes one Yee field component from a (storage_size,) host array,
              // for deck-driven initial-field seeding. The array must already be in
              // the solver's internal (normalized) units and full ghost-padded
              // storage layout (matches fields_to_host()).
              auto& f = self.fields();
              auto& buf = yee_component_buffer(f, component);
-             const auto vec = numpy_to_real_vector(values, "values");
+             const auto vec = numpy_to_finite_real_vector(values, "values");
              if (vec.size() != buf.size()) {
                throw std::invalid_argument("seed_field: array size does not match field storage");
              }
@@ -349,6 +352,10 @@ void bind_pic(py::module_& m) {
            py::arg("component"), py::arg("values"))
       .def("storage_size",
            [](quasar::pic::EmPic2D3V& self) { return self.grid().storage_size(); })
+      .def("nghost",
+           [](const quasar::pic::EmPic2D3V& self) {
+             return self.grid().nghost;
+           })
       .def("fields_to_host",
            [](quasar::pic::EmPic2D3V& self) {
              return yee_field_to_dict(self.fields());
@@ -375,14 +382,12 @@ void bind_pic(py::module_& m) {
   pic.def("alive_count", &quasar::pic::alive_count, py::arg("species"));
   pic.def("total_em_energy",
           [](quasar::pic::EmPic2D3V& self) {
-            const bool cyl = self.config().geometry == "cylindrical";
-            return quasar::pic::total_em_energy(self.fields(), self.grid(), cyl);
+            return quasar::pic::total_em_energy(self);
           },
           py::arg("solver"));
   pic.def("gauss_residual",
           [](quasar::pic::EmPic2D3V& self) {
-            const bool cyl = self.config().geometry == "cylindrical";
-            return quasar::pic::gauss_residual(self.fields(), self.current(), cyl);
+            return quasar::pic::gauss_residual(self);
           },
           py::arg("solver"));
 }

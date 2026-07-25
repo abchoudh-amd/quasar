@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -37,15 +38,15 @@ TEST(PicCylDiagnostics, EmEnergyUsesRingVolume) {
 
   const quasar::Real E0 = 3.0, B0 = 2.0;
   auto& f = solver.fields();
-  std::vector<quasar::Real> ez(f.ez.size(), 0.0), bz(f.bz.size(), 0.0);
+  std::vector<quasar::Real> ey(f.ey.size(), 0.0), by(f.by.size(), 0.0);
   for (int j = 0; j < g.ny; ++j) {
     for (int i = 0; i < g.nx; ++i) {
-      ez[g.index(i, j)] = E0;
-      bz[g.index(i, j)] = B0;
+      ey[g.index(i, j)] = E0;
+      by[g.index(i, j)] = B0;
     }
   }
-  f.ez.copy_from_host(ez.data(), ez.size());
-  f.bz.copy_from_host(bz.data(), bz.size());
+  f.ey.copy_from_host(ey.data(), ey.size());
+  f.by.copy_from_host(by.data(), by.size());
 
   // u = 0.5*(E^2 + B^2) per cell, weighted by the ring volume cell_volume(i)
   // (which varies with radius), summed over the interior.
@@ -56,8 +57,7 @@ TEST(PicCylDiagnostics, EmEnergyUsesRingVolume) {
     }
   }
 
-  const quasar::Real got =
-      quasar::pic::total_em_energy(solver.fields(), solver.grid(), /*cylindrical=*/true);
+  const quasar::Real got = quasar::pic::total_em_energy(solver);
   EXPECT_NEAR(got, expected, 1e-9);
 
   // The flat-area Cartesian weighting would give a different (wrong) number for a
@@ -83,9 +83,10 @@ TEST(PicCylDiagnostics, GaussResidualUniformAxialFieldIsZero) {
   }
   f.ey.copy_from_host(ey.data(), ey.size());
 
-  EXPECT_NEAR(
-      quasar::pic::gauss_residual(solver.fields(), solver.current(), /*cylindrical=*/true),
-      0.0, 1e-9);
+  EXPECT_NEAR(quasar::pic::electric_divergence_norm(
+                  solver.fields(), 2, solver.config().boundary,
+                  /*cylindrical=*/true),
+              0.0, 1e-9);
 }
 
 TEST(PicCylDiagnostics, GaussResidualRadialFieldMatchesMetricDivergence) {
@@ -95,9 +96,8 @@ TEST(PicCylDiagnostics, GaussResidualRadialFieldMatchesMetricDivergence) {
   quasar::pic::EmPic2D3V solver{cyl_cfg(g)};
 
   // A single nonzero radial component E_r (= ex) at one interior node. The
-  // cylindrical residual is the L2 norm of (1/r_c) d(r E_r)/dr, nonzero only at
-  // that node and its +r neighbour. Compute the expectation from the same metric
-  // the implementation uses.
+  // cylindrical residual is the ring-volume-weighted RMS of
+  // (1/r_c)d(r E_r)/dr, nonzero in the charge cells on either side of that face.
   auto& f = solver.fields();
   std::vector<quasar::Real> ex(f.ex.size(), 0.0);
   const quasar::Real val = 2.0;
@@ -105,14 +105,87 @@ TEST(PicCylDiagnostics, GaussResidualRadialFieldMatchesMetricDivergence) {
   ex[g.index(ic, jc)] = val;
   f.ex.copy_from_host(ex.data(), ex.size());
 
-  // div at (ic,jc): (r_e(ic)*val - r_e(ic-1)*0)/(r_c(ic)*dr)
-  // div at (ic+1,jc): (r_e(ic+1)*0 - r_e(ic)*val)/(r_c(ic+1)*dr)
+  // div at (ic-1,jc): +r_e(ic)*val/(r_c(ic-1)*dr)
+  // div at (ic,jc):   -r_e(ic)*val/(r_c(ic)*dr)
   const quasar::Real dr = g.dx();
-  const quasar::Real d_here = (g.r_at_edge(ic) * val) / (g.r_at_cell_center(ic) * dr);
-  const quasar::Real d_next = (-g.r_at_edge(ic) * val) / (g.r_at_cell_center(ic + 1) * dr);
-  const quasar::Real expected = std::sqrt(d_here * d_here + d_next * d_next);
+  const quasar::Real d_here =
+      (g.r_at_edge(ic) * val) / (g.r_at_cell_center(ic - 1) * dr);
+  const quasar::Real d_next =
+      (-g.r_at_edge(ic) * val) / (g.r_at_cell_center(ic) * dr);
+  quasar::Real weighted = d_here * d_here * g.cell_volume(ic - 1)
+                        + d_next * d_next * g.cell_volume(ic);
+  quasar::Real volume = 0.0;
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) volume += g.cell_volume(i);
+  }
+  const quasar::Real expected = std::sqrt(weighted / volume);
 
-  EXPECT_NEAR(
-      quasar::pic::gauss_residual(solver.fields(), solver.current(), /*cylindrical=*/true),
-      expected, 1e-9);
+  EXPECT_NEAR(quasar::pic::electric_divergence_norm(
+                  solver.fields(), 2, solver.config().boundary,
+                  /*cylindrical=*/true),
+              expected, 1e-9);
+}
+
+TEST(PicCylDiagnostics, ThinLargeRadiusAnnulusRetainsEnergyAndZeroGaussNorm) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // r^2 overflows and 2*r0 overflows in binary64, while the factored annular
+  // volume remains finite after multiplication by the very short z extent.
+  constexpr double r0 = 1.0e308;
+  constexpr double dr = 8.0e292;
+  constexpr double lz = 1.0e-308;
+  quasar::Grid2D g{1, 2, dr, lz, r0, 0.0, 1};
+  quasar::pic::EmPicConfig cfg{g, 2, "cic"};
+  cfg.geometry = "cylindrical";
+  cfg.boundary.field[0] = "pec";
+  cfg.boundary.field[1] = "pec";
+  cfg.boundary.particle[0] = "specular";
+  cfg.boundary.particle[1] = "specular";
+  quasar::pic::EmPic2D3V solver{cfg};
+
+  std::vector<double> ey(g.storage_size(), 0.0);
+  for (int j = 0; j < g.ny; ++j) ey[g.index(0, j)] = 1.0;
+  solver.fields().ey.copy_from_host(ey.data(), ey.size());
+
+  const long double annular_volume =
+      std::acos(-1.0L) * static_cast<long double>(dr)
+      * (2.0L * static_cast<long double>(r0)
+         + static_cast<long double>(dr))
+      * static_cast<long double>(lz);
+  ASSERT_TRUE(std::isfinite(annular_volume));
+  const double expected = static_cast<double>(0.5L * annular_volume);
+  ASSERT_TRUE(std::isfinite(expected));
+  EXPECT_NEAR(quasar::pic::total_em_energy(solver), expected,
+              std::abs(expected) * 2.0e-14);
+  EXPECT_DOUBLE_EQ(quasar::pic::electric_divergence_norm(
+                       solver.fields(), 2, solver.config().boundary,
+                       /*cylindrical=*/true),
+                   0.0);
+}
+
+TEST(PicCylDiagnostics, ExtremeRadialAxialChargeCancellationStaysFinite) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{1, 1, 1.0, 1.0, 0.0, 0.0, 1};
+  quasar::YeeField2D<quasar::Real> fields{g};
+  quasar::ScalarGrid2D<quasar::Real> charge{g};
+  quasar::boundary::BoundarySpec boundary;
+  boundary.field = {"axis", "pec", "pec", "pec"};
+
+  const double a = 0.75 * std::numeric_limits<double>::max();
+  std::vector<double> er(g.storage_size(), 0.0);
+  std::vector<double> ez(g.storage_size(), 0.0);
+  std::vector<double> rho(g.storage_size(), 0.0);
+  er[g.index(0, 0)] = 0.0;
+  er[g.index(1, 0)] = 0.5 * a;  // (1/r)d(r Er)/dr = a at r=dr/2
+  ez[g.index(0, 0)] = -0.5 * a;
+  ez[g.index(0, 1)] = 0.5 * a;  // dEz/dz = a
+  rho[g.index(0, 0)] = a;
+  fields.ex.copy_from_host(er.data(), er.size());
+  fields.ey.copy_from_host(ez.data(), ez.size());
+  charge.values.copy_from_host(rho.data(), rho.size());
+
+  EXPECT_DOUBLE_EQ(quasar::pic::gauss_residual(
+                       fields, charge, 2, boundary, true),
+                   a);
 }

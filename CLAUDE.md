@@ -4,22 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Quasar is a HIP-accelerated (AMD ROCm, `gfx942`) numerical simulation framework with a C++20 core, pybind11 bindings, and a pure-Python user-facing layer. Current vertical slices are **magnetostatics** (Biot–Savart for coil design), a minimal **electromagnetic PIC** module, and a high-order **ideal-MHD** module (MP5/MP7 reconstruction, HLLD, FD-CT; Cartesian and axisymmetric cylindrical).
+Quasar is a HIP-accelerated AMD ROCm numerical simulation framework with `gfx942` and `gfx950` presets, a C++20 core, pybind11 bindings, and a pure-Python user-facing layer. Current vertical slices are **magnetostatics** (Biot–Savart for coil design), **electromagnetic PIC**, and **ideal MHD** (high-order Cartesian MP5/MP7 or second-order cylindrical MUSCL reconstruction, HLLD, and FD-CT).
 
-The build is HIP-only at present — configuring with `-DQUASAR_ENABLE_HIP=OFF` is a hard error (see top `CMakeLists.txt`). A host backend is planned but not yet present.
+The build supports only the HIP backend; configuring with
+`-DQUASAR_ENABLE_HIP=OFF` is a hard error (see the top-level `CMakeLists.txt`).
 
 ## Build and test
 
 Configure/build/test via CMake presets:
 
 ```bash
+python -m pip install -r tests/python/requirements.txt
 cmake --preset hip-gfx942-release
 cmake --build --preset hip-gfx942-release -j
 ctest --preset hip-gfx942-release            # all tests
 ctest --preset hip-gfx942-release -R <regex> # single test by name regex
 ```
 
-The build tree lives at `build/hip-gfx942-{release,debug}/`. A `hip-gfx942-debug` preset also exists.
+Preset build trees live under `build/<preset>/`; release and debug presets are
+provided for both `gfx942` and `gfx950`.
 
 The compiled Python extension `quasar._core` lands at `build/hip-gfx942-release/python/quasar/_core*.so`. To run Python entry points or pytest against the build tree:
 
@@ -28,18 +31,24 @@ PYTHONPATH=build/hip-gfx942-release/python python -m quasar.coil.cli run example
 PYTHONPATH=build/hip-gfx942-release/python pytest tests/python -k <pattern>
 ```
 
-A single GoogleTest binary can be run directly, e.g. `build/hip-gfx942-release/tests/unit/physics/test_magnetostatics`, optionally with `--gtest_filter=...`.
+A single GoogleTest binary can be run directly, for example
+`build/hip-gfx942-release/tests/unit/core/quasar_test_grid_2d`, optionally with
+`--gtest_filter=...`.
 
 ## Architecture
 
-The codebase is organized around **four orthogonal axes**: `physics × numerics × boundary × backend`. Each axis has matching trees under `include/quasar/<axis>/` (public interfaces, installed) and `src/<axis>/` (private implementations). Adding a scheme in one axis should not touch the others.
+The codebase is organized around **four orthogonal axes**: `physics × numerics × boundary × backend`. Each axis has matching trees under `include/quasar/<axis>/` (public interfaces) and `src/<axis>/` (private implementations). Adding a scheme in one axis should not touch the others.
 
 Key conventions:
 
 - **Backend isolation** — all HIP `.hip` / device code lives under `src/backend/hip/`. Code outside that directory must go through abstractions in `include/quasar/backend/` (`device.hpp`, `memory.hpp`).
 - **Plugin registry** — concrete schemes/BCs/physics self-register via `core/registry.hpp` so the YAML/Python input deck selects implementations by string name. Drivers in `apps/` should not contain `if/else` chains over physics types.
-- **Public vs private** — only headers under `include/quasar/` are installed. Anything in `src/` (including `src/**/detail/`) is implementation-private; do not include from `src/` outside its own translation unit.
-- **Apps are thin** — any future `apps/*/main.cpp` should only parse input and call the library. Today both vertical slices are driven from Python (`quasar.coil.cli`, `quasar.pic.cli`) and `apps/` holds only a placeholder.
+- **Public vs private** — headers under `include/quasar/` are the supported
+  public include surface. Anything in `src/` (including `src/**/detail/`) is
+  implementation-private; do not include from `src/` outside its own module.
+  The current CMake workflow stages Python into the build tree and does not
+  define system-install or package-export targets.
+- **Apps are thin** — any future `apps/*/main.cpp` should only parse input and call the library. Today all three vertical slices are driven from Python (`quasar.coil.cli`, `quasar.pic.cli`, and `quasar.mhd.cli`); `apps/` contains only the explanatory CMake file.
 
 > **Axis orthogonality is aspirational where the numerics and boundary axes are concerned.** The `numerics` solver/pusher/deposit interfaces (`IFieldSolver`, `IParticlePusher`, `IDepositScheme`) are currently phrased in the EM-PIC concrete types (`YeeField2D`/`JField2D`, `pic::ParticleSpecies`) and their out-of-line definitions + registrations live in `src/physics/pic/pic_solver.cpp` (see `docs/dev-guide/adding_a_field_solver.rst`, `adding_a_pusher.rst`, `adding_a_deposit_scheme.rst`). This is deliberate: with EM-PIC as the only consumer, templating these over field/particle types would add abstraction for a second physics module that does not yet exist. When a non-PIC consumer of these schemes appears, that is the point to template them and split the implementations into `src/numerics/`.
 >
@@ -50,9 +59,10 @@ Key conventions:
 Concrete physics modules currently present:
 
 - `physics/magnetostatics` — Biot–Savart field evaluator over conductor geometries with observation point sets. Exposed to Python as `quasar.coil` with a CLI at `python -m quasar.coil.cli run <input.yaml>` that writes `out.npz`.
-- `physics/pic` — minimal EM-PIC vertical slice (`EmPicConfig`, FDTD, particle shapes). Driven from Python at `python -m quasar.pic.cli run <input.yaml>` (no C++ app exists; `apps/` holds only a placeholder `CMakeLists.txt`). Deck I/O is under `quasar.pic`.
+- `physics/pic` — EM-PIC vertical slice (`EmPicConfig`, Cartesian and axisymmetric-cylindrical FDTD, particle shapes, charge-conserving deposition, particle and field boundaries, and diagnostics). Driven from Python at `python -m quasar.pic.cli run <input.yaml>`; no C++ app exists. Deck I/O is under `quasar.pic`.
 - `physics/mhd` — high-order ideal-MHD vertical slice (MP5/MP7 characteristic reconstruction, HLLD Riemann solver, FD constrained transport, SSP-RK3, troubled-cell positivity floor; Cartesian and axisymmetric cylindrical `(r,z)`). Driven from Python at `python -m quasar.mhd.cli run <input.yaml>`. The numerics live under `numerics/` (the second consumer of that axis after PIC); deck I/O is under `quasar.mhd`.
-- `physics/analytic_fields` — closed-form reference fields used by tests/examples.
+- `physics/analytic_fields` — analytic and rectilinear file-backed fields used
+  by simulations, tests, and examples.
 
 CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target creation), `QuasarHipRuntime.cmake` (HIP runtime detection), `QuasarLaunchParams.cmake` (per-arch kernel launch tuning).
 

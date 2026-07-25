@@ -6,9 +6,9 @@ units: SI
 #
 # Cavity radius R = lx_m = 0.10 m, axial height H = ly_m = 0.10 m.
 # Analytic TM010 eigenfrequency: f_010 = j01 * c / (2 pi R) with j01 = 2.40483,
-# giving f_010 ~ 1.1473 GHz. The Ez seed below is a broadband single-mode
-# perturbation -- NOT the exact J0 eigenmode -- so the resonance is recovered
-# as the dominant FFT peak of the on-axis Ez time series.
+# giving f_010 ~ 1.1473 GHz. In cylindrical geometry `seed_perturbation` uses
+# the regular radial eigenfunction J0(j01 r/R), so the deck excites TM010
+# directly; the resonance is still measured from the on-axis Ez time series.
 geometry: cylindrical
 domain:
   nx: 128
@@ -22,8 +22,8 @@ numerics: {fdtd_order: 2, shape: cic, current_filter: []}
 # radial wall (x_hi) and both axial walls (y_lo, y_hi) are PEC. Periodic x_hi
 # would be rejected for a cylindrical deck.
 boundary:
-  field: {x_lo: pec, x_hi: pec, y_lo: pec, y_hi: pec}
-  particle: {x_lo: specular, x_hi: specular, y_lo: specular, y_hi: specular}
+  field: {x_lo: axis, x_hi: pec, y_lo: pec, y_hi: pec}
+  particle: {x_lo: axis, x_hi: specular, y_lo: specular, y_hi: specular}
 # Excite the cavity with an axial-E perturbation. The seed component is spelled
 # with the PHYSICAL cylindrical name `Ez` (axial E). In cylindrical mode the deck
 # loader reinterprets Er/Ez/Ephi as physical axes and maps them to storage slots
@@ -31,11 +31,11 @@ boundary:
 # `component: Ez` resolves to the "ey" slot -- the same axial slot the verified
 # cyl_gyro_orbit example uses for its axial B (by) and axial velocity (vy) -- and
 # the user does not need to know that convention. (The raw slot name `Ey` is still
-# accepted and equivalent.) The TM010 mode is (Ez_axial, Bphi); the eigenfrequency
-# is measured from the FFT / J0 projection of the axial-E series, not assumed.
+# accepted and equivalent.) The TM010 mode is (Ez_axial, Bphi); its frequency is
+# measured from the weighted J0-mode recurrence, not assumed.
 fields:
   initial: {type: seed_perturbation, component: Ez, mode: [1, 0], amplitude: 1.0}
-# Enough steps to resolve several TM010 periods; cadence 4 records an axial-E
-# (snapshot_field_ey) series dense enough to FFT.
+# Cadence 4 records both conjugate fields densely enough to measure the mode
+# recurrence and the full cylindrical leapfrog invariant.
 time: {dt_s: auto, steps: 1024}
-diagnostics: {output_path: out.npz, cadence: 4, fields: [ey], per_species: false}
+diagnostics: {output_path: out.npz, cadence: 4, fields: [ey, bz], per_species: false}

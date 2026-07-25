@@ -3,7 +3,8 @@
 Warm electrons in the magnetic field of a circular current loop (1 kA), sampled
 via the Biot-Savart external-field evaluator. Demonstrates seeding `B_ext` for a
 PIC run from a coil geometry, with the SI → internal-unit conversion applied to
-both the grid and the sampled field.
+both the grid and the sampled field. A fixed uniform positive background
+neutralizes the periodic electron population.
 
 ## Run
 

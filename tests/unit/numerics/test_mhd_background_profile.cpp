@@ -1,8 +1,5 @@
-// RED-phase tests for the IMhdBackgroundProfile pluggable kind: a registry-
-// selected analytic background-magnetic-field profile. The interface and its
-// "uniform" registration do not exist yet, so this binary fails to compile/link
-// until the implementation lands. Pure host: only registry create()/contains()/
-// names() and the analytic sample() are exercised, touching no device memory.
+// Registry-selected analytic background-magnetic-field profiles. Pure host:
+// only registry creation/configuration and analytic sampling are exercised.
 
 #include "quasar/numerics/mhd_background_profile.hpp"
 #include "quasar/core/registry.hpp"
@@ -59,6 +56,28 @@ TEST(MhdBackgroundProfile, NamesContainUniform) {
   const auto& reg = ::quasar::Registry<IMhdBackgroundProfile>::instance();
   const std::vector<std::string> names = reg.names();
   EXPECT_NE(std::find(names.begin(), names.end(), "uniform"), names.end());
+}
+
+TEST(MhdBackgroundProfile, UniformParametersSetComponents) {
+  auto profile = ::quasar::Registry<IMhdBackgroundProfile>::instance().create("uniform");
+  ASSERT_TRUE(profile->set_parameter("bx0", Real{1.25}));
+  ASSERT_TRUE(profile->set_parameter("by0", Real{-0.5}));
+  ASSERT_TRUE(profile->set_parameter("bz0", Real{3}));
+  EXPECT_FALSE(profile->set_parameter("unknown", Real{1}));
+  EXPECT_DOUBLE_EQ(profile->sample(0, Real{4}, Real{-2}), Real{1.25});
+  EXPECT_DOUBLE_EQ(profile->sample(1, Real{4}, Real{-2}), Real{-0.5});
+  EXPECT_DOUBLE_EQ(profile->sample(2, Real{4}, Real{-2}), Real{3});
+}
+
+TEST(MhdBackgroundProfile, LinearVacuumIsConfiguredAndSolenoidal) {
+  auto profile =
+      ::quasar::Registry<IMhdBackgroundProfile>::instance().create("linear_vacuum");
+  ASSERT_TRUE(profile->set_parameter("gradient", Real{2}));
+  ASSERT_TRUE(profile->set_parameter("shear", Real{-0.25}));
+  EXPECT_FALSE(profile->set_parameter("unknown", Real{1}));
+  EXPECT_DOUBLE_EQ(profile->sample(0, Real{3}, Real{4}), Real{5});
+  EXPECT_DOUBLE_EQ(profile->sample(1, Real{3}, Real{4}), Real{-8.75});
+  EXPECT_DOUBLE_EQ(profile->sample(2, Real{3}, Real{4}), Real{0});
 }
 
 }  // namespace
