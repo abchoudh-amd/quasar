@@ -110,8 +110,14 @@ class BackgroundConfigDefaultsTests(unittest.TestCase):
         self.assertIsNone(build_background_field(deck, NGHOST))
 
     def test_enabled_false_block_same_as_absent(self):
-        deck = parse(_base_data(background_field={"enabled": False, "bz0": 5.0}))
+        deck = parse(_base_data(background_field={
+            "enabled": False,
+            "profile": "not-registered",
+            "bz0": "not-a-number",
+            "params": ["not", "a", "mapping"],
+        }))
         self.assertFalse(deck.background.enabled)
+        self.assertEqual(deck.background, BackgroundConfig())
         self.assertIsNone(build_background_field(deck, NGHOST))
 
     def test_background_config_dataclass_defaults(self):
@@ -185,6 +191,38 @@ class BackgroundValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse(_base_data(background_field={
                 "enabled": True, "profile": bogus, "bz0": 1.0}))
+
+    def test_explicit_file_does_not_validate_ignored_profile(self):
+        deck = parse(_base_data(background_field={
+            "enabled": True,
+            "profile": "stale-profile-that-is-ignored",
+            "file": "relative-background.npz",
+        }))
+        self.assertEqual(deck.background.file, "relative-background.npz")
+
+    def test_nonuniform_profile_rejects_legacy_uniform_components(self):
+        with self.assertRaisesRegex(ValueError, "valid only for profile"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "profile": "linear_vacuum",
+                "bx0": 1.0,
+            }))
+
+    def test_explicit_file_rejects_unused_params(self):
+        with self.assertRaisesRegex(ValueError, "not used with"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "file": "relative-background.npz",
+                "params": {"b_scale": 2.0},
+            }))
+
+    def test_a_file_rejects_unknown_params(self):
+        with self.assertRaisesRegex(ValueError, "unknown.*a_file"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "a_file": "relative-vector-potential.npz",
+                "params": {"b_sclae": 2.0},
+            }))
 
     def test_nonfinite_uniform_component_rejected(self):
         for bad in (float("inf"), float("nan")):
@@ -273,6 +311,26 @@ class BackgroundValidationTests(unittest.TestCase):
         result = _scaled_quotient_sum(terms, 1.0)
         self.assertEqual(float(result[0, 0]), 3.0)
 
+    def test_scaled_reduction_cancels_individually_overflowing_quotients(self):
+        huge = np.finfo(np.float64).max
+        terms = tuple(np.array([[value]], dtype=np.float64) for value in (
+            huge, -huge, 3.0))
+
+        # The first two quotients are +/-2*DBL_MAX and cannot be materialized,
+        # but their exact cancellation leaves the ordinary finite survivor.
+        result = _scaled_quotient_sum(terms, 0.5)
+        self.assertEqual(float(result[0, 0]), 6.0)
+
+    def test_scaled_reduction_recovers_subnormal_from_half_terms(self):
+        tiny = np.nextafter(0.0, 1.0)
+        terms = tuple(np.array([[tiny]], dtype=np.float64) for _ in range(2))
+
+        # Each mathematical quotient is half of the least subnormal and would
+        # round to zero if materialized before the sum; together they equal one
+        # representable least-subnormal result.
+        result = _scaled_quotient_sum(terms, 2.0)
+        self.assertEqual(float(result[0, 0]), tiny)
+
     def test_divergence_reduction_rejects_true_overflow(self):
         g = 1
         shape = (3, 3)
@@ -313,8 +371,149 @@ class BackgroundValidationTests(unittest.TestCase):
         by[g + 1, g] = -1.0 + np.finfo(np.float64).eps
         defect = background_divergence_relative_linf(
             bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertGreater(defect, 0.0)
+        self.assertEqual(defect, 0.0)
+
+    def test_relative_divergence_uses_global_directional_scale_at_null(self):
+        g = 1
+        bx = np.zeros((3, 4), dtype=np.float64)
+        by = np.zeros_like(bx)
+        # Cell zero has O(1) equal/opposite directional derivatives. Cell one
+        # is near a derivative null and carries a cancellation residual that is
+        # locally above 1024 eps but far below the global derivative scale.
+        bx[g, g + 1] = 1.0
+        amplitude = np.ldexp(1.0, -40)
+        bx[g, g + 2] = 1.0 + amplitude
+        by[g + 1, g] = -1.0
+        by[g + 1, g + 1] = -amplitude * (
+            1.0 - 4096.0 * np.finfo(np.float64).eps)
+
+        defect = background_divergence_relative_linf(
+            bx, by, 2, 1, g, 1.0, 1.0)
         self.assertLessEqual(defect, DISCRETE_SOLENOIDAL_TOLERANCE)
+
+    def test_relative_divergence_uses_native_direct_ratio_at_threshold(self):
+        g = 1
+        bx = np.zeros((3, 4), dtype=np.float64)
+        by = np.zeros_like(bx)
+        scale = np.float64(0.6136680112335848)
+        residual = np.float64(1.3953195121611883e-13)
+        half_scale = 0.5 * scale
+        # Cell zero supplies the global residual. Cell one has exactly
+        # cancelling directional derivatives and supplies the global scale.
+        bx[g, g + 2] = half_scale
+        by[g + 1, g] = residual
+        by[g + 1, g + 1] = -half_scale
+
+        defect = background_divergence_relative_linf(
+            bx, by, 2, 1, g, 1.0, 1.0)
+        # Direct scaled division, as used by native background validation, is
+        # one ulp above the tolerance. A log2/exp2 round trip instead rounded it
+        # down to the tolerance and incorrectly accepted this field.
+        self.assertEqual(
+            defect,
+            np.nextafter(DISCRETE_SOLENOIDAL_TOLERANCE, np.inf))
+        self.assertGreater(defect, DISCRETE_SOLENOIDAL_TOLERANCE)
+
+    def test_relative_divergence_rejects_one_ulp_slope_on_large_offset(self):
+        g = 1
+        offset = np.ldexp(1.5, 900)
+        bx = np.full((3, 3), offset, dtype=np.float64)
+        by = np.zeros_like(bx)
+        bx[g, g + 1] = np.nextafter(offset, np.inf)
+
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, 1.0, 1.0)
+        self.assertEqual(defect, 1.0)
+
+    def test_relative_divergence_cancels_opposite_ulps_on_large_offsets(self):
+        g = 1
+        offset = np.ldexp(1.5, 900)
+        bx = np.full((3, 3), offset, dtype=np.float64)
+        by = np.full_like(bx, offset)
+        bx[g, g + 1] = np.nextafter(offset, np.inf)
+        by[g + 1, g] = np.nextafter(offset, -np.inf)
+
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, 1.0, 1.0)
+        self.assertEqual(defect, 0.0)
+
+    def test_relative_divergence_explains_unequal_opposite_storage_ulps(self):
+        g = 1
+        offset = np.ldexp(1.5, 40)
+        bx = np.full((3, 3), offset, dtype=np.float64)
+        by = np.full_like(bx, offset)
+        bx[g, g + 1] = np.nextafter(offset, np.inf)
+        by[g + 1, g] = np.nextafter(
+            np.nextafter(offset, -np.inf), -np.inf)
+
+        # The represented slopes differ by one ulp, but both are nonzero and
+        # oppose one another. Native and Python therefore classify the residual
+        # inside the 1024 metric-face-ulp storage-forward-error envelope.
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, 1.0, 1.0)
+        self.assertEqual(defect, 0.0)
+
+    def test_relative_divergence_rejects_same_sign_ulps_on_large_offsets(self):
+        g = 1
+        offset = np.ldexp(1.5, 40)
+        bx = np.full((3, 3), offset, dtype=np.float64)
+        by = np.full_like(bx, offset)
+        bx[g, g + 1] = np.nextafter(offset, np.inf)
+        by[g + 1, g] = np.nextafter(offset, np.inf)
+
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, 1.0, 1.0)
+        self.assertEqual(defect, 1.0)
+
+    def test_annular_relative_divergence_retains_constant_radial_curvature(self):
+        g = 1
+        bx = np.ones((3, 3), dtype=np.float64)
+        by = np.zeros_like(bx)
+
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, 1.0, 1.0,
+            geometry="cylindrical", origin_x=1.0e16)
+        self.assertEqual(defect, 1.0)
+
+    def test_annular_relative_divergence_matches_native_exact_expansion(self):
+        g = 2
+        bx = np.zeros((5, 5), dtype=np.float64)
+        by = np.zeros_like(bx)
+        dr = 0.000244140625
+        radius = 464305879.05271524
+        origin = radius - 0.5 * dr
+        bx[g, g] = 0.2162073238766361
+        bx[g, g + 1] = 0.21620732387652242
+
+        radial = _scaled_quotient_sum(
+            (bx[g:g + 1, g + 1:g + 2],
+             -bx[g:g + 1, g:g + 1],
+             bx[g:g + 1, g + 1:g + 2],
+             bx[g:g + 1, g:g + 1]),
+            np.array([dr, dr, 2.0, 2.0])[:, None, None],
+            np.array([1.0, 1.0, radius, radius])[:, None, None])
+        self.assertEqual(float(radial[0, 0]), -4.198671064805734e-15)
+
+        # Native's exact expansion gives the complete annular contribution
+        # -4.1986710648057342e-15. The matching axial slope must cancel exactly;
+        # the former greedy Python reducer lost one expansion component and
+        # reported a resolved 3.078e-12 relative defect instead.
+        by[g + 1, g] = 4.198671064805734e-15
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, dr, 1.0,
+            geometry="cylindrical", origin_x=origin)
+        self.assertEqual(defect, 0.0)
+
+        # Cancelling the old greedy reducer's rounded value leaves a genuine
+        # native residual, but it is far below the independently rounded face-
+        # storage envelope. The direct four-term assertion above pins the exact
+        # reducer result; the public validator correctly classifies this tiny
+        # remainder as representational forward error.
+        by[g + 1, g] = 4.198671064779885e-15
+        defect = background_divergence_relative_linf(
+            bx, by, 1, 1, g, dr, 1.0,
+            geometry="cylindrical", origin_x=origin)
+        self.assertEqual(defect, 0.0)
 
     def test_periodic_background_seam_must_wrap(self):
         nx = ny = 2

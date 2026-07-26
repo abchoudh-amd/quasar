@@ -163,6 +163,15 @@ void launch_pic_charge_shape2(const quasar::Grid2D&, const quasar::pic::Particle
 void launch_pic_add_uniform_charge(const quasar::Grid2D&,
                                    quasar::ScalarGrid2D<quasar::Real>&,
                                    quasar::Real density, quasar_stream_t);
+// Synchronously rejects non-finite source values after all deposit-side
+// transformations (wall foldback, filtering/correction, periodic-face restore,
+// and background addition). Either source pointer may be null; `error` is a
+// caller-owned one-element device buffer that is reset on every invocation.
+void launch_pic_validate_finite_sources(
+    const quasar::Grid2D&,
+    const quasar::JField2D<quasar::Real>* current,
+    const quasar::ScalarGrid2D<quasar::Real>* charge,
+    unsigned int* error, quasar_stream_t);
 // The fourth-order staggered derivative factors as D4+ = D2+ S with
 // S=(13/12)I-(1/24)(T+ + T-). This solves Sx*Jx=Jx_raw and Sy*Jy=Jy_raw after
 // the ordinary Esirkepov prefix deposit, making its forward D2 continuity
@@ -192,10 +201,10 @@ void launch_pic_current_correct_cyl_order4(const quasar::Grid2D&,
 void launch_pic_current_periodic_high_faces(
     const quasar::Grid2D&, quasar::JField2D<quasar::Real>&,
     int periodic_x, int periodic_y, quasar_stream_t);
-// Reads + clears the species' persistent deposit-overflow flag and throws a
-// std::runtime_error if any deposit since the last check spilled outside the
-// deposition window. The solver drains it immediately after initial charge and
-// each step's current/next-charge deposits; finalize() is a defensive last drain.
+// Reads + clears the species' persistent deposit-error flag and throws a
+// std::runtime_error if a deposit had an unrepresentable input/result or spilled
+// outside its fixed window. This is deliberately separate from the source scan
+// above, which covers arithmetic performed after the atomic deposits complete.
 void launch_pic_deposit_overflow_check(const quasar::pic::ParticleSpecies&,
                                        quasar_stream_t);
 // Drains the gather/push sticky state-error flag and throws synchronously. The

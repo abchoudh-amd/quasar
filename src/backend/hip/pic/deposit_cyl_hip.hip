@@ -220,7 +220,7 @@ __global__ void deposit_cyl_kernel(quasar::Grid2D g, std::size_t n, double q, do
         return;
       }
       if (jr != 0.0 && colr_face_valid[a] && rowz_valid[b]) {
-        atomicAdd(jx + colr_face[a] + rowz[b], jr);
+        checked_atomic_add(jx + colr_face[a] + rowz[b], jr, overflow);
       }
     }
   }
@@ -256,7 +256,7 @@ __global__ void deposit_cyl_kernel(quasar::Grid2D g, std::size_t n, double q, do
         return;
       }
       if (run != 0.0 && colr_valid[a] && rowz_face_valid[b]) {
-        atomicAdd(jy + colr[a] + rowz_face[b], run);
+        checked_atomic_add(jy + colr[a] + rowz_face[b], run, overflow);
       }
     }
   }
@@ -321,7 +321,9 @@ __global__ void deposit_cyl_kernel(quasar::Grid2D g, std::size_t n, double q, do
           mark_deposit_error(overflow);
           return;
         }
-        if (value != 0.0) atomicAdd(jz + g.index(ir, iz), value);
+        if (value != 0.0) {
+          checked_atomic_add(jz + g.index(ir, iz), value, overflow);
+        }
       }
     }
   };
@@ -394,7 +396,9 @@ __global__ void charge_cyl_kernel(quasar::Grid2D g, std::size_t n, double q,
         mark_deposit_error(overflow);
         return;
       }
-      if (value != 0.0) atomicAdd(rho + g.index(ii, jj), value);
+      if (value != 0.0) {
+        checked_atomic_add(rho + g.index(ii, jj), value, overflow);
+      }
     }
   }
 }

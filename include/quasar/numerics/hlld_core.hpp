@@ -193,9 +193,10 @@ QUASAR_HOST_DEVICE inline MhdFlux hll_flux_x(
 
 // Positivity-oriented local Lax-Friedrichs (Rusanov) anchor. A generic HLL flux
 // with asymmetric Davis speeds is robust as a Riemann fallback, but it is not
-// the Lax-Friedrichs splitting used by the multidimensional ideal-MHD
-// invariant-domain result. The symmetric bracket +/- max(|v_n|+c_f) makes the
-// first-order retry the required convex LF update under the additive CFL bound.
+// the Lax-Friedrichs splitting used by Cartesian ideal-MHD positivity results.
+// The symmetric bracket +/- max(|v_n|+c_f) supplies the convex LF flux for the
+// first-order retry under its additive CFL bound. The complete CT/geometric/
+// background-coupled update is still checked for admissibility at runtime.
 QUASAR_HOST_DEVICE inline MhdFlux lax_friedrichs_flux_x(
     const MhdState& L, const MhdState& R, Real gamma) {
   const Real vxL = L.mx / L.rho;
@@ -221,6 +222,16 @@ QUASAR_HOST_DEVICE QUASAR_HLLD_DEVICE_NOINLINE inline MhdFlux hlld_flux_x(
   auto resolved = [&](Real value, Real scale) {
     return isfinite(value) && fabs(value) > rel_tol * (scale + std::numeric_limits<Real>::min());
   };
+
+  // Besides avoiding a round trip through algebraically identical star states,
+  // this is the exact consistency seam used by multidimensional face
+  // quadrature: a transverse Riemann problem in genuinely one-dimensional data
+  // is a physical-flux evaluation at every quadrature point.
+  if (Lin.rho == Rin.rho && Lin.mx == Rin.mx && Lin.my == Rin.my &&
+      Lin.mz == Rin.mz && Lin.energy == Rin.energy && Lin.bx == Rin.bx &&
+      Lin.by == Rin.by && Lin.bz == Rin.bz) {
+    return physical_flux_x(Lin, gamma);
+  }
 
   // Continuous normal field B_n (CT normally makes the inputs identical). If a
   // caller supplies a mismatch, normalize BOTH states to the same half-scaled

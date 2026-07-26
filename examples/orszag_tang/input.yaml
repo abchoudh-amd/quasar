@@ -9,8 +9,8 @@
 # Standard initial condition (gamma = 5/3), on [0,1] x [0,1]:
 #   rho = gamma^2,  p = gamma
 #   v = (-sin(2*pi*y),  sin(2*pi*x),  0)
-#   B = (-sin(2*pi*y),  sin(4*pi*x),  0) / sqrt(4*pi)
-# (the standard OT magnetic normalization with B0 = 1/sqrt(4*pi)).
+#   B = (-sin(2*pi*y),  sin(4*pi*x),  0)
+# This is the uniformly rescaled mu0=1 form of the standard OT state.
 
 units: normalized
 domain: {nx: 128, ny: 128, lx_m: 1.0, ly_m: 1.0, origin_x_m: 0.0, origin_y_m: 0.0}
@@ -32,9 +32,8 @@ numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssp
 initial:
   type: orszag_tang
   params:
-    # gamma-derived ambient state and B normalization are computed by the IC
-    # generator from numerics.gamma; b0 = 1/sqrt(4*pi) is the standard OT value.
-    b0: 0.2820947918    # 1 / sqrt(4*pi)
+    # With rho=25/9 and p=5/3, the consistent mu0=1 normalization is B0=1.
+    b0: 1.0
 # steps=1000 at cfl=0.1 integrates to t~0.19, the resolved early-time window.
 time: {dt_s: auto, steps: 1000, t_end: 0.2}
 diagnostics: {output_path: out.npz, cadence: 0,

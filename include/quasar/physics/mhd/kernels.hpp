@@ -95,13 +95,17 @@ void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<
 // `b0` is the static background field (B = B0 + b); inactive => zero-background
 // fast path, bit-identical to the original body. `flags` makes the high physical
 // face read the low-face Riemann data on a fully periodic axis, so the two
-// representations of the same periodic face remain bit-identical.
+// representations of the same periodic face remain bit-identical.  MP5/MP7
+// require an order-matched transverse Gauss rule: their reconstructed states are
+// face averages, and the nonlinear Riemann map must be evaluated at recovered
+// point states before being integrated back to a face-average flux.
 void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& iface,
                           const MhdBackgroundField<Real>& b0, int dir,
                           MhdField2D<Real>& flux_out, BoundaryFlags4 flags,
                           Real gamma, stream_t stream,
                           bool hll_only = false,
-                          MhdMomentumFluxParts2D<Real>* momentum_parts = nullptr);
+                          MhdMomentumFluxParts2D<Real>* momentum_parts = nullptr,
+                          int scheme_order = 2);
 
 // -- Conservative flux difference --------------------------------------------
 // Accumulate the conservative finite-volume face-flux divergence into `dudt`:
@@ -120,7 +124,7 @@ void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
 void launch_mhd_background_stress_correction(
     const MhdBackgroundField<Real>& b0, MhdField2D<Real>& dudt,
     BoundaryFlags4 flags, stream_t stream, bool cylindrical = false,
-    int collocation_order = 0);
+    int collocation_order = 0, int scheme_order = 2);
 
 // Active-background momentum residual.  The two directional face fluxes carry
 // material stress in their momentum slots, while `parts_*` carry a factored
@@ -136,7 +140,8 @@ void launch_mhd_split_momentum_residual(
     const MhdField2D<Real>& flux_y,
     const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    bool cylindrical = false, int collocation_order = 0);
+    bool cylindrical = false, int collocation_order = 0,
+    int scheme_order = 2);
 
 // Overwrite the cylindrical radial-momentum rate with the pressure-free tensor
 // form in one common-exponent reduction:
@@ -144,13 +149,14 @@ void launch_mhd_split_momentum_residual(
 // The split/static tensor difference is expanded before rounding, so gas
 // pressure and axial-field terms cancel symbolically instead of being
 // reintroduced after they may already have rounded out of an aggregate face
-// flux. The maximum active path has 20 terms. This launcher is solver-only;
+// flux. The quadrature-expanded active path has at most 64 terms. This launcher
+// is solver-only;
 // launch_mhd_geometric_source remains the standalone source-term API.
 void launch_mhd_cylindrical_radial_momentum_residual(
     const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
     const MhdField2D<Real>& flux_r, const MhdField2D<Real>& flux_z,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    int collocation_order = 0,
+    int collocation_order = 0, int scheme_order = 2,
     const MhdMomentumFluxParts2D<Real>* parts_r = nullptr,
     const MhdMomentumFluxParts2D<Real>* parts_z = nullptr);
 
@@ -205,18 +211,24 @@ void launch_mhd_emf_curl_rate(const EmfField2D<Real>& emf, MhdField2D<Real>& dud
                               Grid2D grid, stream_t stream,
                               bool cylindrical = false);
 
-// Overwrite `actual_rate.energy` with the active-background split equation
-//   -D_E(F_E') + v . [(curl B0) x (B0+b)].
-// The Riemann flux already carries F_E'=F_E-B0.F_B. curl(B0) is formed before
-// multiplication, so a curl-free dominant background produces no B0^2
-// intermediate; the flux divergence and expanded Lorentz-power terms share one
-// exponent reduction. Cylindrical D_E is annular in r.
+// Overwrite `actual_rate.energy` with the CT-consistent active-background
+// change of variables
+//   -D_E(F_E' + B0.F_B) - <B0 . db/dt>.
+// `parts_x/y` retain the small transverse covariance of B0 and F_B from the
+// Riemann face quadrature; the kernel conditions all remaining products around
+// the cell-average B0 before the final reduction.
+// `actual_rate` already contains the final CT in-plane rate and conservative
+// out-of-plane rate.  MP5/MP7 evaluate the cell inner product at tensor Gauss
+// points. Cylindrical D_E is annular in r.
 void launch_mhd_split_energy_residual(
     const MhdBackgroundField<Real>& b0,
-    const MhdField2D<Real>& state,
-    const MhdField2D<Real>& flux_x, const MhdField2D<Real>& flux_y,
+    const MhdField2D<Real>& flux_x,
+    const MhdMomentumFluxParts2D<Real>& parts_x,
+    const MhdField2D<Real>& flux_y,
+    const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& actual_rate, BoundaryFlags4 flags, stream_t stream,
-    bool cylindrical = false, int collocation_order = 0);
+    bool cylindrical = false, int collocation_order = 0,
+    int scheme_order = 2);
 
 // -- SSP-RK stage combine ----------------------------------------------------
 // Pointwise Shu-Osher stage combine over all 8 conserved components:
@@ -243,7 +255,7 @@ void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>
 // p > p_floor. Each cell computes its own density/internal-energy bound; the
 // launcher returns their minimum. The conservative solver passes zero bounds,
 // since strict mathematical positivity (unlike an arbitrary positive floor) is
-// the invariant-domain contract. Pressure admissibility uses the concavity of
+// its acceptance contract. Pressure admissibility uses the concavity of
 // E-|m|^2/(2 rho)-|b|^2/2 and a bracketed bisection, so no cell state is changed.
 // The caller owns/reuses `scratch` for the block-min reduction.
 void launch_mhd_admissible_fraction(
@@ -272,11 +284,14 @@ void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& du
 
 // -- CFL maximum signal rate -------------------------------------------------
 // Reduce the maximum finite-volume Courant coefficient from the four incident
-// faces of every interior cell. At each face alpha=max_side(|v_n|+c_fast,n) is
-// evaluated from the exact reconstructed L/R interface states consumed by the
-// Riemann solver, including its shared CT normal B. Thus both a staggered face
-// that cancels in the cell average and an MP-reconstructed face overshoot enter
-// the bound. Cartesian uses
+// faces of every interior cell. At each configured-HLLD face,
+// alpha=max_side(|v_n|)+max_side(c_fast,n), matching HLLD's common outer fast
+// speed. The piecewise-constant LF retry instead uses its actual
+// alpha=max_side(|v_n|+c_fast,n). Both are evaluated from the exact
+// reconstructed L/R interface states consumed by the Riemann solver, including
+// its shared CT normal B. Thus both a staggered face that cancels in the cell
+// average and an MP-reconstructed point overshoot enter the bound. Cartesian
+// uses
 //   0.5*(alpha_xlo+alpha_xhi)/dx +
 //   0.5*(alpha_ylo+alpha_yhi)/dy.
 // Cylindrical takes the maximum of all three radial operators: the annular
@@ -287,11 +302,25 @@ void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& du
 //       / [dr*(r_c^2+dr^2/12)],
 // and the metric-free B_phi rate 0.5*(alpha_xlo+alpha_xhi)/dr. The ordinary
 // axial half-sum is then added. At the axis the angular-momentum coefficient is
-// 1.5*alpha_xhi/dr. Cartesian uniform states reduce to the familiar additive
-// (|v_x|+c_fast,x)/dx+(|v_y|+c_fast,y)/dy bound. Rates are formed before any
-// unscaled velocity or fast speed, so a finite rate remains representable even
-// when the corresponding physical speed does not. The fast rate sees total
-// B=b+B0. Invalid/non-finite face states contribute infinity.
+// 1.5*alpha_xhi/dr. When each face has coincident L/R states, Cartesian mode
+// reduces to the familiar additive
+// (|v_x|+c_fast,x)/dx+(|v_y|+c_fast,y)/dy bound. Each physical face alpha must
+// itself be finite because the Riemann solver consumes that wave fan before any
+// mesh scaling. The alpha/spacing rates and their multidimensional sum are
+// evaluated with a homogeneous power-of-two scale when necessary, so a finite
+// positive timestep is retained even when the unscaled aggregate rate exceeds
+// binary64. The fast speed sees total B=b+B0. Invalid/non-finite face states or
+// unrepresentable physical face fans contribute infinity.
+//
+// ``ScaledCflRate`` retains the scale used by that homogeneous reduction:
+//
+//   true max rate = scaled_max_rate / rate_scale,
+//   dt            = cfl * rate_scale / scaled_max_rate.
+//
+// The ordinary path always reports rate_scale=1. If its aggregate overflows,
+// the launcher retries once with rate_scale=2^-64. A retry that still overflows
+// cannot have a positive binary64 reciprocal (and physical-fan failures remain
+// infinity under either scale).
 //
 // `scratch` is a caller-owned block-partials buffer reused across calls (the
 // auto-dt loop calls this every step): the launcher (re)sizes it only when it is
@@ -299,12 +328,17 @@ void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& du
 // hipMalloc/hipFree. Ownership stays with the caller, honoring the
 // scratch-ownership contract; the kernel writes every block slot
 // before any read, so a larger reused buffer is safe.
+struct ScaledCflRate {
+  Real scaled_max_rate{};
+  Real rate_scale{Real{1}};
+};
+
 void launch_mhd_cfl_max_rate(
     const quasar::numerics::MhdInterfaceStates<Real>& ifx,
     const quasar::numerics::MhdInterfaceStates<Real>& ify,
     const MhdBackgroundField<Real>& b0, Real gamma,
-    backend::DeviceBuffer<Real>& scratch, Real* host_max_rate,
-    stream_t stream, bool low_order = false, bool cylindrical = false,
+    backend::DeviceBuffer<Real>& scratch, ScaledCflRate* host_rate,
+    stream_t stream, int scheme_order = 2, bool cylindrical = false,
     BoundaryFlags4 flags = BoundaryFlags4{});
 
 // -- Constrained-transport div(B) L-infinity ---------------------------------
@@ -325,18 +359,25 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
                              bool cylindrical = false);
 
 // Scale-free discrete-solenoidality diagnostic used by the live-state
-// preflight.  Each cell reports
+// preflight. Each cell reports
 //
-//   |sum_k t_k| / sum_k |t_k|,
+//   ||d_1+d_2||_inf / || |d_1|+|d_2| ||_inf,
 //
-// where t_k are the signed face/spacing terms in the exact Cartesian or
-// annular CT divergence stencil.  Forming the ratio at a common binary
-// exponent makes it meaningful for subnormal and near-overflow field scales
-// without introducing a unit-dependent absolute floor.  A zero field reports
-// zero; non-finite face data reports infinity.
+// where each d is a complete directional divergence contribution. Cartesian
+// face offsets cancel before normalization; the cylindrical radial d retains
+// the physical B_r/r term. The global directional norm also supplies a
+// meaningful scale at local derivative nulls. Forming both norms from scaled
+// directional values handles subnormal and near-overflow fields without a
+// unit-dependent absolute floor. By default the 1024-face-ulp forward-error
+// envelope is available only at a genuine opposite-sign cross-direction
+// cancellation. ``solver_owned`` widens that envelope to an internally
+// accepted CT/RK state whose exact-arithmetic divergence was already proved;
+// callers must never infer this provenance from field values. A zero stencil
+// reports zero; non-finite face data reports infinity.
 void launch_mhd_ct_divb_relative_linf(
     const MhdField2D<Real>& u, backend::DeviceBuffer<Real>& scratch,
-    Real* host_linf, stream_t stream, bool cylindrical = false);
+    Real* host_linf, stream_t stream, bool cylindrical = false,
+    bool solver_owned = false);
 
 // -- Ghost-layer fill (fluid components) -------------------------------------
 // Fill the ghost layers of ONE boundary `side` (canonical order 0=x_lo, 1=x_hi,

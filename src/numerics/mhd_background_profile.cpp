@@ -20,6 +20,8 @@ namespace quasar::numerics {
 // non-zero uniform background.
 class UniformBackgroundProfile : public IMhdBackgroundProfile {
  public:
+  bool globally_curl_free() const noexcept override { return true; }
+
   void set_uniform(Real b0x, Real b0y, Real b0z) {
     b0x_ = b0x;
     b0y_ = b0y;
@@ -55,6 +57,8 @@ class UniformBackgroundProfile : public IMhdBackgroundProfile {
 // curl-free and provides a small nonuniform profile for registry/deck coverage.
 class LinearVacuumBackgroundProfile : public IMhdBackgroundProfile {
  public:
+  bool globally_curl_free() const noexcept override { return true; }
+
   bool set_parameter(std::string_view name, Real value) override {
     if (name == "gradient") gradient_ = value;
     else if (name == "shear") shear_ = value;

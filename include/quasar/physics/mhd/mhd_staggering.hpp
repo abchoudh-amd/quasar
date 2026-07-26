@@ -44,18 +44,24 @@ inline constexpr int kCellToFace8[8] = {-3, 29, -139, 533,
 
 // Evaluate sum_k weights[k]*sample(k)/denominator without materializing a
 // weighted product, a same-sign partial sum, or a prematurely rounded tiny
-// quotient.  The exact-capacity accumulator pairs large opposite-sign terms
-// before the final binary64 rounding, so constants near DBL_MAX and subnormal
-// constants remain representable through the high-order stencils.
+// quotient. Retain the integer-coefficient numerator as an exact expansion,
+// round that numerator once to a scaled value, then divide once by the common
+// rational denominator. Dividing every term first can destroy an exact
+// distributed cancellation when the denominator is not a power of two
+// (notably the MP5 /60 stencil). The final divide is range-safe, though the
+// rounded-numerator-then-divide sequence may differ by one ulp from a fully
+// correctly rounded exact rational in a double-rounding edge case.
 template <int Count, class Sample>
 QUASAR_HOST_DEVICE inline Real scaled_rational_weighted_sum(
     const int (&weights)[Count], Real denominator, const Sample& sample) {
-  numerics::ScaledProductQuotientAccumulator<Count> sum;
+  numerics::ScaledProductQuotientAccumulator<2 * Count> numerator_sum;
   for (int k = 0; k < Count; ++k) {
-    numerics::append_scaled_product_quotient(
-        sum, static_cast<Real>(weights[k]), sample(k), denominator, Real{1});
+    numerics::append_scaled_exact_product(
+        numerator_sum, static_cast<Real>(weights[k]), sample(k));
   }
-  return numerics::finish_scaled_product_quotient_sum(sum);
+  const numerics::ScaledValue numerator =
+      numerics::finish_scaled_exact_product_sum_to_value(numerator_sum);
+  return numerics::scaled_value_divide(numerator, denominator);
 }
 
 QUASAR_HOST_DEVICE inline int collocation_width(int extent, int nghost) {
@@ -178,7 +184,7 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real face_samples_to_cell_
   return one_sided_face_integral(g, face, axis, fixed, start, width, cell);
 }
 
-// Bounded first-order Godunov collocation used only by the invariant-domain
+// Bounded first-order Godunov collocation used only by the low-order positivity
 // retry. Interior cells average their two bounding CT faces. The outermost high
 // ghost cell has no stored upper face, so use its sole face sample; the
 // first-order physical-interface stencils never need that closure, but keeping

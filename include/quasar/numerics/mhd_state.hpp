@@ -78,55 +78,199 @@ struct MhdBackground {
   Real b0z{};
 };
 
-// Reduce terms already represented as mantissa*2^exponent.  Always pair the
-// largest term with the largest (therefore closest-magnitude) opposite-sign
-// term when one exists.  This preserves a small survivor in expressions such
-// as A+B-A-B+c: combining A+B first can round once at O(A) and leave an ulp(A)
-// residue that overwhelms c even though the exact large terms cancel.
+// A finite value represented without constraining its binary exponent to the
+// binary64 output range.  This is used for intermediate moments which may be
+// individually larger than DBL_MAX but cancel to a representable final flux or
+// source when appended to a shared exponent accumulator.
+struct ScaledValue {
+  Real mantissa{};
+  int exponent{};
+};
+
+// Exact two-sum for independently scaled finite binary64 values.  `high+low`
+// equals lhs+rhs exactly.  When the exponent gap is too wide for the smaller
+// mantissa to enter the larger one's arithmetic bin, retaining the two inputs
+// unchanged is already an exact non-overlapping expansion.
+QUASAR_HOST_DEVICE inline void scaled_two_sum(
+    Real lhs_mantissa, int lhs_exponent,
+    Real rhs_mantissa, int rhs_exponent,
+    ScaledValue& high, ScaledValue& low) {
+  if (lhs_mantissa == Real{0}) {
+    high = ScaledValue{rhs_mantissa, rhs_exponent};
+    low = {};
+    return;
+  }
+  if (rhs_mantissa == Real{0}) {
+    high = ScaledValue{lhs_mantissa, lhs_exponent};
+    low = {};
+    return;
+  }
+  const bool rhs_larger =
+      rhs_exponent > lhs_exponent ||
+      (rhs_exponent == lhs_exponent &&
+       std::fabs(rhs_mantissa) > std::fabs(lhs_mantissa));
+  if (rhs_larger) {
+    const Real temporary_mantissa = lhs_mantissa;
+    const int temporary_exponent = lhs_exponent;
+    lhs_mantissa = rhs_mantissa;
+    lhs_exponent = rhs_exponent;
+    rhs_mantissa = temporary_mantissa;
+    rhs_exponent = temporary_exponent;
+  }
+
+  const int gap = lhs_exponent - rhs_exponent;
+  if (gap > 54) {
+    high = ScaledValue{lhs_mantissa, lhs_exponent};
+    low = ScaledValue{rhs_mantissa, rhs_exponent};
+    return;
+  }
+
+  const Real x = lhs_mantissa;
+  const Real y = scalbn(rhs_mantissa, -gap);
+  const Real rounded = x + y;
+  const Real virtual_y = rounded - x;
+  const Real error = (x - (rounded - virtual_y)) + (y - virtual_y);
+  if (rounded == Real{0}) {
+    high = {};
+  } else {
+    int shift = 0;
+    high.mantissa = frexp(rounded, &shift);
+    high.exponent = lhs_exponent + shift;
+  }
+  if (error == Real{0}) {
+    low = {};
+  } else {
+    int shift = 0;
+    low.mantissa = frexp(error, &shift);
+    low.exponent = lhs_exponent + shift;
+  }
+}
+
+// Reduce normalized mantissa*2^exponent terms through an exact floating-point
+// expansion. Each nonzero finite mantissa must satisfy 0.5 <= |mantissa| < 1;
+// all producers in this header establish that invariant with frexp.
+// A greedy largest-opposite pairing is insufficient: distributed cancellation
+// can leave one ulp of an intermediate (and after scaling, a huge false
+// residual) even when the input sum is exactly zero.  Grow-expansion retains
+// every two-sum roundoff component, so no information is discarded before the
+// final correctly-rounded collapse.
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline ScaledValue
+reduce_scaled_terms_to_value(
+    Real* mantissa, int* exponent, int count) {
+  int active = 0;
+  for (int k = 0; k < count; ++k) {
+    if (mantissa[k] == Real{0}) continue;
+    mantissa[active] = mantissa[k];
+    exponent[active] = exponent[k];
+    ++active;
+  }
+  if (active == 0) return {};
+
+  // Ascending magnitude is the canonical expansion order.  Insertion sort is
+  // efficient for these short fixed arrays and device-portable.
+  for (int k = 1; k < active; ++k) {
+    const Real key_mantissa = mantissa[k];
+    const int key_exponent = exponent[k];
+    int p = k;
+    while (p > 0 &&
+           (exponent[p - 1] > key_exponent ||
+            (exponent[p - 1] == key_exponent &&
+             std::fabs(mantissa[p - 1]) > std::fabs(key_mantissa)))) {
+      mantissa[p] = mantissa[p - 1];
+      exponent[p] = exponent[p - 1];
+      --p;
+    }
+    mantissa[p] = key_mantissa;
+    exponent[p] = key_exponent;
+  }
+
+  // Grow one exact, non-overlapping expansion in place.  Before source `s`,
+  // the expansion occupies only [0,s), so its writes cannot clobber a future
+  // sorted source term.
+  int expansion_count = 0;
+  for (int source = 0; source < active; ++source) {
+    ScaledValue carry{mantissa[source], exponent[source]};
+    int write = 0;
+    for (int k = 0; k < expansion_count; ++k) {
+      const ScaledValue component{mantissa[k], exponent[k]};
+      ScaledValue high, low;
+      scaled_two_sum(carry.mantissa, carry.exponent,
+                     component.mantissa, component.exponent, high, low);
+      if (low.mantissa != Real{0}) {
+        mantissa[write] = low.mantissa;
+        exponent[write] = low.exponent;
+        ++write;
+      }
+      carry = high;
+    }
+    if (carry.mantissa != Real{0}) {
+      mantissa[write] = carry.mantissa;
+      exponent[write] = carry.exponent;
+      ++write;
+    }
+    expansion_count = write;
+  }
+  if (expansion_count == 0) return {};
+
+  // Finalize like a correctly-rounded expansion sum (the same half-even fix
+  // used by robust fsum implementations), after normalizing to the largest
+  // remaining exponent.  Normalization prevents physical-range overflow; any
+  // component that underflows at this relative scale is far below one ulp and
+  // cannot affect the rounded leading component.
+  const int scale = exponent[expansion_count - 1];
+  int n = expansion_count - 1;
+  Real high = scalbn(mantissa[n], exponent[n] - scale);
+  Real low = Real{0};
+  while (n > 0) {
+    const Real x = high;
+    --n;
+    const Real y = scalbn(mantissa[n], exponent[n] - scale);
+    high = x + y;
+    const Real virtual_y = high - x;
+    low = y - virtual_y;
+    if (low != Real{0}) break;
+  }
+  if (n > 0) {
+    const Real next = scalbn(mantissa[n - 1], exponent[n - 1] - scale);
+    if ((low < Real{0} && next < Real{0}) ||
+        (low > Real{0} && next > Real{0})) {
+      const Real doubled_low = Real{2} * low;
+      const Real adjusted = high + doubled_low;
+      if (adjusted - high == doubled_low) high = adjusted;
+    }
+  }
+  if (high == Real{0}) return {};
+  int shift = 0;
+  const Real result_mantissa = frexp(high, &shift);
+  return ScaledValue{result_mantissa, scale + shift};
+}
+
+// Return the correctly rounded difference of two finite binary64 values while
+// retaining an exponent outside binary64's materialized range.  This is the
+// range-safe counterpart of `minuend - subtrahend`: opposite-sign operands
+// near DBL_MAX may have a finite scaled difference even though ordinary
+// subtraction overflows before a later small multiplier is applied.
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline ScaledValue
+scaled_difference_to_value(Real minuend, Real subtrahend) {
+  if (!std::isfinite(minuend) || !std::isfinite(subtrahend)) {
+    return ScaledValue{minuend - subtrahend, 0};
+  }
+  Real mantissa[2]{};
+  int exponent[2]{};
+  if (minuend != Real{0}) {
+    mantissa[0] = frexp(minuend, &exponent[0]);
+  }
+  if (subtrahend != Real{0}) {
+    mantissa[1] = frexp(-subtrahend, &exponent[1]);
+  }
+  return reduce_scaled_terms_to_value(mantissa, exponent, 2);
+}
+
 QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline Real reduce_scaled_terms(
     Real* mantissa, int* exponent, int count) {
-  auto larger_magnitude = [&](int lhs, int rhs) {
-    return exponent[lhs] > exponent[rhs] ||
-           (exponent[lhs] == exponent[rhs] &&
-            std::fabs(mantissa[lhs]) > std::fabs(mantissa[rhs]));
-  };
-
-  while (true) {
-    int largest = -1;
-    for (int k = 0; k < count; ++k) {
-      if (mantissa[k] == Real{0}) continue;
-      if (largest < 0 || larger_magnitude(k, largest)) largest = k;
-    }
-    if (largest < 0) return Real{0};
-
-    int opposite = -1;
-    int same_sign = -1;
-    const bool largest_negative = mantissa[largest] < Real{0};
-    for (int k = 0; k < count; ++k) {
-      if (k == largest || mantissa[k] == Real{0}) continue;
-      const bool opposite_sign =
-          (mantissa[k] < Real{0}) != largest_negative;
-      int& candidate = opposite_sign ? opposite : same_sign;
-      if (candidate < 0 || larger_magnitude(k, candidate)) candidate = k;
-    }
-
-    const int partner = (opposite >= 0) ? opposite : same_sign;
-    if (partner < 0) {
-      return scalbn(mantissa[largest], exponent[largest]);
-    }
-
-    const int common = exponent[largest];
-    const Real sum = mantissa[largest] +
-        scalbn(mantissa[partner], exponent[partner] - common);
-    mantissa[partner] = Real{0};
-    if (sum == Real{0}) {
-      mantissa[largest] = Real{0};
-      continue;
-    }
-    int shift = 0;
-    mantissa[largest] = frexp(sum, &shift);
-    exponent[largest] = common + shift;
-  }
+  const ScaledValue value =
+      reduce_scaled_terms_to_value(mantissa, exponent, count);
+  return scalbn(value.mantissa, value.exponent);
 }
 
 // Sum a small number of signed products without forming any product at its
@@ -251,6 +395,53 @@ finish_scaled_quaternary_sum(
   return sum.has_nonfinite ? sum.nonfinite_sum + finite_sum : finite_sum;
 }
 
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline ScaledValue
+finish_scaled_quaternary_sum_to_value(
+    ScaledQuaternaryAccumulator& sum) {
+  if (sum.has_nonfinite) {
+    const Real finite_sum =
+        reduce_scaled_terms(sum.mantissa, sum.exponent, sum.count);
+    return ScaledValue{sum.nonfinite_sum + finite_sum, 0};
+  }
+  return reduce_scaled_terms_to_value(
+      sum.mantissa, sum.exponent, sum.count);
+}
+
+// Append (value.mantissa*2^value.exponent)*b*c*d to a quaternary accumulator
+// without constraining the intermediate value to binary64's output exponent.
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
+append_scaled_value_product(
+    ScaledQuaternaryAccumulator& sum, const ScaledValue& value,
+    Real b, Real c, Real d) {
+  if (sum.count >= ScaledQuaternaryAccumulator::kMaxTerms) {
+    sum.nonfinite_sum = std::numeric_limits<Real>::quiet_NaN();
+    sum.has_nonfinite = true;
+    return;
+  }
+  const int k = sum.count++;
+  if (!std::isfinite(value.mantissa) || !std::isfinite(b) ||
+      !std::isfinite(c) || !std::isfinite(d)) {
+    const Real product = ((scalbn(value.mantissa, value.exponent) * b) * c) * d;
+    sum.nonfinite_sum = sum.has_nonfinite
+                            ? sum.nonfinite_sum + product
+                            : product;
+    sum.has_nonfinite = true;
+    return;
+  }
+  if (value.mantissa == Real{0} || b == Real{0} ||
+      c == Real{0} || d == Real{0}) return;
+
+  int ev = 0, eb = 0, ec = 0, ed = 0;
+  const Real mv = frexp(value.mantissa, &ev);
+  const Real mb = frexp(b, &eb);
+  const Real mc = frexp(c, &ec);
+  const Real md = frexp(d, &ed);
+  const Real m = ((mv * mb) * mc) * md;
+  int shift = 0;
+  sum.mantissa[k] = frexp(m, &shift);
+  sum.exponent[k] = value.exponent + ev + eb + ec + ed + shift;
+}
+
 // Sum up to 24 signed products of four factors without forming any product at
 // its physical exponent first.  Shorter products use unit factors.  Field-split
 // energy fluxes need this form because terms such as v_n*B0_t*b_t must cancel
@@ -283,9 +474,10 @@ scaled_quaternary_product_sum(
 // as two factors so expressions such as m_phi^2/(rho*r) do not overflow or
 // underflow while first forming rho*r or 1/rho.
 //
-// The six-term bound is deliberate: all current MHD uses fit in fixed-size
-// thread-local storage (the cylindrical div(B) stencil is the largest, with six
-// signed terms), avoiding dynamic storage in device code.
+// The bound is a template parameter so each caller reserves exactly the
+// fixed-size thread-local storage its fused operator requires. The ordinary
+// standalone stencil below remains capped at six signed terms; larger
+// multidimensional residuals instantiate correspondingly larger capacities.
 template <int MaxTerms>
 struct ScaledProductQuotientAccumulator {
   Real mantissa[MaxTerms]{};
@@ -294,6 +486,86 @@ struct ScaledProductQuotientAccumulator {
   int count{};
   bool has_nonfinite{};
 };
+
+// Append the exact binary product a*b as a two-component scaled expansion.
+// Multiplying the normalized mantissas keeps the leading product in range;
+// FMA recovers its exact roundoff component.  Integer-coefficient rational
+// stencils need both pieces: reducing only rounded coefficient*sample products
+// can leave a large false residual even when their exact dyadic numerator is
+// zero.
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
+append_scaled_exact_product(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum, Real a, Real b) {
+  if (sum.count + 2 > MaxTerms) {
+    sum.nonfinite_sum = std::numeric_limits<Real>::quiet_NaN();
+    sum.has_nonfinite = true;
+    return;
+  }
+  if (!std::isfinite(a) || !std::isfinite(b)) {
+    const Real product = a * b;
+    sum.nonfinite_sum = sum.has_nonfinite
+                            ? sum.nonfinite_sum + product
+                            : product;
+    sum.has_nonfinite = true;
+    return;
+  }
+  if (a == Real{0} || b == Real{0}) return;
+
+  int ea = 0, eb = 0;
+  const Real ma = frexp(a, &ea);
+  const Real mb = frexp(b, &eb);
+  const Real high = ma * mb;
+  const Real low = fma(ma, mb, -high);
+  const auto append_component = [&](Real component) {
+    if (component == Real{0}) return;
+    const int k = sum.count++;
+    int shift = 0;
+    sum.mantissa[k] = frexp(component, &shift);
+    sum.exponent[k] = ea + eb + shift;
+  };
+  append_component(high);
+  append_component(low);
+}
+
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline ScaledValue
+finish_scaled_exact_product_sum_to_value(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum) {
+  if (sum.has_nonfinite) {
+    const Real finite_sum =
+        reduce_scaled_terms(sum.mantissa, sum.exponent, sum.count);
+    return ScaledValue{sum.nonfinite_sum + finite_sum, 0};
+  }
+  return reduce_scaled_terms_to_value(
+      sum.mantissa, sum.exponent, sum.count);
+}
+
+// Divide a retained scaled value without first materializing its possibly
+// out-of-range numerator. The denominator mantissa is in [0.5,1), so the
+// intermediate quotient remains representable and is scaled only at the end.
+// Callers that began with a multi-component exact numerator have already
+// rounded that numerator once to ScaledValue; this range-safe division does not
+// promise correctly rounded exact-rational output in the rare double-rounding
+// case.
+QUASAR_HOST_DEVICE inline Real scaled_value_divide(
+    const ScaledValue& numerator, Real denominator) {
+  if (!std::isfinite(numerator.mantissa) ||
+      !std::isfinite(denominator) || denominator == Real{0}) {
+    return scalbn(numerator.mantissa, numerator.exponent) / denominator;
+  }
+  if (numerator.mantissa == Real{0}) {
+    return numerator.mantissa / denominator;
+  }
+  int denominator_exponent = 0;
+  const Real denominator_mantissa =
+      frexp(denominator, &denominator_exponent);
+  int quotient_shift = 0;
+  const Real quotient_mantissa = frexp(
+      numerator.mantissa / denominator_mantissa, &quotient_shift);
+  return scalbn(quotient_mantissa,
+                numerator.exponent - denominator_exponent + quotient_shift);
+}
 
 template <int MaxTerms>
 QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
@@ -336,6 +608,153 @@ append_scaled_product_quotient(
   sum.exponent[k] = ea + eb - ed0 - ed1 + shift;
 }
 
+// Append a*b*c/(d0*d1) while retaining all three numerator factors until
+// their binary exponents have been separated.  Transverse MHD face
+// quadrature uses this to place w_q*B0(q)*b(q) directly into the final cell
+// reduction: reducing the quadrature product to one rounded face scalar first
+// can erase a small survivor beside cancelling out-of-range products.
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
+append_scaled_triple_product_quotient(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum,
+    Real a, Real b, Real c, Real d0, Real d1) {
+  if (sum.count >= MaxTerms) {
+    sum.nonfinite_sum = std::numeric_limits<Real>::quiet_NaN();
+    sum.has_nonfinite = true;
+    return;
+  }
+  const int k = sum.count++;
+  if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) ||
+      !std::isfinite(d0) || !std::isfinite(d1) ||
+      d0 == Real{0} || d1 == Real{0}) {
+    const Real term = (((a * b) * c) / d0) / d1;
+    if (!std::isfinite(term)) {
+      sum.nonfinite_sum = sum.has_nonfinite
+                              ? sum.nonfinite_sum + term
+                              : term;
+      sum.has_nonfinite = true;
+    } else if (term != Real{0}) {
+      sum.mantissa[k] = frexp(term, &sum.exponent[k]);
+    }
+    return;
+  }
+  if (a == Real{0} || b == Real{0} || c == Real{0}) return;
+
+  int ea = 0, eb = 0, ec = 0, ed0 = 0, ed1 = 0;
+  const Real ma = frexp(a, &ea);
+  const Real mb = frexp(b, &eb);
+  const Real mc = frexp(c, &ec);
+  const Real md0 = frexp(d0, &ed0);
+  const Real md1 = frexp(d1, &ed1);
+  const Real m = (((ma * mb) * mc) / md0) / md1;
+  int shift = 0;
+  sum.mantissa[k] = frexp(m, &shift);
+  sum.exponent[k] = ea + eb + ec - ed0 - ed1 + shift;
+}
+
+// Append (value.mantissa*2^value.exponent)*coefficient/(d0*d1) without
+// materializing `value`.  In particular, an out-of-range transverse covariance
+// can cancel its factorized mean contribution inside the final cell reduction.
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
+append_scaled_value_quotient(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum,
+    const ScaledValue& value, Real coefficient, Real d0, Real d1) {
+  if (sum.count >= MaxTerms) {
+    sum.nonfinite_sum = std::numeric_limits<Real>::quiet_NaN();
+    sum.has_nonfinite = true;
+    return;
+  }
+  const int k = sum.count++;
+  if (!std::isfinite(value.mantissa) || !std::isfinite(coefficient) ||
+      !std::isfinite(d0) || !std::isfinite(d1) ||
+      d0 == Real{0} || d1 == Real{0}) {
+    const Real term = ((scalbn(value.mantissa, value.exponent) * coefficient) /
+                       d0) / d1;
+    if (!std::isfinite(term)) {
+      sum.nonfinite_sum = sum.has_nonfinite
+                              ? sum.nonfinite_sum + term
+                              : term;
+      sum.has_nonfinite = true;
+    } else if (term != Real{0}) {
+      sum.mantissa[k] = frexp(term, &sum.exponent[k]);
+    }
+    return;
+  }
+  if (value.mantissa == Real{0} || coefficient == Real{0}) return;
+
+  int ev = 0, ec = 0, ed0 = 0, ed1 = 0;
+  const Real mv = frexp(value.mantissa, &ev);
+  const Real mc = frexp(coefficient, &ec);
+  const Real md0 = frexp(d0, &ed0);
+  const Real md1 = frexp(d1, &ed1);
+  const Real m = ((mv * mc) / md0) / md1;
+  int shift = 0;
+  sum.mantissa[k] = frexp(m, &shift);
+  sum.exponent[k] =
+      value.exponent + ev + ec - ed0 - ed1 + shift;
+}
+
+// Append (value.mantissa*2^value.exponent)*b*c/(d0*d1) without first
+// materializing `value`.  The extra numerator factor is kept separate so a
+// large scaled difference may be multiplied by a tiny flux without either an
+// intermediate overflow or underflow.
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
+append_scaled_value_product_quotient(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum,
+    const ScaledValue& value, Real b, Real c, Real d0, Real d1) {
+  if (sum.count >= MaxTerms) {
+    sum.nonfinite_sum = std::numeric_limits<Real>::quiet_NaN();
+    sum.has_nonfinite = true;
+    return;
+  }
+  const int k = sum.count++;
+  if (!std::isfinite(value.mantissa) || !std::isfinite(b) ||
+      !std::isfinite(c) || !std::isfinite(d0) || !std::isfinite(d1) ||
+      d0 == Real{0} || d1 == Real{0}) {
+    const Real term = ((((scalbn(value.mantissa, value.exponent) * b) * c) /
+                        d0) /
+                       d1);
+    if (!std::isfinite(term)) {
+      sum.nonfinite_sum = sum.has_nonfinite
+                              ? sum.nonfinite_sum + term
+                              : term;
+      sum.has_nonfinite = true;
+    } else if (term != Real{0}) {
+      sum.mantissa[k] = frexp(term, &sum.exponent[k]);
+    }
+    return;
+  }
+  if (value.mantissa == Real{0} || b == Real{0} || c == Real{0}) return;
+
+  int ev = 0, eb = 0, ec = 0, ed0 = 0, ed1 = 0;
+  const Real mv = frexp(value.mantissa, &ev);
+  const Real mb = frexp(b, &eb);
+  const Real mc = frexp(c, &ec);
+  const Real md0 = frexp(d0, &ed0);
+  const Real md1 = frexp(d1, &ed1);
+  const Real m = (((mv * mb) * mc) / md0) / md1;
+  int shift = 0;
+  sum.mantissa[k] = frexp(m, &shift);
+  sum.exponent[k] =
+      value.exponent + ev + eb + ec - ed0 - ed1 + shift;
+}
+
+// Append (minuend-subtrahend)*multiplier*coefficient/(d0*d1) while
+// retaining the difference in scaled form through the multiplication.
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline void
+append_scaled_difference_product_quotient(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum,
+    Real minuend, Real subtrahend, Real multiplier, Real coefficient,
+    Real d0, Real d1) {
+  const ScaledValue difference =
+      scaled_difference_to_value(minuend, subtrahend);
+  append_scaled_value_product_quotient(
+      sum, difference, multiplier, coefficient, d0, d1);
+}
+
 template <int MaxTerms>
 QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline Real
 finish_scaled_product_quotient_sum(
@@ -343,6 +762,19 @@ finish_scaled_product_quotient_sum(
   const Real finite_sum =
       reduce_scaled_terms(sum.mantissa, sum.exponent, sum.count);
   return sum.has_nonfinite ? sum.nonfinite_sum + finite_sum : finite_sum;
+}
+
+template <int MaxTerms>
+QUASAR_HOST_DEVICE QUASAR_MHD_NUMERICS_NOINLINE inline ScaledValue
+finish_scaled_product_quotient_sum_to_value(
+    ScaledProductQuotientAccumulator<MaxTerms>& sum) {
+  if (sum.has_nonfinite) {
+    const Real finite_sum =
+        reduce_scaled_terms(sum.mantissa, sum.exponent, sum.count);
+    return ScaledValue{sum.nonfinite_sum + finite_sum, 0};
+  }
+  return reduce_scaled_terms_to_value(
+      sum.mantissa, sum.exponent, sum.count);
 }
 
 template <int MaxTerms>
@@ -366,10 +798,9 @@ QUASAR_HOST_DEVICE inline Real scaled_product_quotient_sum(
   return scaled_product_quotient_sum_impl<6>(a, b, d0, d1, count);
 }
 
-// Extended reduction used only where a cylindrical background-stress/source
-// cancellation spans more than six signed terms.  Twenty terms cover the fused
-// radial split-stress operator (currently 17) with room for its paired metric
-// corrections, while keeping the hotter ordinary stencil path at six terms.
+// Legacy extended standalone reduction for cancellation spanning more than six
+// signed terms. Fused multidimensional kernels instantiate the accumulator
+// directly with their operator-specific capacities.
 QUASAR_HOST_DEVICE inline Real scaled_product_quotient_sum_extended(
     const Real* a, const Real* b, const Real* d0, const Real* d1,
     int count) {

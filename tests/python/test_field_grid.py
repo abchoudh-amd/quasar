@@ -223,8 +223,10 @@ class FileGridBindingTests(unittest.TestCase):
             _write_map(path)
             params = load_file_grid_npz(tmp, "field.npz", label="field.path")
             evaluator = _core.magnetostatics.create_field_evaluator("file_grid")
+            self.assertFalse(evaluator.provides_grad_B)
             evaluator.configure(params)
             self.assertEqual(type(evaluator).__name__, "FileGridEvaluator")
+            self.assertTrue(evaluator.provides_grad_B)
 
             points = PointCloud()
             points.add(Vec3(10.125, -2.5, 5.0))
@@ -321,10 +323,13 @@ class FileGridDeckTests(unittest.TestCase):
             self.assertEqual(params["spacing"][1], 1.0)
             evaluator = _core.magnetostatics.create_field_evaluator("file_grid")
             evaluator.configure(params)
+            self.assertFalse(evaluator.provides_grad_B)
             points = PointCloud()
             points.add(Vec3(0.25, 2.0, 0.75))
             result = evaluator.evaluate_B(ConductorSystem(), points)
             np.testing.assert_array_equal(result[0], [0.0, 0.0, 1.0])
+            with self.assertRaisesRegex(RuntimeError, "full magnetic-field gradient"):
+                evaluator.evaluate_grad_B(ConductorSystem(), points)
 
 
 if __name__ == "__main__":

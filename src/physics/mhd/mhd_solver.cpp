@@ -3,6 +3,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/core/registry.hpp"
 #include "quasar/numerics/mhd_background_profile.hpp"
+#include "quasar/numerics/mhd_state.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 
@@ -22,6 +23,14 @@ namespace {
 
 inline constexpr Real kDiscreteSolenoidalTolerance =
     Real{1024} * std::numeric_limits<Real>::epsilon();
+inline constexpr int kDiscreteSolenoidalRoundoffUlpShift = 10;  // 2^10 ulps
+// The fixed-boundary vacuum projection stops on a global algebraic residual,
+// so its pointwise staggered curl is a few parts in 1e9 for the finest supplied
+// example. This 1e-8 check is only defense in depth against a proof that plainly
+// disagrees with its samples; it is not itself a proof or a force-error bound.
+// Authorization to omit B0's self-stress must come from a trusted analytic or
+// projection construction.
+inline constexpr Real kDiscreteCurlFreeTolerance = Real{1e-8};
 
 template <class Base>
 void require_registered_name(const std::string& name, const char* what) {
@@ -143,13 +152,14 @@ MhdConfig validate_config(MhdConfig cfg) {
     throw std::invalid_argument{
         "MhdSolver2D: the radial axis cannot use periodic boundaries"};
   }
-  if (!(std::isfinite(cfg.background.bx0) &&
-        std::isfinite(cfg.background.by0) &&
-        std::isfinite(cfg.background.bz0))) {
-    throw std::invalid_argument{
-        "MhdSolver2D: background parameters must be finite"};
-  }
   if (cfg.background.enabled) {
+    if (!(std::isfinite(cfg.background.bx0) &&
+          std::isfinite(cfg.background.by0) &&
+          std::isfinite(cfg.background.bz0) &&
+          std::isfinite(cfg.background.profile_scale))) {
+      throw std::invalid_argument{
+          "MhdSolver2D: background parameters must be finite"};
+    }
     if (cfg.background.profile.empty() ||
         !Registry<numerics::IMhdBackgroundProfile>::instance().contains(
             cfg.background.profile)) {
@@ -210,58 +220,197 @@ Grid2D resolve_working_grid(const Grid2D& deck_grid, int required,
   return g;
 }
 
-// Validate the exact staggered samples consumed by the solver. This helper is
-// shared by constructor-sampled analytic profiles and the deferred validation
-// of explicitly seeded buffers, so native and Python callers have one
-// solenoidal contract. Only the in-plane components enter the divergence
-// stencil; b0z is toroidal/cell-centred and cannot relax a div(B0x,B0y) error.
-Real normalized_product_quotient_defect(const Real* numerator,
-                                        const Real* coefficient,
-                                        const Real* denominator, int count) {
-  constexpr int kMaxTerms = 4;
-  Real mantissa[kMaxTerms]{};
-  int exponent[kMaxTerms]{};
-  int max_exponent = std::numeric_limits<int>::min();
-  for (int term = 0; term < count; ++term) {
-    if (!(std::isfinite(numerator[term]) &&
-          std::isfinite(coefficient[term]) &&
-          std::isfinite(denominator[term]) &&
-          denominator[term] > Real{0})) {
-      return std::numeric_limits<Real>::infinity();
-    }
-    if (numerator[term] == Real{0} || coefficient[term] == Real{0}) {
-      continue;
-    }
-    int en = 0;
-    int ec = 0;
-    int ed = 0;
-    const Real mn = std::frexp(numerator[term], &en);
-    const Real mc = std::frexp(coefficient[term], &ec);
-    const Real md = std::frexp(denominator[term], &ed);
-    int adjustment = 0;
-    mantissa[term] = std::frexp((mn * mc) / md, &adjustment);
-    exponent[term] = en + ec - ed + adjustment;
-    max_exponent = std::max(max_exponent, exponent[term]);
-  }
-  if (max_exponent == std::numeric_limits<int>::min()) return Real{0};
+// Form one signed directional derivative only after cancelling the local
+// field offset. Retaining the difference and quotient in scaled form avoids
+// both overflow and underflow when a small represented slope sits on a field
+// near the ends of binary64's exponent range.
+numerics::ScaledValue scaled_directional_derivative(
+    Real upper, Real lower, Real spacing) {
+  const numerics::ScaledValue difference =
+      numerics::scaled_difference_to_value(upper, lower);
+  numerics::ScaledProductQuotientAccumulator<1> derivative;
+  numerics::append_scaled_value_quotient(
+      derivative, difference, Real{1}, spacing, Real{1});
+  return numerics::finish_scaled_product_quotient_sum_to_value(derivative);
+}
 
-  Real signed_sum = Real{0};
-  Real compensation = Real{0};
-  Real absolute_sum = Real{0};
-  for (int term = 0; term < count; ++term) {
-    if (mantissa[term] == Real{0}) continue;
-    const Real scaled =
-        std::scalbn(mantissa[term], exponent[term] - max_exponent);
-    const Real corrected = scaled - compensation;
-    const Real updated = signed_sum + corrected;
-    compensation = (updated - signed_sum) - corrected;
-    signed_sum = updated;
-    absolute_sum += std::abs(scaled);
+// One representational ulp as a scaled value. This is not a raw-field scale:
+// only the last place that can be rounded when a stored face is updated enters
+// the divergence uncertainty. The subnormal bin has one fixed ulp.
+numerics::ScaledValue scaled_ulp(Real value) {
+  if (!std::isfinite(value)) {
+    return numerics::ScaledValue{
+        std::numeric_limits<Real>::infinity(), 0};
   }
-  if (!(absolute_sum > Real{0}) || !std::isfinite(absolute_sum)) {
+  const Real magnitude = std::abs(value);
+  if (magnitude < std::numeric_limits<Real>::min()) {
+    int exponent = 0;
+    const Real mantissa = std::frexp(
+        std::numeric_limits<Real>::denorm_min(), &exponent);
+    return numerics::ScaledValue{mantissa, exponent};
+  }
+  int exponent = 0;
+  (void)std::frexp(magnitude, &exponent);
+  return numerics::ScaledValue{
+      Real{0.5}, exponent - std::numeric_limits<Real>::digits + 1};
+}
+
+numerics::ScaledValue scaled_directional_roundoff(
+    Real upper, Real lower, Real spacing) {
+  numerics::ScaledProductQuotientAccumulator<2> uncertainty;
+  numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(upper), Real{1}, spacing, Real{1});
+  numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(lower), Real{1}, spacing, Real{1});
+  return numerics::finish_scaled_product_quotient_sum_to_value(uncertainty);
+}
+
+// The annular radial divergence is
+//   (B_hi-B_lo)/dr + (B_hi+B_lo)/(2*r_c).
+// Its first term cancels a local field offset, while the second retains the
+// physical B_r/r curvature of a constant radial field. Keep both terms scaled
+// so a thin, large-radius annulus neither loses curvature in rounded (1+-q)
+// coefficients nor overflows an intermediate face difference.
+numerics::ScaledValue scaled_annular_radial_divergence(
+    Real upper, Real lower, Real spacing, Real radius) {
+  numerics::ScaledProductQuotientAccumulator<4> radial;
+  numerics::append_scaled_product_quotient(
+      radial, upper, Real{1}, spacing, Real{1});
+  numerics::append_scaled_product_quotient(
+      radial, lower, Real{-1}, spacing, Real{1});
+  numerics::append_scaled_product_quotient(
+      radial, upper, Real{1}, Real{2}, radius);
+  numerics::append_scaled_product_quotient(
+      radial, lower, Real{1}, Real{2}, radius);
+  return numerics::finish_scaled_product_quotient_sum_to_value(radial);
+}
+
+numerics::ScaledValue scaled_annular_radial_roundoff(
+    Real upper, Real lower, Real spacing, Real radius) {
+  Real q = Real{0.5} * (spacing / radius);
+  if (q > Real{1}) q = Real{1};
+  numerics::ScaledProductQuotientAccumulator<2> uncertainty;
+  numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(upper), Real{1} + q, spacing, Real{1});
+  numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(lower), Real{1} - q, spacing, Real{1});
+  return numerics::finish_scaled_product_quotient_sum_to_value(uncertainty);
+}
+
+numerics::ScaledValue scaled_directional_sum(
+    const numerics::ScaledValue& lhs,
+    const numerics::ScaledValue& rhs, Real rhs_sign) {
+  if (!(std::isfinite(lhs.mantissa) && std::isfinite(rhs.mantissa) &&
+        std::isfinite(rhs_sign))) {
+    return numerics::ScaledValue{
+        std::numeric_limits<Real>::infinity(), 0};
+  }
+  numerics::ScaledProductQuotientAccumulator<2> residual_sum;
+  numerics::append_scaled_value_quotient(
+      residual_sum, lhs, Real{1}, Real{1}, Real{1});
+  numerics::append_scaled_value_quotient(
+      residual_sum, rhs, rhs_sign, Real{1}, Real{1});
+  return numerics::finish_scaled_product_quotient_sum_to_value(residual_sum);
+}
+
+numerics::ScaledValue scaled_directional_magnitude_sum(
+    const numerics::ScaledValue& lhs,
+    const numerics::ScaledValue& rhs) {
+  const numerics::ScaledValue lhs_abs{std::abs(lhs.mantissa), lhs.exponent};
+  const numerics::ScaledValue rhs_abs{std::abs(rhs.mantissa), rhs.exponent};
+  return scaled_directional_sum(lhs_abs, rhs_abs, Real{1});
+}
+
+bool scaled_abs_less_equal_power_of_two(
+    const numerics::ScaledValue& lhs,
+    const numerics::ScaledValue& rhs, int rhs_exponent_shift) {
+  if (!(std::isfinite(lhs.mantissa) && std::isfinite(rhs.mantissa))) {
+    return false;
+  }
+  if (lhs.mantissa == Real{0}) return true;
+  if (rhs.mantissa == Real{0}) return false;
+  const int shifted_rhs_exponent = rhs.exponent + rhs_exponent_shift;
+  return lhs.exponent < shifted_rhs_exponent ||
+      (lhs.exponent == shifted_rhs_exponent &&
+       std::abs(lhs.mantissa) <= std::abs(rhs.mantissa));
+}
+
+// Solver-owned CT/RK updates round each face independently. At a genuine
+// cross-direction cancellation, admit a residual no larger than 1024 ulps of
+// the metric-weighted face storage. A lone one-ulp slope has no opposing
+// directional term and therefore cannot use this allowance.
+bool residual_is_roundoff_explained(
+    const numerics::ScaledValue& lhs,
+    const numerics::ScaledValue& rhs,
+    const numerics::ScaledValue& residual,
+    const numerics::ScaledValue& uncertainty) {
+  if (lhs.mantissa == Real{0} || rhs.mantissa == Real{0} ||
+      std::signbit(lhs.mantissa) == std::signbit(rhs.mantissa)) {
+    return false;
+  }
+  const numerics::ScaledValue scale =
+      scaled_directional_magnitude_sum(lhs, rhs);
+  if (!scaled_abs_less_equal_power_of_two(residual, scale, -1)) {
+    return false;
+  }
+  return scaled_abs_less_equal_power_of_two(
+      residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
+}
+
+Real normalized_scaled_ratio(
+    const numerics::ScaledValue& numerator,
+    const numerics::ScaledValue& denominator) {
+  if (!(std::isfinite(numerator.mantissa) &&
+        std::isfinite(denominator.mantissa))) {
     return std::numeric_limits<Real>::infinity();
   }
-  return std::abs(signed_sum) / absolute_sum;
+  if (numerator.mantissa == Real{0}) return Real{0};
+  if (!(denominator.mantissa > Real{0})) {
+    return std::numeric_limits<Real>::infinity();
+  }
+
+  const int common_exponent = std::max(
+      numerator.exponent, denominator.exponent);
+  const Real scaled_numerator = std::abs(std::scalbn(
+      numerator.mantissa, numerator.exponent - common_exponent));
+  const Real scaled_denominator = std::abs(std::scalbn(
+      denominator.mantissa, denominator.exponent - common_exponent));
+  if (!(scaled_denominator > Real{0}) ||
+      !std::isfinite(scaled_denominator) ||
+      !std::isfinite(scaled_numerator)) {
+    return std::numeric_limits<Real>::infinity();
+  }
+  return scaled_numerator / scaled_denominator;
+}
+
+void retain_scaled_abs_max(const numerics::ScaledValue& candidate,
+                           numerics::ScaledValue& maximum) {
+  if (!std::isfinite(candidate.mantissa)) {
+    maximum = numerics::ScaledValue{
+        std::numeric_limits<Real>::infinity(), 0};
+    return;
+  }
+  if (!std::isfinite(maximum.mantissa) || candidate.mantissa == Real{0}) {
+    return;
+  }
+  if (maximum.mantissa == Real{0} ||
+      candidate.exponent > maximum.exponent ||
+      (candidate.exponent == maximum.exponent &&
+       std::abs(candidate.mantissa) > std::abs(maximum.mantissa))) {
+    maximum = numerics::ScaledValue{
+        std::abs(candidate.mantissa), candidate.exponent};
+  }
+}
+
+// Normalize cancellation between two independently computed directional
+// contributions by their magnitudes, not by the magnitudes of the underlying
+// field samples. A Cartesian DC offset therefore cannot hide a real derivative.
+Real normalized_directional_sum_defect(
+    const numerics::ScaledValue& lhs,
+    const numerics::ScaledValue& rhs, Real rhs_sign) {
+  return normalized_scaled_ratio(
+      scaled_directional_sum(lhs, rhs, rhs_sign),
+      scaled_directional_magnitude_sum(lhs, rhs));
 }
 
 Real normalized_pair_defect(Real lhs, Real rhs, Real rhs_sign) {
@@ -424,28 +573,44 @@ void validate_background_samples(
     }
   }
 
-  Real relative_linf = Real{0};
+  numerics::ScaledValue residual_linf{};
+  numerics::ScaledValue directional_scale_linf{};
   for (int j = 0; j < grid.ny; ++j) {
     for (int i = 0; i < grid.nx; ++i) {
       const Real bx_lo = b0x[grid.index(i, j)];
       const Real bx_hi = b0x[grid.index(i + 1, j)];
       const Real by_lo = b0y[grid.index(i, j)];
       const Real by_hi = b0y[grid.index(i, j + 1)];
-      Real coefficient[4] = {Real{1}, Real{-1}, Real{1}, Real{-1}};
-      if (cylindrical) {
-        Real q = Real{0.5} * (grid.dx() / grid.r_at_cell_center(i));
-        if (q > Real{1}) q = Real{1};
-        coefficient[0] = Real{1} + q;
-        coefficient[1] = -(Real{1} - q);
+      const numerics::ScaledValue radial = cylindrical
+          ? scaled_annular_radial_divergence(
+                bx_hi, bx_lo, grid.dx(), grid.r_at_cell_center(i))
+          : scaled_directional_derivative(bx_hi, bx_lo, grid.dx());
+      const numerics::ScaledValue axial =
+          scaled_directional_derivative(by_hi, by_lo, grid.dy());
+      const numerics::ScaledValue radial_roundoff = cylindrical
+          ? scaled_annular_radial_roundoff(
+                bx_hi, bx_lo, grid.dx(), grid.r_at_cell_center(i))
+          : scaled_directional_roundoff(bx_hi, bx_lo, grid.dx());
+      const numerics::ScaledValue axial_roundoff =
+          scaled_directional_roundoff(by_hi, by_lo, grid.dy());
+      numerics::ScaledValue residual =
+          scaled_directional_sum(radial, axial, Real{1});
+      const numerics::ScaledValue roundoff =
+          scaled_directional_sum(
+              radial_roundoff, axial_roundoff, Real{1});
+      if (residual_is_roundoff_explained(
+              radial, axial, residual, roundoff)) {
+        residual = {};
       }
-      const Real numerator[4] = {bx_hi, bx_lo, by_hi, by_lo};
-      const Real denominator[4] = {
-          grid.dx(), grid.dx(), grid.dy(), grid.dy()};
-      const Real defect = normalized_product_quotient_defect(
-          numerator, coefficient, denominator, 4);
-      relative_linf = std::max(relative_linf, defect);
+      retain_scaled_abs_max(
+          residual, residual_linf);
+      retain_scaled_abs_max(
+          scaled_directional_magnitude_sum(radial, axial),
+          directional_scale_linf);
     }
   }
+  const Real relative_linf = normalized_scaled_ratio(
+      residual_linf, directional_scale_linf);
   if (!(std::isfinite(relative_linf) &&
         relative_linf <= kDiscreteSolenoidalTolerance)) {
     throw std::invalid_argument{
@@ -453,6 +618,112 @@ void validate_background_samples(
   }
   validate_background_boundaries(
       grid, cylindrical, boundary_spec, b0x, b0y, b0z);
+}
+
+// Check the full axisymmetric/2.5-D curl of a background carrying a trusted
+// domain-wide vacuum proof. This is a defense-in-depth rejection of obvious
+// contradictions, never a way to infer that proof from samples. The poloidal
+// component is collocated at cell corners; derivatives of the cell-centred
+// out-of-plane component are collocated on the corresponding faces. Omitting
+// static stress cell-by-cell would destroy shared-face conservation at the
+// boundary of the selected patch, so the proof itself must remain domain-wide.
+void validate_background_curl_free_samples(
+    const Grid2D& grid, bool cylindrical,
+    const std::vector<Real>& b0x, const std::vector<Real>& b0y,
+    const std::vector<Real>& b0z) {
+  Real relative_linf = Real{0};
+  bool single_derivative_is_zero = true;
+
+  // A regular axisymmetric curl-free field on a simply connected domain that
+  // contains r=0 has no toroidal component. The formal annular solution
+  // Bphi=C/r is singular at the axis and represents a distributional axial
+  // current, so skipping only the r=0 difference is not a valid proof.
+  if (cylindrical && grid.origin_x == Real{0}) {
+    for (int j = 0; j < grid.ny; ++j) {
+      for (int i = 0; i < grid.nx; ++i) {
+        if (b0z[grid.index(i, j)] != Real{0}) {
+          single_derivative_is_zero = false;
+        }
+      }
+    }
+  }
+
+  // curl(B0)_out = d_y B0x - d_x B0y at every interior corner, including
+  // corners on the physical boundary (their one-sided stencil samples are
+  // already present in the fixed padded background).
+  for (int j = 0; j <= grid.ny; ++j) {
+    for (int i = 0; i <= grid.nx; ++i) {
+      const numerics::ScaledValue dy_b0x = scaled_directional_derivative(
+          b0x[grid.index(i, j)], b0x[grid.index(i, j - 1)], grid.dy());
+      const numerics::ScaledValue dx_b0y = scaled_directional_derivative(
+          b0y[grid.index(i, j)], b0y[grid.index(i - 1, j)], grid.dx());
+      relative_linf = std::max(
+          relative_linf,
+          normalized_directional_sum_defect(
+              dy_b0x, dx_b0y, Real{-1}));
+    }
+  }
+
+  // The two remaining curl components are derivatives of B0z. In Cartesian
+  // 2.5-D they are ordinary differences. In axisymmetry the radial derivative
+  // is (1/r)d(r Bphi)/dr. Each curl component contains only this one
+  // directional derivative, so its represented discrete numerator must be
+  // exactly zero; there is no independent derivative with which it can
+  // physically cancel.
+  for (int j = 0; j <= grid.ny; ++j) {
+    for (int i = 0; i < grid.nx; ++i) {
+      const numerics::ScaledValue difference =
+          numerics::scaled_difference_to_value(
+              b0z[grid.index(i, j)], b0z[grid.index(i, j - 1)]);
+      if (!std::isfinite(difference.mantissa) ||
+          difference.mantissa != Real{0}) {
+        single_derivative_is_zero = false;
+      }
+    }
+  }
+  for (int j = 0; j < grid.ny; ++j) {
+    for (int i = 0; i <= grid.nx; ++i) {
+      if (cylindrical) {
+        const Real r_face = grid.origin_x + static_cast<Real>(i) * grid.dx();
+        const Real r_hi = grid.x_at_cell_center(i);
+        const Real r_lo = grid.x_at_cell_center(i - 1);
+        if (r_face == Real{0}) continue;
+        if (!(r_face > Real{0})) {
+          throw std::invalid_argument{
+              "MhdSolver2D: curl_free cylindrical background encountered "
+              "a negative interior radius"};
+        }
+        numerics::ScaledProductQuotientAccumulator<4> product_difference;
+        numerics::append_scaled_exact_product(
+            product_difference, r_hi, b0z[grid.index(i, j)]);
+        numerics::append_scaled_exact_product(
+            product_difference, -r_lo, b0z[grid.index(i - 1, j)]);
+        const numerics::ScaledValue difference =
+            numerics::finish_scaled_exact_product_sum_to_value(
+                product_difference);
+        if (!std::isfinite(difference.mantissa) ||
+            difference.mantissa != Real{0}) {
+          single_derivative_is_zero = false;
+        }
+      } else {
+        const numerics::ScaledValue difference =
+            numerics::scaled_difference_to_value(
+                b0z[grid.index(i, j)], b0z[grid.index(i - 1, j)]);
+        if (!std::isfinite(difference.mantissa) ||
+            difference.mantissa != Real{0}) {
+          single_derivative_is_zero = false;
+        }
+      }
+    }
+  }
+
+  if (!single_derivative_is_zero ||
+      !(std::isfinite(relative_linf) &&
+        relative_linf <= kDiscreteCurlFreeTolerance)) {
+    throw std::invalid_argument{
+        "MhdSolver2D: background curl_free assertion failed the discrete "
+        "curl check"};
+  }
 }
 
 // Resolve a pluggable scheme by registry name. Throws std::invalid_argument on an
@@ -544,9 +815,9 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
               "MhdSolver2D: padded background coordinates are not representable"};
         }
         const std::size_t k = grid_.index(i, j);
-        b0x[k] = profile->sample(0, xf, yc);
-        b0y[k] = profile->sample(1, xc, yf);
-        b0z[k] = profile->sample(2, xc, yc);
+        b0x[k] = cfg_.background.profile_scale * profile->sample(0, xf, yc);
+        b0y[k] = cfg_.background.profile_scale * profile->sample(1, xc, yf);
+        b0z[k] = cfg_.background.profile_scale * profile->sample(2, xc, yc);
         if (!(std::isfinite(b0x[k]) && std::isfinite(b0y[k]) &&
               std::isfinite(b0z[k]))) {
           throw std::invalid_argument{
@@ -557,10 +828,19 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
 
     validate_background_samples(
         grid_, is_cylindrical(), cfg_.boundary, b0x, b0y, b0z);
+    const bool profile_curl_free =
+        !is_cylindrical() && profile->globally_curl_free();
+    const bool globally_curl_free =
+        cfg_.background.curl_free || profile_curl_free;
+    if (globally_curl_free) {
+      validate_background_curl_free_samples(
+          grid_, is_cylindrical(), b0x, b0y, b0z);
+    }
 
     seed_background("b0x", b0x);
     seed_background("b0y", b0y);
     seed_background("b0z", b0z);
+    b0_.globally_curl_free = globally_curl_free;
     background_validated_ = true;
   }
 
@@ -607,6 +887,10 @@ void MhdSolver2D::seed_state(std::string_view component, const std::vector<Real>
         "MhdSolver2D::seed_state: host buffer must contain only finite values"};
   }
   buf.copy_from_host(host_buf.data(), host_buf.size());
+  // Component-wise seeding is external provenance. The complete state is
+  // strictly revalidated before use; a later successful internal step may earn
+  // solver-owned provenance again only if no retainable mutable view exists.
+  live_state_solver_owned_ = false;
 }
 
 void MhdSolver2D::seed_background(std::string_view component,
@@ -642,6 +926,10 @@ void MhdSolver2D::seed_background(std::string_view component,
         "MhdSolver2D::seed_background: host buffer must contain only finite values"};
   }
   buf->copy_from_host(host_buf.data(), host_buf.size());
+  // Component-wise overrides no longer carry an analytic profile's proof. An
+  // explicit caller may retain only the config-level curl_free assertion; the
+  // completed three-component field is independently checked before use.
+  b0_.globally_curl_free = cfg_.background.curl_free;
   background_validated_ = false;
 }
 
@@ -657,6 +945,10 @@ void MhdSolver2D::ensure_background_solenoidal() const {
   b0_.b0z_cell.copy_to_host(b0z.data(), n);
   validate_background_samples(
       grid_, is_cylindrical(), cfg_.boundary, b0x, b0y, b0z);
+  if (b0_.globally_curl_free) {
+    validate_background_curl_free_samples(
+        grid_, is_cylindrical(), b0x, b0y, b0z);
+  }
   background_validated_ = true;
 }
 
@@ -770,25 +1062,25 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   const bool low_order = order <= 1;
   launch_mhd_hlld_flux(
       ifx_, b0_, 0, flux_x_, flags, gamma, nullptr, low_order,
-      b0_.active ? &momentum_flux_x_ : nullptr);
+      b0_.active ? &momentum_flux_x_ : nullptr, order);
   launch_mhd_flux_difference(
       flux_x_, 0, dudt, nullptr, is_cylindrical());
 
   launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr);
   launch_mhd_hlld_flux(
       ify_, b0_, 1, flux_y_, flags, gamma, nullptr, low_order,
-      b0_.active ? &momentum_flux_y_ : nullptr);
+      b0_.active ? &momentum_flux_y_ : nullptr, order);
   launch_mhd_flux_difference(
       flux_y_, 1, dudt, nullptr, is_cylindrical());
   if (b0_.active) {
     launch_mhd_split_momentum_residual(
         b0_, flux_x_, momentum_flux_x_, flux_y_, momentum_flux_y_,
-        dudt, flags, nullptr, is_cylindrical(), collocation_order);
+        dudt, flags, nullptr, is_cylindrical(), collocation_order, order);
   }
   if (is_cylindrical()) {
     launch_mhd_cylindrical_radial_momentum_residual(
         u, b0_, flux_x_, flux_y_, dudt, flags, nullptr,
-        collocation_order,
+        collocation_order, order,
         b0_.active ? &momentum_flux_x_ : nullptr,
         b0_.active ? &momentum_flux_y_ : nullptr);
   }
@@ -815,8 +1107,8 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
     fill_ghosts(dudt);
   }
   launch_mhd_split_energy_residual(
-      b0_, u, flux_x_, flux_y_, dudt, flags, nullptr, is_cylindrical(),
-      collocation_order);
+      b0_, flux_x_, momentum_flux_x_, flux_y_, momentum_flux_y_, dudt,
+      flags, nullptr, is_cylindrical(), collocation_order, order);
 
   // The interface-state host accessors and the next stage's reads are correct
   // only after the queued kernels finish; block once here so the seam is
@@ -825,6 +1117,9 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
 }
 
 void MhdSolver2D::combine_stage(int stage, Real dt) {
+  if (!internal_integrator_access_) {
+    note_external_mutable_state_access();
+  }
   // Standard SSP-RK3 (Shu-Osher), with rk_[0]=U^n (live), rk_[1]=U1, rk_[2]=U2:
   //   stage 0: U1   = 1*U^n + 0*U1 + dt*L(U^n)         -> out rk_[1]
   //   stage 1: U2   = 3/4 U^n + 1/4 U1 + 1/4 dt*L(U1)  -> out rk_[2]
@@ -903,7 +1198,7 @@ void MhdSolver2D::combine_stage(int stage, Real dt) {
         positivity_reconstruction_order_);
     if (stage == 2 && positivity_reconstruction_order_ == 0 &&
         positivity_low_order_anchor_available_) {
-      // Preserve a usable invariant-domain anchor across accepted configured-
+      // Preserve a usable low-order retry anchor across accepted configured-
       // order steps. MP and adjacent-face magnetic recovery are not ordered: a
       // state can have positive MP pressure but negative low-order pressure.
       // Allowing such a final state strands the next retry with no admissible
@@ -945,6 +1240,7 @@ void MhdSolver2D::advance_positive(Real dt) {
   // exit. Preserve the last successful request's diagnostic as transactional
   // state too.
   const int previous_positivity_substeps = last_positivity_substeps_;
+  const bool previous_live_state_solver_owned = live_state_solver_owned_;
   copy_state(rk_[0], request_backup_);
   try {
   // Every exit path, including a failure while taking/restoring a device
@@ -966,7 +1262,7 @@ void MhdSolver2D::advance_positive(Real dt) {
   Real remaining = dt;
   Real trial = dt;
   // Once a high-order candidate rejects an interval, finish that complete
-  // interval with the invariant-domain operator. Alternating back to MP after
+  // interval with the low-order retry operator. Alternating back to MP after
   // each accepted low-order piece would repeatedly recreate the same
   // inadmissible candidate and makes the result depend on controller retries.
   bool low_order_interval = false;
@@ -1003,6 +1299,13 @@ void MhdSolver2D::advance_positive(Real dt) {
     copy_state(rk_[0], step_backup_);
     positivity_control_active_ = true;
     try {
+      struct InternalIntegratorAccess {
+        bool& active;
+        explicit InternalIntegratorAccess(bool& flag) : active{flag} {
+          active = true;
+        }
+        ~InternalIntegratorAccess() { active = false; }
+      } internal_access{internal_integrator_access_};
       integrator_->advance(*this, trial);
     } catch (const PositivityRetry& retry) {
       const bool high_order_attempt = positivity_reconstruction_order_ == 0;
@@ -1017,8 +1320,8 @@ void MhdSolver2D::advance_positive(Real dt) {
             "MhdSolver2D: unable to find a positive conservative substep"};
       }
       if (high_order_attempt) {
-        // First retry the same CFL-safe interval with the genuine low-order
-        // invariant-domain operator. Shrinking by a theta computed from the
+        // First retry the same CFL-safe interval with the piecewise-constant
+        // LF/HLL operator. Shrinking by a theta computed from the
         // rejected high-order candidate before changing operators can drive the
         // trial below representable time progress even though the first-order
         // HLL update is admissible at its own CFL. The two collocations are not
@@ -1071,6 +1374,7 @@ void MhdSolver2D::advance_positive(Real dt) {
       throw;
     }
     positivity_control_active_ = false;
+    live_state_solver_owned_ = !external_mutable_state_exposed_;
 
     retries = 0;
     ++last_positivity_substeps_;
@@ -1102,15 +1406,39 @@ void MhdSolver2D::advance_positive(Real dt) {
     positivity_reconstruction_order_ = 0;
     last_positivity_substeps_ = previous_positivity_substeps;
     copy_state(request_backup_, rk_[0]);
+    live_state_solver_owned_ =
+        previous_live_state_solver_owned && !external_mutable_state_exposed_;
     throw;
   }
+}
+
+void MhdSolver2D::note_external_mutable_state_access() noexcept {
+  external_mutable_state_exposed_ = true;
+  live_state_solver_owned_ = false;
+}
+
+MhdField2D<Real>& MhdSolver2D::state() noexcept {
+  if (!internal_integrator_access_) {
+    note_external_mutable_state_access();
+  }
+  return rk_[0];
 }
 
 MhdField2D<Real>& MhdSolver2D::rk_register(int k) {
   if (k < 0 || k >= kNumRkRegisters) {
     throw std::out_of_range{"MhdSolver2D::rk_register: index out of range"};
   }
+  if (!internal_integrator_access_) {
+    note_external_mutable_state_access();
+  }
   return rk_[k];
+}
+
+MhdField2D<Real>& MhdSolver2D::residual_register() noexcept {
+  if (!internal_integrator_access_) {
+    note_external_mutable_state_access();
+  }
+  return residual_;
 }
 
 void MhdSolver2D::ensure_live_state_admissible(int collocation_order) const {
@@ -1135,16 +1463,27 @@ void MhdSolver2D::ensure_live_state_solenoidal() const {
   // CT preserves the discrete divergence of the accepted seed; it does not
   // repair an inconsistent seed.  Reject a resolved defect before either the
   // Riemann/CFL path or the first residual consumes it.  The local diagnostic
-  // is dimensionless and normalized by the absolute terms in the same exact
-  // Cartesian/annular stencil, so this bound is independent of field units,
-  // mesh spacing, and binary exponent.
+  // is the ratio of global residual and directional-scale L-infinity norms.
+  // Cartesian offsets cancel before either norm; the annular radial
+  // contribution retains B_r/r curvature. The scaled representation is
+  // independent of field units and binary exponent and remains meaningful at
+  // local derivative nulls.
   Real relative_linf = Real{0};
   launch_mhd_ct_divb_relative_linf(
-      rk_[0], divb_scratch_, &relative_linf, nullptr, is_cylindrical());
+      rk_[0], divb_scratch_, &relative_linf, nullptr, is_cylindrical(),
+      live_state_solver_owned_ && !external_mutable_state_exposed_);
   if (!(std::isfinite(relative_linf) &&
         relative_linf <= kDiscreteSolenoidalTolerance)) {
-    throw std::invalid_argument{
-        "MhdSolver2D: live magnetic field is not discretely divergence-free"};
+    Real absolute_linf = Real{0};
+    launch_mhd_ct_divb_linf(
+        rk_[0], divb_scratch_, &absolute_linf, nullptr, is_cylindrical());
+    std::ostringstream message;
+    message << "MhdSolver2D: live magnetic field is not discretely "
+               "divergence-free (relative L-infinity defect "
+            << std::setprecision(std::numeric_limits<Real>::max_digits10)
+            << relative_linf << ", absolute L-infinity residual "
+            << absolute_linf << ')';
+    throw std::invalid_argument{message.str()};
   }
 }
 
@@ -1153,17 +1492,16 @@ Real MhdSolver2D::cfl_limit() const {
 }
 
 Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
-  // Reduce the maximum interior ADDITIVE signal rate
-  //   (|v_x| + c_fast_x)/dx + (|v_y| + c_fast_y)/dy
-  // on device, then return cfl / max_rate. The additive (rather than per-direction
-  // max over min(dx,dy)) bound is the correct stability limit for the UNSPLIT
-  // residual, which sums both directional flux differences into one dudt per
-  // SSP-RK3 stage; a per-direction max would accept up to ~2x the stable step on
-  // an isotropic grid. The device reduction is b0-aware (it folds the total
-  // field B = B0 + b) and reads the exact reconstructed L/R states consumed by
-  // HLLD; an invalid face contributes an infinite rate and is rejected.
-  // Cylindrical
-  // uses (dr, dz) = (dx, dy) on the (r,z) grid, which Grid2D dx()/dy() report.
+  // Reduce the maximum interior ADDITIVE incident-face signal rate on device,
+  // then return cfl / max_rate. Configured HLLD uses the absolute outer-fan
+  // bound max_side|v_n|+max_side(c_fast,n) at each face; the piecewise-constant
+  // positivity retry uses its actual LF alpha=max_side(|v_n|+c_fast,n). The
+  // additive (rather than per-direction max over min(dx,dy)) cell bound is the
+  // correct stability limit for the UNSPLIT residual, which sums both flux
+  // differences into one dudt per SSP-RK3 stage. The reduction is b0-aware (the
+  // fast speed sees B=B0+b) and reads the exact reconstructed L/R states; an
+  // invalid face contributes infinity. Cylindrical mode applies the exact
+  // radial operator self-weights with (dr,dz)=(dx,dy).
   //
   ensure_background_solenoidal();
   // Incident-face CFL states include one derived ghost cell at physical or
@@ -1179,7 +1517,6 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
   ensure_live_state_solenoidal();
   ensure_live_state_admissible(collocation_order);
   const int order = collocation_order > 0 ? 1 : reconstruction_order();
-  const bool low_order = order <= 1;
   const BoundaryFlags4 flags = boundary_flags();
   launch_mhd_reconstruct(
       self.rk_[0], b0_, 0, self.ifx_, order, flags, cfg_.gamma, nullptr,
@@ -1187,10 +1524,10 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
   launch_mhd_reconstruct(
       self.rk_[0], b0_, 1, self.ify_, order, flags, cfg_.gamma, nullptr,
       /*rate_only=*/true);
-  Real max_rate = Real{0};
+  ScaledCflRate max_rate{};
   launch_mhd_cfl_max_rate(
       self.ifx_, self.ify_, b0_, cfg_.gamma, cfl_scratch_,
-      &max_rate, nullptr, low_order, is_cylindrical(), flags);
+      &max_rate, nullptr, order, is_cylindrical(), flags);
 
   // The Suresh-Huynh MP limiter uses alpha=4, whose forward-Euler
   // monotonicity bound is nu <= 1/(1+alpha)=0.2. SSP-RK3 inherits that
@@ -1199,10 +1536,11 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
   const Real effective_cfl = order >= 5
       ? std::min(cfg_.cfl, Real{0.2}) : cfg_.cfl;
 
-  if (!std::isfinite(max_rate)) {
+  if (!(std::isfinite(max_rate.scaled_max_rate) &&
+        std::isfinite(max_rate.rate_scale) && max_rate.rate_scale > Real{0})) {
     throw std::runtime_error{"MhdSolver2D: non-finite state encountered in CFL reduction"};
   }
-  if (!(max_rate > Real{0})) {
+  if (!(max_rate.scaled_max_rate > Real{0})) {
     // Reached only when every interior cell has a non-positive / non-finite
     // signal rate -- e.g. a pressureless, field-free, motionless state (the
     // positivity controller keeps rho>0 and p>0, so a normal run always yields a
@@ -1220,7 +1558,14 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
     }
     return fallback;
   }
-  const Real result = effective_cfl / max_rate;
+  // Keep the ordinary final division bit-for-bit unchanged. The overflow retry
+  // scales every face/metric contribution homogeneously, so cfl/rate =
+  // (cfl*rate_scale)/scaled_max_rate without materializing the true
+  // out-of-range aggregate rate.
+  const Real result = max_rate.rate_scale == Real{1}
+      ? effective_cfl / max_rate.scaled_max_rate
+      : (effective_cfl * max_rate.rate_scale) /
+            max_rate.scaled_max_rate;
   if (!(result > Real{0}) || !std::isfinite(result)) {
     throw std::runtime_error{
         "MhdSolver2D: no finite positive CFL timestep is representable"};

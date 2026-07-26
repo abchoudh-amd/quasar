@@ -8,11 +8,11 @@
 # strong torsional Alfven waves, and a positivity stress test in the low-density
 # rarefied wake.
 #
-# Standard setup (gamma = 5/3), on [0,1] x [0,1], rotor centered at (0.5, 0.5):
+# Standard setup (gamma = 1.4), on [0,1] x [0,1], rotor centered at (0.5, 0.5):
 #   r0 = 0.1 (disk radius), r1 = 0.115 (taper to ambient)
 #   inside  (r < r0):  rho = 10, v = omega * (-(y-0.5), (x-0.5), 0),  omega = u0/r0
 #   outside (r > r1):  rho = 1,  v = 0
-#   taper   (r0<r<r1): linear blend (f = (r1-r)/(r1-r0)) of rho and the rim speed
+#   taper   (r0<r<r1): rho = 1+9f and v_phi = f*u0, f = (r1-r)/(r1-r0)
 #   everywhere: p = 1, B = (5/sqrt(4*pi), 0, 0)
 #   u0 = 2 (rim speed), so omega = 20.
 
@@ -26,7 +26,7 @@ geometry: cartesian
 # does not repair pressure by injecting energy. The rotor's div(B) is at machine
 # epsilon RELATIVE to the field; its absolute divb_linf is dominated by
 # telescoping round-off that grows with the 4000-step count.
-numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
+numerics: {gamma: 1.4, reconstruction: mp7, riemann: hlld, integrator: ssprk3,
            ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}
 initial:
   type: rotor

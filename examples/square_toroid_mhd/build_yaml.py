@@ -84,11 +84,17 @@ NGHOST = 2
 BZ_TOROIDAL = 0.1
 B_SCALE = 1.0
 
-# Confined plasma blob (denser/higher-p inside a centered square).
+# Confined plasma blob (denser/higher-p inside a centered square).  The sampled
+# coil reaches roughly 0.6 T, or O(1e5 Pa) magnetic pressure.  Pressures of
+# 1/0.1 Pa make the discontinuous blob beta O(1e-6), below the truncation scale
+# of the supported cylindrical MUSCL update; the conservative positivity
+# controller then correctly refuses to cross zero internal energy.  These
+# values retain a strongly magnetized beta O(1e-3--1e-2) case while remaining
+# resolved for the shipped grid and full 400-step run.
 RHO_IN = 10.0
 RHO_OUT = 1.0
-P_IN = 1.0
-P_OUT = 0.1
+P_IN = 1000.0
+P_OUT = 100.0
 BLOB_HALF_M = 0.25 * MHD_LX_M
 
 GAMMA = 1.6666667

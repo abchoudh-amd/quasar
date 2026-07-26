@@ -24,6 +24,11 @@ struct MhdBackgroundField {
   backend::DeviceBuffer<T> b0y_face{};  // same staggering as MhdField2D::by_face
   backend::DeviceBuffer<T> b0z_cell{};  // same staggering as MhdField2D::bz_cell
   bool active{false};                   // false => B0 identically zero (fast path)
+  // Domain-wide proof supplied by an analytic profile or a validated explicit
+  // vacuum field. When true, the static Maxwell stress is omitted in every cell
+  // together; a cell-local curl-free decision would break shared-face
+  // conservation at the boundary of a curl-free patch.
+  bool globally_curl_free{false};
 
   MhdBackgroundField() = default;
   explicit MhdBackgroundField(Grid2D g)
@@ -45,6 +50,18 @@ struct MhdBackgroundSpec {
   std::string profile{"uniform"};  // registry name (default uniform vector)
   Real bx0{}, by0{}, bz0{};        // uniform-vector params (profile="uniform")
   std::unordered_map<std::string, Real> params{};
+  // Constant applied to every native analytic-profile sample. This lets a
+  // frontend convert the profile's output units without replacing the sampled
+  // buffers and thereby discarding the profile's trusted curl-free capability.
+  Real profile_scale{Real{1}};
+  // Trusted domain-wide assertion that the supplied static field is curl-free;
+  // it is construction metadata, not a property inferred from a relative
+  // sample tolerance. The solver rejects obvious discrete contradictions as a
+  // defense-in-depth check, then omits the analytically zero pure-B0 Lorentz
+  // force. The vector-potential vacuum projection supplies this proof because
+  // differencing its enormous Maxwell stress would otherwise create a
+  // truncation-level self-force that can dwarf a low-beta plasma.
+  bool curl_free{false};
 };
 
 }  // namespace quasar::mhd

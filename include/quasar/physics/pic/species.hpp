@@ -30,6 +30,9 @@ class ParticleSpecies {
   std::size_t capacity() const noexcept { return capacity_; }
 
   void set_count(std::size_t n);
+  // Before insertion/evolution, vx/vy/vz are physical velocities at t=0. The
+  // owning solver performs the initial dt/2 Boris kick; callers must not
+  // pre-stagger these values to t=-dt/2.
   void set_host_particles(const std::vector<Real>& x, const std::vector<Real>& y,
                           const std::vector<Real>& vx, const std::vector<Real>& vy,
                           const std::vector<Real>& vz,
@@ -88,11 +91,10 @@ class ParticleSpecies {
   // Persistent device flag the charge/current deposit atomically sets when a
   // particle coordinate/value is nonrepresentable or its displacement spills
   // outside the fixed deposition window. Kept
-  // separate from compact_counter (which the deposit memsets to 0 each call) so
-  // the host can read it on a cadence instead of synchronizing every step. The
-  // deposit accumulates into it across steps; the solver copies it back
-  // periodically and at end-of-run, then clears it. mutable: device scratch read
-  // by the logically-const consume path.
+  // separate from compact_counter (which other kernels reuse). The flag remains
+  // sticky across all charge/current launches until the solver synchronously
+  // drains it before Ampere or a public charge-density return. mutable: device
+  // scratch read by the logically-const consume path.
   unsigned int* deposit_overflow() const noexcept { return deposit_overflow_.device_ptr(); }
   // Sticky device flag set by the gather/push kernel when a particle state or
   // gathered force is non-finite, a coordinate cannot be reduced safely to an
@@ -134,8 +136,9 @@ class ParticleSpecies {
   backend::DeviceBuffer<std::uint8_t> c_alive_{};
   // mutable: device scratch reused by the logically-const alive_count reduction.
   mutable backend::DeviceBuffer<unsigned int> c_counter_{};
-  // mutable: persistent deposit-overflow flag, accumulated by the deposit kernel
-  // and consumed (copied + cleared) by the solver on a cadence.
+  // mutable: persistent deposit-error flag, accumulated only by atomic
+  // charge/current deposition and drained by the solver immediately after the
+  // paired deposits. Post-deposit transforms use the solver-owned source scan.
   mutable backend::DeviceBuffer<unsigned int> deposit_overflow_{};
   mutable backend::DeviceBuffer<unsigned int> particle_error_{};
 };

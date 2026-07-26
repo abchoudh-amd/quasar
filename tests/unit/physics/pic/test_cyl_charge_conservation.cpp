@@ -22,6 +22,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -329,4 +330,54 @@ TEST(PicCylChargeConservation,
   const double expected =
       q * (0.5 * ((z1 - z0) / dt) / quasar::pi);
   EXPECT_NEAR(jz[g.index(0, 1)], expected, 5.0e-15 * q);
+}
+
+TEST(PicCylChargeConservation,
+     CollocatedRingCurrentAccumulationOverflowIsRejected) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // Eight stationary rings deposit individually finite q*vphi/(2*pi) values
+  // onto the same Jphi face. Their atomic sum exceeds DBL_MAX.
+  quasar::Grid2D g{4, 4, 4.0, 4.0, 0.0, 0.0, 1};
+  const double largest = std::numeric_limits<double>::max();
+  constexpr std::size_t count = 8;
+  quasar::pic::ParticleSpecies sp{
+      quasar::pic::SpeciesConfig{"collocated-ring-current",
+                                 largest, largest, count}};
+  sp.set_host_particles(std::vector<double>(count, 1.0),
+                        std::vector<double>(count, 0.5),
+                        std::vector<double>(count, 0.0),
+                        std::vector<double>(count, 0.0),
+                        std::vector<double>(count, 0.9),
+                        std::vector<double>(count, 1.0));
+  quasar::JField2D<double> current{g};
+  launch_pic_deposit_cyl_shape1(
+      g, sp, current, 0.1, /*periodic_x=*/0, /*periodic_y=*/0, nullptr);
+  EXPECT_THROW(launch_pic_deposit_overflow_check(sp, nullptr),
+               std::runtime_error);
+}
+
+TEST(PicCylChargeConservation,
+     CollocatedRingChargeAccumulationOverflowIsRejected) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // At r=1 the CIC charge splits between the adjacent ring centres. Eight
+  // individually finite image-volume contributions overflow the inner rho node.
+  quasar::Grid2D g{4, 4, 4.0, 4.0, 0.0, 0.0, 1};
+  const double largest = std::numeric_limits<double>::max();
+  constexpr std::size_t count = 8;
+  quasar::pic::ParticleSpecies sp{
+      quasar::pic::SpeciesConfig{"collocated-ring-charge",
+                                 largest, largest, count}};
+  sp.set_host_particles(std::vector<double>(count, 1.0),
+                        std::vector<double>(count, 0.5),
+                        std::vector<double>(count, 0.0),
+                        std::vector<double>(count, 0.0),
+                        std::vector<double>(count, 0.0),
+                        std::vector<double>(count, 1.0));
+  quasar::ScalarGrid2D<double> rho{g};
+  launch_pic_charge_cyl_shape1(
+      g, sp, rho, /*periodic_x=*/0, /*periodic_y=*/0, nullptr);
+  EXPECT_THROW(launch_pic_deposit_overflow_check(sp, nullptr),
+               std::runtime_error);
 }

@@ -89,7 +89,7 @@ void expect_high_x_face_gather(bool periodic_field) {
   solver.add_species(std::move(sp));
   solver.step(0.01);
   const auto snap = solver.species()[0].to_host();
-  EXPECT_NEAR(snap.vx[0], -0.01, 2.0e-14);
+  EXPECT_NEAR(snap.vx[0], -0.005, 2.0e-14);
 }
 
 }  // namespace

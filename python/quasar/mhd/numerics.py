@@ -260,19 +260,198 @@ def _validated_staggered_inputs(b0x, b0y, nx, ny, nghost, dx, dy):
     return bx.reshape(height, pitch), by.reshape(height, pitch), nx, ny, g, dx, dy
 
 
-def _scaled_quotient_sum(numerators, denominator0, denominator1=1.0):
-    """Elementwise ``sum(numerator / denominator0 / denominator1)``.
+_SCALED_ZERO_EXPONENT = np.int64(-1_000_000)
 
-    Terms stay in mantissa/exponent form until the final result. At each round
-    the largest term is paired with the largest opposite-sign term when one is
-    available, so matched enormous terms cancel before a smaller, representable
-    remainder is rounded away.
+
+def _scaled_two_sum(lhs_mantissa, lhs_exponent,
+                    rhs_mantissa, rhs_exponent):
+    """Exact two-sum for finite values stored as ``mantissa * 2**exponent``."""
+    rhs_larger = (
+        (rhs_exponent > lhs_exponent)
+        | ((rhs_exponent == lhs_exponent)
+           & (np.abs(rhs_mantissa) > np.abs(lhs_mantissa))))
+    larger_mantissa = np.where(
+        rhs_larger, rhs_mantissa, lhs_mantissa)
+    larger_exponent = np.where(
+        rhs_larger, rhs_exponent, lhs_exponent)
+    smaller_mantissa = np.where(
+        rhs_larger, lhs_mantissa, rhs_mantissa)
+    smaller_exponent = np.where(
+        rhs_larger, lhs_exponent, rhs_exponent)
+
+    gap = larger_exponent - smaller_exponent
+    nonoverlapping = gap > 54
+    # A gap this wide is already an exact two-component expansion. Avoid
+    # materializing its tiny aligned component merely to underflow it.
+    aligned_gap = np.where(nonoverlapping, 0, gap)
+    with np.errstate(under="ignore"):
+        smaller = np.ldexp(smaller_mantissa, -aligned_gap)
+    rounded = larger_mantissa + smaller
+    virtual_smaller = rounded - larger_mantissa
+    error = ((larger_mantissa - (rounded - virtual_smaller))
+             + (smaller - virtual_smaller))
+
+    high_mantissa, high_shift = np.frexp(rounded)
+    high_exponent = larger_exponent + high_shift.astype(np.int64)
+    low_mantissa, low_shift = np.frexp(error)
+    low_exponent = larger_exponent + low_shift.astype(np.int64)
+
+    high_mantissa = np.where(
+        nonoverlapping, larger_mantissa, high_mantissa)
+    high_exponent = np.where(
+        nonoverlapping, larger_exponent, high_exponent)
+    low_mantissa = np.where(
+        nonoverlapping, smaller_mantissa, low_mantissa)
+    low_exponent = np.where(
+        nonoverlapping, smaller_exponent, low_exponent)
+
+    smaller_is_zero = smaller_mantissa == 0.0
+    high_mantissa = np.where(
+        smaller_is_zero, larger_mantissa, high_mantissa)
+    high_exponent = np.where(
+        smaller_is_zero, larger_exponent, high_exponent)
+    low_mantissa = np.where(smaller_is_zero, 0.0, low_mantissa)
+    high_exponent = np.where(
+        high_mantissa == 0.0, _SCALED_ZERO_EXPONENT, high_exponent)
+    low_exponent = np.where(
+        low_mantissa == 0.0, _SCALED_ZERO_EXPONENT, low_exponent)
+    return high_mantissa, high_exponent, low_mantissa, low_exponent
+
+
+def _reduce_scaled_terms_to_scaled(mantissa, exponent):
+    """Correctly round a short scaled sum without losing cancellation bits.
+
+    This is the vectorized NumPy port of native
+    ``reduce_scaled_terms_to_value``. It grows an exact, non-overlapping
+    floating-point expansion with two-sum, then applies the same half-even
+    final collapse as the C++/HIP implementation.
+    """
+    mantissa = np.asarray(mantissa, dtype=np.float64).copy()
+    exponent = np.asarray(exponent, dtype=np.int64).copy()
+    count = mantissa.shape[0]
+    exponent = np.where(
+        mantissa == 0.0, _SCALED_ZERO_EXPONENT, exponent)
+
+    # Stable ascending-magnitude sort, matching the native insertion sort.
+    for end in range(count - 1, 0, -1):
+        for k in range(end):
+            swap = (
+                (exponent[k] > exponent[k + 1])
+                | ((exponent[k] == exponent[k + 1])
+                   & (np.abs(mantissa[k]) > np.abs(mantissa[k + 1]))))
+            old_mantissa = mantissa[k].copy()
+            old_exponent = exponent[k].copy()
+            mantissa[k] = np.where(swap, mantissa[k + 1], mantissa[k])
+            exponent[k] = np.where(swap, exponent[k + 1], exponent[k])
+            mantissa[k + 1] = np.where(
+                swap, old_mantissa, mantissa[k + 1])
+            exponent[k + 1] = np.where(
+                swap, old_exponent, exponent[k + 1])
+
+    expansion_mantissa = np.zeros_like(mantissa)
+    expansion_exponent = np.full_like(exponent, _SCALED_ZERO_EXPONENT)
+    lane_shape = mantissa.shape[1:]
+
+    def scatter_where(target, index, value, mask):
+        gather = index[None, ...]
+        previous = np.take_along_axis(target, gather, axis=0)[0]
+        np.put_along_axis(
+            target, gather,
+            np.where(mask, value, previous)[None, ...], axis=0)
+
+    # Grow one exact expansion independently in every array lane.
+    for source in range(count):
+        carry_mantissa = mantissa[source]
+        carry_exponent = exponent[source]
+        next_mantissa = np.zeros_like(mantissa)
+        next_exponent = np.full_like(exponent, _SCALED_ZERO_EXPONENT)
+        write = np.zeros(lane_shape, dtype=np.int64)
+        for k in range(count):
+            (high_mantissa, high_exponent,
+             low_mantissa, low_exponent) = _scaled_two_sum(
+                 carry_mantissa, carry_exponent,
+                 expansion_mantissa[k], expansion_exponent[k])
+            retain_low = low_mantissa != 0.0
+            scatter_where(next_mantissa, write, low_mantissa, retain_low)
+            scatter_where(next_exponent, write, low_exponent, retain_low)
+            write += retain_low.astype(np.int64)
+            carry_mantissa = high_mantissa
+            carry_exponent = high_exponent
+        retain_carry = carry_mantissa != 0.0
+        scatter_where(next_mantissa, write, carry_mantissa, retain_carry)
+        scatter_where(next_exponent, write, carry_exponent, retain_carry)
+        expansion_mantissa = next_mantissa
+        expansion_exponent = next_exponent
+
+    # Correctly rounded collapse of the non-overlapping expansion. The loop is
+    # mask-driven because cancellation leaves a different component count in
+    # each grid cell.
+    expansion_count = np.sum(
+        expansion_mantissa != 0.0, axis=0).astype(np.int64)
+    component = np.maximum(expansion_count - 1, 0)
+    gather = component[None, ...]
+    scale = np.take_along_axis(
+        expansion_exponent, gather, axis=0)[0]
+    leading_mantissa = np.take_along_axis(
+        expansion_mantissa, gather, axis=0)[0]
+    leading_exponent = np.take_along_axis(
+        expansion_exponent, gather, axis=0)[0]
+    high = np.ldexp(leading_mantissa, leading_exponent - scale)
+    low = np.zeros_like(high)
+    active = component > 0
+    for _ in range(count - 1):
+        next_component = np.maximum(component - 1, 0)
+        gather = next_component[None, ...]
+        next_mantissa = np.take_along_axis(
+            expansion_mantissa, gather, axis=0)[0]
+        next_exponent = np.take_along_axis(
+            expansion_exponent, gather, axis=0)[0]
+        with np.errstate(under="ignore"):
+            next_value = np.ldexp(next_mantissa, next_exponent - scale)
+        updated = high + next_value
+        virtual_next = updated - high
+        roundoff = next_value - virtual_next
+        high = np.where(active, updated, high)
+        low = np.where(active, roundoff, low)
+        component = np.where(active, next_component, component)
+        active &= (roundoff == 0.0) & (component > 0)
+
+    # Half-even correction used by robust fsum implementations and by native.
+    correctable = (component > 0) & (low != 0.0)
+    next_component = np.maximum(component - 1, 0)
+    gather = next_component[None, ...]
+    next_mantissa = np.take_along_axis(
+        expansion_mantissa, gather, axis=0)[0]
+    next_exponent = np.take_along_axis(
+        expansion_exponent, gather, axis=0)[0]
+    with np.errstate(under="ignore"):
+        next_value = np.ldexp(next_mantissa, next_exponent - scale)
+    same_sign = (((low < 0.0) & (next_value < 0.0))
+                 | ((low > 0.0) & (next_value > 0.0)))
+    doubled_low = 2.0 * low
+    adjusted = high + doubled_low
+    exact_adjustment = adjusted - high == doubled_low
+    high = np.where(
+        correctable & same_sign & exact_adjustment, adjusted, high)
+
+    result_mantissa, result_shift = np.frexp(high)
+    result_exponent = scale + result_shift.astype(np.int64)
+    result_exponent = np.where(
+        result_mantissa == 0.0, _SCALED_ZERO_EXPONENT, result_exponent)
+    return result_mantissa, result_exponent
+
+
+def _scaled_quotient_sum_to_scaled(numerators, denominator0, denominator1=1.0):
+    """Return ``sum(numerator / denominator0 / denominator1)`` as (m, e).
+
+    Terms stay in mantissa/exponent form until an exact floating-point expansion
+    has retained every two-sum roundoff component. Thus matched enormous terms
+    can cancel without erasing a smaller representable remainder.
     This is the NumPy counterpart of native ``scaled_product_quotient_sum``.
     All inputs to this private helper are already finite and denominators are
     nonzero by the public diagnostic's validation.
     """
     values = np.stack(np.broadcast_arrays(*numerators), axis=0)
-    count = values.shape[0]
     d0 = np.broadcast_to(np.asarray(denominator0, dtype=np.float64),
                          values.shape)
     d1 = np.broadcast_to(np.asarray(denominator1, dtype=np.float64),
@@ -288,138 +467,181 @@ def _scaled_quotient_sum(numerators, denominator0, denominator1=1.0):
                 - d1_exponent.astype(np.int64)
                 + shift.astype(np.int64))
 
-    # A zero has no meaningful exponent. Keep it below every possible binary64
-    # quotient exponent so it sorts after all nonzero terms without relying on
-    # platform-specific integer minima during exponent subtraction.
-    zero_exponent = np.int64(-1_000_000)
-    exponent = np.where(mantissa == 0.0, zero_exponent, exponent)
+    return _reduce_scaled_terms_to_scaled(mantissa, exponent)
 
-    # Match the native reducer: combine the largest term with the largest
-    # opposite-sign term whenever one exists. Pairing the two largest terms
-    # regardless of sign can first round A+B and leave an ulp(A) residue in
-    # A+B-A-B+c that overwhelms the finite survivor c.
-    term_axis = np.arange(count).reshape(
-        (count,) + (1,) * (mantissa.ndim - 1))
-    for _ in range(count - 1):
-        nonzero = mantissa != 0.0
-        largest_exponent = np.max(
-            np.where(nonzero, exponent, zero_exponent), axis=0)
-        largest_mask = nonzero & (exponent == largest_exponent[None, ...])
-        largest_index = np.argmax(
-            np.where(largest_mask, np.abs(mantissa), -1.0), axis=0)
-        largest_gather = largest_index[None, ...]
-        largest_mantissa = np.take_along_axis(
-            mantissa, largest_gather, axis=0)[0]
-        largest_term_exponent = np.take_along_axis(
-            exponent, largest_gather, axis=0)[0]
 
-        remaining = nonzero & (term_axis != largest_gather)
-        opposite = remaining & (
-            np.signbit(mantissa) != np.signbit(largest_mantissa)[None, ...])
-        has_opposite = np.any(opposite, axis=0)
-        candidates = np.where(has_opposite[None, ...], opposite, remaining)
-        has_partner = np.any(candidates, axis=0)
-        partner_exponent = np.max(
-            np.where(candidates, exponent, zero_exponent), axis=0)
-        partner_mask = candidates & (
-            exponent == partner_exponent[None, ...])
-        partner_index = np.argmax(
-            np.where(partner_mask, np.abs(mantissa), -1.0), axis=0)
-        partner_gather = partner_index[None, ...]
-        partner_mantissa = np.take_along_axis(
-            mantissa, partner_gather, axis=0)[0]
-        partner_term_exponent = np.take_along_axis(
-            exponent, partner_gather, axis=0)[0]
-
-        with np.errstate(under="ignore"):
-            combined = largest_mantissa + np.ldexp(
-                partner_mantissa,
-                partner_term_exponent - largest_term_exponent)
-        combined_mantissa, combined_shift = np.frexp(combined)
-        combined_exponent = (
-            largest_term_exponent + combined_shift.astype(np.int64))
-        combined_exponent = np.where(
-            combined_mantissa == 0.0, zero_exponent, combined_exponent)
-
-        # Some array elements may already contain only one nonzero term. Leave
-        # those lanes untouched while other cells finish their reductions.
-        old_largest_mantissa = np.take_along_axis(
-            mantissa, largest_gather, axis=0)[0]
-        old_largest_exponent = np.take_along_axis(
-            exponent, largest_gather, axis=0)[0]
-        np.put_along_axis(
-            mantissa, largest_gather,
-            np.where(has_partner, combined_mantissa,
-                     old_largest_mantissa)[None, ...], axis=0)
-        np.put_along_axis(
-            exponent, largest_gather,
-            np.where(has_partner, combined_exponent,
-                     old_largest_exponent)[None, ...], axis=0)
-        partner_old_mantissa = np.take_along_axis(
-            mantissa, partner_gather, axis=0)[0]
-        partner_old_exponent = np.take_along_axis(
-            exponent, partner_gather, axis=0)[0]
-        np.put_along_axis(
-            mantissa, partner_gather,
-            np.where(has_partner, 0.0,
-                     partner_old_mantissa)[None, ...], axis=0)
-        np.put_along_axis(
-            exponent, partner_gather,
-            np.where(has_partner, zero_exponent,
-                     partner_old_exponent)[None, ...], axis=0)
-
-    final_index = np.argmax(mantissa != 0.0, axis=0)[None, ...]
-    final_mantissa = np.take_along_axis(mantissa, final_index, axis=0)[0]
-    final_exponent = np.take_along_axis(exponent, final_index, axis=0)[0]
+def _scaled_quotient_sum(numerators, denominator0, denominator1=1.0):
+    """Materialize the range-safe quotient sum when its result is representable."""
+    mantissa, exponent = _scaled_quotient_sum_to_scaled(
+        numerators, denominator0, denominator1)
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        return np.ldexp(final_mantissa, final_exponent)
+        return np.ldexp(mantissa, exponent)
 
 
-def _normalized_product_quotient_defect(numerators, coefficients,
-                                        denominators):
-    """Return ``|sum(t)|/sum(|t|)`` without materializing physical-scale t."""
-    values = np.stack(np.broadcast_arrays(*numerators), axis=0)
-    coefficient = np.broadcast_to(
-        np.asarray(coefficients, dtype=np.float64), values.shape)
-    denominator = np.broadcast_to(
-        np.asarray(denominators, dtype=np.float64), values.shape)
-    if (not np.all(np.isfinite(values))
-            or not np.all(np.isfinite(coefficient))
-            or not np.all(np.isfinite(denominator))
-            or np.any(denominator <= 0.0)):
-        raise ValueError("invalid discrete-divergence term")
-
-    value_mantissa, value_exponent = np.frexp(values)
-    coefficient_mantissa, coefficient_exponent = np.frexp(coefficient)
-    denominator_mantissa, denominator_exponent = np.frexp(denominator)
-    raw_mantissa = ((value_mantissa * coefficient_mantissa)
-                    / denominator_mantissa)
-    mantissa, shift = np.frexp(raw_mantissa)
+def _scaled_value_quotient_to_scaled(value, denominator0, denominator1=1.0):
+    """Divide a retained ``(mantissa, exponent)`` value without materializing."""
+    value_mantissa, value_exponent = value
+    d0 = np.broadcast_to(
+        np.asarray(denominator0, dtype=np.float64), value_mantissa.shape)
+    d1 = np.broadcast_to(
+        np.asarray(denominator1, dtype=np.float64), value_mantissa.shape)
+    d0_mantissa, d0_exponent = np.frexp(d0)
+    d1_mantissa, d1_exponent = np.frexp(d1)
+    quotient_mantissa = (
+        (value_mantissa / d0_mantissa) / d1_mantissa)
+    mantissa, shift = np.frexp(quotient_mantissa)
     exponent = (value_exponent.astype(np.int64)
-                + coefficient_exponent.astype(np.int64)
-                - denominator_exponent.astype(np.int64)
+                - d0_exponent.astype(np.int64)
+                - d1_exponent.astype(np.int64)
                 + shift.astype(np.int64))
-    zero_exponent = np.int64(-1_000_000)
-    exponent = np.where(mantissa == 0.0, zero_exponent, exponent)
-    common_exponent = np.max(exponent, axis=0)
-    with np.errstate(under="ignore"):
-        scaled = np.ldexp(mantissa, exponent - common_exponent[None, ...])
+    exponent = np.where(
+        mantissa == 0.0, _SCALED_ZERO_EXPONENT, exponent)
+    return mantissa, exponent
 
-    signed_sum = np.zeros(values.shape[1:], dtype=np.float64)
-    compensation = np.zeros_like(signed_sum)
-    absolute_sum = np.zeros_like(signed_sum)
-    for term in scaled:
-        corrected = term - compensation
-        updated = signed_sum + corrected
-        compensation = (updated - signed_sum) - corrected
-        signed_sum = updated
-        absolute_sum += np.abs(term)
-    defect = np.divide(
-        np.abs(signed_sum), absolute_sum,
-        out=np.zeros_like(signed_sum), where=absolute_sum > 0.0)
-    if not np.all(np.isfinite(defect)):
+
+def _scaled_value_product_quotient_to_scaled(
+        value, numerator, denominator0, denominator1=1.0):
+    """Return ``value * numerator / denominator0 / denominator1`` scaled."""
+    value_mantissa, value_exponent = value
+    numerator = np.broadcast_to(
+        np.asarray(numerator, dtype=np.float64), value_mantissa.shape)
+    d0 = np.broadcast_to(
+        np.asarray(denominator0, dtype=np.float64), value_mantissa.shape)
+    d1 = np.broadcast_to(
+        np.asarray(denominator1, dtype=np.float64), value_mantissa.shape)
+    numerator_mantissa, numerator_exponent = np.frexp(numerator)
+    d0_mantissa, d0_exponent = np.frexp(d0)
+    d1_mantissa, d1_exponent = np.frexp(d1)
+    quotient_mantissa = (
+        (value_mantissa * numerator_mantissa)
+        / d0_mantissa / d1_mantissa)
+    mantissa, shift = np.frexp(quotient_mantissa)
+    exponent = (value_exponent.astype(np.int64)
+                + numerator_exponent.astype(np.int64)
+                - d0_exponent.astype(np.int64)
+                - d1_exponent.astype(np.int64)
+                + shift.astype(np.int64))
+    exponent = np.where(
+        mantissa == 0.0, _SCALED_ZERO_EXPONENT, exponent)
+    return mantissa, exponent
+
+
+def _scaled_directional_derivative(upper, lower, spacing):
+    """Cancel a local field offset before applying the derivative scale."""
+    difference = _scaled_quotient_sum_to_scaled((upper, -lower), 1.0)
+    return _scaled_value_quotient_to_scaled(difference, spacing)
+
+
+def _scaled_ulp(value):
+    """One binary64 storage ulp as a normalized scaled value."""
+    magnitude = np.abs(np.asarray(value, dtype=np.float64))
+    _, value_exponent = np.frexp(magnitude)
+    denorm_mantissa, denorm_exponent = np.frexp(
+        np.nextafter(np.float64(0.0), np.float64(1.0)))
+    normal = magnitude >= np.finfo(np.float64).tiny
+    mantissa = np.where(normal, 0.5, denorm_mantissa)
+    exponent = np.where(
+        normal,
+        value_exponent.astype(np.int64) - np.finfo(np.float64).nmant,
+        np.int64(denorm_exponent))
+    return mantissa, exponent
+
+
+def _scaled_directional_roundoff(upper, lower, spacing):
+    """Metric-weighted uncertainty from independently rounded face storage."""
+    upper_term = _scaled_value_quotient_to_scaled(_scaled_ulp(upper), spacing)
+    lower_term = _scaled_value_quotient_to_scaled(_scaled_ulp(lower), spacing)
+    return _reduce_scaled_terms_to_scaled(
+        np.stack((upper_term[0], lower_term[0]), axis=0),
+        np.stack((upper_term[1], lower_term[1]), axis=0))
+
+
+def _scaled_annular_radial_roundoff(
+        upper, lower, spacing, radius):
+    """Face-storage uncertainty with the exact annular divergence weights."""
+    q = np.minimum(0.5 * (spacing / radius), 1.0)
+    upper_term = _scaled_value_product_quotient_to_scaled(
+        _scaled_ulp(upper), 1.0 + q, spacing)
+    lower_term = _scaled_value_product_quotient_to_scaled(
+        _scaled_ulp(lower), 1.0 - q, spacing)
+    return _reduce_scaled_terms_to_scaled(
+        np.stack((upper_term[0], lower_term[0]), axis=0),
+        np.stack((upper_term[1], lower_term[1]), axis=0))
+
+
+def _scaled_abs_less_equal_power_of_two(lhs, rhs, rhs_exponent_shift):
+    """Elementwise ``abs(lhs) <= abs(rhs) * 2**shift`` without materializing."""
+    lhs_mantissa, lhs_exponent = lhs
+    rhs_mantissa, rhs_exponent = rhs
+    lhs_zero = lhs_mantissa == 0.0
+    rhs_nonzero = rhs_mantissa != 0.0
+    shifted_rhs_exponent = rhs_exponent + np.int64(rhs_exponent_shift)
+    ordered = ((lhs_exponent < shifted_rhs_exponent)
+               | ((lhs_exponent == shifted_rhs_exponent)
+                  & (np.abs(lhs_mantissa) <= np.abs(rhs_mantissa))))
+    return lhs_zero | (rhs_nonzero & ordered)
+
+
+def _normalized_scaled_linf_defect(
+        scaled_values, roundoff_uncertainty=None):
+    """Return ``||sum(d)||_inf / ||sum(|d|)||_inf`` from scaled terms."""
+    mantissa = np.stack([value[0] for value in scaled_values], axis=0)
+    exponent = np.stack([value[1] for value in scaled_values], axis=0)
+    residual_mantissa, residual_exponent = _reduce_scaled_terms_to_scaled(
+        mantissa, exponent)
+    scale_mantissa, scale_exponent = _reduce_scaled_terms_to_scaled(
+        np.abs(mantissa), exponent)
+
+    if roundoff_uncertainty is not None:
+        # External/background samples get the strict native gate: only genuine
+        # opposite-sign cross-direction cancellation can consume the 1024-face-
+        # ulp storage-forward-error envelope. A lone or same-sign one-ulp slope
+        # therefore remains a resolved defect even on a huge DC field.
+        lhs_mantissa = scaled_values[0][0]
+        rhs_mantissa = scaled_values[1][0]
+        both_nonzero = (lhs_mantissa != 0.0) & (rhs_mantissa != 0.0)
+        opposite_sign = np.signbit(lhs_mantissa) != np.signbit(rhs_mantissa)
+        residual = (residual_mantissa, residual_exponent)
+        scale = (scale_mantissa, scale_exponent)
+        explained = (both_nonzero & opposite_sign
+                     & _scaled_abs_less_equal_power_of_two(
+                         residual, scale, -1)
+                     & _scaled_abs_less_equal_power_of_two(
+                         residual, roundoff_uncertainty, 10))
+        residual_mantissa = np.where(explained, 0.0, residual_mantissa)
+        residual_exponent = np.where(
+            explained, _SCALED_ZERO_EXPONENT, residual_exponent)
+
+    def scaled_abs_max(value_mantissa, value_exponent):
+        absolute_mantissa = np.abs(value_mantissa)
+        maximum_exponent = np.max(np.where(
+            absolute_mantissa == 0.0,
+            _SCALED_ZERO_EXPONENT, value_exponent))
+        maximum_mantissa = np.max(np.where(
+            (absolute_mantissa != 0.0)
+            & (value_exponent == maximum_exponent),
+            absolute_mantissa, 0.0))
+        return float(maximum_mantissa), int(maximum_exponent)
+
+    residual_mantissa, residual_exponent = scaled_abs_max(
+        residual_mantissa, residual_exponent)
+    scale_mantissa, scale_exponent = scaled_abs_max(
+        scale_mantissa, scale_exponent)
+    if residual_mantissa == 0.0:
+        return 0.0
+    if not scale_mantissa > 0.0:
         raise ValueError("background divergence defect is not representable")
-    return defect
+
+    common_exponent = max(residual_exponent, scale_exponent)
+    with np.errstate(under="ignore"):
+        scaled_residual = np.ldexp(
+            residual_mantissa, residual_exponent - common_exponent)
+        scaled_scale = np.ldexp(
+            scale_mantissa, scale_exponent - common_exponent)
+    defect = scaled_residual / scaled_scale
+    if not np.isfinite(defect):
+        raise ValueError("background divergence defect is not representable")
+    return float(defect)
 
 
 def fast_magnetosonic_speed_split(rho, p, bx, by, bz, b0x, b0y, b0z, gamma):
@@ -499,14 +721,21 @@ def background_divergence_linf(b0x, b0y, nx, ny, nghost, dx, dy,
 def background_divergence_relative_linf(
         b0x, b0y, nx, ny, nghost, dx, dy, *, geometry="cartesian",
         origin_x=0.0):
-    """Maximum scale-free defect in the exact staggered divergence stencil.
+    """Maximum derivative-scaled defect in the staggered divergence stencil.
 
-    Each interior cell contributes ``|sum(t_k)| / sum(|t_k|)``, where the
-    signed terms are the Cartesian face differences or the exact annular radial
-    weights plus the axial face differences.  Terms share a binary exponent
-    before either sum is formed, so the diagnostic is invariant under field-unit
-    rescaling and remains meaningful at subnormal and near-overflow magnitudes.
-    A zero field reports zero.
+    The result is ``max(|d_x+d_y|)/max(|d_x|+|d_y|)`` after each Cartesian
+    face difference has cancelled its local field offset. Cylindrical ``d_x``
+    is the complete annular contribution
+    ``(B_hi-B_lo)/dr + (B_hi+B_lo)/(2*r_c)``, retaining the physical ``B_r/r``
+    curvature. Directional contributions stay in mantissa/exponent form, so a
+    represented slope cannot be hidden by a large Cartesian DC field, harmless
+    roundoff at a local derivative null uses the global directional scale, and
+    true cross-direction cancellation remains safe near float64's exponent
+    limits. Before the global maximum, a residual may be removed as face-storage
+    forward error only when both directional terms are nonzero and opposite in
+    sign, the remainder is at most half their magnitude sum, and it lies within
+    1024 metric-weighted face ULPs. One-direction and same-sign slopes receive no
+    such allowance. A zero stencil reports zero.
     """
     bx, by, nx, ny, g, dx, dy = _validated_staggered_inputs(
         b0x, b0y, nx, ny, nghost, dx, dy)
@@ -517,7 +746,8 @@ def background_divergence_relative_linf(
     by_lo = by[g:g + ny, g:g + nx]
     by_hi = by[g + 1:g + 1 + ny, g:g + nx]
     if geometry == "cartesian":
-        coefficients = np.array([1.0, -1.0, 1.0, -1.0])[:, None, None]
+        radial = _scaled_directional_derivative(bx_hi, bx_lo, dx)
+        radial_roundoff = _scaled_directional_roundoff(bx_hi, bx_lo, dx)
     elif geometry == "cylindrical":
         origin_x = float(origin_x)
         if not np.isfinite(origin_x) or origin_x < 0.0:
@@ -526,16 +756,26 @@ def background_divergence_relative_linf(
         if not np.all(np.isfinite(radii)) or np.any(radii <= 0.0):
             raise ValueError(
                 "cylindrical cell-center radii must be finite and positive")
-        q = np.minimum(1.0, 0.5 * dx / radii)
-        coefficients = np.stack(np.broadcast_arrays(
-            1.0 + q[None, :], -(1.0 - q[None, :]),
-            np.ones((ny, nx)), -np.ones((ny, nx))), axis=0)
+        unit_row = np.ones((1, nx), dtype=np.float64)
+        radial_denominator0 = np.stack(
+            (dx * unit_row, dx * unit_row,
+             2.0 * unit_row, 2.0 * unit_row), axis=0)
+        radial_denominator1 = np.stack(
+            (unit_row, unit_row, radii[None, :], radii[None, :]), axis=0)
+        radial = _scaled_quotient_sum_to_scaled(
+            (bx_hi, -bx_lo, bx_hi, bx_lo),
+            radial_denominator0, radial_denominator1)
+        radial_roundoff = _scaled_annular_radial_roundoff(
+            bx_hi, bx_lo, dx, radii[None, :])
     else:
         raise ValueError(f"unknown geometry {geometry!r}")
-    denominators = np.array([dx, dx, dy, dy])[:, None, None]
-    defect = _normalized_product_quotient_defect(
-        (bx_hi, bx_lo, by_hi, by_lo), coefficients, denominators)
-    return float(np.max(defect)) if defect.size else 0.0
+    axial = _scaled_directional_derivative(by_hi, by_lo, dy)
+    axial_roundoff = _scaled_directional_roundoff(by_hi, by_lo, dy)
+    roundoff = _reduce_scaled_terms_to_scaled(
+        np.stack((radial_roundoff[0], axial_roundoff[0]), axis=0),
+        np.stack((radial_roundoff[1], axial_roundoff[1]), axis=0))
+    return _normalized_scaled_linf_defect(
+        (radial, axial), roundoff_uncertainty=roundoff)
 
 
 def validate_background_boundary_compatibility(

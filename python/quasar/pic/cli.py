@@ -232,8 +232,11 @@ def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
                                 mass=units.mass(sp.mass_kg),
                                 capacity=sp.n_particles)
         idx = solver.add_species(cfg)
-        # The pybind binding is declared with py::array::forcecast, so it copies
-        # to contiguous float64 itself; no host-side astype needed here.
+        # These samples are the physical velocity distribution at t=0. The C++
+        # solver owns the initial dt/2 Boris kick; the deck path must not
+        # pre-stagger them. The pybind binding is declared with
+        # py::array::forcecast, so it copies to contiguous float64 itself; no
+        # host-side astype needed here.
         solver.set_species_particles(
             idx,
             x=positions[:, 0],
@@ -814,9 +817,8 @@ def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
             with per_path.open("wb") as stream:
                 np.savez(stream, **_flatten_for_npz([], final, None))
 
-    # The deposit defers its overflow check off the per-step hot path, so drain
-    # the accumulated flag once after the last step (raises "reduce dt" if any
-    # deposit spilled the deposition window).
+    # step() drains deposit failures before Ampere. Keep the public final drain as
+    # a defensive check for alternate/low-level integrations.
     solver.finalize()
 
     if log_every == 0 or step_done % log_every != 0:

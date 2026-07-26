@@ -38,6 +38,7 @@ TEST(MhdBackgroundProfile, UniformIsSpatiallyConstant) {
   const auto& reg = ::quasar::Registry<IMhdBackgroundProfile>::instance();
   std::unique_ptr<IMhdBackgroundProfile> profile = reg.create("uniform");
   ASSERT_NE(profile, nullptr);
+  EXPECT_TRUE(profile->globally_curl_free());
 
   const Real x1 = 0.0;
   const Real y1 = 0.0;
@@ -72,6 +73,7 @@ TEST(MhdBackgroundProfile, UniformParametersSetComponents) {
 TEST(MhdBackgroundProfile, LinearVacuumIsConfiguredAndSolenoidal) {
   auto profile =
       ::quasar::Registry<IMhdBackgroundProfile>::instance().create("linear_vacuum");
+  EXPECT_TRUE(profile->globally_curl_free());
   ASSERT_TRUE(profile->set_parameter("gradient", Real{2}));
   ASSERT_TRUE(profile->set_parameter("shear", Real{-0.25}));
   EXPECT_FALSE(profile->set_parameter("unknown", Real{1}));

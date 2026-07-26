@@ -51,9 +51,10 @@ struct MhdConfig {
   std::string positivity{"troubled_cell"};
   // Positive thresholds retained for the explicit repair kernel and deck/API
   // compatibility. Neither automatic initial-state construction nor
-  // conservative evolution clamps to them. Evolution preserves the invariant
-  // domain rho>0 and internal energy>0; it cannot make an arbitrary nonzero
-  // floor invariant without adding/removing conserved quantities.
+  // conservative evolution clamps to them. A successful step accepts only
+  // rho>0 and internal energy>0; a request that cannot make representable
+  // positive progress is restored and reported. An arbitrary nonzero floor
+  // cannot be invariant without adding/removing conserved quantities.
   Real rho_floor{Real{1e-8}};
   Real p_floor{Real{1e-9}};
   // CFL safety factor (deck: numerics.cfl). The C++ contract carried no cfl
@@ -73,12 +74,15 @@ class MhdSolver2D {
   explicit MhdSolver2D(MhdConfig cfg);
 
   Grid2D grid() const noexcept { return grid_; }
-  MhdField2D<Real>& state() noexcept { return rk_[0]; }
+  // A mutable view may be retained and written after this call returns. Once
+  // exposed, live-state solenoidality therefore stays on the strict external-
+  // data predicate for the lifetime of this solver instance.
+  MhdField2D<Real>& state() noexcept;
   const MhdField2D<Real>& state() const noexcept { return rk_[0]; }
   const MhdConfig& config() const noexcept { return cfg_; }
   // Number of conservative substeps accepted while advancing the most recent
-  // requested interval. Exposed as a diagnostic so invariant-domain regression
-  // tests can prove that conservation holds across actual positivity subcycling.
+  // requested interval. Exposed so regression tests can prove that conservation
+  // holds across actual positivity subcycling.
   int last_positivity_substeps() const noexcept {
     return last_positivity_substeps_;
   }
@@ -112,9 +116,11 @@ class MhdSolver2D {
   // Loop step() to t_end, CFL-checked each step.
   void advance(Real t_end, Real dt);
 
-  // cfl / max_cells((|v_x|+c_fast,x)/dx + (|v_y|+c_fast,y)/dy): the additive
-  // multidimensional Courant limit for the unsplit residual. Cylindrical uses
-  // (dr,dz) = (dx,dy).
+  // Additive finite-volume Courant limit from the four incident reconstructed
+  // faces. Configured HLLD uses alpha=max_side|v_n|+max_side(c_fast,n), matching
+  // its common outer fast speed; the piecewise-constant LF retry uses its own
+  // alpha=max_side(|v_n|+c_fast,n). Cylindrical applies the matching annular,
+  // angular-momentum, and metric-free radial self-weights.
   Real cfl_limit() const;
 
   // Max |div B| over the interior; delegates to the CT scheme diagnostic.
@@ -134,7 +140,7 @@ class MhdSolver2D {
   // for `stage`; an inadmissible candidate triggers a conservative retry.
   void combine_stage(int stage, Real dt);
   MhdField2D<Real>& rk_register(int k);
-  MhdField2D<Real>& residual_register() { return residual_; }
+  MhdField2D<Real>& residual_register() noexcept;
   int n_rk_registers() const noexcept { return kNumRkRegisters; }
 
  private:
@@ -150,6 +156,7 @@ class MhdSolver2D {
   void fill_ghosts(MhdField2D<Real>& u) const;
   void copy_state(const MhdField2D<Real>& src, MhdField2D<Real>& dst);
   void advance_positive(Real dt);
+  void note_external_mutable_state_access() noexcept;
   int reconstruction_order() const;
   // Per-side one-sided boundary flags ([x_lo, x_hi, y_lo, y_hi]) derived from
   // cfg_.boundary.field via boundary::mhd_boundary_is_periodic (0 = periodic,
@@ -194,6 +201,15 @@ class MhdSolver2D {
   // mutable because cfl_limit() is const (it only reads the state).
   mutable backend::DeviceBuffer<Real> cfl_scratch_{};
   mutable backend::DeviceBuffer<Real> divb_scratch_{};
+  // A successfully accepted internal CT/RK update has stronger provenance than
+  // an arbitrary seed: its exact-arithmetic divergence is inherited from the
+  // preflighted input, so the live check may account for independent face-
+  // storage rounding even when one directional contribution rounds to zero.
+  // The privilege is never inferred from values. Any public mutable view is
+  // conservatively treated as retainable and permanently disables it.
+  bool live_state_solver_owned_{false};
+  bool external_mutable_state_exposed_{false};
+  bool internal_integrator_access_{false};
   // 0 selects the configured high-order reconstruction; 1 is the conservative
   // piecewise-constant retry path for a positivity-troubled substep.
   int positivity_reconstruction_order_{0};

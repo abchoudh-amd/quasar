@@ -293,6 +293,17 @@ TEST(PicChargeConservation, RejectsInvalidTimeStepsAndMissingHalo) {
 TEST(PicChargeConservation, RejectsMalformedConfigBeforeFieldAllocation) {
   quasar::Grid2D g{16, 16, 1.0, 1.0, 0.0, 0.0, 1};
 
+  const quasar::Grid2D one_x{1, 2, 1.0, 2.0, 0.0, 0.0, 2};
+  EXPECT_THROW(
+      quasar::pic::EmPic2D3V(
+          quasar::pic::EmPicConfig{one_x, 4, "cic"}),
+      std::invalid_argument);
+  const quasar::Grid2D one_y{2, 1, 2.0, 1.0, 0.0, 0.0, 2};
+  EXPECT_THROW(
+      quasar::pic::EmPic2D3V(
+          quasar::pic::EmPicConfig{one_y, 4, "cic"}),
+      std::invalid_argument);
+
   auto bad_geometry = quasar::pic::EmPicConfig{g, 2, "cic"};
   bad_geometry.geometry = "spherical";
   EXPECT_THROW(quasar::pic::EmPic2D3V solver{bad_geometry},
@@ -428,16 +439,70 @@ TEST(PicChargeConservation, ShortenedFinalStepUsesVariableLeapfrogCentering) {
   quasar::pic::ParticleSpecies sp{
       quasar::pic::SpeciesConfig{"test", 1.0, 1.0, 1}};
   // Zero macro-weight isolates the pusher from its self-current while retaining
-  // q/m=1. Stored v starts at t=-0.03 for the first 0.06 position step.
+  // q/m=1. The uploaded velocity is the physical value at t=0.
   sp.set_host_particles({1.0}, {1.0}, {0.0}, {0.0}, {0.0}, {0.0});
   solver.add_species(std::move(sp));
 
   solver.advance(0.10, 0.06);  // position steps 0.06, 0.04
   const auto snap = solver.species()[0].to_host();
-  // Force intervals are 0.06 then (0.06+0.04)/2=0.05. Thus v=0.11 and
-  // x-x0=0.06*0.06 + 0.04*0.11 = 0.008 for constant unit acceleration.
-  EXPECT_NEAR(snap.vx[0], 0.11, 2.0e-14);
-  EXPECT_NEAR(snap.x[0], 1.008, 2.0e-14);
+  // The startup force interval is 0.06/2=0.03, then the variable-step interval
+  // is (0.06+0.04)/2=0.05. Thus v=0.08 and
+  // x-x0=0.06*0.03 + 0.04*0.08 = 0.005 for constant unit acceleration.
+  EXPECT_NEAR(snap.vx[0], 0.08, 2.0e-14);
+  EXPECT_NEAR(snap.x[0], 1.005, 2.0e-14);
+}
+
+TEST(PicChargeConservation,
+     AdjacentSubnormalStepsPreserveTheCenteredTimestep) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{16, 4, 16.0, 4.0, 0.0, 0.0, 1};
+  quasar::pic::EmPic2D3V solver{quasar::pic::EmPicConfig{g, 2, "cic"}};
+  std::vector<double> ez(g.storage_size(), 0.0);
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      ez[g.index(i, j)] = g.x_at_cell_center(i);
+    }
+  }
+  solver.fields().ez.copy_from_host(ez.data(), ez.size());
+
+  const double denorm = std::numeric_limits<double>::denorm_min();
+  // This field-only case has no Boris update, so the unrepresentable first
+  // particle half-step is irrelevant. Faraday can still advance by the full
+  // 2*denorm interval and the following centred magnetic interval.
+  solver.step(2.0 * denorm);
+  solver.step(denorm);
+
+  std::vector<double> by(g.storage_size(), 0.0);
+  solver.fields().by.copy_to_host(by.data(), by.size());
+  // The second magnetic interval is midpoint(2*denorm, denorm)=2*denorm.
+  // Evaluating each half separately would lose half of the smaller operand and
+  // leave only 3*denorm after the two updates instead of 4*denorm.
+  EXPECT_EQ(by[g.index(8, 2)], 4.0 * denorm);
+
+  // A neutral particle has no force interval to resolve. Its first Boris kick
+  // is the identity even though dt/2 underflows, while the full-width position
+  // drift and zero charge/current deposition remain well-defined.
+  quasar::pic::EmPic2D3V neutral_solver{
+      quasar::pic::EmPicConfig{g, 2, "cic"}};
+  quasar::pic::ParticleSpecies neutral{
+      quasar::pic::SpeciesConfig{"neutral", 0.0, 1.0, 1}};
+  neutral.set_host_particles(
+      {8.0}, {2.0}, {0.0}, {0.0}, {0.0}, {1.0});
+  neutral_solver.add_species(std::move(neutral));
+  EXPECT_NO_THROW(neutral_solver.step(denorm));
+  const auto neutral_snapshot = neutral_solver.species()[0].to_host();
+  EXPECT_DOUBLE_EQ(neutral_snapshot.x[0], 8.0);
+  EXPECT_DOUBLE_EQ(neutral_snapshot.y[0], 2.0);
+
+  quasar::pic::EmPic2D3V particle_solver{
+      quasar::pic::EmPicConfig{g, 2, "cic"}};
+  quasar::pic::ParticleSpecies species{
+      quasar::pic::SpeciesConfig{"physical-v0", 1.0, 1.0, 1}};
+  species.set_host_particles(
+      {8.0}, {2.0}, {0.0}, {0.0}, {0.0}, {0.0});
+  particle_solver.add_species(std::move(species));
+  EXPECT_THROW(particle_solver.step(denorm), std::overflow_error);
 }
 
 TEST(PicChargeConservation, VariableStepWeightsMagneticHalfStepsAtForceTime) {
@@ -464,7 +529,7 @@ TEST(PicChargeConservation, VariableStepWeightsMagneticHalfStepsAtForceTime) {
   solver.fields().by.copy_to_host(by_after_first.data(),
                                   by_after_first.size());
   EXPECT_NEAR(by_after_first[g.index(8, 2)], 0.06, 2.0e-14);
-  const double first_tau = 0.5 * 0.06 * 0.03;
+  const double first_tau = 0.5 * 0.03 * 0.03;
   EXPECT_NEAR(first_snap.vx[0],
               0.1 * (1.0 - first_tau * first_tau)
                   / (1.0 + first_tau * first_tau),
@@ -489,9 +554,9 @@ TEST(PicChargeConservation, VariableStepWeightsMagneticHalfStepsAtForceTime) {
                                   by_after_second.size());
   EXPECT_NEAR(by_after_second[g.index(8, 2)], 0.11, 2.0e-14);
 
-  // The particle is present from the start because adding an unstaggered
-  // species after evolution begins is intentionally forbidden. The first
-  // force interval samples 0.5*(B^-1/2+B^1/2)=0.03. The second interval is
+  // The particle is present from t=0 because adding a new integer-time species
+  // after evolution begins is intentionally forbidden. The first force interval
+  // has width 0.03 and samples 0.5*(B^-1/2+B^1/2)=0.03. The second interval is
   // 0.05 with B_old=0.06, B_new=0.11 and the variable-step interpolation
   // 0.4*old+0.6*new=0.09. Compose the two Boris plane rotations.
   const auto rotate = [](double vx, double vz, double tau) {
@@ -501,7 +566,7 @@ TEST(PicChargeConservation, VariableStepWeightsMagneticHalfStepsAtForceTime) {
     return std::pair<double, double>{
         cosine * vx - sine * vz, sine * vx + cosine * vz};
   };
-  const auto after_first = rotate(0.1, 0.0, 0.5 * 0.06 * 0.03);
+  const auto after_first = rotate(0.1, 0.0, 0.5 * 0.03 * 0.03);
   const auto expected = rotate(
       after_first.first, after_first.second, 0.5 * 0.05 * 0.09);
   const auto snap = solver.species()[0].to_host();
@@ -572,6 +637,124 @@ TEST(PicChargeConservation,
                           [](double v) { return std::isfinite(v); }));
   EXPECT_NEAR(jx[g.index(1, 0)], 0.5 * q, 4.0e-15 * q);
   EXPECT_NEAR(charge[g.index(1, 0)], 0.625 * q, 4.0e-15 * q);
+}
+
+TEST(PicChargeConservation,
+     CollocatedParticleCurrentAccumulationOverflowIsRejected) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // Each particle contributes 0.75*DBL_MAX to the same Jz node. Both
+  // contributions are individually finite, but their atomic sum is not.
+  quasar::Grid2D g{4, 4, 4.0, 4.0, 0.0, 0.0, 1};
+  const double largest = std::numeric_limits<double>::max();
+  quasar::pic::ParticleSpecies sp{
+      quasar::pic::SpeciesConfig{"collocated-current", largest, largest, 2}};
+  sp.set_host_particles({0.5, 0.5}, {0.5, 0.5},
+                        {0.0, 0.0}, {0.0, 0.0}, {0.75, 0.75},
+                        {1.0, 1.0});
+  quasar::JField2D<double> current{g};
+  launch_pic_deposit_shape1(g, sp, current, 0.1,
+                            /*periodic_x=*/0, /*periodic_y=*/0, nullptr);
+  EXPECT_THROW(launch_pic_deposit_overflow_check(sp, nullptr),
+               std::runtime_error);
+}
+
+TEST(PicChargeConservation,
+     CollocatedParticleChargeAccumulationOverflowIsRejected) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // At a cell centre each particle contributes DBL_MAX to the same rho node;
+  // only the accumulated result overflows.
+  quasar::Grid2D g{4, 4, 4.0, 4.0, 0.0, 0.0, 1};
+  const double largest = std::numeric_limits<double>::max();
+  quasar::pic::ParticleSpecies sp{
+      quasar::pic::SpeciesConfig{"collocated-charge", largest, largest, 2}};
+  sp.set_host_particles({0.5, 0.5}, {0.5, 0.5},
+                        {0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0},
+                        {1.0, 1.0});
+  quasar::ScalarGrid2D<double> rho{g};
+  launch_pic_charge_shape1(g, sp, rho,
+                           /*periodic_x=*/0, /*periodic_y=*/0, nullptr);
+  EXPECT_THROW(launch_pic_deposit_overflow_check(sp, nullptr),
+               std::runtime_error);
+}
+
+TEST(PicChargeConservation,
+     SpecularCurrentFoldbackOverflowIsRejectedAndFlagIsReusable) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{4, 4, 4.0, 4.0, 0.0, 0.0, 2};
+  quasar::JField2D<double> current{g};
+  std::vector<double> jy(g.storage_size(), 0.0);
+  const double large = 0.75 * std::numeric_limits<double>::max();
+  // The x-low specular image adds ghost (-1,0) to interior (0,0).
+  // Both deposits are finite; their folded sum is not.
+  jy[g.index(0, 0)] = large;
+  jy[g.index(-1, 0)] = large;
+  current.jy.copy_from_host(jy.data(), jy.size());
+  launch_pic_boundary_specular_foldback(
+      g, current, /*side=*/0, /*cylindrical=*/0, nullptr);
+
+  quasar::backend::DeviceBuffer<unsigned int> error{1};
+  EXPECT_THROW(launch_pic_validate_finite_sources(
+                   g, &current, nullptr, error.device_ptr(), nullptr),
+               std::overflow_error);
+
+  // Every invocation clears the caller-owned sticky flag. A finite combined
+  // current/charge scan must therefore pass even after the preceding throw.
+  std::fill(jy.begin(), jy.end(), 0.0);
+  current.jy.copy_from_host(jy.data(), jy.size());
+  quasar::ScalarGrid2D<double> charge{g};
+  EXPECT_NO_THROW(launch_pic_validate_finite_sources(
+      g, &current, &charge, error.device_ptr(), nullptr));
+}
+
+TEST(PicChargeConservation, SpecularChargeFoldbackOverflowIsRejected) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{4, 4, 4.0, 4.0, 0.0, 0.0, 2};
+  quasar::ScalarGrid2D<double> charge{g};
+  std::vector<double> rho(g.storage_size(), 0.0);
+  const double large = 0.75 * std::numeric_limits<double>::max();
+  rho[g.index(0, 0)] = large;
+  rho[g.index(-1, 0)] = large;
+  charge.values.copy_from_host(rho.data(), rho.size());
+  launch_pic_boundary_specular_foldback_charge(
+      g, charge, /*side=*/0, /*cylindrical=*/0, nullptr);
+
+  quasar::backend::DeviceBuffer<unsigned int> error{1};
+  EXPECT_THROW(launch_pic_validate_finite_sources(
+                   g, nullptr, &charge, error.device_ptr(), nullptr),
+               std::overflow_error);
+}
+
+TEST(PicChargeConservation, CompensatedFilterOverflowIsRejected) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::Grid2D g{8, 4, 8.0, 4.0, 0.0, 0.0, 2};
+  quasar::JField2D<double> current{g};
+  std::vector<double> jz(g.storage_size(), 0.0);
+  const double large = 0.9 * std::numeric_limits<double>::max();
+  // A smoother followed by its one-pass compensator has the one-dimensional
+  // five-point kernel [-1/16, 1/4, 5/8, 1/4, -1/16]. This finite sign pattern
+  // therefore produces 1.25*large at i=3, which is genuinely unrepresentable.
+  for (int j = 0; j < g.ny; ++j) {
+    jz[g.index(1, j)] = -large;
+    jz[g.index(2, j)] = large;
+    jz[g.index(3, j)] = large;
+    jz[g.index(4, j)] = large;
+    jz[g.index(5, j)] = -large;
+  }
+  current.jz.copy_from_host(jz.data(), jz.size());
+  quasar::backend::DeviceBuffer<double> scratch{3 * g.storage_size()};
+  launch_pic_filter_compensated(
+      g, current, scratch.device_ptr(), /*passes=*/1,
+      /*periodic_x=*/0, /*periodic_y=*/0, /*cylindrical=*/0, nullptr);
+
+  quasar::backend::DeviceBuffer<unsigned int> error{1};
+  EXPECT_THROW(launch_pic_validate_finite_sources(
+                   g, &current, nullptr, error.device_ptr(), nullptr),
+               std::overflow_error);
 }
 
 TEST(PicChargeConservation, DepositTypesExist) {

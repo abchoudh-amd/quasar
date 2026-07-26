@@ -4,10 +4,14 @@
 // convex segment from a known-positive base state to a stage candidate, and a
 // device block-min reduction returns the most restrictive theta. MhdSolver2D
 // retries the entire conservative SSP-RK substep when theta<1, using
-// piecewise-constant HLL as its invariant-domain low-order anchor. No evolved
-// cell is locally repaired. Positive configured floors are used only by the
-// explicit repair surface; they cannot be invariant under an arbitrary
-// conservative flux and automatic initialization does not clamp to them.
+// piecewise-constant HLL as its low-order retry anchor. The full coupled
+// cylindrical/CT/background operator is checked for admissibility at runtime;
+// no unconditional invariant-domain progress claim is made for it. A request
+// that cannot make a positive representable advance is restored and reported
+// as an error. No evolved cell is locally repaired. Positive configured floors
+// are used only by the explicit repair surface; they cannot be invariant under
+// an arbitrary conservative flux and automatic initialization does not clamp
+// to them.
 //
 // apply() remains a thin launcher over apply_floors_kernel for explicit callers
 // that already hold an invalid standalone field. Keeping that repair in one

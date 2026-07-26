@@ -163,6 +163,27 @@ __device__ inline Real interface_normal_b(const quasar::Grid2D& g, int dir,
   return quasar::mhd::normal_face_b(g, dir, bx_face, by_face, i, j);
 }
 
+// Use the same canonical x-normal frame as the HLLD kernel.  An x/y swap is
+// its own inverse, so reconstruction followed by the Riemann solve is exactly
+// covariant under the solver's dir=1 rotation instead of choosing a different
+// cyclic ordering for the two transverse characteristic fields.
+__device__ inline MhdState rotate_xy(const MhdState& value, int dir) {
+  if (dir == 0) return value;
+  MhdState rotated = value;
+  rotated.mx = value.my;
+  rotated.my = value.mx;
+  rotated.bx = value.by;
+  rotated.by = value.bx;
+  return rotated;
+}
+
+__device__ inline quasar::numerics::MhdBackground rotate_xy(
+    const quasar::numerics::MhdBackground& value, int dir) {
+  if (dir == 0) return value;
+  return quasar::numerics::MhdBackground{
+      value.b0y, value.b0x, value.b0z};
+}
+
 // Maximum supported MP stencil half-width (MP7 reads 3 each side).
 inline constexpr int kMaxHalf = 3;
 inline constexpr int kMaxWidth = 2 * kMaxHalf + 1;  // 7
@@ -194,8 +215,8 @@ __device__ inline MhdState recon_char_state(
     // Projecting U'-U'_ref directly avoids ever constructing the enormous total
     // energy E'+B0.b+|B0|^2/2. B0 is frozen at this interface, so prescribed
     // background gradients are not reconstructed as evolved waves.
-    MhdState delta =
-        load_state(g, rho, mx, my, mz, energy, bx, by, bz, is, js);
+    MhdState delta = rotate_xy(
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz, is, js), dir);
     delta.rho    -= ref.rho;
     delta.mx     -= ref.mx;
     delta.my     -= ref.my;
@@ -237,7 +258,7 @@ __device__ inline MhdState recon_char_state(
   s.bx     = ref.bx + d.bx;
   s.by     = ref.by + d.by;
   s.bz     = ref.bz + d.bz;
-  return s;
+  return rotate_xy(s, dir);
 }
 
 // 2nd-order MUSCL-minmod reconstruction of the LEFT and RIGHT interface states
@@ -292,7 +313,7 @@ __device__ inline void muscl_reconstruct_face(
 // Piecewise-constant states from the two cells adjacent to face (i,j).  A
 // configured order-2/5/7 operator uses its ordinary high-order magnetic
 // collocation (order 0): the solver preflight has already proved those live
-// cells admissible.  The global invariant-domain retry passes order 1 instead,
+// cells admissible.  The global low-order positivity retry passes order 1 instead,
 // matching its bounded two-adjacent-face EOS everywhere else.
 __device__ inline void piecewise_constant_reconstruct_face(
     const quasar::Grid2D& g, int dir, int i, int j, int collocation_order,
@@ -328,23 +349,15 @@ __device__ inline bool reconstructed_state_admissible(const MhdState& s, Real ga
       && isfinite(s.energy) && isfinite(s.bx) && isfinite(s.by) && isfinite(s.bz);
 }
 
-// CFL reconstruction has a deliberately wider numerical domain than the
-// Riemann solve.  A conservative state can have finite rho, momentum, energy,
-// and gas pressure while m/rho (and therefore a physical characteristic
-// speed) lies beyond binary64.  The CFL kernel forms speed/spacing directly at
-// a safe exponent, so rejecting such a face here would turn a representable
-// Courant rate into a spurious infinity.  This predicate still rejects every
-// non-finite conserved component and every non-positive thermodynamic state.
+// Rate-only reconstruction has the same physical-face domain as the Riemann
+// solve. Mesh weighting is range-safe, but it is applied only after the HLLD/LF
+// fan itself has been formed: an unrepresentable m/rho or other primitive is
+// therefore a genuine face-fan failure, not a metric overflow that the scaled
+// CFL reduction may rescue. Keep this wrapper to make that boundary explicit at
+// the rate-only call site.
 __device__ inline bool reconstructed_rate_state_admissible(
     const MhdState& s, Real gamma) {
-  if (!(isfinite(s.rho) && s.rho > Real{0} &&
-        isfinite(s.mx) && isfinite(s.my) && isfinite(s.mz) &&
-        isfinite(s.energy) && isfinite(s.bx) && isfinite(s.by) &&
-        isfinite(s.bz))) {
-    return false;
-  }
-  const Real p = quasar::numerics::pressure(s, gamma);
-  return isfinite(p) && p > Real{0};
+  return reconstructed_state_admissible(s, gamma);
 }
 
 // A fixed quiet-NaN state is an explicit reconstruction failure token.  The
@@ -375,17 +388,23 @@ __global__ void reconstruct_kernel(
     double* __restrict__ Rrho, double* __restrict__ Rmx, double* __restrict__ Rmy,
     double* __restrict__ Rmz, double* __restrict__ Renergy, double* __restrict__ Rbx,
     double* __restrict__ Rby, double* __restrict__ Rbz) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int j = blockIdx.y * blockDim.y + threadIdx.y;
-  // Produce interface states over the interior PLUS the high-edge face layer
-  // (i==nx / j==ny). flux_difference at the last interior cell (i==nx-1) reads
-  // the flux at face index nx, so the reconstruction that feeds that flux must
-  // exist there too; computing only [0,nx) would leave face nx holding stale
-  // buffer data and break the conservative telescoping. Face index nx/ny is an
-  // in-bounds ghost slot (valid i in [-nghost, nx-1+nghost], nghost>=2), and the
-  // stencil cells it reads are all within the padded storage because the deck
-  // sizes nghost to the scheme's halo (2/3/4).
-  if (i > g.nx || j > g.ny) return;
+  const int launch_i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int launch_j = blockIdx.y * blockDim.y + threadIdx.y;
+  // The normal axis spans every physical face, including its high layer.  The
+  // transverse axis spans the complete padded cell range: MP5/MP7 face
+  // quadrature reconstructs point states from neighbouring face averages, so a
+  // boundary-adjacent physical face legitimately consumes reconstructed ghost
+  // rows/columns.  Those ghosts have already been filled by the configured
+  // boundary closure.  Normal reconstruction never extends beyond the existing
+  // halo: at face 0 / n, MP7's outermost source cell is exactly -nghost /
+  // n+nghost-1.
+  const int i = dir == 1 ? launch_i - g.nghost : launch_i;
+  const int j = dir == 0 ? launch_j - g.nghost : launch_j;
+  if (dir == 0) {
+    if (launch_i > g.nx || launch_j >= g.ny + 2 * g.nghost) return;
+  } else {
+    if (launch_i >= g.nx + 2 * g.nghost || launch_j > g.ny) return;
+  }
 
   // Neighbor offsets along the reconstruction direction.
   const int di = (dir == 0) ? 1 : 0;
@@ -425,17 +444,21 @@ __global__ void reconstruct_kernel(
     ref.by     = Real{0.5} * cL.by     + Real{0.5} * cR.by;
     ref.bz     = Real{0.5} * cL.bz     + Real{0.5} * cR.bz;
 
+    const MhdState canonical_ref = rotate_xy(ref, dir);
+    const quasar::numerics::MhdBackground canonical_bg = rotate_xy(bg, dir);
     MhdEigensystem eig;
-    eig.build(ref, bg, dir, gamma);
+    eig.build(canonical_ref, canonical_bg, /*dir=*/0, gamma);
 
     const int half = (scheme_order == 5) ? 2 : 3;
 
     // L state: stencil centered on cell (i-1), reconstruct its RIGHT face.
     ul = recon_char_state(g, dir, i, j, /*center_off=*/-1, /*mirror=*/false,
-                          half, eig, ref, rho, mx, my, mz, energy, bx, by, bz);
+                          half, eig, canonical_ref,
+                          rho, mx, my, mz, energy, bx, by, bz);
     // R state: stencil centered on cell (i), reconstruct its LEFT face (mirror).
     ur = recon_char_state(g, dir, i, j, /*center_off=*/0, /*mirror=*/true,
-                          half, eig, ref, rho, mx, my, mz, energy, bx, by, bz);
+                          half, eig, canonical_ref,
+                          rho, mx, my, mz, energy, bx, by, bz);
 
     // ---- Per-interface robustness fallback (finiteness / positivity) ------
     // Characteristic MP reconstruction carries NO positivity guarantee: at a
@@ -519,10 +542,15 @@ void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<
                             stream_t stream, bool rate_only) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
-  // Launch over nx+1 x ny+1: the kernel also writes the high-edge face layer
-  // (index nx/ny) that flux_difference consumes at the last interior cell.
-  const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
-                  (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
+  // Include the complete transverse ghost range needed by the pointwise face
+  // quadrature.  Along the normal axis only the physical face range [0,n] is
+  // required.
+  const unsigned launch_nx = static_cast<unsigned>(
+      dir == 0 ? g.nx + 1 : g.nx + 2 * g.nghost);
+  const unsigned launch_ny = static_cast<unsigned>(
+      dir == 0 ? g.ny + 2 * g.nghost : g.ny + 1);
+  const dim3 grid((launch_nx + block.x - 1) / block.x,
+                  (launch_ny + block.y - 1) / block.y);
   // Select this axis's non-periodic flags: [x_lo,x_hi] for dir==0, [y_lo,y_hi].
   // MP characteristic projection uses the interface-collocated total field
   // B0+b; MUSCL remains a componentwise reconstruction of the split primitives.

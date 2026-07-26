@@ -637,6 +637,16 @@ class ResourceCeilingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _deck(numerics=Numerics(fdtd_order=3)).validate()
 
+    def test_fourth_order_requires_two_cells_per_dimension(self):
+        for nx, ny in ((1, 8), (8, 1)):
+            with self.subTest(nx=nx, ny=ny):
+                with self.assertRaisesRegex(
+                        ValueError, r"fdtd_order 4 requires.*at least 2"):
+                    _deck(
+                        domain=Domain(nx=nx, ny=ny, lx_m=1.0, ly_m=1.0),
+                        numerics=Numerics(fdtd_order=4, shape="cic"),
+                    ).validate()
+
     def test_negative_temperature_rejected(self):
         sp = Species(name="e", charge_C=-1.0, mass_kg=1.0, n_particles=8,
                      initial=SpeciesInitial(temperature_eV=-1.0))

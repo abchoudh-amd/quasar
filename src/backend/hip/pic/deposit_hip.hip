@@ -140,9 +140,9 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
                             + g.nghost);
   }
 
-  // NOTE(perf): current is accumulated with scattered global atomicAdd into a
-  // 6x6 window per particle (~100 atomics/particle). Particles sharing a cell
-  // collide on the same addresses, so this is the typical PIC bottleneck. The
+  // NOTE(perf): current is accumulated with scattered checked atomic additions
+  // into a 6x6 window per particle (~100 atomics/particle). Particles sharing a
+  // cell collide on the same addresses, so this is the typical PIC bottleneck. The
   // `run != 0.0` / `smid != 0.0` guards skip zero writes, which helps. Cutting the
   // contention itself needs per-block LDS partial accumulation or cell-binning so
   // co-located particles reduce in shared memory first — both require a
@@ -188,7 +188,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
         return;
       }
       if (run != 0.0 && colx_face_valid[a] && rowy_valid[b]) {
-        atomicAdd(jx + colx_face[a] + rowy[b], run);
+        checked_atomic_add(jx + colx_face[a] + rowy[b], run, overflow);
       }
     }
   }
@@ -213,7 +213,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
         return;
       }
       if (run != 0.0 && colx_valid[a] && rowy_face_valid[b]) {
-        atomicAdd(jy + colx[a] + rowy_face[b], run);
+        checked_atomic_add(jy + colx[a] + rowy_face[b], run, overflow);
       }
     }
   }
@@ -230,7 +230,7 @@ __global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double
         return;
       }
       if (value != 0.0 && colx_valid[a] && rowy_valid[b]) {
-        atomicAdd(jz + colx[a] + rowy[b], value);
+        checked_atomic_add(jz + colx[a] + rowy[b], value, overflow);
       }
     }
   }
@@ -244,12 +244,10 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
   const dim3 block(256);
   const dim3 grid((s.size() + block.x - 1) / block.x);
   // The kernel atomically sets the persistent deposit-error flag if any
-  // particle's displacement spills outside the deposition window. The flag is
-  // accumulated across steps and read back by the solver on a cadence (and at
-  // end-of-run), so there is no per-step host synchronize on the hot path — the
-  // old unconditional hipStreamSynchronize here drained the GPU pipeline every
-  // timestep. A deposit error is fatal, so a delayed throw is
-  // acceptable.
+  // particle's displacement spills outside the deposition window or any node
+  // accumulation becomes non-finite. EmPic2D3V drains the flag after the
+  // current and charge launches, before Ampere; keeping the synchronization at
+  // that ownership boundary avoids one host stall per species launch.
   hipLaunchKernelGGL((deposit_kernel<ShapeOrder>), grid, block, 0, stream,
                      g, s.size(), s.charge(), dt, periodic_x, periodic_y,
                      s.x(), s.y(), s.x_prev(), s.y_prev(),
@@ -301,7 +299,9 @@ __global__ void charge_kernel(quasar::Grid2D g, std::size_t n, double q,
         mark_deposit_error(overflow);
         return;
       }
-      if (value != 0.0) atomicAdd(rho + g.index(ii, jj), value);
+      if (value != 0.0) {
+        checked_atomic_add(rho + g.index(ii, jj), value, overflow);
+      }
     }
   }
 }
@@ -360,6 +360,73 @@ extern "C" void launch_pic_add_uniform_charge(
                      static_cast<hipStream_t>(stream), g, density,
                      rho.values.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+namespace {
+
+__global__ void validate_finite_sources_kernel(
+    std::size_t n, const double* jx, const double* jy, const double* jz,
+    const double* charge, unsigned int* error) {
+  const std::size_t k = blockIdx.x * blockDim.x + threadIdx.x;
+  if (k >= n) return;
+  if ((jx != nullptr
+       && (!isfinite(jx[k]) || !isfinite(jy[k]) || !isfinite(jz[k])))
+      || (charge != nullptr && !isfinite(charge[k]))) {
+    atomicExch(error, 1u);
+  }
+}
+
+}  // namespace
+
+extern "C" void launch_pic_validate_finite_sources(
+    const quasar::Grid2D& g,
+    const quasar::JField2D<quasar::Real>* current,
+    const quasar::ScalarGrid2D<quasar::Real>* charge,
+    unsigned int* error, quasar_stream_t stream) {
+  if (current == nullptr && charge == nullptr) {
+    throw std::invalid_argument{
+        "launch_pic_validate_finite_sources: no source was supplied"};
+  }
+  if (error == nullptr) {
+    throw std::invalid_argument{
+        "launch_pic_validate_finite_sources: error flag is null"};
+  }
+
+  const std::size_t n = g.storage_size();
+  if (current != nullptr
+      && (current->jx.size() < n || current->jy.size() < n
+          || current->jz.size() < n)) {
+    throw std::invalid_argument{
+        "launch_pic_validate_finite_sources: current storage is too small"};
+  }
+  if (charge != nullptr && charge->values.size() < n) {
+    throw std::invalid_argument{
+        "launch_pic_validate_finite_sources: charge storage is too small"};
+  }
+
+  auto hip_stream = static_cast<hipStream_t>(stream);
+  QUASAR_HIP_CHECK(::hipMemsetAsync(error, 0, sizeof(unsigned int), hip_stream));
+  const dim3 block(quasar::backend::pic::kLaunchBlock);
+  const dim3 grid = quasar::backend::pic::grid_1d(n);
+  hipLaunchKernelGGL(
+      validate_finite_sources_kernel, grid, block, 0, hip_stream, n,
+      current != nullptr ? current->jx.device_ptr() : nullptr,
+      current != nullptr ? current->jy.device_ptr() : nullptr,
+      current != nullptr ? current->jz.device_ptr() : nullptr,
+      charge != nullptr ? charge->values.device_ptr() : nullptr, error);
+  QUASAR_HIP_CHECK(::hipGetLastError());
+
+  unsigned int found_non_finite = 0;
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(
+      &found_non_finite, error, sizeof(unsigned int),
+      ::hipMemcpyDeviceToHost, hip_stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(hip_stream));
+  if (found_non_finite != 0u) {
+    throw std::overflow_error{
+        "PIC source construction produced a non-finite charge/current value "
+        "during boundary foldback, filtering/correction, periodic restoration, "
+        "or background addition"};
+  }
 }
 
 namespace {

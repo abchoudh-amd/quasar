@@ -63,7 +63,8 @@ The divergence-free requirement
    round-off level before stepping. Then
    ``div_h(B0 + b) = div_h(B0) + div_h(b)`` differs from the CT-controlled
    ``div_h(b)`` only by that accepted, time-independent residual. Curl-free is
-   not part of this contract.
+   not part of the general background contract; current-carrying backgrounds
+   remain supported.
 
 Concretely, on a Cartesian grid the face-staggered ``B0`` must satisfy
 
@@ -84,17 +85,35 @@ The precise acceptance criterion is
 
 .. math::
 
-   \max_{i,j}
-   \frac{\left|\sum_k t_{k,i,j}\right|}
-        {\sum_k\left|t_{k,i,j}\right|}
+   \frac{\max_{i,j}\left|\widetilde r_{i,j}\right|}
+        {\max_{i,j}\left(\left|d_{1,i,j}\right|+
+                          \left|d_{2,i,j}\right|\right)}
    \le 1024\,\epsilon_{64}.
 
-Here :math:`t_k` are the signed face-value/spacing terms in the exact Cartesian
-or annular stencil. A zero stencil reports zero. Both sums are formed after
-scaling every term to a common binary exponent, making the criterion invariant
-under field units, mesh scale, and power-of-two rescaling and safe near the
-binary64 exponent limits. ``1024 * epsilon(float64)`` is approximately
-``2.274e-13``.
+In Cartesian geometry :math:`d_1=\Delta_x B_x/\Delta x` and
+:math:`d_2=\Delta_y B_y/\Delta y`. Each local face offset is cancelled before
+normalization, so even a one-ULP slope on a strong DC field remains visible. In
+cylindrical geometry the complete first contribution is
+:math:`d_1=\Delta_r B_r/\Delta r+(B_{r,h}+B_{r,l})/(2r_c)`, retaining the
+physical :math:`B_r/r` curvature, and :math:`d_2=\Delta_z B_z/\Delta z`.
+:math:`\widetilde r` normally equals :math:`d_1+d_2`. It is set to zero as
+representational forward error only when both directional terms are nonzero,
+have opposite signs, the residual is no more than half
+:math:`|d_1|+|d_2|`, and it lies within 1024 times the sum of the
+metric-weighted storage ULPs of the four faces. The annular bound uses the
+actual :math:`(1+q)` and :math:`(1-q)` face coefficients, so the zero-area axis
+face creates no artificial allowance. A one-direction defect or two same-sign
+defects can never use this local envelope; in particular, a one-ULP slope on a
+large Cartesian DC field is rejected.
+
+A zero stencil reports zero. Using global L-infinity norms prevents harmless
+roundoff at a local derivative null from becoming an order-one ratio, while an
+isolated slope on an otherwise constant field still has defect one. All
+directional, residual, scale, and ULP values remain in scaled
+mantissa/exponent form through the decision, making the criterion invariant
+under field-unit and uniform coordinate-unit rescaling and safe near the
+binary64 exponent limits.
+``1024 * epsilon(float64)`` is approximately ``2.274e-13``.
 
 The complete padded field must also match the configured device boundary
 closure. Periodic ghosts wrap, wall-normal fields are odd with an exact zero on
@@ -102,15 +121,16 @@ the wall face while tangential components are even, and the cylindrical axis
 also makes ``B_phi`` odd. This prevents a background that is solenoidal only in
 the deep interior from injecting a seam or boundary divergence.
 
-This contract is enforced twice at the public boundaries. The Python deck loader
-samples the profile, assembles the staggered ``B0`` buffers, and checks their
-interior discrete divergence at build/seed time (``background_divergence_linf``
-in ``python/quasar/mhd/numerics.py``, called from ``build_background_field`` in
-``python/quasar/mhd/io.py``). The native solver independently validates profiles
-sampled by its constructor. A later ``seed_background`` call invalidates that
-proof, and the complete three-component field is revalidated immediately before
-the next CFL, residual, stepping, or divergence operation consumes it. Thus a
-direct C++/binding caller cannot bypass the solenoidal requirement by overwriting
+This contract is enforced at both public construction paths. The native solver
+samples analytic profiles and validates their padded staggered field. For
+``file`` and ``a_file`` input, the Python loader assembles and checks the buffers
+at build/seed time (``background_divergence_linf`` in
+``python/quasar/mhd/numerics.py``, called from ``build_background_field`` in
+``python/quasar/mhd/io.py``), and the native solver validates them again. A
+later ``seed_background`` call invalidates the prior validation, and the
+complete three-component field is revalidated immediately before the next CFL,
+residual, stepping, or divergence operation consumes it. Thus a direct
+C++/binding caller cannot bypass the solenoidal requirement by overwriting
 constructor-populated buffers.
 
 The deck block
@@ -146,22 +166,22 @@ How the profile reaches the device
 
 The background ``B0`` is assembled **host-side**. A native ``MhdConfig`` resolves
 the registry profile, applies ``background.params`` (followed by the legacy
-uniform ``bx0/by0/bz0`` values), samples the padded staggered mesh, and copies the
-result into the solver. A frontend may replace those values through
+uniform ``bx0/by0/bz0`` values), samples the padded staggered mesh, applies the
+constant ``profile_scale``, and copies the result into the solver. A frontend may
+replace those values through
 ``seed_background(component, buf)`` for file/vector-potential input. Device
 kernels only consume the resulting buffers, so no ``.hip`` translation unit
 depends on the profile class and a new profile is a pure host/numerics addition.
 
 .. note::
 
-   Python data path: ``build_background_field`` in ``python/quasar/mhd/io.py``
-   assembles the staggered ``B0`` buffers and calls the generic
-   ``_core.mhd.sample_mhd_background_profile`` binding at x-faces, y-faces, and
-   cell centers. The binding constructs the selected profile from the live
-   registry, applies every finite scalar ``params`` entry through
-   ``set_parameter``, and invokes ``sample`` over the supplied arrays. Both
-   ``uniform`` and ``linear_vacuum`` use this path, and a newly registered
-   profile does too without a Python dispatch edit.
+   The Python CLI leaves analytic ``uniform`` and ``linear_vacuum`` profiles in
+   the native path above; ``profile_scale`` performs their SI conversion without
+   destroying registry capability metadata. The standalone
+   ``build_background_field`` helper can still sample any registered profile
+   through ``_core.mhd.sample_mhd_background_profile`` for validation and tests.
+   The CLI uses that helper to assemble explicit ``file``/``a_file`` buffers
+   before calling ``seed_background``.
 
 .. important::
 
@@ -170,25 +190,56 @@ depends on the profile class and a new profile is a pure host/numerics addition.
    constructs reduced split fluxes directly, with the static ``B0`` Maxwell
    stress restored by the finite-volume residual. It never materializes a total
    energy or flux containing ``|B0|^2/2``. For a static, solenoidal background,
-   the energy kernel directly discretizes
+   let :math:`\mathbf F'_E` denote the reduced energy flux returned by the split
+   Riemann solve and :math:`\mathbf F_B` its induction flux. The energy kernel
+   enforces the finite-volume identity
 
    .. math::
 
-      \partial_t E' + \nabla\mathbin{\cdot}
-        (\mathbf F_E-\mathbf B_0\mathbin{\cdot}\mathbf F_B)
-      =\mathbf v\mathbin{\cdot}
-        [ (\nabla\mathbin{\times}\mathbf B_0)
-          \mathbin{\times}(\mathbf B_0+\mathbf b) ].
+      \dot E' =
+      -D_E\!\left(\mathbf F'_E
+        +\left\langle\mathbf B_0\mathbin{\cdot}\mathbf F_B\right\rangle_f\right)
+      -\left\langle\mathbf B_0\mathbin{\cdot}
+        \dot{\mathbf b}_{\rm CT}\right\rangle_V .
 
-   The kernel reduces ``curl(B0)`` before multiplication, then accumulates the
-   directional flux divergence and expanded current-work terms at a common
-   exponent. This retains small equilibrium survivors under dominant-background
-   cancellation without forming an ``O(B0^2)`` intermediate for curl-free
-   fields. Nonzero curl is permitted; ``background_curl_linf`` is a diagnostic,
-   not an acceptance gate. A constant cylindrical toroidal ``B0_phi`` is
-   current-carrying because
+   Here :math:`D_E` is the same Cartesian or annular face-divergence operator
+   used by the conservative update, and :math:`\dot{\mathbf b}_{\rm CT}` is the
+   finalized constrained-transport magnetic rate. Face and volume quadrature
+   are matched to the spatial order. The implementation conditions this
+   expression around the cell background and accumulates background
+   differences, CT/Godunov rate differences, and covariance terms at a common
+   exponent. It therefore does not rely on a continuum product rule that the
+   discrete CT and flux-divergence operators need not satisfy, and it avoids
+   forming an ``O(B0^2)`` intermediate. Nonzero curl is permitted;
+   ``background_curl_linf`` is a diagnostic, not an acceptance gate. A constant
+   cylindrical toroidal ``B0_phi`` is current-carrying because
    :math:`(\nabla\times B_0)_z=B_{0\phi}/r`, but it is supported when the
    staggered divergence criterion passes.
+
+   A trusted domain-wide curl-free construction proof enables one additional
+   well-balanced path; it is never inferred from sampled tolerances.
+   Analytic Cartesian profiles may return ``true`` from
+   ``globally_curl_free()``. The cylindrical ``a_file`` vacuum projection sets
+   the equivalent native ``MhdBackgroundSpec::curl_free`` assertion after its
+   solve. ``MhdBackgroundSpec::profile_scale`` applies a uniform unit conversion
+   inside native sampling, preserving an analytic profile's registry proof
+   without component-wise overrides. Explicit samples carrying an
+   assertion are checked against all staggered curl components as defense in
+   depth. Each directional difference cancels its local field offset first;
+   only cancellation between independent derivatives receives the ``1e-8``
+   local relative tolerance. A curl component containing one derivative must
+   vanish exactly in the represented samples, and an axis-containing
+   cylindrical domain requires ``B0_phi=0`` throughout its physical cells.
+   This check catches gross contradictions but is neither a mathematical proof
+   nor a force-error bound; correctness rests on the trusted construction that
+   supplied the assertion. Only then does the momentum operator omit the
+   pure-static
+   :math:`B_0` Maxwell stress, whose divergence is identically
+   :math:`(\nabla\times B_0)\times B_0=0`; all :math:`B_0`--:math:`b` cross
+   stresses remain. This avoids an :math:`O(h^p B_0^2)` numerical self-force in
+   low-beta vacuum backgrounds. Never claim curl-free for a current-carrying
+   profile merely to remove that force: doing so violates the trusted-proof
+   contract even if the defense-in-depth sample check does not expose the lie.
 
 An ``a_file`` is one convenient non-uniform input: the loader constructs the
 in-plane field as a discrete curl of the padded-corner vector potential, making

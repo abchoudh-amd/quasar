@@ -58,9 +58,11 @@ Key              Meaning
                  block).
 ``profile``      Registry name of the background-field profile. Validated
                  against the live registry; ``uniform`` is built in and is the
-                 default. An unknown name is rejected with an error.
+                 default. An unknown analytic profile is rejected. Ignored in
+                 ``file``/``a_file`` modes, which supply all spatial samples.
 ``bx0`` ``by0``  Components of the uniform vector :math:`\mathbf{B}_0` when
-``bz0``          ``profile == uniform``. Default ``0`` each.
+``bz0``          ``profile == uniform``. Default ``0`` each. In ``a_file`` mode
+                 only ``bz0`` is used, as a uniform out-of-plane component.
 ``params``       Mapping forwarded to the selected analytic profile. In
                  ``a_file`` mode, ``b_scale`` scales the potential and
                  ``vacuum_project`` requests the annular harmonic projection.
@@ -97,23 +99,26 @@ the grid's storage layout: either the 2-D ghost-padded shape
    divergence-free and compatible with the configured periodic, wall, or axis
    closure. The Riemann solver computes the split momentum and energy fluxes
    directly, without ever forming an :math:`O(|\mathbf B_0|^2)` state or flux.
-   For a static, divergence-free background the residual discretizes the split
-   conservation law directly,
+   For a static, divergence-free background the energy residual enforces the
+   finite-volume change of variables directly,
 
    .. math::
 
-      \partial_t E' + \nabla\mathbin{\cdot}
-        (\mathbf F_E-\mathbf B_0\mathbin{\cdot}\mathbf F_B)
-      =\mathbf v\mathbin{\cdot}
-        [ (\nabla\mathbin{\times}\mathbf B_0)
-          \mathbin{\times}(\mathbf B_0+\mathbf b) ].
+      \dot E' =
+      -D_E\!\left(\mathbf F'_E
+        +\left\langle\mathbf B_0\mathbin{\cdot}\mathbf F_B\right\rangle_f\right)
+      -\left\langle\mathbf B_0\mathbin{\cdot}
+        \dot{\mathbf b}_{\rm CT}\right\rangle_V .
 
-   The curl of :math:`\mathbf B_0` is reduced before it is multiplied by either
-   field. Directional flux terms and the expanded current-work source share a
-   common binary exponent. This retains background-gradient/current work and
-   finite survivors even when much larger background terms cancel, while a
-   curl-free dominant background never creates an
-   :math:`O(|\mathbf B_0|^2)` intermediate.
+   Here :math:`\mathbf F'_E` is the reduced energy flux,
+   :math:`\mathbf F_B` is the induction flux, and
+   :math:`\dot{\mathbf b}_{\rm CT}` is the finalized constrained-transport
+   magnetic rate. The face and volume averages use the quadrature appropriate
+   to the configured spatial order. Background differences, CT/Godunov rate
+   differences, and covariance terms share a common binary exponent. This
+   preserves finite background-gradient/current-work contributions when much
+   larger background terms cancel and avoids relying on a continuum product
+   rule that need not hold for the discrete flux and CT operators.
 
    ``params.vacuum_project: true`` is an explicit cylindrical-annulus operation.
    It fixes :math:`A_\phi` on the outer boundary of the **padded** corner grid and
@@ -122,6 +127,28 @@ the grid's storage layout: either the 2-D ghost-padded shape
    Jacobi-preconditioned conjugate-gradient solve is required to reach a
    field-derivative-scaled vacuum-operator target; failure is a hard setup
    error.
+   The loader carries that trusted construction proof into the native solver.
+   The completed seeded field receives a defense-in-depth staggered-curl check:
+   single-derivative components must vanish in the represented samples, while
+   cancellation between independent derivatives uses a ``1e-8`` local relative
+   bound. This catches direct contradictions but is not itself a mathematical
+   proof or a force-error bound. A proven field omits the
+   pure-:math:`\mathbf B_0` Maxwell-stress residual domain-wide, because
+
+   .. math::
+
+      -\nabla\!\cdot\!\left(
+        \tfrac12|\mathbf B_0|^2\mathbf I
+        -\mathbf B_0\mathbf B_0\right)
+      =(\nabla\!\times\!\mathbf B_0)\times\mathbf B_0=0 .
+
+   This well-balanced path is important for low-beta plasmas: separately
+   differencing two large static stresses would leave a truncation-level
+   self-force even though the intended vacuum field exerts none on itself.
+   Cross stresses involving the evolved perturbation remain active, so the
+   total field still supplies magnetic pressure and tension. A field that
+   contradicts the native curl check is rejected; callers must never set the
+   trusted flag merely because a sampled field passes that tolerance.
    Without the flag, the sampled vector potential is used directly. The
    projection is optional field preparation, not a requirement of the split
    equations.
@@ -137,16 +164,29 @@ unless every interior cell satisfies the scale-free stencil test
 
 .. math::
 
-   \max_{i,j}
-   \frac{\left|\sum_k t_{k,i,j}\right|}
-        {\sum_k\left|t_{k,i,j}\right|}
+   \frac{\max_{i,j}\left|\widetilde r_{i,j}\right|}
+        {\max_{i,j}\left(\left|d_{1,i,j}\right|+
+                          \left|d_{2,i,j}\right|\right)}
    \le 1024\,\epsilon_{64},
 
-where :math:`t_k` are the four signed Cartesian face/spacing terms (or the
-matching annular-radial and axial terms in cylindrical geometry). A zero stencil
-has zero defect. Numerator and denominator share a common binary exponent, so
-the test is invariant under field-unit, mesh, and power-of-two rescaling and is
-safe near the binary64 exponent limits. Here
+where the two :math:`d` values are the complete directional divergence
+contributions. Cartesian face differences cancel their local field offsets
+before normalization, so a represented slope cannot be hidden by a strong DC
+field. Cylindrical radial divergence additionally retains its physical
+:math:`B_r/r` curvature. Normally
+:math:`\widetilde r=d_1+d_2`. A local residual is classified as face-storage
+roundoff only if both terms are nonzero and opposite in sign, the cancellation
+leaves at most half their magnitude sum, and the remainder is within 1024
+metric-weighted face ULPs. The annular weights include the true axis-face zero.
+One-direction and same-sign defects receive no such allowance, so even a
+one-ULP slope on a large DC field remains visible.
+
+A zero stencil has zero defect. The ratio of global L-infinity norms admits
+floating-point noise at a local derivative null without letting an isolated
+slope on a constant field hide. Directional values, the forward-error bound,
+and both norms remain in scaled mantissa/exponent form, so cancellation is safe
+near the binary64 exponent limits and the test is invariant under field-unit
+and uniform coordinate-unit rescaling. Here
 ``1024 * epsilon(float64)`` is approximately ``2.274e-13``.
 
 The padded background must also be a fixed point of its configured boundary

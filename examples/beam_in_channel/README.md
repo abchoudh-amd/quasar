@@ -3,7 +3,12 @@
 A drifting electron beam confined to a channel: periodic along `x`, reflecting
 (PEC field + specular particle) walls in `y`. Exercises mixed dict-form
 boundaries with separate `field` and `particle` side-maps. The beam streams along
-`x` and bounces off the `y` walls, staying confined (no particle loss).
+`x` and bounces off the `y` walls, staying confined (no particle loss). A cold,
+heavy positive species is loaded on the same deterministic quiet-start positions
+as the electrons. Equal densities, counts, and opposite charges cancel the
+deposited charge cell-by-cell at startup, so the zero self-electric-field seed
+satisfies the discrete Gauss constraint to roundoff. The ions remain nearly
+stationary on this short beam-transit timescale.
 
 ## Run
 
@@ -15,9 +20,11 @@ PYTHONPATH=build/hip-gfx942-release/python \
 `units: normalized`. Output `out.npz` keys:
 
 - `field_bz`, `snapshot_field_bz` — field output (cadence 8).
-- `species_electron_beam_*` — final particle state (incl. `_alive`).
+- `species_electron_beam_*`, `species_ion_background_*` — final particle states
+  (including `_alive`).
 
 ## Reference signature
 
-The specular `y` walls keep every particle alive (the beam is confined). The
-integration test asserts the alive count equals the particle count.
+The paired quiet start is initially charge-neutral on the mesh, and the specular
+`y` walls keep every particle alive. The integration test asserts the equal and
+opposite load and checks both alive counts.

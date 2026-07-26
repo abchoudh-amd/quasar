@@ -492,6 +492,73 @@ class InitialConditionValidationTests(unittest.TestCase):
                                         bx0=1.0))
         deck.validate()
 
+    def test_alfven_seed_is_exact_finite_volume_projection(self):
+        gamma = 1.4
+        rho0 = 4.0
+        pressure0 = 0.7
+        b0 = -1.5
+        amplitude = 0.2
+        mode = 2
+        nx = 12
+        nghost = 4
+        origin = -0.7
+        length = 2.5
+        deck = _deck(
+            domain=_domain(nx=nx, ny=3, lx_m=length, ly_m=0.6,
+                           origin_x_m=origin, origin_y_m=1.2),
+            numerics=_numerics(gamma=gamma),
+            initial=Initial(type="alfven_wave", params={
+                "rho": rho0,
+                "p": pressure0,
+                "b0": b0,
+                "amplitude": amplitude,
+                "wavenumber": mode,
+            }),
+        )
+        state = build_initial_state(deck, nghost=nghost)
+        shape = (deck.domain.ny + 2 * nghost, nx + 2 * nghost)
+        x = origin + (np.arange(-nghost, nx + nghost) + 0.5) * length / nx
+        phase = 2.0 * np.pi * mode * (x - origin) / length
+        half_cell_phase = math.pi * mode / nx
+        average = math.sin(half_cell_phase) / half_cell_phase
+        sin_average = average * np.sin(phase)
+        cos_average = average * np.cos(phase)
+
+        def rows(values):
+            return np.broadcast_to(values, shape)
+
+        # my/mz and Bz are cell averages.  By is a y-normal face average;
+        # because the wave varies in x, that face spans the same averaging
+        # interval and carries the same sinc factor.
+        np.testing.assert_allclose(
+            state["my"].reshape(shape),
+            rows(math.sqrt(rho0) * amplitude * sin_average),
+            rtol=0.0, atol=3.0e-15,
+        )
+        np.testing.assert_allclose(
+            state["mz"].reshape(shape),
+            rows(math.sqrt(rho0) * amplitude * cos_average),
+            rtol=0.0, atol=3.0e-15,
+        )
+        np.testing.assert_allclose(
+            state["by"].reshape(shape), rows(amplitude * sin_average),
+            rtol=0.0, atol=3.0e-15,
+        )
+        np.testing.assert_allclose(
+            state["bz"].reshape(shape), rows(amplitude * cos_average),
+            rtol=0.0, atol=3.0e-15,
+        )
+
+        # Circular polarization makes kinetic + transverse magnetic energy
+        # pointwise constant.  Its cell average is therefore A^2, not A^2 times
+        # sinc^2 as would result from squaring the averaged primitives.
+        exact_energy = (pressure0 / (gamma - 1.0)
+                        + 0.5 * b0 * b0 + amplitude * amplitude)
+        np.testing.assert_allclose(
+            state["energy"].reshape(shape), exact_energy,
+            rtol=0.0, atol=4.0e-14,
+        )
+
     def test_blast_rotor_and_blob_reject_invalid_geometry_parameters(self):
         invalid = (
             Initial(type="blast", params={"center": [0.0], "r_in": 0.1}),
@@ -522,6 +589,49 @@ class InitialConditionValidationTests(unittest.TestCase):
             with self.subTest(component=name):
                 np.testing.assert_allclose(
                     state_b[name], state_a[name], rtol=0.0, atol=2.0e-14)
+
+    def test_orszag_tang_default_uses_consistent_mu0_one_normalization(self):
+        gamma = 5.0 / 3.0
+        deck = _deck(
+            domain=_domain(nx=16, ny=16),
+            numerics=_numerics(gamma=gamma),
+            initial=Initial(type="orszag_tang"),
+        )
+        state = build_initial_state(deck, nghost=4)
+        self.assertTrue(np.allclose(state["rho"], gamma * gamma))
+        x = (np.arange(-4, 16 + 4) + 0.5) / 16.0
+        y = (np.arange(-4, 16 + 4) + 0.5) / 16.0
+        shape = (24, 24)
+        np.testing.assert_allclose(
+            state["bx"].reshape(shape),
+            np.broadcast_to(-np.sin(2.0 * np.pi * y)[:, None], shape),
+            rtol=0.0, atol=2.0e-15,
+        )
+        np.testing.assert_allclose(
+            state["by"].reshape(shape),
+            np.broadcast_to(np.sin(4.0 * np.pi * x)[None, :], shape),
+            rtol=0.0, atol=2.0e-15,
+        )
+
+    def test_rotor_taper_uses_canonical_tangential_speed(self):
+        r0, r1, u0 = 0.1, 0.2, 2.0
+        # Physical cell centres lie at r=0.05 (solid body), 0.15 (mid-taper),
+        # and 0.25 (ambient) along +x from the origin.
+        deck = _deck(
+            domain=_domain(nx=3, ny=1, lx_m=0.3, ly_m=0.1,
+                           origin_x_m=0.0, origin_y_m=-0.05),
+            initial=Initial(type="rotor", params={
+                "center": [0.0, 0.0], "r0": r0, "r1": r1, "u0": u0,
+            }),
+        )
+        state = build_initial_state(deck, nghost=2)
+        row = 2
+        shape = (5, 7)
+        rho = state["rho"].reshape(shape)
+        vx = state["mx"].reshape(shape)[row, 2:5] / rho[row, 2:5]
+        vy = state["my"].reshape(shape)[row, 2:5] / rho[row, 2:5]
+        np.testing.assert_allclose(vx, 0.0, atol=1.0e-15)
+        np.testing.assert_allclose(vy, [1.0, 1.0, 0.0], atol=2.0e-14)
 
     def test_initial_state_requires_strictly_positive_density(self):
         deck = _deck(initial=Initial(
@@ -602,8 +712,15 @@ class SiMagneticNormalizationTests(unittest.TestCase):
         state = build_initial_state(deck, nghost=2)
         vtrans = np.sqrt((state["my"] / state["rho"])**2 +
                          (state["mz"] / state["rho"])**2)
-        expected = amp_tesla / math.sqrt(mhd_units.MU0 * rho0)
+        half_cell_phase = math.pi / deck.domain.nx
+        average = math.sin(half_cell_phase) / half_cell_phase
+        expected = (amp_tesla / math.sqrt(mhd_units.MU0 * rho0) * average)
         np.testing.assert_allclose(vtrans, expected, rtol=2.0e-14, atol=0.0)
+        expected_energy = (1.0 / (deck.numerics.gamma - 1.0)
+                           + 0.5 * 0.1**2 / mhd_units.MU0
+                           + amp_tesla**2 / mhd_units.MU0)
+        np.testing.assert_allclose(
+            state["energy"], expected_energy, rtol=2.0e-14, atol=0.0)
 
 
 class BoundaryParseTests(unittest.TestCase):

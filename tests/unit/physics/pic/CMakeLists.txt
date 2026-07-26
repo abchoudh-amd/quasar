@@ -2,6 +2,7 @@ set(_quasar_pic_tests
   test_em_wave_dispersion
   test_fdtd_order_convergence
   test_fdtd_range
+  test_single_particle_uniform_E
   test_single_particle_uniform_B
   test_single_particle_ExB_drift
   test_charge_conservation

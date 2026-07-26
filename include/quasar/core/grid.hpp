@@ -251,14 +251,47 @@ inline Real cfl_dt(const Grid2D& g, int fdtd_order, Real c = Real{1}) {
   return dt;
 }
 
-// Cylindrical (r,z) CFL limit for the m=0 mimetic curl.  In the radial
-// volume-weighted inner product, (1/r)D+(r .) is the negative adjoint of D-.
-// The regular axis row is the even/odd parity restriction of the same staggered
-// operator, so it cannot increase its norm.  Consequently the maximum symbols
-// are 2/h (order 2) and 7/(3h) (order 4), exactly the Cartesian values; no
-// additional small-r restriction is needed.
+// Cylindrical (r,z) CFL limit for the m=0 mimetic curl.  Order two has the
+// Cartesian Yee bound.  At order four the regular-axis closure is not exactly
+// Fourier-diagonal: the conservative all-grid induced-norm estimate is
+//   rho(-A_r B_r) <= 35/(6 dr^2),
+// while the axial Cartesian contribution is 49/(9 dz^2).  Leapfrog stability
+// therefore follows from
+//   dt <= 1 / (c*sqrt(35/(24 dr^2) + 49/(36 dz^2))).
+// This is a proved sufficient bound, not an empirical safety margin.
 inline Real cyl_cfl_dt(const Grid2D& g, int fdtd_order, Real c) {
-  return cfl_dt(g, fdtd_order, c);
+  g.validate();
+  if (c <= Real{0} || !std::isfinite(c)) {
+    throw std::invalid_argument{
+        "cyl_cfl_dt: wave speed must be finite and positive"};
+  }
+  if (fdtd_order == 2) return cfl_dt(g, fdtd_order, c);
+  if (fdtd_order != 4) {
+    throw std::invalid_argument{
+        "cyl_cfl_dt: supported FDTD orders are 2 and 4"};
+  }
+
+  // Scale by the smaller spacing before squaring.  This is algebraically the
+  // formula above, but remains finite for extreme aspect ratios and spacings.
+  constexpr Real radial_squared = Real{35} / Real{24};
+  constexpr Real axial_squared = Real{49} / Real{36};
+  const Real dr = g.dx();
+  const Real dz = g.dy();
+  Real h_min = dr;
+  Real ratio = dr / dz;
+  Real spectral_squared = radial_squared + axial_squared * ratio * ratio;
+  if (dz < dr) {
+    h_min = dz;
+    ratio = dz / dr;
+    spectral_squared = axial_squared + radial_squared * ratio * ratio;
+  }
+  const Real spectral_factor = std::sqrt(spectral_squared);
+  const Real dt = detail::scaled_quotient3(h_min, spectral_factor, c);
+  if (!(std::isfinite(dt) && dt > Real{0})) {
+    throw std::overflow_error{
+        "cyl_cfl_dt: stable timestep is not representable"};
+  }
+  return dt;
 }
 
 // Backward-compatible order-two spelling.

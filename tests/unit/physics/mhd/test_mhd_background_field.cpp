@@ -45,11 +45,14 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
+#include "quasar/physics/mhd/kernels.hpp"
+#include "quasar/physics/mhd/mhd_field.hpp"
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -315,6 +318,32 @@ TEST(MhdBackgroundField, HasBackgroundReflectsConfig) {
   EXPECT_TRUE(solver_on.has_background());
 }
 
+TEST(MhdBackgroundField, NativeProfileScaleMatchesUniformAmplitude) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto scaled_cfg = make_config();
+  set_all_boundaries(scaled_cfg, "outflow");
+  scaled_cfg.background.enabled = true;
+  scaled_cfg.background.profile = "uniform";
+  scaled_cfg.background.bx0 = Real{0.8};
+  scaled_cfg.background.profile_scale = Real{2};
+
+  auto direct_cfg = scaled_cfg;
+  direct_cfg.background.bx0 = Real{1.6};
+  direct_cfg.background.profile_scale = Real{1};
+
+  quasar::mhd::MhdSolver2D scaled_solver{scaled_cfg};
+  quasar::mhd::MhdSolver2D direct_solver{direct_cfg};
+  seed_uniform_split_state(
+      scaled_solver, scaled_cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+  seed_uniform_split_state(
+      direct_solver, direct_cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  EXPECT_EQ(scaled_solver.cfl_limit(), direct_solver.cfl_limit());
+}
+
 // Turning on a nonzero uniform B0 lowers the stable dt for the SAME seeded
 // perturbation+fluid state (the fast speed rises with |B0+b|).
 TEST(MhdBackgroundField, NonzeroBackgroundTightensCfl) {
@@ -392,6 +421,19 @@ TEST(MhdBackgroundField, NativeConfigSamplesUniformBackgroundAtConstruction) {
   ASSERT_TRUE(std::isfinite(dt_off));
   ASSERT_TRUE(std::isfinite(dt_on));
   EXPECT_LT(dt_on, dt_off);
+}
+
+TEST(MhdBackgroundField, DisabledBackgroundIgnoresDormantMetadata) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.background.enabled = false;
+  cfg.background.profile = "not-a-registered-profile";
+  cfg.background.bx0 = std::numeric_limits<Real>::quiet_NaN();
+  cfg.background.profile_scale = std::numeric_limits<Real>::infinity();
+  cfg.background.params = {{"unused", std::numeric_limits<Real>::quiet_NaN()}};
+  cfg.background.curl_free = true;
+  EXPECT_NO_THROW(quasar::mhd::MhdSolver2D{cfg});
 }
 
 TEST(MhdBackgroundField, NativeConfigAppliesGenericAnalyticProfileParameters) {
@@ -524,6 +566,303 @@ TEST(MhdBackgroundField, ExplicitSeedIsRevalidatedBeforeUse) {
   EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
 }
 
+TEST(MhdBackgroundField, RejectsOneUlpDivergenceOnLargeCartesianOffset) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = cfg.grid.storage_size();
+  const Real offset = std::scalbn(Real{1.5}, 40);
+  std::vector<Real> b0x(n, offset);
+  const std::vector<Real> zero(n, Real{0});
+  b0x[cfg.grid.index(3, 4)] = std::nextafter(
+      offset, std::numeric_limits<Real>::infinity());
+  solver.seed_background("b0x", b0x);
+  solver.seed_background("b0y", zero);
+  solver.seed_background("b0z", zero);
+
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+}
+
+TEST(MhdBackgroundField, AcceptsOppositeUlpSlopesOnLargeCartesianOffsets) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = cfg.grid.storage_size();
+  const Real offset = std::scalbn(Real{1.5}, 40);
+  const Real upper_x = std::nextafter(
+      offset, std::numeric_limits<Real>::infinity());
+  const Real lower_x = std::nextafter(
+      offset, -std::numeric_limits<Real>::infinity());
+  const Real upper_y = std::nextafter(
+      upper_x, std::numeric_limits<Real>::infinity());
+  const Real lower_y = std::nextafter(
+      lower_x, -std::numeric_limits<Real>::infinity());
+  std::vector<Real> b0x(n, offset), b0y(n, offset), b0z(n, Real{0});
+  constexpr int corner_i = 3;
+  constexpr int corner_j = 4;
+  // The x slopes are one storage ulp while the opposing y slopes are two.
+  // Their one-ulp residual is a genuine cross-direction cancellation inside
+  // the metric-weighted storage-forward-error envelope, not exact arithmetic
+  // cancellation. This pins native parity with the Python +1/-2 ulp stencil.
+  b0x[cfg.grid.index(corner_i, corner_j - 1)] = upper_x;
+  b0x[cfg.grid.index(corner_i, corner_j)] = lower_x;
+  b0y[cfg.grid.index(corner_i - 1, corner_j)] = lower_y;
+  b0y[cfg.grid.index(corner_i, corner_j)] = upper_y;
+  solver.seed_background("b0x", b0x);
+  solver.seed_background("b0y", b0y);
+  solver.seed_background("b0z", b0z);
+
+  EXPECT_NO_THROW((void)solver.cfl_limit());
+}
+
+TEST(MhdBackgroundField, RejectsSameSignUlpSlopesOnLargeCartesianOffsets) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = cfg.grid.storage_size();
+  const Real offset = std::scalbn(Real{1.5}, 40);
+  const Real upper = std::nextafter(
+      offset, std::numeric_limits<Real>::infinity());
+  std::vector<Real> b0x(n, offset), b0y(n, offset), b0z(n, Real{0});
+  b0x[cfg.grid.index(4, 3)] = upper;
+  b0y[cfg.grid.index(3, 4)] = upper;
+  solver.seed_background("b0x", b0x);
+  solver.seed_background("b0y", b0y);
+  solver.seed_background("b0z", b0z);
+
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+}
+
+TEST(MhdBackgroundField, RejectsFalseExplicitCurlFreeAssertion) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.geometry = "cylindrical";
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid = quasar::Grid2D{
+      8, 8, Real{0.8}, Real{0.8}, Real{1}, Real{-0.4}, /*nghost=*/2};
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.curl_free = true;
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = cfg.grid.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0z_axial(n);
+  for (int j = -cfg.grid.nghost; j < cfg.grid.ny + cfg.grid.nghost; ++j) {
+    for (int i = -cfg.grid.nghost; i < cfg.grid.nx + cfg.grid.nghost; ++i) {
+      // B0=(0,r,0) in storage order (Br,Bz,Bphi) is divergence-free but has
+      // curl_phi=-d_r Bz=-1. It must not be allowed to suppress its Lorentz
+      // force merely because a caller asserted curl_free.
+      b0z_axial[cfg.grid.index(i, j)] = cfg.grid.x_at_cell_center(i);
+    }
+  }
+  solver.seed_background("b0x", zero);
+  solver.seed_background("b0y", b0z_axial);
+  solver.seed_background("b0z", zero);
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+}
+
+TEST(MhdBackgroundField,
+     RejectsCurlHiddenByStrongCartesianFieldOffset) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.curl_free = true;
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = cfg.grid.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0z(n);
+  const Real offset = std::scalbn(Real{1}, 40);
+  for (int j = -cfg.grid.nghost;
+       j < cfg.grid.ny + cfg.grid.nghost; ++j) {
+    for (int i = -cfg.grid.nghost;
+         i < cfg.grid.nx + cfg.grid.nghost; ++i) {
+      // curl_y(B0)=-d_x B0z=-1. The represented adjacent samples differ,
+      // but normalizing by |B0z| would report only O(dx/offset) and accept the
+      // false assertion at the historical 1e-8 tolerance.
+      b0z[cfg.grid.index(i, j)] =
+          offset + cfg.grid.x_at_cell_center(i);
+    }
+  }
+  ASSERT_NE(b0z[cfg.grid.index(1, 0)], b0z[cfg.grid.index(0, 0)]);
+  solver.seed_background("b0x", zero);
+  solver.seed_background("b0y", zero);
+  solver.seed_background("b0z", b0z);
+
+  try {
+    (void)solver.cfl_limit();
+    FAIL() << "a represented B0z slope was accepted as curl-free";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string{error.what()}.find("curl_free assertion"),
+              std::string::npos);
+  }
+}
+
+TEST(MhdBackgroundField,
+     RejectsSingularToroidalCurlFreeFieldAtCylindricalAxis) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.geometry = "cylindrical";
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid = quasar::Grid2D{
+      8, 8, Real{0.8}, Real{0.8}, Real{0}, Real{-0.4}, /*nghost=*/2};
+  set_all_boundaries(cfg, "outflow");
+  cfg.boundary.fluid[0] = "axis";
+  cfg.boundary.field[0] = "axis";
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.curl_free = true;
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, cfg.grid, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = cfg.grid.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0phi(n);
+  for (int j = -cfg.grid.nghost;
+       j < cfg.grid.ny + cfg.grid.nghost; ++j) {
+    for (int i = -cfg.grid.nghost;
+         i < cfg.grid.nx + cfg.grid.nghost; ++i) {
+      // r*Bphi=1 at every positive-radius face, so checks which skip r=0 see
+      // only round-off. Nevertheless Bphi=1/r is singular on this domain and
+      // carries a distributional axial current. Its negative-radius samples
+      // also satisfy the required odd axis parity.
+      b0phi[cfg.grid.index(i, j)] =
+          Real{1} / cfg.grid.x_at_cell_center(i);
+    }
+  }
+  solver.seed_background("b0x", zero);
+  solver.seed_background("b0y", zero);
+  solver.seed_background("b0z", b0phi);
+
+  try {
+    (void)solver.cfl_limit();
+    FAIL() << "singular Bphi=1/r was accepted as curl-free at the axis";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string{error.what()}.find("curl_free assertion"),
+              std::string::npos);
+  }
+}
+
+TEST(MhdBackgroundField,
+     CylindricalExplicitVacuumBackgroundHasNoSpuriousSelfForce) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.geometry = "cylindrical";
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid = quasar::Grid2D{
+      8, 8, Real{0.8}, Real{0.8}, Real{1}, Real{-0.4}, /*nghost=*/2};
+  set_all_boundaries(cfg, "outflow");
+  cfg.cfl = Real{0.2};
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.curl_free = true;
+  quasar::mhd::MhdSolver2D solver{cfg};
+
+  const auto& g = cfg.grid;
+  const std::size_t n = g.storage_size();
+  std::vector<Real> b0r(n), b0z(n), b0phi(n, Real{0});
+  constexpr Real amplitude = Real{10};
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real z_cell = g.y_at_cell_center(j);
+    const Real z_face = g.origin_y + static_cast<Real>(j) * g.dy();
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real r_face = g.origin_x + static_cast<Real>(i) * g.dx();
+      const Real r_cell = g.x_at_cell_center(i);
+      const std::size_t k = g.index(i, j);
+      // Gradient of the axisymmetric harmonic potential
+      //   Phi = z^3 - (3/2) z r^2:
+      //   Br=-3 a z r, Bz=a(3 z^2 - 3 r^2/2), Bphi=0.
+      // The annular face divergence and corner curl both cancel exactly, while
+      // separately differencing the quadratic Maxwell stress leaves a visible
+      // O(h^2 B0^2) self-force. The domain-wide vacuum proof must omit only
+      // that identically-zero pure-B0 force.
+      b0r[k] = -Real{3} * amplitude * z_cell * r_face;
+      b0z[k] = amplitude *
+          (Real{3} * z_face * z_face - Real{1.5} * r_cell * r_cell);
+    }
+  }
+  seed_uniform_split_state(
+      solver, g, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+  solver.seed_background("b0x", b0r);
+  solver.seed_background("b0y", b0z);
+  solver.seed_background("b0z", b0phi);
+
+  const auto rho0 = solver.state_component_to_host("rho");
+  const auto mx0 = solver.state_component_to_host("mx");
+  const auto my0 = solver.state_component_to_host("my");
+  const auto mz0 = solver.state_component_to_host("mz");
+  const auto energy0 = solver.state_component_to_host("energy");
+  const auto bx0 = solver.state_component_to_host("bx_face");
+  const auto by0 = solver.state_component_to_host("by_face");
+  const auto bz0 = solver.state_component_to_host("bz");
+
+  const Real dt = Real{0.5} * solver.cfl_limit();
+  ASSERT_GT(dt, Real{0});
+  solver.step(dt);
+
+  constexpr Real tolerance = Real{2e-12};
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("rho"), rho0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("mx"), mx0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("my"), my0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("mz"), mz0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(
+                solver.state_component_to_host("energy"), energy0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(
+                solver.state_component_to_host("bx_face"), bx0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(
+                solver.state_component_to_host("by_face"), by0, g),
+            tolerance);
+  EXPECT_LT(max_abs_diff(solver.state_component_to_host("bz"), bz0, g),
+            tolerance);
+}
+
 TEST(MhdBackgroundField,
      DominantCurlFreeBackgroundHasNoSpuriousSelfForce) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
@@ -572,6 +911,817 @@ TEST(MhdBackgroundField,
 }
 
 TEST(MhdBackgroundField,
+     PeriodicStaticStressHasZeroIntegratedMomentumForce) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      32, 32, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  std::vector<Real> b0x(n), b0y(n), b0z(n);
+  const Real amplitude = std::scalbn(Real{1}, 300);
+  const auto potential = [&](int i, int j) {
+    const int wi = g.wrap_i(i);
+    const int wj = g.wrap_j(j);
+    // An exactly quadratic interior streamfunction makes B0 linear and the
+    // order-matched tensor curl identically zero in some cells while the
+    // surrounding field still carries current.  A cell-local "curl-free"
+    // stress skip would then break shared-face cancellation at the transition
+    // even though the shared stress there is nonzero; only a domain-wide
+    // decision is safe.  The power-of-two amplitude makes the patch arithmetic
+    // exact while magnifying any lost O(B0^2) face contribution.
+    if (wi >= 4 && wi <= 28 && wj >= 4 && wj <= 28) {
+      return amplitude * static_cast<Real>(wi * wj) / Real{1024};
+    }
+    const Real x = g.origin_x + static_cast<Real>(wi) * g.dx();
+    const Real y = g.origin_y + static_cast<Real>(wj) * g.dy();
+    return amplitude *
+           std::sin(Real{2} * quasar::pi * (x + Real{2} * y));
+  };
+  Real max_divergence = Real{0};
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      b0x[k] = (potential(i, j + 1) - potential(i, j)) / g.dy();
+      b0y[k] = -(potential(i + 1, j) - potential(i, j)) / g.dx();
+      const int wi = g.wrap_i(i);
+      const int wj = g.wrap_j(j);
+      if (wi >= 4 && wi <= 28 && wj >= 4 && wj <= 28) {
+        b0z[k] = Real{0.5} * amplitude;
+      } else {
+        const Real xc = g.x_at_cell_center(wi);
+        const Real yc = g.y_at_cell_center(wj);
+        b0z[k] = amplitude * std::sin(
+            Real{2} * quasar::pi * (xc + Real{2} * yc));
+      }
+    }
+  }
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const Real divergence =
+          (b0x[g.index(i + 1, j)] - b0x[g.index(i, j)]) / g.dx() +
+          (b0y[g.index(i, j + 1)] - b0y[g.index(i, j)]) / g.dy();
+      max_divergence = std::max(max_divergence, std::abs(divergence));
+    }
+  }
+  Real max_field = Real{0};
+  for (std::size_t k = 0; k < n; ++k) {
+    max_field = std::max(
+        max_field, std::max(std::abs(b0x[k]), std::abs(b0y[k])));
+  }
+  ASSERT_LT(max_divergence,
+            Real{2048} * std::numeric_limits<Real>::epsilon() *
+                std::abs(max_field) / std::min(g.dx(), g.dy()));
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.b0x_face.copy_from_host(b0x.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(b0z.data(), n);
+
+  const std::vector<Real> zero(n, Real{0});
+  const std::vector<int> zero_flag(n, 0);
+  quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g}, residual{g};
+  for (auto* flux : {&flux_x, &flux_y}) {
+    flux->mx.copy_from_host(zero.data(), n);
+    flux->my.copy_from_host(zero.data(), n);
+    flux->mz.copy_from_host(zero.data(), n);
+  }
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+  for (auto* parts : {&parts_x, &parts_y}) {
+    parts->wave_x.copy_from_host(zero.data(), n);
+    parts->wave_y.copy_from_host(zero.data(), n);
+    parts->wave_z.copy_from_host(zero.data(), n);
+    for (auto& point : parts->cross_b_point) {
+      point.x.copy_from_host(zero.data(), n);
+      point.y.copy_from_host(zero.data(), n);
+      point.z.copy_from_host(zero.data(), n);
+    }
+    parts->quadrature_valid.copy_from_host(zero_flag.data(), n);
+  }
+
+  // With no material, wave, or cross-stress channels, this is precisely the
+  // high-order static Maxwell-stress divergence.  The helical streamfunction
+  // mode has nonzero current and a finite-resolution local B0z residual, but
+  // periodic face sharing requires every component of its global force to
+  // telescope to zero.
+  quasar::mhd::launch_mhd_split_momentum_residual(
+      background, flux_x, parts_x, flux_y, parts_y, residual,
+      quasar::mhd::BoundaryFlags4{}, /*stream=*/nullptr,
+      /*cylindrical=*/false, /*collocation_order=*/0,
+      /*scheme_order=*/7);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> dmx(n), dmy(n), dmz(n);
+  residual.mx.copy_to_host(dmx.data(), n);
+  residual.my.copy_to_host(dmy.data(), n);
+  residual.mz.copy_to_host(dmz.data(), n);
+
+  // The retained standalone API must use the same conservative high-order
+  // face stress, not its former nonconservative cell-volume curl source.
+  residual.mx.copy_from_host(zero.data(), n);
+  residual.my.copy_from_host(zero.data(), n);
+  residual.mz.copy_from_host(zero.data(), n);
+  quasar::mhd::launch_mhd_background_stress_correction(
+      background, residual, quasar::mhd::BoundaryFlags4{},
+      /*stream=*/nullptr, /*cylindrical=*/false,
+      /*collocation_order=*/0, /*scheme_order=*/7);
+  quasar::backend::device_synchronize(nullptr);
+  std::vector<Real> standalone_x(n), standalone_y(n), standalone_z(n);
+  residual.mx.copy_to_host(standalone_x.data(), n);
+  residual.my.copy_to_host(standalone_y.data(), n);
+  residual.mz.copy_to_host(standalone_z.data(), n);
+
+  const Real cell_area = g.dx() * g.dy();
+  long double total[3]{};
+  long double l1[3]{};
+  Real standalone_difference[3]{};
+  Real peak_z = Real{0};
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const std::size_t k = g.index(i, j);
+      const Real rate[3] = {dmx[k], dmy[k], dmz[k]};
+      const Real standalone[3] = {
+          standalone_x[k], standalone_y[k], standalone_z[k]};
+      for (int component = 0; component < 3; ++component) {
+        const long double contribution =
+            static_cast<long double>(cell_area) * rate[component];
+        total[component] += contribution;
+        l1[component] += std::abs(contribution);
+        standalone_difference[component] = std::max(
+            standalone_difference[component],
+            std::abs(rate[component] - standalone[component]));
+      }
+      peak_z = std::max(peak_z, std::abs(dmz[k]));
+    }
+  }
+  EXPECT_GT(peak_z, Real{1e-6} * amplitude * amplitude);
+  for (int component = 0; component < 3; ++component) {
+    EXPECT_EQ(standalone_difference[component], Real{0})
+        << "component=" << component;
+    const long double roundoff_bound =
+        1024.0L * std::numeric_limits<Real>::epsilon() *
+        std::max(1.0L, l1[component]);
+    EXPECT_LE(std::abs(total[component]), roundoff_bound)
+        << "component=" << component
+        << " total=" << static_cast<double>(total[component])
+        << " L1=" << static_cast<double>(l1[component]);
+  }
+}
+
+namespace {
+
+Real periodic_average_sin(Real lo, Real hi) {
+  const Real wave = Real{2} * quasar::pi;
+  return (std::cos(wave * lo) - std::cos(wave * hi)) /
+         (wave * (hi - lo));
+}
+
+Real periodic_average_cos(Real lo, Real hi) {
+  const Real wave = Real{2} * quasar::pi;
+  return (std::sin(wave * hi) - std::sin(wave * lo)) /
+         (wave * (hi - lo));
+}
+
+Real periodic_average_sin_cos(Real lo, Real hi) {
+  const Real wave = Real{2} * quasar::pi;
+  return (std::cos(Real{2} * wave * lo) -
+          std::cos(Real{2} * wave * hi)) /
+         (Real{4} * wave * (hi - lo));
+}
+
+void zero_momentum_flux_parts(
+    quasar::mhd::MhdField2D<Real>& flux,
+    quasar::mhd::MhdMomentumFluxParts2D<Real>& parts,
+    const std::vector<Real>& zero, const std::vector<int>& zero_flag) {
+  const std::size_t n = zero.size();
+  flux.mx.copy_from_host(zero.data(), n);
+  flux.my.copy_from_host(zero.data(), n);
+  flux.mz.copy_from_host(zero.data(), n);
+  parts.wave_x.copy_from_host(zero.data(), n);
+  parts.wave_y.copy_from_host(zero.data(), n);
+  parts.wave_z.copy_from_host(zero.data(), n);
+  for (auto& point : parts.cross_b_point) {
+    point.x.copy_from_host(zero.data(), n);
+    point.y.copy_from_host(zero.data(), n);
+    point.z.copy_from_host(zero.data(), n);
+  }
+  parts.quadrature_valid.copy_from_host(zero_flag.data(), n);
+  const std::vector<quasar::numerics::ScaledValue> zero_covariance(n);
+  parts.b0_induction_covariance.copy_from_host(
+      zero_covariance.data(), n);
+}
+
+void zero_mhd_field(quasar::mhd::MhdField2D<Real>& field,
+                    const std::vector<Real>& zero) {
+  const std::size_t n = zero.size();
+  field.rho.copy_from_host(zero.data(), n);
+  field.mx.copy_from_host(zero.data(), n);
+  field.my.copy_from_host(zero.data(), n);
+  field.mz.copy_from_host(zero.data(), n);
+  field.energy.copy_from_host(zero.data(), n);
+  field.bx_face.copy_from_host(zero.data(), n);
+  field.by_face.copy_from_host(zero.data(), n);
+  field.bz_cell.copy_from_host(zero.data(), n);
+}
+
+Real current_background_force_error(int order, int resolution) {
+  const quasar::Grid2D g{
+      resolution, resolution, Real{1}, Real{1}, Real{0}, Real{0},
+      /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  std::vector<Real> b0x(n), b0y(n), zero(n, Real{0});
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real y_lo = g.origin_y + static_cast<Real>(j) * g.dy();
+    const Real y_hi = y_lo + g.dy();
+    const Real bx_average = periodic_average_sin(y_lo, y_hi);
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real x_lo = g.origin_x + static_cast<Real>(i) * g.dx();
+      const Real x_hi = x_lo + g.dx();
+      const std::size_t k = g.index(i, j);
+      b0x[k] = bx_average;
+      b0y[k] = periodic_average_sin(x_lo, x_hi);
+    }
+  }
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.b0x_face.copy_from_host(b0x.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(zero.data(), n);
+  quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g}, residual{g};
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+  const std::vector<int> zero_flag(n, 0);
+  zero_momentum_flux_parts(flux_x, parts_x, zero, zero_flag);
+  zero_momentum_flux_parts(flux_y, parts_y, zero, zero_flag);
+  quasar::mhd::launch_mhd_split_momentum_residual(
+      background, flux_x, parts_x, flux_y, parts_y, residual,
+      quasar::mhd::BoundaryFlags4{}, /*stream=*/nullptr,
+      /*cylindrical=*/false, /*collocation_order=*/0, order);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> dmx(n), dmy(n);
+  residual.mx.copy_to_host(dmx.data(), n);
+  residual.my.copy_to_host(dmy.data(), n);
+  const Real wave = Real{2} * quasar::pi;
+  Real error = Real{0};
+  for (int j = 0; j < g.ny; ++j) {
+    const Real y_lo = g.origin_y + static_cast<Real>(j) * g.dy();
+    const Real y_hi = y_lo + g.dy();
+    const Real sy = periodic_average_sin(y_lo, y_hi);
+    const Real cy = periodic_average_cos(y_lo, y_hi);
+    const Real scy = periodic_average_sin_cos(y_lo, y_hi);
+    for (int i = 0; i < g.nx; ++i) {
+      const Real x_lo = g.origin_x + static_cast<Real>(i) * g.dx();
+      const Real x_hi = x_lo + g.dx();
+      const Real sx = periodic_average_sin(x_lo, x_hi);
+      const Real cx = periodic_average_cos(x_lo, x_hi);
+      const Real scx = periodic_average_sin_cos(x_lo, x_hi);
+      // B0=(sin(2*pi*y),sin(2*pi*x),0),
+      // Jz=2*pi(cos(2*pi*x)-cos(2*pi*y)), and
+      // JxB=(-Jz*By,Jz*Bx,0). These are exact cell averages.
+      const Real exact_x = wave * (-scx + sx * cy);
+      const Real exact_y = wave * (cx * sy - scy);
+      const std::size_t k = g.index(i, j);
+      error += Real{0.5} *
+          (std::abs(dmx[k] - exact_x) + std::abs(dmy[k] - exact_y));
+    }
+  }
+  return error / static_cast<Real>(g.nx * g.ny);
+}
+
+}  // namespace
+
+TEST(MhdBackgroundField, CurrentCarryingStaticForceKeepsMpOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const Real mp5_coarse =
+      current_background_force_error(/*order=*/5, /*resolution=*/12);
+  const Real mp5_fine =
+      current_background_force_error(/*order=*/5, /*resolution=*/24);
+  const Real mp7_coarse =
+      current_background_force_error(/*order=*/7, /*resolution=*/10);
+  const Real mp7_fine =
+      current_background_force_error(/*order=*/7, /*resolution=*/20);
+  ASSERT_GT(mp5_coarse, Real{0});
+  ASSERT_GT(mp5_fine, Real{0});
+  ASSERT_GT(mp7_coarse, Real{0});
+  ASSERT_GT(mp7_fine, Real{0});
+  EXPECT_GT(std::log2(mp5_coarse / mp5_fine), Real{4.0})
+      << "errors " << mp5_coarse << " -> " << mp5_fine;
+  EXPECT_GT(std::log2(mp7_coarse / mp7_fine), Real{5.8})
+      << "errors " << mp7_coarse << " -> " << mp7_fine;
+}
+
+TEST(MhdBackgroundField,
+     PointFactorSurvivorReachesSplitMomentumResidual) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      4, 4, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  const Real background_scale = std::scalbn(Real{1}, 600);
+  const Real cross_scale = std::scalbn(Real{1}, 400);
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0z(n, background_scale);
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.globally_curl_free = true;
+  background.b0x_face.copy_from_host(zero.data(), n);
+  background.b0y_face.copy_from_host(zero.data(), n);
+  background.b0z_cell.copy_from_host(b0z.data(), n);
+
+  quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g}, residual{g};
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+  std::vector<int> zero_flag(n, 0);
+  zero_momentum_flux_parts(flux_x, parts_x, zero, zero_flag);
+  zero_momentum_flux_parts(flux_y, parts_y, zero, zero_flag);
+
+  const int face_i = 2;
+  const int face_j = 2;
+  const std::size_t face = g.index(face_i, face_j);
+  const Real point_value[3] = {
+      cross_scale,
+      -Real{5} / Real{8} * cross_scale,
+      Real{18} / (Real{5} * background_scale)};
+  std::vector<Real> point(n, Real{0});
+  for (int q = 0; q < 3; ++q) {
+    point[face] = point_value[q];
+    parts_x.cross_b_point[q].z.copy_from_host(point.data(), n);
+    point[face] = Real{0};
+  }
+  std::vector<int> valid(n, 0);
+  valid[face] = 1;
+  parts_x.quadrature_valid.copy_from_host(valid.data(), n);
+
+  // At this one MP5 x-face,
+  //   sum_q w_q B0z(q) cross_bz(q) = 1,
+  // while its first two terms are individually O(2^1000) and cancel. The
+  // survivor must remain factorized through the final cell accumulator.
+  quasar::mhd::launch_mhd_split_momentum_residual(
+      background, flux_x, parts_x, flux_y, parts_y, residual,
+      quasar::mhd::BoundaryFlags4{}, /*stream=*/nullptr,
+      /*cylindrical=*/false, /*collocation_order=*/0,
+      /*scheme_order=*/5);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> dmx(n);
+  residual.mx.copy_to_host(dmx.data(), n);
+  const Real expected = Real{1} / g.dx();
+  EXPECT_EQ(dmx[g.index(face_i - 1, face_j)], -expected);
+  EXPECT_EQ(dmx[g.index(face_i, face_j)], expected);
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      if (j == face_j && (i == face_i - 1 || i == face_i)) continue;
+      EXPECT_EQ(dmx[g.index(i, j)], Real{0}) << "i=" << i << " j=" << j;
+    }
+  }
+}
+
+TEST(MhdBackgroundField,
+     ConditionedSplitEnergyCancelsDominantCtTransformExactly) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      4, 4, Real{4}, Real{4}, Real{0}, Real{0}, /*nghost=*/2};
+  const std::size_t n = g.storage_size();
+  const Real amplitude = std::scalbn(Real{1}, 600);
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0x(n), b0y(n), x_energy(n), x_by(n), y_bx(n);
+  std::vector<Real> dby(n, amplitude);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      b0x[k] = amplitude * static_cast<Real>(i);
+      b0y[k] = -amplitude * static_cast<Real>(j);
+      x_by[k] = -amplitude * static_cast<Real>(i);
+      y_bx[k] = amplitude * (static_cast<Real>(i) + Real{0.5});
+      x_energy[k] = -static_cast<Real>(i);
+    }
+  }
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.b0x_face.copy_from_host(b0x.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(zero.data(), n);
+
+  quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g}, rate{g};
+  flux_x.energy.copy_from_host(x_energy.data(), n);
+  flux_x.bx_face.copy_from_host(zero.data(), n);
+  flux_x.by_face.copy_from_host(x_by.data(), n);
+  flux_x.bz_cell.copy_from_host(zero.data(), n);
+  flux_y.energy.copy_from_host(zero.data(), n);
+  flux_y.bx_face.copy_from_host(y_bx.data(), n);
+  flux_y.by_face.copy_from_host(zero.data(), n);
+  flux_y.bz_cell.copy_from_host(zero.data(), n);
+  rate.bx_face.copy_from_host(zero.data(), n);
+  rate.by_face.copy_from_host(dby.data(), n);
+  rate.bz_cell.copy_from_host(zero.data(), n);
+  rate.energy.copy_from_host(zero.data(), n);
+
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+  const std::vector<quasar::numerics::ScaledValue> zero_covariance(n);
+  parts_x.b0_induction_covariance.copy_from_host(
+      zero_covariance.data(), n);
+  parts_y.b0_induction_covariance.copy_from_host(
+      zero_covariance.data(), n);
+  quasar::mhd::BoundaryFlags4 outflow{};
+  for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+
+  // Here B0=(A*x,-A*y,0), F_x(By)=-A*x, F_y(Bx)=A*(x+1/2),
+  // and the final CT rate is dBy/dt=A.  The raw change-of-variables terms are
+  // O(A^2) and overflow, but every conditioned correction is exactly zero.
+  // The deliberately independent F_E'=-x leaves the finite residual +1.
+  quasar::mhd::launch_mhd_split_energy_residual(
+      background, flux_x, parts_x, flux_y, parts_y, rate, outflow,
+      /*stream=*/nullptr, /*cylindrical=*/false,
+      /*collocation_order=*/1, /*scheme_order=*/2);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> denergy(n);
+  rate.energy.copy_to_host(denergy.data(), n);
+  EXPECT_EQ(denergy[g.index(1, 1)], Real{1});
+  EXPECT_EQ(denergy[g.index(2, 2)], Real{1});
+}
+
+TEST(MhdBackgroundField,
+     SplitEnergyOperatorUsesFinalCtRateAtEverySupportedOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      16, 16, Real{16}, Real{16}, Real{0}, Real{0}, /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  const std::vector<int> zero_flag(n, 0);
+  const std::vector<Real> b0x(n, Real{2});
+  const std::vector<Real> b0y(n, Real{-4});
+  const std::vector<Real> b0z(n, Real{8});
+
+  std::vector<Real> x_energy(n), x_bx(n), x_by(n), x_bz(n);
+  std::vector<Real> y_energy(n), y_bx(n), y_by(n), y_bz(n);
+  std::vector<Real> x_total_energy(n), y_total_energy(n);
+  std::vector<Real> ez(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real y_face = g.origin_y + static_cast<Real>(j) * g.dy();
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real x_face = g.origin_x + static_cast<Real>(i) * g.dx();
+      const std::size_t k = g.index(i, j);
+      x_energy[k] = Real{3} * x_face;
+      x_bx[k] = x_face;
+      x_by[k] = Real{2} * x_face;
+      x_bz[k] = Real{-3} * x_face;
+      y_energy[k] = Real{-5} * y_face;
+      y_bx[k] = Real{3} * y_face;
+      y_by[k] = -y_face;
+      y_bz[k] = Real{-4} * y_face;
+      x_total_energy[k] = x_energy[k] + Real{2} * x_bx[k] -
+          Real{4} * x_by[k] + Real{8} * x_bz[k];
+      y_total_energy[k] = y_energy[k] + Real{2} * y_bx[k] -
+          Real{4} * y_by[k] + Real{8} * y_bz[k];
+      ez[k] = Real{-5} * x_face - Real{3} * y_face;
+    }
+  }
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.globally_curl_free = true;
+  background.b0x_face.copy_from_host(b0x.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(b0z.data(), n);
+
+  struct OperatorCase {
+    int scheme_order;
+    int collocation_order;
+    bool cylindrical;
+    const char* name;
+  };
+  const OperatorCase cases[] = {
+      {1, 1, false, "cartesian-first-order"},
+      {2, 0, false, "cartesian-muscl"},
+      {5, 0, false, "cartesian-mp5"},
+      {7, 0, false, "cartesian-mp7"},
+      {1, 1, true, "cylindrical-first-order"},
+      {2, 0, true, "cylindrical-muscl"}};
+
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.name);
+    quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g};
+    quasar::mhd::MhdField2D<Real> total_flux_x{g}, total_flux_y{g};
+    quasar::mhd::MhdField2D<Real> rate{g}, total_rate{g};
+    for (auto* field : {
+             &flux_x, &flux_y, &total_flux_x, &total_flux_y,
+             &rate, &total_rate}) {
+      zero_mhd_field(*field, zero);
+    }
+    flux_x.energy.copy_from_host(x_energy.data(), n);
+    flux_x.bx_face.copy_from_host(x_bx.data(), n);
+    flux_x.by_face.copy_from_host(x_by.data(), n);
+    flux_x.bz_cell.copy_from_host(x_bz.data(), n);
+    flux_y.energy.copy_from_host(y_energy.data(), n);
+    flux_y.bx_face.copy_from_host(y_bx.data(), n);
+    flux_y.by_face.copy_from_host(y_by.data(), n);
+    flux_y.bz_cell.copy_from_host(y_bz.data(), n);
+    total_flux_x.energy.copy_from_host(x_total_energy.data(), n);
+    total_flux_y.energy.copy_from_host(y_total_energy.data(), n);
+
+    quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+    zero_momentum_flux_parts(flux_x, parts_x, zero, zero_flag);
+    zero_momentum_flux_parts(flux_y, parts_y, zero, zero_flag);
+
+    // Match the production ordering: first form every Godunov rate (including
+    // the metric-free Bz rate), then overwrite the in-plane slots with the
+    // finalized CT curl.  In cylindrical geometry the annular curl of the
+    // radial-only Ez=-5*r/2 gives the same exact (-5) axial-field rate and a
+    // zero radial-field rate.
+    quasar::mhd::launch_mhd_flux_difference(
+        flux_x, 0, rate, /*stream=*/nullptr, test_case.cylindrical);
+    quasar::mhd::launch_mhd_flux_difference(
+        flux_y, 1, rate, /*stream=*/nullptr, test_case.cylindrical);
+    std::vector<Real> case_ez = ez;
+    if (test_case.cylindrical) {
+      for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+        for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+          const Real r_face = g.origin_x + static_cast<Real>(i) * g.dx();
+          case_ez[g.index(i, j)] = Real{-2.5} * r_face;
+        }
+      }
+    }
+    quasar::mhd::EmfField2D<Real> emf{g};
+    emf.ez_edge.copy_from_host(case_ez.data(), n);
+    quasar::mhd::launch_mhd_emf_curl_rate(
+        emf, rate, g, /*stream=*/nullptr, test_case.cylindrical);
+
+    quasar::mhd::launch_mhd_flux_difference(
+        total_flux_x, 0, total_rate, /*stream=*/nullptr,
+        test_case.cylindrical);
+    quasar::mhd::launch_mhd_flux_difference(
+        total_flux_y, 1, total_rate, /*stream=*/nullptr,
+        test_case.cylindrical);
+
+    quasar::mhd::BoundaryFlags4 outflow{};
+    for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+    quasar::mhd::launch_mhd_split_energy_residual(
+        background, flux_x, parts_x, flux_y, parts_y, rate, outflow,
+        /*stream=*/nullptr, test_case.cylindrical,
+        test_case.collocation_order, test_case.scheme_order);
+    quasar::backend::device_synchronize(nullptr);
+
+    std::vector<Real> split_energy(n), total_energy(n);
+    std::vector<Real> dbx(n), dby(n), dbz(n);
+    rate.energy.copy_to_host(split_energy.data(), n);
+    rate.bx_face.copy_to_host(dbx.data(), n);
+    rate.by_face.copy_to_host(dby.data(), n);
+    rate.bz_cell.copy_to_host(dbz.data(), n);
+    total_rate.energy.copy_to_host(total_energy.data(), n);
+
+    const int ci = 8;
+    const int cj = 8;
+    const std::size_t k = g.index(ci, cj);
+    const Real final_bx_rate = quasar::mhd::cell_bx(
+        g, dbx.data(), ci, cj, test_case.collocation_order);
+    const Real final_by_rate = quasar::mhd::cell_by(
+        g, dby.data(), ci, cj, test_case.collocation_order);
+    EXPECT_EQ(final_bx_rate, test_case.cylindrical ? Real{0} : Real{3});
+    EXPECT_EQ(final_by_rate, Real{-5});
+    EXPECT_EQ(dbz[k], Real{7});
+    const Real background_work = Real{2} * final_bx_rate -
+        Real{4} * final_by_rate + Real{8} * dbz[k];
+    const Real transformed_rate = split_energy[k] + background_work;
+    if (test_case.cylindrical) {
+      const Real tolerance = Real{32} * std::numeric_limits<Real>::epsilon() *
+          std::max(Real{1}, std::abs(total_energy[k]));
+      EXPECT_NEAR(transformed_rate, total_energy[k], tolerance);
+    } else {
+      EXPECT_EQ(transformed_rate, total_energy[k]);
+    }
+  }
+}
+
+TEST(MhdBackgroundField,
+     MpSplitEnergyOperatorMatchesCurrentCarryingCtTransform) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      24, 24, Real{24}, Real{24}, Real{-12.5}, Real{-12.5},
+      /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  const std::vector<int> zero_flag(n, 0);
+  std::vector<Real> b0x(n), b0y(n), b0z(n);
+  std::vector<Real> x_bz_flux(n), x_total_energy(n), ez(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real y_cell = g.y_at_cell_center(j);
+    const Real y_corner = g.origin_y + static_cast<Real>(j) * g.dy();
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real x_cell = g.x_at_cell_center(i);
+      const Real x_face = g.origin_x + static_cast<Real>(i) * g.dx();
+      const std::size_t k = g.index(i, j);
+      b0x[k] = y_cell;
+      b0y[k] = -x_cell;
+      b0z[k] = x_cell;
+      x_bz_flux[k] = Real{-0.5} * x_face * x_face;
+      x_total_energy[k] = Real{-0.5} * x_face * x_face * x_face;
+      ez[k] = Real{-0.5} *
+          (x_face * x_face + y_corner * y_corner);
+    }
+  }
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.globally_curl_free = false;
+  background.b0x_face.copy_from_host(b0x.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(b0z.data(), n);
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g};
+    quasar::mhd::MhdField2D<Real> total_flux_x{g}, total_flux_y{g};
+    quasar::mhd::MhdField2D<Real> rate{g}, total_rate{g};
+    for (auto* field : {
+             &flux_x, &flux_y, &total_flux_x, &total_flux_y,
+             &rate, &total_rate}) {
+      zero_mhd_field(*field, zero);
+    }
+    flux_x.bz_cell.copy_from_host(x_bz_flux.data(), n);
+    total_flux_x.energy.copy_from_host(x_total_energy.data(), n);
+
+    quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+    zero_momentum_flux_parts(flux_x, parts_x, zero, zero_flag);
+    zero_momentum_flux_parts(flux_y, parts_y, zero, zero_flag);
+
+    quasar::mhd::launch_mhd_flux_difference(
+        flux_x, 0, rate, /*stream=*/nullptr, /*cylindrical=*/false);
+    quasar::mhd::launch_mhd_flux_difference(
+        flux_y, 1, rate, /*stream=*/nullptr, /*cylindrical=*/false);
+    quasar::mhd::EmfField2D<Real> emf{g};
+    emf.ez_edge.copy_from_host(ez.data(), n);
+    quasar::mhd::launch_mhd_emf_curl_rate(
+        emf, rate, g, /*stream=*/nullptr, /*cylindrical=*/false);
+
+    quasar::mhd::launch_mhd_flux_difference(
+        total_flux_x, 0, total_rate, /*stream=*/nullptr,
+        /*cylindrical=*/false);
+    quasar::mhd::launch_mhd_flux_difference(
+        total_flux_y, 1, total_rate, /*stream=*/nullptr,
+        /*cylindrical=*/false);
+    quasar::mhd::BoundaryFlags4 outflow{};
+    for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+    quasar::mhd::launch_mhd_split_energy_residual(
+        background, flux_x, parts_x, flux_y, parts_y, rate, outflow,
+        /*stream=*/nullptr, /*cylindrical=*/false,
+        /*collocation_order=*/0, order);
+    quasar::backend::device_synchronize(nullptr);
+
+    std::vector<Real> split_energy(n), total_energy(n), dbx(n), dby(n);
+    rate.energy.copy_to_host(split_energy.data(), n);
+    rate.bx_face.copy_to_host(dbx.data(), n);
+    rate.by_face.copy_to_host(dby.data(), n);
+    total_rate.energy.copy_to_host(total_energy.data(), n);
+    const int ci = 12;
+    const int cj = 12;
+    const std::size_t k = g.index(ci, cj);
+    EXPECT_EQ(dbx[g.index(ci, cj + 1)], Real{1});
+    EXPECT_EQ(dby[g.index(ci + 1, cj)], Real{-1});
+    constexpr Real background_work = Real{1} / Real{4};
+    constexpr Real expected_total_rate = Real{1} / Real{8};
+    constexpr Real expected_split_rate = Real{-1} / Real{8};
+    EXPECT_NEAR(total_energy[k], expected_total_rate, Real{2e-14});
+    EXPECT_NEAR(split_energy[k], expected_split_rate, Real{3e-14});
+    EXPECT_NEAR(split_energy[k] + background_work, total_energy[k],
+                Real{4e-14});
+  }
+}
+
+TEST(MhdBackgroundField,
+     CylindricalSplitEnergyOperatorMatchesCurrentCarryingCtTransform) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      16, 16, Real{16}, Real{16}, Real{0}, Real{0}, /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  const std::vector<int> zero_flag(n, 0);
+  std::vector<Real> b0y(n), ez(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real r_cell = g.x_at_cell_center(i);
+      const Real r_face = g.origin_x + static_cast<Real>(i) * g.dx();
+      const std::size_t k = g.index(i, j);
+      b0y[k] = r_cell;
+      ez[k] = r_face * r_face;
+    }
+  }
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.globally_curl_free = false;
+  background.b0x_face.copy_from_host(zero.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(zero.data(), n);
+
+  quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g}, rate{g};
+  for (auto* field : {&flux_x, &flux_y, &rate}) zero_mhd_field(*field, zero);
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+  zero_momentum_flux_parts(flux_x, parts_x, zero, zero_flag);
+  zero_momentum_flux_parts(flux_y, parts_y, zero, zero_flag);
+  quasar::mhd::EmfField2D<Real> emf{g};
+  emf.ez_edge.copy_from_host(ez.data(), n);
+  quasar::mhd::launch_mhd_emf_curl_rate(
+      emf, rate, g, /*stream=*/nullptr, /*cylindrical=*/true);
+  quasar::backend::device_synchronize(nullptr);
+  std::vector<Real> dby(n);
+  rate.by_face.copy_to_host(dby.data(), n);
+
+  quasar::mhd::BoundaryFlags4 outflow{};
+  for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+  for (const int collocation_order : {1, 0}) {
+    SCOPED_TRACE(collocation_order);
+    rate.energy.copy_from_host(zero.data(), n);
+    quasar::mhd::launch_mhd_split_energy_residual(
+        background, flux_x, parts_x, flux_y, parts_y, rate, outflow,
+        /*stream=*/nullptr, /*cylindrical=*/true, collocation_order,
+        collocation_order == 1 ? 1 : 2);
+    quasar::backend::device_synchronize(nullptr);
+    std::vector<Real> split_energy(n);
+    rate.energy.copy_to_host(split_energy.data(), n);
+    const int ci = 8;
+    const int cj = 8;
+    const std::size_t k = g.index(ci, cj);
+    const Real background_mean = quasar::mhd::cell_by(
+        g, b0y.data(), ci, cj, collocation_order);
+    const Real final_rate_mean = quasar::mhd::cell_by(
+        g, dby.data(), ci, cj, collocation_order);
+    const Real transformed_rate =
+        split_energy[k] + background_mean * final_rate_mean;
+    const Real scale = std::max(
+        Real{1}, std::abs(background_mean * final_rate_mean));
+    EXPECT_NEAR(transformed_rate, Real{0},
+                Real{64} * std::numeric_limits<Real>::epsilon() * scale);
+  }
+}
+
+TEST(MhdBackgroundField,
+     Mp5SplitEnergyIncludesCellVolumeCovariance) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const quasar::Grid2D g{
+      5, 5, Real{5}, Real{5}, Real{-2.5}, Real{-2.5}, /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0z(n), dbz(n), x_bz_flux(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const std::size_t k = g.index(i, j);
+      const Real cell_x = g.x_at_cell_center(i);
+      const Real face_x = g.origin_x + static_cast<Real>(i) * g.dx();
+      b0z[k] = cell_x;
+      dbz[k] = cell_x;
+      x_bz_flux[k] = Real{-0.5} * face_x * face_x;
+    }
+  }
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  background.b0x_face.copy_from_host(zero.data(), n);
+  background.b0y_face.copy_from_host(zero.data(), n);
+  background.b0z_cell.copy_from_host(b0z.data(), n);
+
+  quasar::mhd::MhdField2D<Real> flux_x{g}, flux_y{g}, rate{g};
+  for (auto* flux : {&flux_x, &flux_y}) {
+    flux->energy.copy_from_host(zero.data(), n);
+    flux->bx_face.copy_from_host(zero.data(), n);
+    flux->by_face.copy_from_host(zero.data(), n);
+    flux->bz_cell.copy_from_host(zero.data(), n);
+  }
+  flux_x.bz_cell.copy_from_host(x_bz_flux.data(), n);
+  rate.bx_face.copy_from_host(zero.data(), n);
+  rate.by_face.copy_from_host(zero.data(), n);
+  rate.bz_cell.copy_from_host(dbz.data(), n);
+  rate.energy.copy_from_host(zero.data(), n);
+
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_x{g}, parts_y{g};
+  const std::vector<quasar::numerics::ScaledValue> zero_covariance(n);
+  parts_x.b0_induction_covariance.copy_from_host(
+      zero_covariance.data(), n);
+  parts_y.b0_induction_covariance.copy_from_host(
+      zero_covariance.data(), n);
+  quasar::mhd::BoundaryFlags4 outflow{};
+  for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+
+  quasar::mhd::launch_mhd_split_energy_residual(
+      background, flux_x, parts_x, flux_y, parts_y, rate, outflow,
+      /*stream=*/nullptr, /*cylindrical=*/false,
+      /*collocation_order=*/0, /*scheme_order=*/5);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> denergy(n);
+  rate.energy.copy_to_host(denergy.data(), n);
+  // At the centre cell B0z=Rz=x, F_x(Bz)=-x^2/2. Therefore
+  //   -d_x(B0z*F_x) - <B0z*Rz>
+  // = <3*x^2/2> - <x^2> = 1/24 over [-1/2,1/2].
+  EXPECT_NEAR(denergy[g.index(2, 2)], Real{1} / Real{24}, Real{2e-14});
+}
+
+TEST(MhdBackgroundField,
      DominantBackgroundRetainsFusedSplitEnergySurvivor) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
@@ -601,6 +1751,88 @@ TEST(MhdBackgroundField,
           << "i=" << i << " j=" << j;
     }
   }
+}
+
+TEST(MhdBackgroundField,
+     PeriodicSplitEnergyUsesFinalCtChangeOfVariables) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid.nghost = 2;
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  const auto& g = cfg.grid;
+  const std::size_t n = g.storage_size();
+
+  std::vector<Real> b0x(n), b0y(n), b0z(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real y = (static_cast<Real>(g.wrap_j(j)) + Real{0.5}) * g.dy();
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real x = (static_cast<Real>(g.wrap_i(i)) + Real{0.5}) * g.dx();
+      const std::size_t k = g.index(i, j);
+      // B0x(y), B0y(x) is exactly divergence-free under the staggered
+      // face-difference operator and has a nonzero, spatially varying curl.
+      b0x[k] = Real{0.7} * std::sin(Real{2} * quasar::pi * y);
+      b0y[k] = Real{-0.4} * std::sin(Real{2} * quasar::pi * x);
+      b0z[k] = Real{0.3} * std::cos(
+          Real{2} * quasar::pi * (x + y));
+    }
+  }
+
+  const SeedFields seed = build_seed(g);
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_split_solver(solver, seed, g);
+  solver.seed_background("b0x", b0x);
+  solver.seed_background("b0y", b0y);
+  solver.seed_background("b0z", b0z);
+
+  const auto transformed_sum = [&g, &b0x, &b0y, &b0z](
+      const std::vector<Real>& energy,
+      const std::vector<Real>& bx,
+      const std::vector<Real>& by,
+      const std::vector<Real>& bz) {
+    long double sum = 0;
+    for (int j = 0; j < g.ny; ++j) {
+      for (int i = 0; i < g.nx; ++i) {
+        const std::size_t k = g.index(i, j);
+        const Real b0xc = quasar::mhd::cell_bx(g, b0x.data(), i, j);
+        const Real b0yc = quasar::mhd::cell_by(g, b0y.data(), i, j);
+        const Real bxc = quasar::mhd::cell_bx(g, bx.data(), i, j);
+        const Real byc = quasar::mhd::cell_by(g, by.data(), i, j);
+        sum += static_cast<long double>(energy[k]);
+        sum += static_cast<long double>(b0xc) * bxc;
+        sum += static_cast<long double>(b0yc) * byc;
+        sum += static_cast<long double>(b0z[k]) * bz[k];
+      }
+    }
+    return sum;
+  };
+
+  const auto energy0 = solver.state_component_to_host("energy");
+  const auto bx0 = solver.state_component_to_host("bx");
+  const auto by0 = solver.state_component_to_host("by");
+  const auto bz0 = solver.state_component_to_host("bz");
+  const long double total0 = transformed_sum(energy0, bx0, by0, bz0);
+
+  const Real dt = Real{0.05} * solver.cfl_limit();
+  ASSERT_GT(dt, Real{0});
+  solver.step(dt);
+
+  const auto energy1 = solver.state_component_to_host("energy");
+  const auto bx1 = solver.state_component_to_host("bx");
+  const auto by1 = solver.state_component_to_host("by");
+  const auto bz1 = solver.state_component_to_host("bz");
+  const long double total1 = transformed_sum(energy1, bx1, by1, bz1);
+
+  // The transformed total energy is affine in the evolved state because B0 is
+  // static.  Each SSP-RK stage must therefore conserve its periodic global sum
+  // when the energy rate uses the same final CT magnetic rate.
+  const long double tolerance =
+      1e-10L * std::abs(total0) + 1e-12L;
+  EXPECT_LT(std::abs(total1 - total0), tolerance)
+      << "initial=" << static_cast<double>(total0)
+      << " final=" << static_cast<double>(total1);
 }
 
 TEST(MhdBackgroundField,

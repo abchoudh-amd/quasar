@@ -93,6 +93,20 @@ def _run_cli(yaml_path: Path):
 
 class MhdNativeBackgroundConfigTests(unittest.TestCase):
 
+    def test_disabled_default_does_not_carry_a_curl_free_assertion(self):
+        data = _small_deck()
+        data["background_field"] = {
+            "enabled": False,
+            "profile": "not-registered",
+            "bx0": "not-a-number",
+            "params": ["not", "a", "mapping"],
+        }
+        cfg = mhd_cli._make_config(parse_mhd_deck(data))
+        self.assertIs(cfg.background.enabled, False)
+        self.assertIs(cfg.background.curl_free, False)
+        self.assertEqual(cfg.background.profile, "uniform")
+        self.assertEqual(cfg.background.bx0, 0.0)
+
     def test_make_config_forwards_analytic_profile_params(self):
         data = _small_deck()
         data["background_field"] = {
@@ -103,6 +117,23 @@ class MhdNativeBackgroundConfigTests(unittest.TestCase):
         cfg = mhd_cli._make_config(parse_mhd_deck(data))
         self.assertEqual(cfg.background.params,
                          {"gradient": 1.25, "shear": -0.4})
+        self.assertEqual(cfg.background.profile_scale, 1.0)
+        # The native registry capability, rather than a frontend assertion,
+        # supplies the analytic profile's trusted curl-free proof.
+        self.assertIs(cfg.background.curl_free, False)
+
+    def test_make_config_scales_native_analytic_profile_for_si_units(self):
+        data = _small_deck()
+        data["units"] = "SI"
+        data["background_field"] = {
+            "enabled": True,
+            "profile": "linear_vacuum",
+            "params": {"gradient": 1.25, "shear": -0.4},
+        }
+        cfg = mhd_cli._make_config(parse_mhd_deck(data))
+        self.assertAlmostEqual(
+            cfg.background.profile_scale,
+            1.0 / mhd_cli.mhd_units.SQRT_MU0)
 
     def test_make_config_does_not_treat_file_params_as_profile_params(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,11 +142,17 @@ class MhdNativeBackgroundConfigTests(unittest.TestCase):
             data = _small_deck()
             data["background_field"] = {
                 "enabled": True,
+                "profile": "stale-profile-that-is-ignored",
                 "file": str(path),
-                "params": {"b_scale": 2.0},
             }
             cfg = mhd_cli._make_config(parse_mhd_deck(data))
         self.assertEqual(cfg.background.params, {})
+        self.assertEqual(cfg.background.profile, "uniform")
+        self.assertEqual(cfg.background.bx0, 0.0)
+        self.assertEqual(cfg.background.profile_scale, 1.0)
+        # The default profile is uniform, but arbitrary file samples do not
+        # inherit that analytic profile's proof.
+        self.assertIs(cfg.background.curl_free, False)
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")

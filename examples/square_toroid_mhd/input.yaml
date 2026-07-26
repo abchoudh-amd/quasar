@@ -28,8 +28,8 @@ initial:
     bz: 0.1             # uniform toroidal guide field (in the state)
     rho_in: 10.0
     rho_out: 1.0
-    p_in: 1.0
-    p_out: 0.1
+    p_in: 1000.0
+    p_out: 100.0
     blob_half: 0.067500   # half-width of the centered plasma blob
 background_field:
   enabled: true

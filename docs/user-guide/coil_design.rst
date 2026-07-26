@@ -121,6 +121,8 @@ passed to the C++ evaluator's ``configure`` method; unknown keys are rejected.
                  and ``grid_spacing[3]`` (positive on every non-singleton axis;
                  zero is accepted and canonicalized on singleton axes). Samples
                  use trilinear interpolation and reject points outside the map.
+                 A singleton axis is one geometric plane, so such a map supports
+                 field sampling but not a complete magnetic-field Jacobian.
                  The shorter ``origin`` / ``spacing`` names are accepted as
                  aliases, but an archive must provide exactly one spelling of
                  each and exactly one field representation (``B_xyz_grid`` or
@@ -177,10 +179,13 @@ postprocessing. Grid observations additionally include ``grid_origin`` and
 ``grid_spacing``, so an archive containing ``B_xyz_grid`` can be consumed
 directly by the ``file_grid`` evaluator.
 
-The evaluator's Jacobian is the exact derivative of the piecewise-trilinear
+For a full three-dimensional map (at least two nodes on every axis), the
+evaluator's Jacobian is the exact derivative of the piecewise-trilinear
 interpolant. At an internal grid knot, where that derivative need not be unique,
 the implementation uses the cell on the positive-coordinate (right) side; the
-outermost upper boundary necessarily uses the final cell on its left.
+outermost upper boundary necessarily uses the final cell on its left. If any
+axis is singleton, ``provides_grad_B`` is false and a direct Jacobian request is
+rejected: samples on one plane cannot determine the normal derivative.
 
 The C++ ``FileGridEvaluator(path)`` constructor also accepts a dependency-free
 text form, with x varying fastest in the data block:

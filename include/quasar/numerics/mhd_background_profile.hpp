@@ -37,6 +37,13 @@ class IMhdBackgroundProfile {
   virtual bool set_parameter(std::string_view /*name*/, Real /*value*/) {
     return false;
   }
+
+  // True only when every field produced by this analytic profile is curl-free
+  // over the whole Cartesian domain. The solver uses this as a domain-wide
+  // well-balanced proof. Explicit buffer overrides invalidate the analytic
+  // proof unless the config separately requests and passes native curl
+  // validation (used by the cylindrical vector-potential vacuum projection).
+  virtual bool globally_curl_free() const noexcept { return false; }
 };
 
 }  // namespace quasar::numerics

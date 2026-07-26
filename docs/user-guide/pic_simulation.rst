@@ -64,7 +64,7 @@ Deck schema (``quasar.pic.io``)
          distribution: maxwellian_uniform   # 'maxwellian_uniform' or 'maxwellian_block'
          density_per_m3: 1.0e15
          temperature_eV: 10.0
-         drift_v: [0.0, 0.0, 0.0]           # optional
+         drift_v: [0.0, 0.0, 0.0]           # optional physical velocity at t=0
          # Optional deterministic velocity mode, in the deck's velocity units:
          velocity_perturbation:
            amplitude_v: [1.0e-6, 0.0, 0.0]
@@ -87,10 +87,12 @@ Deck schema (``quasar.pic.io``)
                              # 4-list ordered [x_lo, x_hi, y_lo, y_hi].
      field: [periodic, periodic, pec, outflow]
                              # one of {periodic, pec, outflow}; same single-string
-                             # or 4-list [x_lo, x_hi, y_lo, y_hi] form.
+                             # or 4-list [x_lo, x_hi, y_lo, y_hi] form. Outflow
+                             # is vacuum-only; charged species require periodic
+                             # or PEC field boundaries.
 
    time:
-     dt_s: auto              # float or 'auto' (CFL-limited)
+     dt_s: auto              # float or 'auto' (Maxwell CFL-limited only)
      steps: 2000             # safety cap
      t_end_s: 1.0e-8         # optional; final position step is clipped exactly
 
@@ -99,6 +101,10 @@ Deck schema (``quasar.pic.io``)
      cadence: 200            # snapshot every N steps; 0 = final only
      fields: [bz, ex, ey]    # any subset of {ex,ey,ez,bx,by,bz}
      per_species: true
+
+Fourth-order FDTD requires ``domain.nx >= 2`` and ``domain.ny >= 2``. Its
+two-layer non-periodic ghost continuation needs distinct physical source cells
+on both sides; a one-cell dimension is therefore rejected before allocation.
 
 Conductor specs in ``external_field.evaluator.conductors`` are passed
 through ``quasar.coil.io._build_geometry`` and therefore accept any
@@ -137,7 +143,20 @@ non-singleton axis; zero is accepted for a singleton axis in a coil-generated
 map and canonicalized internally. The evaluator performs
 trilinear interpolation at the component-specific Yee locations and rejects an
 attempt to sample beyond the map. In ``units: SI`` the coordinates and field are
-metres and tesla; in ``units: normalized`` they are already internal units.
+metres and tesla; in ``units: normalized`` they are already internal units. A
+singleton axis represents one geometric plane rather than a constant extrusion,
+so the map can still supply ``B`` on that plane but reports no trustworthy full
+Jacobian and rejects ``evaluate_grad_B``. In particular, a nonzero cylindrical
+external field—which requires a continuous ``div(B)`` check—must use a full
+three-dimensional file grid or another gradient-capable evaluator.
+
+``initial.drift_v`` and ``initial.velocity_perturbation`` describe the physical
+particle velocity distribution at ``t=0``. They are not the preceding leapfrog
+half-step velocity and must not be pre-staggered by a deck. On the first solver
+step, Boris applies a half-width force update before the full position drift.
+That half interval must be representable when a populated species is charged;
+for a neutral species the force map is the identity, so only the full position
+interval needs to be representable.
 
 ``initial.velocity_perturbation`` adds
 ``amplitude_v * sin(2*pi*(mx*x/Lx + my*y/Ly) + phase_rad)`` to every sampled
@@ -158,6 +177,14 @@ rejects a resolved nonzero total charge.  Set ``neutralizing_background: true``
 only when the intended model includes a fixed, uniform counter-charge (for
 example an electron-only plasma with immobile ions); the background is never
 inserted implicitly.
+
+The uniform background cancels the net charge, not the cellwise noise of a
+finite particle load. Quasar does not currently perform an initial discrete
+Poisson projection, so an arbitrary zero-field particle seed need not satisfy
+the local Gauss constraint. The charge-compatible current update preserves any
+initial residual instead of removing it. Also, ``dt_s: auto`` enforces the
+Maxwell CFL limit only; users must separately resolve plasma-frequency,
+gyrofrequency, and particle-crossing timescales for their model.
 
 Initial electromagnetic seeds
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -256,14 +283,17 @@ For legacy archives without boundary metadata it conservatively retains all
 component-valid high faces.  ``reshape_with_ghost`` remains the cell-centred
 ``(ny, nx)`` helper and must not be used for a general Yee component.
 
-The reported time labels the integer-time positions and electric field. Raw
-magnetic fields and particle velocities are leapfrog quantities at the preceding
-half time (``final_time_s - dt_last/2``). When the last step is shortened to hit
-``t_end_s`` exactly, the solver uses the variable-step centred update; it does
-not reinterpret those half-step arrays as integer-time diagnostics. If
-``t_end_s`` is shorter than the nominal first step, field initialization uses
-that first clipped width as well, so a seeded travelling wave or cavity mode has
-the magnetic field at the correct preceding half time.
+The reported time labels the integer-time positions and electric field. Before
+any evolution, uploaded/deck particle velocities are also physical values at
+``t=0``. After one or more steps, raw magnetic fields and particle velocities
+are leapfrog quantities at the preceding half time
+(``final_time_s - dt_last/2``); the first velocity half step was obtained from
+the physical ``v(t=0)`` using a half-width Boris force interval. When the last
+step is shortened to hit ``t_end_s`` exactly, the solver uses the variable-step
+centred update and does not reinterpret those half-step arrays as integer-time
+diagnostics. If ``t_end_s`` is shorter than the nominal first step, field
+initialization and the particle startup kick both use that first clipped width,
+so seeded fields and particles share the correct half-time convention.
 
 With ``--write-every N`` the same per-step arrays are also emitted as
 self-contained ``out_<step>.npz`` files alongside the end-of-run ``out.npz``.

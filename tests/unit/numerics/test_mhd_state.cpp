@@ -358,6 +358,23 @@ TEST(MhdState, StreamingQuotientAccumulatorSupportsFusedStressCapacity) {
             Real{21});
 }
 
+TEST(MhdState, ScaledDifferenceProductAvoidsIntermediateOverflow) {
+  const Real large = std::scalbn(Real{1}, 1023);
+  const Real small = std::scalbn(Real{1}, -1023);
+
+  quasar::numerics::ScaledProductQuotientAccumulator<2> finite;
+  quasar::numerics::append_scaled_difference_product_quotient(
+      finite, large, -large, small, Real{1}, Real{1}, Real{1});
+  EXPECT_EQ(quasar::numerics::finish_scaled_product_quotient_sum(finite),
+            Real{2});
+
+  quasar::numerics::ScaledProductQuotientAccumulator<2> exact_zero;
+  quasar::numerics::append_scaled_difference_product_quotient(
+      exact_zero, large, -large, Real{0}, Real{1}, Real{1}, Real{1});
+  EXPECT_EQ(quasar::numerics::finish_scaled_product_quotient_sum(exact_zero),
+            Real{0});
+}
+
 TEST(MhdState, ScaledReducersCombineExplicitInfinityWithFiniteOverflow) {
   const Real inf = std::numeric_limits<Real>::infinity();
   const Real a2[2] = {inf, Real{-1e300}};
@@ -563,6 +580,51 @@ TEST(MhdStaggering, CenteredStencilsAreRangeSafeAtEveryHighOrderWidth) {
                     }),
                 survivor, Real{2e-13})
         << "cell-to-face cancellation width=" << stencil.width;
+
+    if (stencil.width == 6) {
+      // The numerator of this /60 MP5 stencil is exactly zero in binary64,
+      // but distributing the non-binary denominator over the six terms leaves
+      // a false 2^-56*S survivor.  The shared rational stencil must cancel the
+      // integer-weight numerator before performing its one division by 60.
+      const Real scale = std::scalbn(Real{1}, 900);
+      const Real distributed[6] = {
+          Real{60} * scale,
+          Real{3.30859375} * scale,
+          Real{-0.765625} * scale,
+          Real{-0.140625} * scale,
+          Real{0}, Real{0}};
+      std::fill(averages.begin(), averages.end(), Real{0});
+      for (int k = 0; k < 6; ++k) {
+        averages[static_cast<std::size_t>(average_start + k + g.nghost)] =
+            distributed[k];
+      }
+      EXPECT_EQ(quasar::mhd::cell_averages_to_face(
+                    g, 0, face, [&](int i) {
+                      return averages[static_cast<std::size_t>(i + g.nghost)];
+                    }),
+                Real{0});
+
+      // Here the exact integer-weight numerator is also zero, but several
+      // coefficient*sample products require more than 53 significand bits.
+      // Reducing only their rounded products leaves a nonzero residual, so the
+      // stencil must retain each FMA TwoProd error component as well.
+      const Real exact_product_cancellation[6] = {
+          Real{1.9171051776448014} * scale,
+          Real{1.8461202561526626} * scale,
+          Real{-1.6574366374011578} * scale,
+          Real{1.568143878640971} * scale,
+          Real{-1.8120937183404688} * scale,
+          Real{1.6589391989796616} * scale};
+      for (int k = 0; k < 6; ++k) {
+        averages[static_cast<std::size_t>(average_start + k + g.nghost)] =
+            exact_product_cancellation[k];
+      }
+      EXPECT_EQ(quasar::mhd::cell_averages_to_face(
+                    g, 0, face, [&](int i) {
+                      return averages[static_cast<std::size_t>(i + g.nghost)];
+                    }),
+                Real{0});
+    }
 
     std::fill(samples.begin(), samples.end(), denorm);
     std::fill(averages.begin(), averages.end(), denorm);

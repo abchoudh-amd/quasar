@@ -1,8 +1,10 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -13,6 +15,87 @@ namespace {
 
 // Tight relative tolerance for closed-form double-precision comparisons.
 constexpr Real kTol = Real{1e-12};
+
+// Assemble the order-four radial wave operator -A4*B4 on an axis-touching
+// unit-spaced grid with an outer PEC wall. This independent test construction
+// spells out the same staggered derivative and parity closures used in the HIP
+// kernels; nx>=2 keeps the two wall ghost sources distinct.
+std::vector<std::vector<long double>> radial_wave_matrix(int nx) {
+  using Matrix = std::vector<std::vector<long double>>;
+  Matrix a(nx, std::vector<long double>(nx + 1, 0.0L));
+  Matrix b(nx + 1, std::vector<long double>(nx, 0.0L));
+
+  const auto face_value = [nx](int k, const std::vector<long double>& values) {
+    if (k < 0) return -values[static_cast<std::size_t>(-k)];
+    if (k > nx) return values[static_cast<std::size_t>(2 * nx - k)];
+    return values[static_cast<std::size_t>(k)];
+  };
+  const auto cell_value = [nx](int k, const std::vector<long double>& values) {
+    if (k < 0) return values[static_cast<std::size_t>(-1 - k)];
+    if (k >= nx) return -values[static_cast<std::size_t>(2 * nx - 1 - k)];
+    return values[static_cast<std::size_t>(k)];
+  };
+
+  for (int i = 0; i < nx; ++i) {
+    const long double radius = static_cast<long double>(i) + 0.5L;
+    for (int basis = 0; basis <= nx; ++basis) {
+      std::vector<long double> values(nx + 1, 0.0L);
+      values[static_cast<std::size_t>(basis)] = 1.0L;
+      const auto flux = [&](int k) {
+        return static_cast<long double>(k) * face_value(k, values);
+      };
+      a[static_cast<std::size_t>(i)][static_cast<std::size_t>(basis)] =
+          ((9.0L / 8.0L) * (flux(i + 1) - flux(i))
+           - (1.0L / 24.0L) * (flux(i + 2) - flux(i - 1))) / radius;
+    }
+  }
+  for (int face = 0; face <= nx; ++face) {
+    for (int basis = 0; basis < nx; ++basis) {
+      std::vector<long double> values(nx, 0.0L);
+      values[static_cast<std::size_t>(basis)] = 1.0L;
+      b[static_cast<std::size_t>(face)][static_cast<std::size_t>(basis)] =
+          (9.0L / 8.0L)
+              * (cell_value(face, values) - cell_value(face - 1, values))
+          - (1.0L / 24.0L)
+              * (cell_value(face + 1, values)
+                 - cell_value(face - 2, values));
+    }
+  }
+
+  Matrix wave(nx, std::vector<long double>(nx, 0.0L));
+  for (int i = 0; i < nx; ++i) {
+    for (int j = 0; j < nx; ++j) {
+      for (int k = 0; k <= nx; ++k) {
+        wave[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] -=
+            a[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)]
+            * b[static_cast<std::size_t>(k)][static_cast<std::size_t>(j)];
+      }
+    }
+  }
+  return wave;
+}
+
+long double dominant_eigenvalue(const std::vector<std::vector<long double>>& m) {
+  std::vector<long double> x(m.size(), 1.0L);
+  for (int iteration = 0; iteration < 256; ++iteration) {
+    std::vector<long double> y(m.size(), 0.0L);
+    for (std::size_t i = 0; i < m.size(); ++i) {
+      for (std::size_t j = 0; j < m.size(); ++j) y[i] += m[i][j] * x[j];
+    }
+    long double scale = 0.0L;
+    for (long double value : y) scale = std::max(scale, std::abs(value));
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = y[i] / scale;
+  }
+  long double numerator = 0.0L;
+  long double denominator = 0.0L;
+  for (std::size_t i = 0; i < m.size(); ++i) {
+    long double mx = 0.0L;
+    for (std::size_t j = 0; j < m.size(); ++j) mx += m[i][j] * x[j];
+    numerator += x[i] * mx;
+    denominator += x[i] * x[i];
+  }
+  return numerator / denominator;
+}
 
 // ---------------------------------------------------------------------------
 // r_at_edge: r = origin_x + i*dr. On an axis-touching grid (origin_x == 0)
@@ -203,6 +286,85 @@ TEST(GridCylindrical, CflFinerDzGivesSmallerDt) {
   const Grid2D fine{8, 16, Real{2}, Real{2}, Real{0}, Real{0}, 1};
   EXPECT_GT(quasar::cyl_cfl_dt(coarse, Real{1}),
             quasar::cyl_cfl_dt(fine, Real{1}));
+}
+
+TEST(GridCylindrical, FourthOrderCflUsesProvenAxisBound) {
+  const Grid2D g{8, 16, Real{2}, Real{8}, Real{0}, Real{0}, 2};
+  const Real dr = g.dx();
+  const Real dz = g.dy();
+  const Real c = Real{3};
+  const Real expected = Real{1} /
+      (c * std::sqrt(Real{35} / (Real{24} * dr * dr)
+                     + Real{49} / (Real{36} * dz * dz)));
+  EXPECT_NEAR(quasar::cyl_cfl_dt(g, 4, c), expected,
+              Real{8} * std::numeric_limits<Real>::epsilon() * expected);
+  EXPECT_LT(quasar::cyl_cfl_dt(g, 4, c), quasar::cfl_dt(g, 4, c));
+}
+
+TEST(GridCylindrical, FourthOrderCflPreservesExtremeAspectRatios) {
+  const Grid2D radial_dominated{
+      2, 2, Real{2e-300}, Real{2e300}, Real{0}, Real{0}, 2};
+  const Grid2D axial_dominated{
+      2, 2, Real{2e300}, Real{2e-300}, Real{0}, Real{0}, 2};
+  const Real radial_dt = quasar::cyl_cfl_dt(radial_dominated, 4, Real{1});
+  const Real axial_dt = quasar::cyl_cfl_dt(axial_dominated, 4, Real{1});
+  ASSERT_TRUE(std::isfinite(radial_dt));
+  ASSERT_TRUE(std::isfinite(axial_dt));
+  ASSERT_GT(radial_dt, Real{0});
+  ASSERT_GT(axial_dt, Real{0});
+  EXPECT_NEAR(
+      radial_dt / (Real{1e-300} / std::sqrt(Real{35} / Real{24})),
+      Real{1}, Real{8} * std::numeric_limits<Real>::epsilon());
+  EXPECT_NEAR(
+      axial_dt / (Real{1e-300} / std::sqrt(Real{49} / Real{36})),
+      Real{1}, Real{8} * std::numeric_limits<Real>::epsilon());
+}
+
+TEST(GridCylindrical, FourthOrderAxisBoundCoversSmallValidRadialGrids) {
+  struct Reference {
+    int nx;
+    long double spectral_radius;
+  };
+  constexpr Reference references[] = {
+      {2, 5.444010369561416L},
+      {3, 5.4444536388582545L},
+      {4, 5.444444234189444L},
+  };
+  constexpr long double proved_bound = 35.0L / 6.0L;
+  for (const auto& reference : references) {
+    const long double actual = dominant_eigenvalue(
+        radial_wave_matrix(reference.nx));
+    EXPECT_NEAR(static_cast<double>(actual),
+                static_cast<double>(reference.spectral_radius), 2.0e-14)
+        << "nx=" << reference.nx;
+    EXPECT_LE(actual, proved_bound) << "nx=" << reference.nx;
+  }
+}
+
+TEST(GridCylindrical, ThreeCellAxisOperatorExceedsCartesianOrderFourSymbol) {
+  const auto wave = radial_wave_matrix(3);
+  const long double old_bound = 49.0L / 9.0L;
+  EXPECT_GT(dominant_eigenvalue(wave), old_bound);
+
+  // For this exact matrix, p(lambda)=det(lambda I-(-A4 B4)) satisfies
+  // p(49/9)=-7/69120. The negative sign (with the other two eigenvalues below
+  // 49/9) proves that the largest eigenvalue is strictly above the Cartesian
+  // radial symbol; this is not a tolerance-driven numerical observation.
+  const long double a00 = old_bound - wave[0][0];
+  const long double a01 = -wave[0][1];
+  const long double a02 = -wave[0][2];
+  const long double a10 = -wave[1][0];
+  const long double a11 = old_bound - wave[1][1];
+  const long double a12 = -wave[1][2];
+  const long double a20 = -wave[2][0];
+  const long double a21 = -wave[2][1];
+  const long double a22 = old_bound - wave[2][2];
+  const long double determinant =
+      a00 * (a11 * a22 - a12 * a21)
+      - a01 * (a10 * a22 - a12 * a20)
+      + a02 * (a10 * a21 - a11 * a20);
+  EXPECT_NEAR(static_cast<double>(determinant),
+              static_cast<double>(-7.0L / 69120.0L), 5.0e-15);
 }
 
 }  // namespace

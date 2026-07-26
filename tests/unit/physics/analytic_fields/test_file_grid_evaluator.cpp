@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -73,6 +74,23 @@ void expect_vec_near(Vec3 actual, Vec3 expected, double tolerance = 1e-12) {
   EXPECT_NEAR(actual.z, expected.z, tolerance);
 }
 
+std::vector<double> repeat_x_line(const std::vector<Vec3>& line,
+                                  std::size_t ny = 2,
+                                  std::size_t nz = 2) {
+  std::vector<double> values;
+  values.reserve(3 * line.size() * ny * nz);
+  for (std::size_t k = 0; k < nz; ++k) {
+    for (std::size_t j = 0; j < ny; ++j) {
+      for (const Vec3 value : line) {
+        values.push_back(value.x);
+        values.push_back(value.y);
+        values.push_back(value.z);
+      }
+    }
+  }
+  return values;
+}
+
 }  // namespace
 
 TEST(FileGridEvaluator, RegisteredAndDefaultRequiresConfiguration) {
@@ -80,6 +98,7 @@ TEST(FileGridEvaluator, RegisteredAndDefaultRequiresConfiguration) {
   EXPECT_TRUE(quasar::Registry<quasar::numerics::IFieldEvaluator>::instance()
                   .contains("file_grid"));
   EXPECT_FALSE(eval.configured());
+  EXPECT_FALSE(eval.provides_grad_B());
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{0, 0, 0});
@@ -91,6 +110,7 @@ TEST(FileGridEvaluator, TextGridTrilinearInterpolationIsExactForLinearField) {
   const TempFile file = write_linear_grid();
   FileGridEvaluator eval{file.path.string()};
   EXPECT_TRUE(eval.configured());
+  EXPECT_TRUE(eval.provides_grad_B());
   EXPECT_EQ(eval.path(), file.path.string());
 
   ConductorSystem source;
@@ -106,6 +126,7 @@ TEST(FileGridEvaluator, TextGridTrilinearInterpolationIsExactForLinearField) {
 TEST(FileGridEvaluator, GradientMatchesPiecewiseTrilinearJacobian) {
   const TempFile file = write_linear_grid();
   FileGridEvaluator eval{file.path.string()};
+  EXPECT_TRUE(eval.provides_grad_B());
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{10.25, -3.0, 4.0});
@@ -123,15 +144,16 @@ TEST(FileGridEvaluator, ExtremeScaleInterpolationAndGradientRemainFinite) {
   const double max = std::numeric_limits<double>::max();
   FileGridEvaluator wide;
   wide.configure({
-      {"origin", {0, 0, 0}}, {"spacing", {max, 0, 0}},
-      {"dims", {2, 1, 1}},
+      {"origin", {0, 0, 0}}, {"spacing", {max, 1, 1}},
+      {"dims", {2, 2, 2}},
       // A transverse field may reverse across x without contributing to
       // div(B).  The midpoint cancels, while dBy/dx=(max-(-max))/max=2.
-      {"values", {0, -max, 0, 0, max, 0}},
+      {"values", repeat_x_line({Vec3{0, -max, 0}, Vec3{0, max, 0}})},
   });
+  EXPECT_TRUE(wide.provides_grad_B());
   ConductorSystem source;
   PointCloud midpoint;
-  midpoint.add(Vec3{max / 2, 0, 0});
+  midpoint.add(Vec3{max / 2, 0.5, 0.5});
   expect_vec_near(wide.evaluate_B(source, midpoint)[0], Vec3{0, 0, 0});
   expect_vec_near(wide.evaluate_grad_B(source, midpoint)[0].r1,
                   Vec3{2, 0, 0});
@@ -139,23 +161,23 @@ TEST(FileGridEvaluator, ExtremeScaleInterpolationAndGradientRemainFinite) {
   const double tiny = std::numeric_limits<double>::denorm_min();
   FileGridEvaluator narrow;
   narrow.configure({
-      {"origin", {0, 0, 0}}, {"spacing", {tiny, 0, 0}},
-      {"dims", {2, 1, 1}},
+      {"origin", {0, 0, 0}}, {"spacing", {tiny, 1, 1}},
+      {"dims", {2, 2, 2}},
       // dBy/dx=tiny/tiny=1 even though 1/tiny is not representable.
-      {"values", {0, 0, 0, 0, tiny, 0}},
+      {"values", repeat_x_line({Vec3{0, 0, 0}, Vec3{0, tiny, 0}})},
   });
   PointCloud lower_face;
-  lower_face.add(Vec3{0, 0, 0});
+  lower_face.add(Vec3{0, 0.5, 0.5});
   expect_vec_near(narrow.evaluate_grad_B(source, lower_face)[0].r1,
                   Vec3{1, 0, 0});
 
   FileGridEvaluator constant;
   constant.configure({
-      {"origin", {0, 0, 0}}, {"spacing", {tiny, 0, 0}},
-      {"dims", {2, 1, 1}},
+      {"origin", {0, 0, 0}}, {"spacing", {tiny, 1, 1}},
+      {"dims", {2, 2, 2}},
       // Differentiating a huge constant must cancel before the reciprocal of
       // the subnormal spacing is materialized.
-      {"values", {0, max, 0, 0, max, 0}},
+      {"values", repeat_x_line({Vec3{0, max, 0}, Vec3{0, max, 0}})},
   });
   expect_vec_near(constant.evaluate_grad_B(source, lower_face)[0].r1,
                   Vec3{0, 0, 0});
@@ -178,7 +200,8 @@ TEST(FileGridEvaluator, EndpointDistinctnessUsesIndependentlyRoundedNodes) {
   }), std::overflow_error);
 }
 
-TEST(FileGridEvaluator, RegistryConfigurationAcceptsSingletonAxes) {
+TEST(FileGridEvaluator,
+     RegistryConfigurationAcceptsSingletonAxesWithoutClaimingGradient) {
   FileGridEvaluator eval;
   quasar::numerics::EvaluatorParams params{
       {"origin", {1.0, 2.0, 3.0}},
@@ -189,31 +212,51 @@ TEST(FileGridEvaluator, RegistryConfigurationAcceptsSingletonAxes) {
       {"values", {1.0, 2.0, 3.0, 1.0, 4.0, 5.0}},
   };
   eval.configure(params);
+  EXPECT_FALSE(eval.provides_grad_B());
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{1.25, 2.0, 3.0});
   const auto field = eval.evaluate_B(source, points);
   expect_vec_near(field[0], Vec3{1.0, 3.0, 4.0});
-  const auto gradient = eval.evaluate_grad_B(source, points);
-  expect_vec_near(gradient[0].r0, Vec3{0.0, 0.0, 0.0});
-  expect_vec_near(gradient[0].r1, Vec3{4.0, 0.0, 0.0});
-  expect_vec_near(gradient[0].r2, Vec3{4.0, 0.0, 0.0});
+  EXPECT_THROW((void)eval.evaluate_grad_B(source, points), std::runtime_error);
+}
+
+TEST(FileGridEvaluator,
+     SingletonPlaneDoesNotAssumeAZeroMissingNormalDerivative) {
+  FileGridEvaluator eval;
+  // These samples are the x=0 plane of the solenoidal three-dimensional field
+  // B=(-x,y,0).  The observed dBy/dy=1 is cancelled by the unavailable dBx/dx;
+  // a one-plane map cannot prove or disprove that completion.
+  EXPECT_NO_THROW(eval.configure({
+      {"origin", {0, 0, 0}}, {"spacing", {0, 1, 1}},
+      {"dims", {1, 2, 2}},
+      {"values", {0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0}},
+  }));
+  EXPECT_FALSE(eval.provides_grad_B());
+
+  ConductorSystem source;
+  PointCloud point;
+  point.add(Vec3{0, 0.25, 0.5});
+  expect_vec_near(eval.evaluate_B(source, point)[0], Vec3{0, 0.25, 0});
+  EXPECT_THROW((void)eval.evaluate_grad_B(source, point), std::runtime_error);
 }
 
 TEST(FileGridEvaluator, InternalKnotJacobianUsesRightHandCell) {
   FileGridEvaluator eval;
   eval.configure({
       {"origin", {0, 0, 0}},
-      {"spacing", {1, 0, 0}},
-      {"dims", {3, 1, 1}},
+      {"spacing", {1, 1, 1}},
+      {"dims", {3, 2, 2}},
       // B=(0, f(x), 0), f=[0,1,3], is solenoidal.  Its slope is 1 in
       // [0,1] and 2 in [1,2].
-      {"values", {0, 0, 0, 0, 1, 0, 0, 3, 0}},
+      {"values", repeat_x_line(
+          {Vec3{0, 0, 0}, Vec3{0, 1, 0}, Vec3{0, 3, 0}})},
   });
+  EXPECT_TRUE(eval.provides_grad_B());
   ConductorSystem source;
   PointCloud points;
-  points.add(Vec3{1.0, 0.0, 0.0});
-  points.add(Vec3{2.0, 0.0, 0.0});
+  points.add(Vec3{1.0, 0.5, 0.5});
+  points.add(Vec3{2.0, 0.5, 0.5});
   const auto gradient = eval.evaluate_grad_B(source, points);
   ASSERT_EQ(gradient.size(), 2u);
   // Interior knots select the positive-coordinate cell; the upper endpoint

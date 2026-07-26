@@ -27,11 +27,14 @@ On `[0,1] × [0,1]` with `gamma = 5/3`:
 ```
 rho = gamma^2                      p = gamma
 v   = (-sin(2*pi*y),  sin(2*pi*x),  0)
-B   = (-sin(2*pi*y),  sin(4*pi*x),  0) / sqrt(4*pi)
+B   = (-sin(2*pi*y),  sin(4*pi*x),  0)
 ```
 
-i.e. uniform density `rho = gamma^2 = 25/9` and pressure `p = gamma = 5/3`, with
-the standard magnetic normalization `B0 = 1/sqrt(4*pi)`.
+i.e. uniform density `rho = gamma^2 = 25/9` and pressure `p = gamma = 5/3`.
+Quasar evolves the `mu0 = 1` equations, so this is the uniformly rescaled form
+of the common reference state
+`rho=25/(36*pi), p=5/(12*pi), B0=1/sqrt(4*pi)`. Mixing the rescaled fluid state
+with the unscaled magnetic amplitude would change beta by a factor of `4*pi`.
 
 ## Reference / validation
 

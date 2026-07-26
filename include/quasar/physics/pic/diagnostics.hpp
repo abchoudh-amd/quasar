@@ -5,11 +5,13 @@
 namespace quasar::pic {
 
 Real total_kinetic_energy(const ParticleSpecies& species);
-// Yee discrete EM energy: 0.5*sum(component^2 * dual_control_volume), evaluated
-// on each component's own logical lattice (never average-then-square). The
-// overload without a BoundarySpec retains the historical all-periodic topology;
-// use the boundary-aware overload for wall/open domains. Cylindrical weights are
-// exact radial dual annuli times the axial dual length.
+// Positive same-snapshot Yee field norm:
+// 0.5*sum(component^2 * dual_control_volume), evaluated on each component's own
+// logical lattice (never average-then-square). Because stored E and B occupy
+// different leapfrog times, this is not the exactly conserved cross-time Yee
+// invariant. The overload without a BoundarySpec retains the historical
+// all-periodic topology; use the boundary-aware overload for wall/open domains.
+// Cylindrical weights are exact radial dual annuli times the axial dual length.
 Real total_em_energy(const YeeField2D<Real>& fields, const Grid2D& grid,
                      bool cylindrical = false);
 Real total_em_energy(const YeeField2D<Real>& fields, const Grid2D& grid,

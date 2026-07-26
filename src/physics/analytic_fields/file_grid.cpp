@@ -268,6 +268,11 @@ FileGridEvaluator::FileGridEvaluator(std::string path) : path_{std::move(path)} 
   set_grid(load_text_grid(path_));
 }
 
+bool FileGridEvaluator::provides_grad_B() const noexcept {
+  return configured_ && grid_.dims[0] > 1 && grid_.dims[1] > 1
+      && grid_.dims[2] > 1;
+}
+
 void FileGridEvaluator::validate_grid(const GridData& grid) {
   if (!finite(grid.origin) || !finite(grid.spacing)
       || !std::isfinite(grid.divergence_tolerance)
@@ -307,6 +312,13 @@ void FileGridEvaluator::validate_grid(const GridData& grid) {
       }
     }
   }
+
+  // A singleton axis denotes one sampled geometric plane.  Its missing normal
+  // derivative is undetermined, so neither the full Jacobian nor div(B) can be
+  // inferred by silently setting that derivative to zero.  Such maps remain
+  // valid B-only samplers; provides_grad_B() stays false and direct gradient
+  // requests are rejected below.
+  if (grid.dims[0] == 1 || grid.dims[1] == 1 || grid.dims[2] == 1) return;
 
   // Componentwise trilinear interpolation does not automatically preserve
   // div(B)=0. Its divergence is multi-affine inside each cell, so its extrema
@@ -528,6 +540,11 @@ Field<Mat3x3> FileGridEvaluator::evaluate_grad_B(const core::IFieldSource&,
                                                  const core::PointCloud& observations) const {
   if (!configured_) {
     throw std::invalid_argument{"FileGridEvaluator: no field grid is configured"};
+  }
+  if (!provides_grad_B()) {
+    throw std::runtime_error{
+        "FileGridEvaluator: a full magnetic-field gradient requires at least "
+        "two grid nodes on every axis; singleton axes are geometric planes"};
   }
   Field<Mat3x3> out(observations.size());
   const auto regular = [](const AxisWeights& a, int i) {

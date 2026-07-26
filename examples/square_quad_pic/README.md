@@ -29,14 +29,12 @@ magnet's null.
 - **Two species, 10 keV.** H+ (`q=+e`, proton mass) and mu- (`q=-e`, muon mass)
   are each loaded `maxwellian_uniform` at `temperature_eV = 10000`. The lighter,
   oppositely-charged muon responds faster and bends the opposite way.
-- **Field boundary is PEC, not outflow.** The first-order Mur `outflow` BC is
-  numerically unstable when coupled to the deposited particle current here: the
-  field energy grows exponentially and the run diverges within ~1000 steps
-  (independent of the external field, and not cured by current smoothing or by
-  lowering density; with zero particles `outflow` is stable, which localizes the
-  fault to the outflow+current coupling). `pec` walls are stable for the full
-  run. Because the self-consistent fields are negligible next to the static
-  external quadrupole, PEC reflection does not distort the particle dynamics.
+- **Field boundary is PEC, not outflow.** The first-order Mur `outflow` path does
+  not preserve the deposited-current Gauss constraint, so charged species are
+  rejected with Mur boundaries. This example uses the charge-compatible `pec`
+  boundary. Because the self-consistent fields are negligible next to the static
+  external quadrupole, PEC reflection is not expected to control the illustrated
+  particle dynamics.
 
 ## Run
 
@@ -57,8 +55,8 @@ PYTHONPATH=build/hip-gfx942-release/python \
 
 ## Timescale / why 10000 steps
 
-The EM solver is **explicit**, so `dt` is bounded by the light-crossing CFL
-limit, **not** particle dynamics:
+The EM solver is **explicit**, and the automatic policy bounds `dt` by the
+light-crossing CFL limit:
 
 ```
 dt_auto = 0.5 / (c * sqrt(1/dx^2 + 1/dy^2)) ~ 2.3e-14 s   (dx = dy ~ 19.5 um)
@@ -66,6 +64,8 @@ dt_auto = 0.5 / (c * sqrt(1/dx^2 + 1/dy^2)) ~ 2.3e-14 s   (dx = dy ~ 19.5 um)
 
 So the shipped 10000 steps span only **~0.23 ns**. A full **1 us** study would
 need ~43 million steps at this resolution -- infeasible as a routine example.
+The automatic policy does not enforce plasma-frequency or particle-orbit
+resolution; production studies must impose those additional timestep criteria.
 To extend the physical time, either raise `time.steps` deliberately (and expect
 a long GPU run) or coarsen the grid (larger `dx` => larger `dt`).
 

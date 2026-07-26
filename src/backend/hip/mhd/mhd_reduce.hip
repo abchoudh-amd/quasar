@@ -18,6 +18,7 @@
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 
 #include "backend/hip/hip_check.hpp"
+#include "mhd_face_quadrature.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -34,6 +35,8 @@ using quasar::numerics::MhdState;
 // 16x16 = 256 threads per block, matching the other MHD update kernels.
 inline constexpr unsigned kBlock2D = 16;
 inline constexpr unsigned kThreadsPerBlock = kBlock2D * kBlock2D;
+inline constexpr int kDiscreteSolenoidalRoundoffUlpShift = 10;
+inline constexpr Real kCflOverflowRetryScale = 0x1p-64;
 
 inline dim3 mhd_grid_2d(const quasar::Grid2D& g, dim3 block) {
   return dim3((static_cast<unsigned>(g.nx) + block.x - 1) / block.x,
@@ -57,6 +60,27 @@ __device__ inline void block_min_reduce(double* sdata, unsigned tid) {
     if (tid < stride) {
       const double other = sdata[tid + stride];
       if (other < sdata[tid]) sdata[tid] = other;
+    }
+    __syncthreads();
+  }
+}
+
+__device__ inline void block_scaled_abs_max_reduce(
+    Real* mantissa, int* exponent, unsigned tid) {
+  for (unsigned stride = kThreadsPerBlock / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      const Real other = mantissa[tid + stride];
+      const int other_exponent = exponent[tid + stride];
+      const Real current = mantissa[tid];
+      const bool take_other = !std::isfinite(other) ||
+          (std::isfinite(current) && other != Real{0} &&
+           (current == Real{0} || other_exponent > exponent[tid] ||
+            (other_exponent == exponent[tid] &&
+             fabs(other) > fabs(current))));
+      if (take_other) {
+        mantissa[tid] = other;
+        exponent[tid] = other_exponent;
+      }
     }
     __syncthreads();
   }
@@ -164,8 +188,8 @@ __global__ void admissible_fraction_kernel(
 }
 
 // a*b*c/(d0*d1), evaluated without materializing any intermediate product or
-// quotient at its physical exponent.  The CFL path needs the third numerator
-// factor for sqrt(gamma)*sqrt(p)*face_weight/(sqrt(rho)*spacing).
+// quotient at its physical exponent. The CFL path uses this both for physical
+// wave speeds and for the final face_weight*alpha/spacing metric scaling.
 __device__ inline Real scaled_product3_quotient2(
     Real a, Real b, Real c, Real d0, Real d1) {
   if (!std::isfinite(a) || !std::isfinite(b) || !std::isfinite(c) ||
@@ -187,26 +211,27 @@ __device__ inline Real scaled_product3_quotient2(
                 ea + eb + ec - ed0 - ed1 + adjustment);
 }
 
-__device__ inline Real scaled_field_rate(
-    Real perturbation, Real background, Real face_weight,
-    Real sqrt_rho, Real spacing) {
+__device__ inline Real scaled_total_field_speed(
+    Real perturbation, Real background, Real sqrt_rho) {
   const Real a[2] = {perturbation, background};
-  const Real b[2] = {face_weight, face_weight};
+  const Real b[2] = {Real{1}, Real{1}};
   const Real d0[2] = {sqrt_rho, sqrt_rho};
-  const Real d1[2] = {spacing, spacing};
+  const Real d1[2] = {Real{1}, Real{1}};
   return quasar::numerics::scaled_product_quotient_sum(a, b, d0, d1, 2);
 }
 
-// One side's contribution face_weight*(|v_n|+c_fast)/spacing.  Compute the
-// RATE directly: a perfectly finite conservative state can have an
-// unrepresentable physical velocity or magnetosonic speed while division by a
-// large cell spacing makes the Courant rate finite.  Magnetosonic eigenvalues
-// are homogeneous in their constituent speeds, so evaluating the normalized
-// quadratic from already-scaled sound/Alfven rates is algebraically identical.
-__device__ inline Real face_state_rate(
-    const MhdState& s, const MhdBackground& bg, int dir, Real gamma,
-    Real face_weight, Real spacing) {
-  if (face_weight == Real{0}) return Real{0};
+struct FaceSpeedParts {
+  Real velocity{};
+  Real fast{};
+};
+
+// One side's separate physical |v_n| and c_fast contributions. The Riemann
+// solver consumes this physical wave fan before the mesh metric is applied, so
+// an unrepresentable speed is not made admissible merely because a large cell
+// spacing would make its quotient finite. The constituent products and field
+// split still use exponent-scaled algebra so every representable speed is kept.
+__device__ inline FaceSpeedParts face_state_speed_parts(
+    const MhdState& s, const MhdBackground& bg, int dir, Real gamma) {
   const Real p = quasar::numerics::pressure(s, gamma);
   if (!(std::isfinite(s.rho) && s.rho > Real{0} &&
         std::isfinite(s.mx) && std::isfinite(s.my) &&
@@ -214,110 +239,100 @@ __device__ inline Real face_state_rate(
         std::isfinite(s.bx) && std::isfinite(s.by) &&
         std::isfinite(s.bz) && std::isfinite(bg.b0x) &&
         std::isfinite(bg.b0y) && std::isfinite(bg.b0z) &&
-        std::isfinite(p) && p > Real{0} &&
-        std::isfinite(face_weight) && face_weight > Real{0} &&
-        std::isfinite(spacing) && spacing > Real{0})) {
-    return std::numeric_limits<Real>::infinity();
+        std::isfinite(p) && p > Real{0})) {
+    const Real infinity = std::numeric_limits<Real>::infinity();
+    return FaceSpeedParts{infinity, infinity};
   }
 
   const Real sqrt_rho = std::sqrt(s.rho);
-  const Real sound_rate = scaled_product3_quotient2(
-      std::sqrt(gamma), std::sqrt(p), face_weight, sqrt_rho, spacing);
-  const Real ax_rate = scaled_field_rate(
-      s.bx, bg.b0x, face_weight, sqrt_rho, spacing);
-  const Real ay_rate = scaled_field_rate(
-      s.by, bg.b0y, face_weight, sqrt_rho, spacing);
-  const Real az_rate = scaled_field_rate(
-      s.bz, bg.b0z, face_weight, sqrt_rho, spacing);
-  if (!(std::isfinite(sound_rate) && std::isfinite(ax_rate) &&
-        std::isfinite(ay_rate) && std::isfinite(az_rate))) {
-    return std::numeric_limits<Real>::infinity();
+  const Real sound_speed = scaled_product3_quotient2(
+      std::sqrt(gamma), std::sqrt(p), Real{1}, sqrt_rho, Real{1});
+  const Real ax_speed = scaled_total_field_speed(s.bx, bg.b0x, sqrt_rho);
+  const Real ay_speed = scaled_total_field_speed(s.by, bg.b0y, sqrt_rho);
+  const Real az_speed = scaled_total_field_speed(s.bz, bg.b0z, sqrt_rho);
+  if (!(std::isfinite(sound_speed) && std::isfinite(ax_speed) &&
+        std::isfinite(ay_speed) && std::isfinite(az_speed))) {
+    const Real infinity = std::numeric_limits<Real>::infinity();
+    return FaceSpeedParts{infinity, infinity};
   }
 
-  const Real alfven_rate =
-      quasar::numerics::scaled_norm3(ax_rate, ay_rate, az_rate);
-  const Real alfven_normal_rate = std::abs(dir == 0 ? ax_rate : ay_rate);
-  const Real scale = std::max(sound_rate, alfven_rate);
-  Real fast_rate = Real{0};
+  const Real alfven_speed =
+      quasar::numerics::scaled_norm3(ax_speed, ay_speed, az_speed);
+  const Real alfven_normal_speed = std::abs(dir == 0 ? ax_speed : ay_speed);
+  const Real scale = std::max(sound_speed, alfven_speed);
+  Real fast_speed = Real{0};
   if (scale > Real{0}) {
-    const Real an = sound_rate / scale;
-    const Real bn = alfven_rate / scale;
-    const Real can = alfven_normal_rate / scale;
+    const Real an = sound_speed / scale;
+    const Real bn = alfven_speed / scale;
+    const Real can = alfven_normal_speed / scale;
     const Real a2n = an * an;
     const Real b2n = bn * bn;
     const Real sum = a2n + b2n;
     Real disc = sum * sum - Real{4} * a2n * can * can;
     if (disc < Real{0}) disc = Real{0};
-    fast_rate = scale * std::sqrt(
+    fast_speed = scale * std::sqrt(
         Real{0.5} * (sum + std::sqrt(disc)));
   }
 
   const Real momentum = std::abs(dir == 0 ? s.mx : s.my);
   const Real velocity_a[1] = {momentum};
-  const Real velocity_b[1] = {face_weight};
+  const Real velocity_b[1] = {Real{1}};
   const Real velocity_d0[1] = {s.rho};
-  const Real velocity_d1[1] = {spacing};
-  const Real velocity_rate = quasar::numerics::scaled_product_quotient_sum(
+  const Real velocity_d1[1] = {Real{1}};
+  const Real velocity_speed = quasar::numerics::scaled_product_quotient_sum(
       velocity_a, velocity_b, velocity_d0, velocity_d1, 1);
-  const Real rate = velocity_rate + fast_rate;
+  if (!(std::isfinite(velocity_speed) && std::isfinite(fast_speed))) {
+    const Real infinity = std::numeric_limits<Real>::infinity();
+    return FaceSpeedParts{infinity, infinity};
+  }
+  return FaceSpeedParts{velocity_speed, fast_speed};
+}
+
+// HLLD uses one common fast speed across the two states:
+//   S_L=min(v_L,v_R)-max(c_f,L,c_f,R),
+//   S_R=max(v_L,v_R)+max(c_f,L,c_f,R).
+// Its absolute outer-fan bound is therefore max(|v_L|,|v_R|)+max(c_f,L,c_f,R),
+// not max_side(|v|+c_f). The piecewise-constant positivity retry uses the LF
+// flux, whose alpha is the latter expression, so retain that distinct bound.
+__device__ inline Real interface_speed(
+    const FaceSpeedParts& left, const FaceSpeedParts& right,
+    int scheme_order) {
+  const Real velocity = std::max(left.velocity, right.velocity);
+  const Real fast = std::max(left.fast, right.fast);
+  const Real rate = scheme_order <= 1
+      ? std::max(left.velocity + left.fast,
+                 right.velocity + right.fast)
+      : velocity + fast;
   return std::isfinite(rate) ? rate
                              : std::numeric_limits<Real>::infinity();
 }
 
-struct DeviceInterfaceStates {
-  const double* lrho;
-  const double* lmx;
-  const double* lmy;
-  const double* lmz;
-  const double* lenergy;
-  const double* lbx;
-  const double* lby;
-  const double* lbz;
-  const double* rrho;
-  const double* rmx;
-  const double* rmy;
-  const double* rmz;
-  const double* renergy;
-  const double* rbx;
-  const double* rby;
-  const double* rbz;
-};
-
-__device__ inline MhdState load_interface_state(
-    const DeviceInterfaceStates& iface, std::size_t k, bool left) {
-  MhdState state;
-  if (left) {
-    state.rho = iface.lrho[k];
-    state.mx = iface.lmx[k];
-    state.my = iface.lmy[k];
-    state.mz = iface.lmz[k];
-    state.energy = iface.lenergy[k];
-    state.bx = iface.lbx[k];
-    state.by = iface.lby[k];
-    state.bz = iface.lbz[k];
-  } else {
-    state.rho = iface.rrho[k];
-    state.mx = iface.rmx[k];
-    state.my = iface.rmy[k];
-    state.mz = iface.rmz[k];
-    state.energy = iface.renergy[k];
-    state.bx = iface.rbx[k];
-    state.by = iface.rby[k];
-    state.bz = iface.rbz[k];
+// Apply the finite-volume metric only after the physical Riemann fan has been
+// proved representable. ``face_weight`` includes the homogeneous retry scale;
+// exponent factoring prevents either its product or the spacing quotient from
+// overflowing before the final (possibly still out-of-range) rate is known.
+__device__ inline Real scaled_face_rate(
+    Real physical_speed, Real face_weight, Real spacing) {
+  if (!(std::isfinite(physical_speed) && physical_speed >= Real{0} &&
+        std::isfinite(face_weight) && face_weight > Real{0} &&
+        std::isfinite(spacing) && spacing > Real{0})) {
+    return std::numeric_limits<Real>::infinity();
   }
-  return state;
+  return scaled_product3_quotient2(
+      physical_speed, face_weight, Real{1}, spacing, Real{1});
 }
 
 // Maximum weighted Courant rate on one numerical face, evaluated from the
-// exact reconstructed L/R states consumed by HLLD. This closes the amplitude
-// gap in which an MP face overshoot has a larger signal speed than either
-// incident cell average. The duplicate periodic high face uses the same face-0
-// data/background mapping as the production Riemann kernel.
+// exact reconstructed L/R point states consumed by HLLD. MP5/MP7 reconstruct
+// face averages and then recover transverse Gauss-point states; bounding only
+// the face average is unsafe because that second polynomial can have a larger
+// wave speed. The duplicate periodic high face uses the same face-0 data and
+// background mapping as the production Riemann kernel.
 __device__ inline Real reconstructed_face_rate(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
-    int b0_active, Real gamma, int low_order, int dir,
+    int b0_active, Real gamma, int scheme_order, int dir,
     int face_i, int face_j, Real face_weight, Real spacing,
-    const DeviceInterfaceStates& iface,
+    const quasar::mhd::detail::FaceInterfaceView& iface,
     const double* b0x, const double* b0y, const double* b0z) {
   if (face_weight == Real{0}) return Real{0};
   if (dir == 0 && face_i == g.nx &&
@@ -329,20 +344,48 @@ __device__ inline Real reconstructed_face_rate(
     face_j = 0;
   }
   const std::size_t k = g.index(face_i, face_j);
-  const MhdState left = load_interface_state(iface, k, true);
-  const MhdState right = load_interface_state(iface, k, false);
+  const MhdState base_left =
+      quasar::mhd::detail::load_interface_side(iface, k, true);
+  const MhdState base_right =
+      quasar::mhd::detail::load_interface_side(iface, k, false);
+  const quasar::mhd::detail::FaceBackgroundView background{
+      b0_active, b0x, b0y, b0z};
+  const MhdBackground base_bg = quasar::mhd::detail::average_background(
+      g, dir, face_i, face_j, background, scheme_order <= 1 ? 1 : 0);
+  const FaceSpeedParts base_left_speed = face_state_speed_parts(
+      base_left, base_bg, dir, gamma);
+  const FaceSpeedParts base_right_speed = face_state_speed_parts(
+      base_right, base_bg, dir, gamma);
+  Real maximum = scaled_face_rate(
+      interface_speed(base_left_speed, base_right_speed, scheme_order),
+      face_weight, spacing);
+  if (scheme_order != 5 && scheme_order != 7) return maximum;
 
-  MhdBackground bg{};
-  if (b0_active != 0) {
-    bg = quasar::mhd::load_interface_background(
-        g, dir, b0x, b0y, b0z, face_i, face_j,
-        low_order != 0 ? 1 : 0);
+  const int count = scheme_order == 5 ? 3 : 4;
+  for (int q = 0; q < count; ++q) {
+    const MhdState left = quasar::mhd::detail::point_interface_state(
+        g, dir, face_i, face_j, scheme_order, q, iface, true);
+    const MhdState right = quasar::mhd::detail::point_interface_state(
+        g, dir, face_i, face_j, scheme_order, q, iface, false);
+    // Production quadrature falls back to the admissible face-average solve if
+    // any recovered point is inadmissible, so its base rate is the matching
+    // bound rather than an unrelated infinite rejection.
+    if (!quasar::mhd::detail::state_is_admissible(left, gamma) ||
+        !quasar::mhd::detail::state_is_admissible(right, gamma)) {
+      return maximum;
+    }
+    const MhdBackground point_bg = quasar::mhd::detail::point_background(
+        g, dir, face_i, face_j, scheme_order, q, background);
+    const FaceSpeedParts left_speed = face_state_speed_parts(
+        left, point_bg, dir, gamma);
+    const FaceSpeedParts right_speed = face_state_speed_parts(
+        right, point_bg, dir, gamma);
+    maximum = std::max(
+        maximum, scaled_face_rate(
+            interface_speed(left_speed, right_speed, scheme_order),
+            face_weight, spacing));
   }
-  const Real left_rate = face_state_rate(
-      left, bg, dir, gamma, face_weight, spacing);
-  const Real right_rate = face_state_rate(
-      right, bg, dir, gamma, face_weight, spacing);
-  return left_rate > right_rate ? left_rate : right_rate;
+  return maximum;
 }
 
 // Per-cell finite-volume CFL coefficient from the incident numerical faces.
@@ -351,9 +394,10 @@ __device__ inline Real reconstructed_face_rate(
 // angular-momentum, and metric-free B_phi operators.
 __global__ void cfl_max_rate_kernel(
     quasar::Grid2D g, int b0_active, Real gamma, Real dx, Real dy,
-    int low_order, int cylindrical,
+    Real rate_scale, int scheme_order, int cylindrical,
     quasar::mhd::BoundaryFlags4 flags,
-    DeviceInterfaceStates ifx, DeviceInterfaceStates ify,
+    quasar::mhd::detail::FaceInterfaceView ifx,
+    quasar::mhd::detail::FaceInterfaceView ify,
     const double* __restrict__ b0x, const double* __restrict__ b0y,
     const double* __restrict__ b0z,
     double* __restrict__ block_partials) {
@@ -364,22 +408,23 @@ __global__ void cfl_max_rate_kernel(
 
   double local = 0.0;
   if (i < g.nx && j < g.ny) {
-    // Compute each expensive face state/eigenvalue once at the metric-free
-    // half weight. This quantity is itself required by B_phi, so if it is not
-    // representable then no later smaller metric factor can make the complete
-    // local CFL coefficient representable.
+    // Compute each expensive physical face eigenvalue once, then apply the
+    // finite-volume half weight together with the homogeneous retry scale.
+    // Physical-fan failures stay infinite; mesh/aggregate overflow becomes
+    // finite on the retry whenever a positive binary64 timestep exists.
+    const Real half_weight = Real{0.5} * rate_scale;
     const Real ax_lo = reconstructed_face_rate(
-        g, flags, b0_active, gamma, low_order, 0, i, j,
-        Real{0.5}, dx, ifx, b0x, b0y, b0z);
+        g, flags, b0_active, gamma, scheme_order, 0, i, j,
+        half_weight, dx, ifx, b0x, b0y, b0z);
     const Real ax_hi = reconstructed_face_rate(
-        g, flags, b0_active, gamma, low_order, 0, i + 1, j,
-        Real{0.5}, dx, ifx, b0x, b0y, b0z);
+        g, flags, b0_active, gamma, scheme_order, 0, i + 1, j,
+        half_weight, dx, ifx, b0x, b0y, b0z);
     const Real ay_lo = reconstructed_face_rate(
-        g, flags, b0_active, gamma, low_order, 1, i, j,
-        Real{0.5}, dy, ify, b0x, b0y, b0z);
+        g, flags, b0_active, gamma, scheme_order, 1, i, j,
+        half_weight, dy, ify, b0x, b0y, b0z);
     const Real ay_hi = reconstructed_face_rate(
-        g, flags, b0_active, gamma, low_order, 1, i, j + 1,
-        Real{0.5}, dy, ify, b0x, b0y, b0z);
+        g, flags, b0_active, gamma, scheme_order, 1, i, j + 1,
+        half_weight, dy, ify, b0x, b0y, b0z);
 
     const Real radial_bphi = ax_lo + ax_hi;
     Real radial = radial_bphi;
@@ -483,97 +528,226 @@ __global__ void ct_divb_linf_kernel(
   }
 }
 
-// Return the cancellation defect of a short signed product/quotient sum,
-// normalized by the corresponding absolute term sum.  Every nonzero term is
-// first represented as mantissa*2^exponent; scaling to the largest exponent
-// keeps both numerator and denominator in an O(1) range even when the physical
-// divergence terms overflow, underflow, or cancel across hundreds of decades.
-__device__ inline Real normalized_divergence_defect(
-    const Real* numerator, const Real* coefficient,
-    const Real* denominator, int count) {
-  constexpr int kMaxTerms = 4;
-  Real mantissa[kMaxTerms]{};
-  int exponent[kMaxTerms]{};
-  int max_exponent = std::numeric_limits<int>::min();
-
-  for (int k = 0; k < count; ++k) {
-    if (!std::isfinite(numerator[k]) ||
-        !std::isfinite(coefficient[k]) ||
-        !std::isfinite(denominator[k]) ||
-        !(denominator[k] > Real{0})) {
-      return std::numeric_limits<Real>::infinity();
-    }
-    if (numerator[k] == Real{0} || coefficient[k] == Real{0}) continue;
-
-    int en = 0, ec = 0, ed = 0;
-    const Real mn = frexp(numerator[k], &en);
-    const Real mc = frexp(coefficient[k], &ec);
-    const Real md = frexp(denominator[k], &ed);
-    int shift = 0;
-    mantissa[k] = frexp((mn * mc) / md, &shift);
-    exponent[k] = en + ec - ed + shift;
-    if (exponent[k] > max_exponent) max_exponent = exponent[k];
-  }
-
-  if (max_exponent == std::numeric_limits<int>::min()) return Real{0};
-
-  // Kahan accumulation avoids making the diagnostic itself appreciably less
-  // accurate than the roundoff envelope it is intended to measure.
-  Real signed_sum = Real{0};
-  Real compensation = Real{0};
-  Real absolute_sum = Real{0};
-  for (int k = 0; k < count; ++k) {
-    if (mantissa[k] == Real{0}) continue;
-    const Real term = scalbn(mantissa[k], exponent[k] - max_exponent);
-    const Real corrected = term - compensation;
-    const Real updated = signed_sum + corrected;
-    compensation = (updated - signed_sum) - corrected;
-    signed_sum = updated;
-    absolute_sum += std::fabs(term);
-  }
-  if (!(absolute_sum > Real{0}) || !std::isfinite(absolute_sum)) {
-    return std::numeric_limits<Real>::infinity();
-  }
-  return std::fabs(signed_sum) / absolute_sum;
+__device__ inline quasar::numerics::ScaledValue
+scaled_directional_derivative(
+    Real upper, Real lower, Real spacing) {
+  const quasar::numerics::ScaledValue difference =
+      quasar::numerics::scaled_difference_to_value(upper, lower);
+  quasar::numerics::ScaledProductQuotientAccumulator<1> derivative;
+  quasar::numerics::append_scaled_value_quotient(
+      derivative, difference, Real{1}, spacing, Real{1});
+  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(
+      derivative);
 }
 
-// Per-cell dimensionless defect in the exact CT divergence stencil.  The
-// cylindrical radial terms use their actual annular weights (1+q,1-q), rather
-// than an algebraic expansion containing cancelling copies of the zero-area
-// axis face; an arbitrary axis-face value therefore cannot mask a real defect.
+__device__ inline quasar::numerics::ScaledValue scaled_ulp(Real value) {
+  if (!std::isfinite(value)) {
+    return quasar::numerics::ScaledValue{
+        std::numeric_limits<Real>::infinity(), 0};
+  }
+  const Real magnitude = fabs(value);
+  if (magnitude < std::numeric_limits<Real>::min()) {
+    int exponent = 0;
+    const Real mantissa = frexp(
+        std::numeric_limits<Real>::denorm_min(), &exponent);
+    return quasar::numerics::ScaledValue{mantissa, exponent};
+  }
+  int exponent = 0;
+  (void)frexp(magnitude, &exponent);
+  return quasar::numerics::ScaledValue{
+      Real{0.5}, exponent - std::numeric_limits<Real>::digits + 1};
+}
+
+__device__ inline quasar::numerics::ScaledValue
+scaled_directional_roundoff(
+    Real upper, Real lower, Real spacing) {
+  quasar::numerics::ScaledProductQuotientAccumulator<2> uncertainty;
+  quasar::numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(upper), Real{1}, spacing, Real{1});
+  quasar::numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(lower), Real{1}, spacing, Real{1});
+  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(
+      uncertainty);
+}
+
+// (B_hi-B_lo)/dr cancels a local offset, while
+// (B_hi+B_lo)/(2*r_c) retains the physical B_r/r curvature of a constant
+// radial field. Both remain scaled through their final directional sum.
+__device__ inline quasar::numerics::ScaledValue
+scaled_annular_radial_divergence(
+    Real upper, Real lower, Real spacing, Real radius) {
+  quasar::numerics::ScaledProductQuotientAccumulator<4> radial;
+  quasar::numerics::append_scaled_product_quotient(
+      radial, upper, Real{1}, spacing, Real{1});
+  quasar::numerics::append_scaled_product_quotient(
+      radial, lower, Real{-1}, spacing, Real{1});
+  quasar::numerics::append_scaled_product_quotient(
+      radial, upper, Real{1}, Real{2}, radius);
+  quasar::numerics::append_scaled_product_quotient(
+      radial, lower, Real{1}, Real{2}, radius);
+  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(radial);
+}
+
+__device__ inline quasar::numerics::ScaledValue
+scaled_annular_radial_roundoff(
+    Real upper, Real lower, Real spacing, Real radius) {
+  Real q = Real{0.5} * (spacing / radius);
+  if (q > Real{1}) q = Real{1};
+  quasar::numerics::ScaledProductQuotientAccumulator<2> uncertainty;
+  quasar::numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(upper), Real{1} + q, spacing, Real{1});
+  quasar::numerics::append_scaled_value_quotient(
+      uncertainty, scaled_ulp(lower), Real{1} - q, spacing, Real{1});
+  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(
+      uncertainty);
+}
+
+struct DirectionalNormParts {
+  quasar::numerics::ScaledValue residual;
+  quasar::numerics::ScaledValue scale;
+};
+
+// Return the signed residual and sum of absolute directional contributions as
+// separate scaled values. The inputs have already cancelled Cartesian field
+// offsets, so neither norm can be diluted by a large DC field.
+__device__ inline DirectionalNormParts directional_norm_parts(
+    const quasar::numerics::ScaledValue& lhs,
+    const quasar::numerics::ScaledValue& rhs) {
+  if (!(std::isfinite(lhs.mantissa) && std::isfinite(rhs.mantissa))) {
+    const quasar::numerics::ScaledValue invalid{
+        std::numeric_limits<Real>::infinity(), 0};
+    return DirectionalNormParts{invalid, invalid};
+  }
+
+  quasar::numerics::ScaledProductQuotientAccumulator<2> residual_sum;
+  quasar::numerics::append_scaled_value_quotient(
+      residual_sum, lhs, Real{1}, Real{1}, Real{1});
+  quasar::numerics::append_scaled_value_quotient(
+      residual_sum, rhs, Real{1}, Real{1}, Real{1});
+  const quasar::numerics::ScaledValue residual =
+      quasar::numerics::finish_scaled_product_quotient_sum_to_value(
+          residual_sum);
+
+  const quasar::numerics::ScaledValue lhs_abs{
+      fabs(lhs.mantissa), lhs.exponent};
+  const quasar::numerics::ScaledValue rhs_abs{
+      fabs(rhs.mantissa), rhs.exponent};
+  quasar::numerics::ScaledProductQuotientAccumulator<2> scale_sum;
+  quasar::numerics::append_scaled_value_quotient(
+      scale_sum, lhs_abs, Real{1}, Real{1}, Real{1});
+  quasar::numerics::append_scaled_value_quotient(
+      scale_sum, rhs_abs, Real{1}, Real{1}, Real{1});
+  const quasar::numerics::ScaledValue scale =
+      quasar::numerics::finish_scaled_product_quotient_sum_to_value(scale_sum);
+  return DirectionalNormParts{residual, scale};
+}
+
+__device__ inline bool scaled_abs_less_equal_power_of_two(
+    const quasar::numerics::ScaledValue& lhs,
+    const quasar::numerics::ScaledValue& rhs, int rhs_exponent_shift) {
+  if (!(std::isfinite(lhs.mantissa) && std::isfinite(rhs.mantissa))) {
+    return false;
+  }
+  if (lhs.mantissa == Real{0}) return true;
+  if (rhs.mantissa == Real{0}) return false;
+  const int shifted_rhs_exponent = rhs.exponent + rhs_exponent_shift;
+  return lhs.exponent < shifted_rhs_exponent ||
+      (lhs.exponent == shifted_rhs_exponent &&
+       fabs(lhs.mantissa) <= fabs(rhs.mantissa));
+}
+
+__device__ inline bool residual_is_roundoff_explained(
+    const quasar::numerics::ScaledValue& lhs,
+    const quasar::numerics::ScaledValue& rhs,
+    const quasar::numerics::ScaledValue& residual,
+    const quasar::numerics::ScaledValue& uncertainty,
+    const quasar::numerics::ScaledValue& scale,
+    bool solver_owned) {
+  if (solver_owned) {
+    return scaled_abs_less_equal_power_of_two(
+        residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
+  }
+  if (lhs.mantissa == Real{0} || rhs.mantissa == Real{0} ||
+      signbit(lhs.mantissa) == signbit(rhs.mantissa)) {
+    return false;
+  }
+  if (!scaled_abs_less_equal_power_of_two(residual, scale, -1)) {
+    return false;
+  }
+  return scaled_abs_less_equal_power_of_two(
+      residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
+}
+
+// Accumulate the two global L-infinity norms needed by
+//   ||d_1+d_2||_inf / || |d_1|+|d_2| ||_inf.
+// Mantissa/exponent maxima retain values outside binary64's materialized range
+// and let the host make the threshold decision without a log2/exp2 round trip.
 __global__ void ct_divb_relative_linf_kernel(
-    quasar::Grid2D g, int cylindrical,
+    quasar::Grid2D g, int cylindrical, int solver_owned,
     const double* __restrict__ bx, const double* __restrict__ by,
     double* __restrict__ block_partials) {
-  __shared__ double sdata[kThreadsPerBlock];
+  __shared__ Real shared_mantissa[kThreadsPerBlock];
+  __shared__ int shared_exponent[kThreadsPerBlock];
   const unsigned tid = threadIdx.y * blockDim.x + threadIdx.x;
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-  Real local = Real{0};
+  quasar::numerics::ScaledValue residual{};
+  quasar::numerics::ScaledValue scale{};
   if (i < g.nx && j < g.ny) {
     const Real bx_lo = bx[g.index(i, j)];
     const Real bx_hi = bx[g.index(i + 1, j)];
     const Real by_lo = by[g.index(i, j)];
     const Real by_hi = by[g.index(i, j + 1)];
-    const Real numerator[4] = {bx_hi, bx_lo, by_hi, by_lo};
-    Real coefficient[4] = {Real{1}, Real{-1}, Real{1}, Real{-1}};
-    const Real denominator[4] = {g.dx(), g.dx(), g.dy(), g.dy()};
-    if (cylindrical != 0) {
-      Real q = Real{0.5} * (g.dx() / g.r_at_cell_center(i));
-      if (q > Real{1}) q = Real{1};
-      coefficient[0] = Real{1} + q;
-      coefficient[1] = -(Real{1} - q);
-    }
-    local = normalized_divergence_defect(
-        numerator, coefficient, denominator, 4);
+    const quasar::numerics::ScaledValue radial = cylindrical != 0
+        ? scaled_annular_radial_divergence(
+              bx_hi, bx_lo, g.dx(), g.r_at_cell_center(i))
+        : scaled_directional_derivative(bx_hi, bx_lo, g.dx());
+    const quasar::numerics::ScaledValue axial =
+        scaled_directional_derivative(by_hi, by_lo, g.dy());
+    const quasar::numerics::ScaledValue radial_roundoff = cylindrical != 0
+        ? scaled_annular_radial_roundoff(
+              bx_hi, bx_lo, g.dx(), g.r_at_cell_center(i))
+        : scaled_directional_roundoff(bx_hi, bx_lo, g.dx());
+    const quasar::numerics::ScaledValue axial_roundoff =
+        scaled_directional_roundoff(by_hi, by_lo, g.dy());
+    const DirectionalNormParts norms = directional_norm_parts(radial, axial);
+    quasar::numerics::ScaledProductQuotientAccumulator<2> roundoff_sum;
+    quasar::numerics::append_scaled_value_quotient(
+        roundoff_sum, radial_roundoff, Real{1}, Real{1}, Real{1});
+    quasar::numerics::append_scaled_value_quotient(
+        roundoff_sum, axial_roundoff, Real{1}, Real{1}, Real{1});
+    const quasar::numerics::ScaledValue roundoff =
+        quasar::numerics::finish_scaled_product_quotient_sum_to_value(
+            roundoff_sum);
+    const bool explained = residual_is_roundoff_explained(
+        radial, axial, norms.residual, roundoff, norms.scale,
+        solver_owned != 0);
+    residual = explained ? quasar::numerics::ScaledValue{} : norms.residual;
+    scale = norms.scale;
   }
 
-  sdata[tid] = local;
+  const std::size_t block_count =
+      static_cast<std::size_t>(gridDim.x) * gridDim.y;
+  const std::size_t block_index =
+      static_cast<std::size_t>(blockIdx.y) * gridDim.x + blockIdx.x;
+  shared_mantissa[tid] = residual.mantissa;
+  shared_exponent[tid] = residual.exponent;
   __syncthreads();
-  block_max_reduce(sdata, tid);
+  block_scaled_abs_max_reduce(shared_mantissa, shared_exponent, tid);
   if (tid == 0) {
-    block_partials[blockIdx.y * gridDim.x + blockIdx.x] = sdata[0];
+    block_partials[block_index] = shared_mantissa[0];
+    block_partials[block_count + block_index] =
+        static_cast<Real>(shared_exponent[0]);
+  }
+  shared_mantissa[tid] = scale.mantissa;
+  shared_exponent[tid] = scale.exponent;
+  __syncthreads();
+  block_scaled_abs_max_reduce(shared_mantissa, shared_exponent, tid);
+  if (tid == 0) {
+    block_partials[2 * block_count + block_index] = shared_mantissa[0];
+    block_partials[3 * block_count + block_index] =
+        static_cast<Real>(shared_exponent[0]);
   }
 }
 
@@ -592,6 +766,54 @@ inline Real finish_host_max(const quasar::backend::DeviceBuffer<Real>& partials,
     if (host[b] > m) m = host[b];
   }
   return m;
+}
+
+inline Real finish_host_scaled_norm_ratio(
+    const quasar::backend::DeviceBuffer<Real>& partials,
+    std::size_t n_blocks) {
+  std::vector<Real> host(4 * n_blocks);
+  partials.copy_to_host(host.data(), host.size());
+  quasar::numerics::ScaledValue residual_max{};
+  quasar::numerics::ScaledValue scale_max{};
+  const auto retain_max = [](Real mantissa, Real exponent_value,
+                             quasar::numerics::ScaledValue& maximum) {
+    if (!std::isfinite(mantissa) || !std::isfinite(exponent_value)) {
+      maximum = quasar::numerics::ScaledValue{
+          std::numeric_limits<Real>::infinity(), 0};
+      return;
+    }
+    if (!std::isfinite(maximum.mantissa) || mantissa == Real{0}) return;
+    const int exponent = static_cast<int>(exponent_value);
+    if (maximum.mantissa == Real{0} || exponent > maximum.exponent ||
+        (exponent == maximum.exponent &&
+         std::abs(mantissa) > std::abs(maximum.mantissa))) {
+      maximum = quasar::numerics::ScaledValue{
+          std::abs(mantissa), exponent};
+    }
+  };
+  for (std::size_t b = 0; b < n_blocks; ++b) {
+    retain_max(host[b], host[n_blocks + b], residual_max);
+    retain_max(host[2 * n_blocks + b], host[3 * n_blocks + b], scale_max);
+  }
+  if (!(std::isfinite(residual_max.mantissa) &&
+        std::isfinite(scale_max.mantissa))) {
+    return std::numeric_limits<Real>::infinity();
+  }
+  if (residual_max.mantissa == Real{0}) return Real{0};
+  if (!(scale_max.mantissa > Real{0})) {
+    return std::numeric_limits<Real>::infinity();
+  }
+  const int common_exponent = std::max(
+      residual_max.exponent, scale_max.exponent);
+  const Real numerator = std::abs(scalbn(
+      residual_max.mantissa, residual_max.exponent - common_exponent));
+  const Real denominator = std::abs(scalbn(
+      scale_max.mantissa, scale_max.exponent - common_exponent));
+  if (!(denominator > Real{0}) || !std::isfinite(numerator) ||
+      !std::isfinite(denominator)) {
+    return std::numeric_limits<Real>::infinity();
+  }
+  return numerator / denominator;
 }
 
 inline Real finish_host_min(const quasar::backend::DeviceBuffer<Real>& partials,
@@ -624,8 +846,8 @@ void launch_mhd_cfl_max_rate(
     const quasar::numerics::MhdInterfaceStates<Real>& ifx,
     const quasar::numerics::MhdInterfaceStates<Real>& ify,
     const MhdBackgroundField<Real>& b0, Real gamma,
-    backend::DeviceBuffer<Real>& scratch, Real* host_max_rate,
-    stream_t stream, bool low_order, bool cylindrical,
+    backend::DeviceBuffer<Real>& scratch, ScaledCflRate* host_rate,
+    stream_t stream, int scheme_order, bool cylindrical,
     BoundaryFlags4 flags) {
   const Grid2D g = ifx.grid;
   const dim3 block(kBlock2D, kBlock2D);
@@ -647,7 +869,7 @@ void launch_mhd_cfl_max_rate(
   // Keep the kernel POD construction explicit. This is host-only pointer
   // packaging; avoiding a generic lambda here also keeps older HIP frontends
   // from trying to infer device attributes for a host closure.
-  const DeviceInterfaceStates x_view{
+  const detail::FaceInterfaceView x_view{
       ifx.Lrho.device_ptr(), ifx.Lmx.device_ptr(),
       ifx.Lmy.device_ptr(), ifx.Lmz.device_ptr(),
       ifx.Lenergy.device_ptr(), ifx.Lbx.device_ptr(),
@@ -656,7 +878,7 @@ void launch_mhd_cfl_max_rate(
       ifx.Rmy.device_ptr(), ifx.Rmz.device_ptr(),
       ifx.Renergy.device_ptr(), ifx.Rbx.device_ptr(),
       ifx.Rby.device_ptr(), ifx.Rbz.device_ptr()};
-  const DeviceInterfaceStates y_view{
+  const detail::FaceInterfaceView y_view{
       ify.Lrho.device_ptr(), ify.Lmx.device_ptr(),
       ify.Lmy.device_ptr(), ify.Lmz.device_ptr(),
       ify.Lenergy.device_ptr(), ify.Lbx.device_ptr(),
@@ -667,14 +889,33 @@ void launch_mhd_cfl_max_rate(
       ify.Rby.device_ptr(), ify.Rbz.device_ptr()};
 
   hipLaunchKernelGGL(cfl_max_rate_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, b0_active, gamma, dx, dy,
-                     low_order ? 1 : 0, cylindrical ? 1 : 0, flags,
+                     g, b0_active, gamma, dx, dy, Real{1},
+                     scheme_order, cylindrical ? 1 : 0, flags,
                      x_view, y_view,
                      b0x, b0y, b0z, scratch.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_max_rate = finish_host_max(scratch, n_blocks);
+  Real rate_scale = Real{1};
+  Real scaled_max_rate = finish_host_max(scratch, n_blocks);
+  if (!std::isfinite(scaled_max_rate)) {
+    // Every valid physical face alpha is finite before its mesh factor is
+    // applied. An infinite first reduction can therefore be either a genuine
+    // state/fan failure (which remains infinite) or only an out-of-range
+    // metric/incident-face sum. Retry once with an exact power-of-two scale.
+    // If that retry still overflows, the true rate exceeds roughly 2^1088;
+    // because cfl<=1, its reciprocal lies below binary64's 2^-1074 minimum.
+    rate_scale = kCflOverflowRetryScale;
+    hipLaunchKernelGGL(
+        cfl_max_rate_kernel, grid, block, 0,
+        static_cast<hipStream_t>(stream), g, b0_active, gamma, dx, dy,
+        rate_scale, scheme_order, cylindrical ? 1 : 0, flags,
+        x_view, y_view, b0x, b0y, b0z, scratch.device_ptr());
+    QUASAR_HIP_CHECK(::hipGetLastError());
+    backend::device_synchronize(stream);
+    scaled_max_rate = finish_host_max(scratch, n_blocks);
+  }
+  *host_rate = ScaledCflRate{scaled_max_rate, rate_scale};
 }
 
 void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
@@ -702,21 +943,23 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
 
 void launch_mhd_ct_divb_relative_linf(
     const MhdField2D<Real>& u, backend::DeviceBuffer<Real>& scratch,
-    Real* host_linf, stream_t stream, bool cylindrical) {
+    Real* host_linf, stream_t stream, bool cylindrical,
+    bool solver_owned) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
-  ensure_scratch(scratch, n_blocks);
+  ensure_scratch(scratch, 4 * n_blocks);
 
   hipLaunchKernelGGL(
       ct_divb_relative_linf_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, cylindrical ? 1 : 0,
+      solver_owned ? 1 : 0,
       u.bx_face.device_ptr(), u.by_face.device_ptr(), scratch.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_linf = finish_host_max(scratch, n_blocks);
+  *host_linf = finish_host_scaled_norm_ratio(scratch, n_blocks);
 }
 
 void launch_mhd_admissible_fraction(

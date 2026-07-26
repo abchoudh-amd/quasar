@@ -102,11 +102,14 @@ class AnalyticEvaluatorBindingsTest(unittest.TestCase):
         self.assertFalse(
             _core.magnetostatics.field_evaluator_provides_vector_potential(
                 "uniform"))
-        for name in ("biot_savart", "uniform", "dipole", "gradient",
-                     "file_grid"):
+        for name in ("biot_savart", "uniform", "dipole", "gradient"):
             with self.subTest(name=name):
                 self.assertTrue(
                     _core.magnetostatics.field_evaluator_provides_grad_B(name))
+        # The registry query observes the default, unconfigured instance.  A
+        # file grid advertises a Jacobian only after a full 3-D map is configured.
+        self.assertFalse(
+            _core.magnetostatics.field_evaluator_provides_grad_B("file_grid"))
 
         uniform = _core.magnetostatics.create_field_evaluator("uniform")
         self.assertTrue(uniform.provides_grad_B)

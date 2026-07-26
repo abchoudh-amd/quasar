@@ -298,7 +298,10 @@ void bind_pic(py::module_& m) {
            },
            py::arg("index"), py::arg("x"), py::arg("y"),
            py::arg("vx"), py::arg("vy"), py::arg("vz"),
-           py::arg("weight"))
+           py::arg("weight"),
+           "Upload physical particle positions and velocities at t=0. "
+           "Velocity must not be pre-staggered; the first step applies the "
+           "initial half-width Boris force update before drifting.")
       .def("species_count",
            [](const quasar::pic::EmPic2D3V& self) { return self.species().size(); })
       .def("species_alive_count",
@@ -384,7 +387,10 @@ void bind_pic(py::module_& m) {
           [](quasar::pic::EmPic2D3V& self) {
             return quasar::pic::total_em_energy(self);
           },
-          py::arg("solver"));
+          py::arg("solver"),
+          "Return the positive same-snapshot Yee field norm. Because E and B "
+          "occupy different leapfrog times, this is not the exactly conserved "
+          "cross-time Yee invariant.");
   pic.def("gauss_residual",
           [](quasar::pic::EmPic2D3V& self) {
             return quasar::pic::gauss_residual(self);

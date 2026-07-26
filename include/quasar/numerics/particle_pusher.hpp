@@ -17,6 +17,9 @@ namespace quasar::numerics {
 class IParticlePusher {
  public:
   virtual ~IParticlePusher() = default;
+  // force_dt is the interval represented by the velocity update; position_dt is
+  // the following drift width. They differ at startup: a public v(t=0) receives
+  // a force_dt=position_dt/2 kick to form v^1/2 before the full first drift.
   virtual void push(pic::ParticleSpecies& species,
                     const YeeField2D<Real>& self_fields,
                     const YeeField2D<Real>& external_fields,

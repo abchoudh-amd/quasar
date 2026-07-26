@@ -144,20 +144,31 @@ Numerics and time step
   the staggered fourth-order derivative to the conservative radial flux
   ``q = r A_r``. Even parity of ``q`` supplies the regular axis row
   ``[(7/6) q1 - q2/24] / (r_(1/2) dr)``; current compatibility is solved in
-  ``r Jr`` so the same operator preserves Gauss's law.
+  ``r Jr`` so the same operator preserves Gauss's law. Fourth order requires
+  ``domain.nx >= 2`` and ``domain.ny >= 2``; with one physical cell, the two
+  non-periodic ghost layers do not have distinct source cells.
 * ``domain.origin_x_m: 0`` selects the regular axis boundary automatically.
   A positive origin defines an annulus; both inner-radius ``x_lo`` field and
   particle boundaries must then be explicitly non-periodic. Negative radius is
   rejected.
 * When ``time.dt_s: auto``, a cylindrical PIC deck goes through the cylindrical
-  PIC CFL helper. For its conservative axisymmetric ``m = 0`` Yee FDTD
-  formulation, the stability bound is the same directional spectral bound as
-  the planar Yee scheme with ``(dx, dy) -> (dr, dz)``; there is no extra ad-hoc
-  ``1/r`` tightening near the axis. This statement is specific to PIC/FDTD and
-  does not apply to cylindrical MHD: the exact-moment MHD ``m_phi``
-  Lax--Friedrichs rate has the axis coefficient ``1.5 * alpha / dr``. Supply a
-  fixed ``dt_s`` if you want to override the automatic PIC value (the same PIC
-  bound is still enforced).
+  PIC CFL helper. Order two has the planar Yee bound with
+  ``(dx, dy) -> (dr, dz)``. At order four the regular-axis closure is bounded
+  conservatively by
+
+  .. math::
+
+     \Delta t \le {1\over c\sqrt{35/(24\,\Delta r^2)
+                                    +49/(36\,\Delta z^2)}}.
+
+  The radial ``35/24`` coefficient follows from an all-grid operator-norm proof;
+  it replaces the slightly unsafe Cartesian radial coefficient ``49/36`` and
+  is not an empirical ``ppm`` margin. There is still no singular ad-hoc ``1/r``
+  tightening near the axis. This statement is specific to PIC/FDTD and does not
+  apply to cylindrical MHD: the exact-moment MHD ``m_phi`` Lax--Friedrichs rate
+  has the axis coefficient ``1.5 * alpha / dr``. Supply a fixed ``dt_s`` if you
+  want to override the automatic PIC value (the same PIC bound is still
+  enforced).
 
 Output
 ------

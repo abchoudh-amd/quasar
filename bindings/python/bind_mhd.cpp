@@ -223,7 +223,8 @@ void bind_mhd(py::module_& m) {
   // Deck-facing static background magnetic field B0 for the field-split
   // formulation B = B0 + b. `profile` is a registry name (default "uniform");
   // bx0/by0/bz0 are the uniform-vector parameters consumed when profile ==
-  // "uniform", while params carries scalar parameters for any analytic profile.
+  // "uniform", profile_scale converts every sampled output uniformly, and
+  // params carries scalar parameters for any analytic profile.
   // The Python deck validator queries
   // registered_mhd_background_profiles() above rather than mirroring the name
   // list, so it stays in sync with the C++ registry automatically.
@@ -234,7 +235,10 @@ void bind_mhd(py::module_& m) {
       .def_readwrite("bx0", &quasar::mhd::MhdBackgroundSpec::bx0)
       .def_readwrite("by0", &quasar::mhd::MhdBackgroundSpec::by0)
       .def_readwrite("bz0", &quasar::mhd::MhdBackgroundSpec::bz0)
-      .def_readwrite("params", &quasar::mhd::MhdBackgroundSpec::params);
+      .def_readwrite("profile_scale",
+                     &quasar::mhd::MhdBackgroundSpec::profile_scale)
+      .def_readwrite("params", &quasar::mhd::MhdBackgroundSpec::params)
+      .def_readwrite("curl_free", &quasar::mhd::MhdBackgroundSpec::curl_free);
 
   // -- Config ---------------------------------------------------------------
   // Every scheme axis is a registry-name string so a new scheme is selectable

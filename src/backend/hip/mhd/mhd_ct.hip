@@ -16,6 +16,7 @@
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 
 #include "backend/hip/hip_check.hpp"
+#include "mhd_face_quadrature.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -24,227 +25,90 @@ namespace {
 using quasar::Real;
 using quasar::numerics::MhdFlux;
 using quasar::numerics::MhdState;
+using quasar::mhd::detail::FaceBackgroundView;
+using quasar::mhd::detail::FaceInterfaceView;
 
 inline constexpr unsigned kBlock2D = 16;
 
 // Range-safe rational interpolation.  High-order coefficients are large
 // enough that coefficient*EMF overflows for a perfectly representable constant
 // near DBL_MAX; adding the signed numerator before dividing has the same
-// problem.  These scalar terms implement the same largest-opposite-sign-first
-// reduction as numerics::reduce_scaled_terms without runtime-indexed arrays;
-// AMDGPU can keep them in registers instead of promoting per-thread arrays to
-// tens of KiB of workgroup memory.
-struct ScaledCtTerm {
-  Real mantissa{};
-  int exponent{};
-};
-
-__device__ inline ScaledCtTerm make_scaled_ct_term(
-    Real coefficient, Real value, Real denominator) {
-  if (value == Real{0}) return {};
-  int ec = 0, ev = 0, ed = 0;
-  const Real mc = frexp(coefficient, &ec);
-  const Real mv = frexp(value, &ev);
-  const Real md = frexp(denominator, &ed);
-  int shift = 0;
-  const Real mantissa = frexp((mc * mv) / md, &shift);
-  return ScaledCtTerm{mantissa, ec + ev - ed + shift};
-}
-
-__device__ inline bool ct_term_larger(const ScaledCtTerm& lhs,
-                                      const ScaledCtTerm& rhs) {
-  return lhs.exponent > rhs.exponent ||
-         (lhs.exponent == rhs.exponent &&
-          fabs(lhs.mantissa) > fabs(rhs.mantissa));
-}
-
-__device__ inline ScaledCtTerm combine_scaled_ct_terms(
-    const ScaledCtTerm& largest, const ScaledCtTerm& partner) {
-  const Real sum = largest.mantissa +
-      scalbn(partner.mantissa, partner.exponent - largest.exponent);
-  if (sum == Real{0}) return {};
-  int shift = 0;
-  const Real mantissa = frexp(sum, &shift);
-  return ScaledCtTerm{mantissa, largest.exponent + shift};
-}
-
-__device__ inline bool ct_term_active(const ScaledCtTerm& term) {
-  return term.mantissa != Real{0};
-}
-
-__device__ inline void swap_scaled_ct_terms(ScaledCtTerm& lhs,
-                                            ScaledCtTerm& rhs) {
-  const ScaledCtTerm temporary = lhs;
-  lhs = rhs;
-  rhs = temporary;
-}
-
-// Keep the larger active term in `selected`.  Every invocation below names its
-// operands explicitly; there is no runtime subscript or selected-term address
-// for the GPU compiler to lower to scratch/LDS storage.
-__device__ inline void select_larger_scaled_ct_term(
-    ScaledCtTerm& selected, ScaledCtTerm& candidate) {
-  if (ct_term_active(candidate) &&
-      (!ct_term_active(selected) || ct_term_larger(candidate, selected))) {
-    swap_scaled_ct_terms(selected, candidate);
-  }
-}
-
-// Select the largest term opposite in sign to `largest`; if no opposite-sign
-// term exists, select the largest same-sign term.  This is the range-preserving
-// cancellation order used by reduce_scaled_terms, expressed as a fixed scan.
-__device__ inline void select_scaled_ct_partner(
-    const ScaledCtTerm& largest, ScaledCtTerm& selected,
-    ScaledCtTerm& candidate) {
-  if (!ct_term_active(candidate)) return;
-  const bool candidate_opposite =
-      (candidate.mantissa < Real{0}) != (largest.mantissa < Real{0});
-  const bool selected_active = ct_term_active(selected);
-  const bool selected_opposite = selected_active &&
-      ((selected.mantissa < Real{0}) != (largest.mantissa < Real{0}));
-  if (!selected_active ||
-      (candidate_opposite && !selected_opposite) ||
-      (candidate_opposite == selected_opposite &&
-       ct_term_larger(candidate, selected))) {
-    swap_scaled_ct_terms(selected, candidate);
-  }
-}
-
-__device__ inline void reduce_scaled_ct_round(
-    ScaledCtTerm& t0, ScaledCtTerm& t1, ScaledCtTerm& t2, ScaledCtTerm& t3,
-    ScaledCtTerm& t4, ScaledCtTerm& t5, ScaledCtTerm& t6, ScaledCtTerm& t7) {
-  select_larger_scaled_ct_term(t0, t1);
-  select_larger_scaled_ct_term(t0, t2);
-  select_larger_scaled_ct_term(t0, t3);
-  select_larger_scaled_ct_term(t0, t4);
-  select_larger_scaled_ct_term(t0, t5);
-  select_larger_scaled_ct_term(t0, t6);
-  select_larger_scaled_ct_term(t0, t7);
-  if (!ct_term_active(t0)) return;
-
-  select_scaled_ct_partner(t0, t1, t2);
-  select_scaled_ct_partner(t0, t1, t3);
-  select_scaled_ct_partner(t0, t1, t4);
-  select_scaled_ct_partner(t0, t1, t5);
-  select_scaled_ct_partner(t0, t1, t6);
-  select_scaled_ct_partner(t0, t1, t7);
-  if (!ct_term_active(t1)) return;
-  t0 = combine_scaled_ct_terms(t0, t1);
-  t1 = {};
-}
-
+// problem.  Each normalized coefficient*EMF product enters as an error-free
+// FMA two-product expansion; the shared reducer retains every high/low
+// component through one rounded numerator before applying the common rational
+// denominator once. This guarantees exact-zero numerator cancellation and
+// range safety, but not exact-rational correct rounding in every double-round
+// edge case.
+template <int Capacity>
 __device__ inline Real finish_scaled_ct_terms(
-    ScaledCtTerm t0, ScaledCtTerm t1, ScaledCtTerm t2, ScaledCtTerm t3,
-    ScaledCtTerm t4, ScaledCtTerm t5, ScaledCtTerm t6, ScaledCtTerm t7) {
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  reduce_scaled_ct_round(t0, t1, t2, t3, t4, t5, t6, t7);
-  if (t0.mantissa != Real{0}) return scalbn(t0.mantissa, t0.exponent);
-  if (t1.mantissa != Real{0}) return scalbn(t1.mantissa, t1.exponent);
-  if (t2.mantissa != Real{0}) return scalbn(t2.mantissa, t2.exponent);
-  if (t3.mantissa != Real{0}) return scalbn(t3.mantissa, t3.exponent);
-  if (t4.mantissa != Real{0}) return scalbn(t4.mantissa, t4.exponent);
-  if (t5.mantissa != Real{0}) return scalbn(t5.mantissa, t5.exponent);
-  if (t6.mantissa != Real{0}) return scalbn(t6.mantissa, t6.exponent);
-  if (t7.mantissa != Real{0}) return scalbn(t7.mantissa, t7.exponent);
-  return Real{0};
+    quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
+    Real denominator) {
+  const quasar::numerics::ScaledValue numerator =
+      quasar::numerics::finish_scaled_exact_product_sum_to_value(sum);
+  return quasar::numerics::scaled_value_divide(numerator, denominator);
 }
 
 __device__ __attribute__((noinline)) Real scaled_face_average(Real e0, Real e1) {
+  if (e0 == e1) return e0;
   if (!(isfinite(e0) && isfinite(e1))) {
     return Real{0.5} * e0 + Real{0.5} * e1;
   }
-  return finish_scaled_ct_terms(
-      make_scaled_ct_term(Real{1}, e0, Real{2}),
-      make_scaled_ct_term(Real{1}, e1, Real{2}), {}, {}, {}, {}, {}, {});
+  quasar::numerics::ScaledProductQuotientAccumulator<4> sum;
+  quasar::numerics::append_scaled_exact_product(sum, Real{1}, e0);
+  quasar::numerics::append_scaled_exact_product(sum, Real{1}, e1);
+  return finish_scaled_ct_terms(sum, Real{2});
 }
 
-__device__ __attribute__((noinline)) Real scaled_face_interpolation5(
+__device__ __attribute__((noinline)) Real scaled_face_average_to_edge5(
     Real e0, Real e1, Real e2, Real e3, Real e4, Real e5) {
+  if (e0 == e1 && e0 == e2 && e0 == e3 && e0 == e4 && e0 == e5) return e0;
   if (!(isfinite(e0) && isfinite(e1) && isfinite(e2) &&
         isfinite(e3) && isfinite(e4) && isfinite(e5))) {
-    return (Real{3} * e0 - Real{25} * e1 + Real{150} * e2 +
-            Real{150} * e3 - Real{25} * e4 + Real{3} * e5) / Real{256};
+    return (e0 - Real{8} * e1 + Real{37} * e2 + Real{37} * e3 -
+            Real{8} * e4 + e5) / Real{60};
   }
-  return finish_scaled_ct_terms(
-      make_scaled_ct_term(Real{3}, e0, Real{256}),
-      make_scaled_ct_term(Real{-25}, e1, Real{256}),
-      make_scaled_ct_term(Real{150}, e2, Real{256}),
-      make_scaled_ct_term(Real{150}, e3, Real{256}),
-      make_scaled_ct_term(Real{-25}, e4, Real{256}),
-      make_scaled_ct_term(Real{3}, e5, Real{256}), {}, {});
+  quasar::numerics::ScaledProductQuotientAccumulator<12> sum;
+  quasar::numerics::append_scaled_exact_product(sum, Real{1}, e0);
+  quasar::numerics::append_scaled_exact_product(sum, Real{-8}, e1);
+  quasar::numerics::append_scaled_exact_product(sum, Real{37}, e2);
+  quasar::numerics::append_scaled_exact_product(sum, Real{37}, e3);
+  quasar::numerics::append_scaled_exact_product(sum, Real{-8}, e4);
+  quasar::numerics::append_scaled_exact_product(sum, Real{1}, e5);
+  return finish_scaled_ct_terms(sum, Real{60});
 }
 
-__device__ __attribute__((noinline)) Real scaled_face_interpolation7(
+__device__ __attribute__((noinline)) Real scaled_face_average_to_edge7(
     Real e0, Real e1, Real e2, Real e3,
     Real e4, Real e5, Real e6, Real e7) {
+  if (e0 == e1 && e0 == e2 && e0 == e3 && e0 == e4 && e0 == e5 &&
+      e0 == e6 && e0 == e7) return e0;
   if (!(isfinite(e0) && isfinite(e1) && isfinite(e2) && isfinite(e3) &&
         isfinite(e4) && isfinite(e5) && isfinite(e6) && isfinite(e7))) {
-    return (-Real{5} * e0 + Real{49} * e1 - Real{245} * e2 +
-            Real{1225} * e3 + Real{1225} * e4 - Real{245} * e5 +
-            Real{49} * e6 - Real{5} * e7) / Real{2048};
+    return (-Real{3} * e0 + Real{29} * e1 - Real{139} * e2 +
+            Real{533} * e3 + Real{533} * e4 - Real{139} * e5 +
+            Real{29} * e6 - Real{3} * e7) / Real{840};
   }
-  return finish_scaled_ct_terms(
-      make_scaled_ct_term(Real{-5}, e0, Real{2048}),
-      make_scaled_ct_term(Real{49}, e1, Real{2048}),
-      make_scaled_ct_term(Real{-245}, e2, Real{2048}),
-      make_scaled_ct_term(Real{1225}, e3, Real{2048}),
-      make_scaled_ct_term(Real{1225}, e4, Real{2048}),
-      make_scaled_ct_term(Real{-245}, e5, Real{2048}),
-      make_scaled_ct_term(Real{49}, e6, Real{2048}),
-      make_scaled_ct_term(Real{-5}, e7, Real{2048}));
-}
-
-struct InterfaceView {
-  const double *Lrho, *Lmx, *Lmy, *Lmz, *Lenergy, *Lbx, *Lby, *Lbz;
-  const double *Rrho, *Rmx, *Rmy, *Rmz, *Renergy, *Rbx, *Rby, *Rbz;
-};
-
-struct BackgroundView {
-  int active;
-  const double *bx, *by, *bz;
-};
-
-__device__ inline MhdState load_interface_side(const InterfaceView& v,
-                                                std::size_t k, bool left) {
-  MhdState s;
-  if (left) {
-    s.rho=v.Lrho[k]; s.mx=v.Lmx[k]; s.my=v.Lmy[k]; s.mz=v.Lmz[k];
-    s.energy=v.Lenergy[k]; s.bx=v.Lbx[k]; s.by=v.Lby[k]; s.bz=v.Lbz[k];
-  } else {
-    s.rho=v.Rrho[k]; s.mx=v.Rmx[k]; s.my=v.Rmy[k]; s.mz=v.Rmz[k];
-    s.energy=v.Renergy[k]; s.bx=v.Rbx[k]; s.by=v.Rby[k]; s.bz=v.Rbz[k];
-  }
-  return s;
+  quasar::numerics::ScaledProductQuotientAccumulator<16> sum;
+  quasar::numerics::append_scaled_exact_product(sum, Real{-3}, e0);
+  quasar::numerics::append_scaled_exact_product(sum, Real{29}, e1);
+  quasar::numerics::append_scaled_exact_product(sum, Real{-139}, e2);
+  quasar::numerics::append_scaled_exact_product(sum, Real{533}, e3);
+  quasar::numerics::append_scaled_exact_product(sum, Real{533}, e4);
+  quasar::numerics::append_scaled_exact_product(sum, Real{-139}, e5);
+  quasar::numerics::append_scaled_exact_product(sum, Real{29}, e6);
+  quasar::numerics::append_scaled_exact_product(sum, Real{-3}, e7);
+  return finish_scaled_ct_terms(sum, Real{840});
 }
 
 // Directional Godunov electric field.  For an x-face F_x(By)=-Ez; for a
 // y-face F_y(Bx)=+Ez.  Reusing HLLD here gives CT the same upwind wave fan as
 // the fluid flux instead of a disconnected centred cell-EMF average.
 __device__ inline Real face_ez(const quasar::Grid2D& g, int dir, int i, int j,
-                               int hll_only, Real gamma, const InterfaceView& v,
-                               const BackgroundView& bgv) {
-  const std::size_t k = g.index(i, j);
-  MhdState L = load_interface_side(v, k, true);
-  MhdState R = load_interface_side(v, k, false);
-  quasar::numerics::MhdBackground b0{};
-  if (bgv.active != 0) {
-    b0 = quasar::mhd::load_interface_background(
-        g, dir, bgv.bx, bgv.by, bgv.bz, i, j,
-        hll_only != 0 ? 1 : 0);
-  }
-  const MhdState Lr = quasar::numerics::hlld::rotate_in(L, dir);
-  const MhdState Rr = quasar::numerics::hlld::rotate_in(R, dir);
-  const auto b0r = quasar::numerics::hlld::rotate_in(b0, dir);
-  const MhdFlux fr = hll_only != 0
-      ? quasar::numerics::hlld::lax_friedrichs_flux_split_x(
-            Lr, Rr, b0r, gamma)
-      : quasar::numerics::hlld::hlld_flux_split_x(Lr, Rr, b0r, gamma);
-  const MhdFlux f = quasar::numerics::hlld::rotate_out(fr, dir);
+                               int order, int hll_only, Real gamma,
+                               const FaceInterfaceView& v,
+                               const FaceBackgroundView& bgv) {
+  const MhdFlux f = quasar::mhd::detail::average_face_flux(
+      g, dir, i, j, order, hll_only, gamma, v, bgv);
   return (dir == 0) ? -f.by : f.bx;
 }
 
@@ -257,86 +121,326 @@ __device__ inline int face_index(int q, int n, int lo_mode, int hi_mode) {
   return (q < 0) ? 0 : ((q > n) ? n : q);
 }
 
+__device__ inline bool mapped_interface_is_equal_state(
+    const quasar::Grid2D& g, int i, int j,
+    const FaceInterfaceView& v, quasar::mhd::BoundaryFlags4 modes) {
+  const int ii = face_index(i, g.nx, modes.side[0], modes.side[1]);
+  const int jj = face_index(j, g.ny, modes.side[2], modes.side[3]);
+  const std::size_t k = g.index(ii, jj);
+  return v.Lrho[k] == v.Rrho[k] && v.Lmx[k] == v.Rmx[k] &&
+         v.Lmy[k] == v.Rmy[k] && v.Lmz[k] == v.Rmz[k] &&
+         v.Lenergy[k] == v.Renergy[k] && v.Lbx[k] == v.Rbx[k] &&
+         v.Lby[k] == v.Rby[k] && v.Lbz[k] == v.Rbz[k];
+}
+
+// Prove that every directional face problem feeding this corner has no jump.
+// The range includes both the face-average-to-edge stencil and the additional
+// transverse point-recovery halo used inside each MP face solve.
+__device__ inline bool directional_corner_stencil_has_no_jump(
+    const quasar::Grid2D& g, int dir, int i, int j, int order,
+    const FaceInterfaceView& v, quasar::mhd::BoundaryFlags4 modes) {
+  const int interpolation_lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
+  const int interpolation_hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
+  const int recovery_half = order >= 7 ? 3 : order >= 5 ? 2 : 0;
+  for (int offset = interpolation_lo - recovery_half;
+       offset <= interpolation_hi + recovery_half; ++offset) {
+    const int sample_i = dir == 0 ? i : i + offset;
+    const int sample_j = dir == 0 ? j + offset : j;
+    if (!mapped_interface_is_equal_state(g, sample_i, sample_j, v, modes)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 __device__ inline Real xface_ez(const quasar::Grid2D& g, int i, int j,
-                                int hll_only, Real gamma, const InterfaceView& x,
-                                const BackgroundView& bg,
+                                int order, int hll_only, Real gamma,
+                                const FaceInterfaceView& x,
+                                const FaceBackgroundView& bg,
                                 quasar::mhd::BoundaryFlags4 modes) {
   const int ii = face_index(i, g.nx, modes.side[0], modes.side[1]);
   const int jj = face_index(j, g.ny, modes.side[2], modes.side[3]);
-  return face_ez(g, 0, ii, jj, hll_only, gamma, x, bg);
+  return face_ez(g, 0, ii, jj, order, hll_only, gamma, x, bg);
 }
 
 __device__ inline Real yface_ez(const quasar::Grid2D& g, int i, int j,
-                                int hll_only, Real gamma, const InterfaceView& y,
-                                const BackgroundView& bg,
+                                int order, int hll_only, Real gamma,
+                                const FaceInterfaceView& y,
+                                const FaceBackgroundView& bg,
                                 quasar::mhd::BoundaryFlags4 modes) {
   const int ii = face_index(i, g.nx, modes.side[0], modes.side[1]);
   const int jj = face_index(j, g.ny, modes.side[2], modes.side[3]);
-  return face_ez(g, 1, ii, jj, hll_only, gamma, y, bg);
+  return face_ez(g, 1, ii, jj, order, hll_only, gamma, y, bg);
 }
 
 __device__ inline Real interp_x_to_corner(
     const quasar::Grid2D& g, int i, int j, int order, int hll_only, Real gamma,
-    const InterfaceView& x, const BackgroundView& bg,
+    const FaceInterfaceView& x, const FaceBackgroundView& bg,
     quasar::mhd::BoundaryFlags4 modes) {
   if (order >= 7) {
-    return scaled_face_interpolation7(
-        xface_ez(g, i, j - 4, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 3, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 2, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 1, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 1, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 2, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 3, hll_only, gamma, x, bg, modes));
+    return scaled_face_average_to_edge7(
+        xface_ez(g, i, j - 4, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j - 3, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j - 2, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j - 1, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j + 1, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j + 2, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j + 3, order, hll_only, gamma, x, bg, modes));
   }
   if (order >= 5) {
-    return scaled_face_interpolation5(
-        xface_ez(g, i, j - 3, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 2, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 1, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 1, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 2, hll_only, gamma, x, bg, modes));
+    return scaled_face_average_to_edge5(
+        xface_ez(g, i, j - 3, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j - 2, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j - 1, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j + 1, order, hll_only, gamma, x, bg, modes),
+        xface_ez(g, i, j + 2, order, hll_only, gamma, x, bg, modes));
   }
   return scaled_face_average(
-      xface_ez(g, i, j - 1, hll_only, gamma, x, bg, modes),
-      xface_ez(g, i, j, hll_only, gamma, x, bg, modes));
+      xface_ez(g, i, j - 1, order, hll_only, gamma, x, bg, modes),
+      xface_ez(g, i, j, order, hll_only, gamma, x, bg, modes));
 }
 
 __device__ inline Real interp_y_to_corner(
     const quasar::Grid2D& g, int i, int j, int order, int hll_only, Real gamma,
-    const InterfaceView& y, const BackgroundView& bg,
+    const FaceInterfaceView& y, const FaceBackgroundView& bg,
     quasar::mhd::BoundaryFlags4 modes) {
   if (order >= 7) {
-    return scaled_face_interpolation7(
-        yface_ez(g, i - 4, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 3, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 2, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 1, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 1, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 2, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 3, j, hll_only, gamma, y, bg, modes));
+    return scaled_face_average_to_edge7(
+        yface_ez(g, i - 4, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i - 3, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i - 2, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i - 1, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i + 1, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i + 2, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i + 3, j, order, hll_only, gamma, y, bg, modes));
   }
   if (order >= 5) {
-    return scaled_face_interpolation5(
-        yface_ez(g, i - 3, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 2, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 1, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 1, j, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 2, j, hll_only, gamma, y, bg, modes));
+    return scaled_face_average_to_edge5(
+        yface_ez(g, i - 3, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i - 2, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i - 1, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i + 1, j, order, hll_only, gamma, y, bg, modes),
+        yface_ez(g, i + 2, j, order, hll_only, gamma, y, bg, modes));
   }
   return scaled_face_average(
-      yface_ez(g, i - 1, j, hll_only, gamma, y, bg, modes),
-      yface_ez(g, i, j, hll_only, gamma, y, bg, modes));
+      yface_ez(g, i - 1, j, order, hll_only, gamma, y, bg, modes),
+      yface_ez(g, i, j, order, hll_only, gamma, y, bg, modes));
+}
+
+struct CellStateView {
+  const double *rho, *mx, *my, *mz, *energy, *bx, *by, *bz;
+};
+
+template <class Sample>
+__device__ inline Real cell_point_value(
+    int order, int node_x, int node_y, const Sample& sample) {
+  return quasar::mhd::detail::point_value(order, node_y, [&](int oy) {
+    return quasar::mhd::detail::point_value(order, node_x, [&](int ox) {
+      return sample(ox, oy);
+    });
+  });
+}
+
+__device__ inline MhdState point_cell_state(
+    const quasar::Grid2D& g, int i, int j, int order, int node_x, int node_y,
+    const CellStateView& u) {
+  const auto raw = [&](const double* values) {
+    return cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
+      return static_cast<Real>(values[g.index(i + ox, j + oy)]);
+    });
+  };
+  const Real bx = cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
+    return quasar::mhd::cell_bx(g, u.bx, i + ox, j + oy);
+  });
+  const Real by = cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
+    return quasar::mhd::cell_by(g, u.by, i + ox, j + oy);
+  });
+  return MhdState{raw(u.rho), raw(u.mx), raw(u.my), raw(u.mz), raw(u.energy),
+                  bx, by, raw(u.bz)};
+}
+
+__device__ inline quasar::numerics::MhdBackground point_cell_background(
+    const quasar::Grid2D& g, int i, int j, int order, int node_x, int node_y,
+    const FaceBackgroundView& bg) {
+  if (bg.active == 0) return {};
+  const auto component = [&](int which) {
+    return cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
+      const auto value = quasar::mhd::load_cell_background(
+          g, bg.bx, bg.by, bg.bz, i + ox, j + oy);
+      return which == 0 ? value.b0x : which == 1 ? value.b0y : value.b0z;
+    });
+  };
+  return {component(0), component(1), component(2)};
+}
+
+__device__ inline Real physical_ez(
+    const MhdState& u, const quasar::numerics::MhdBackground& bg) {
+  const Real vx = u.mx / u.rho;
+  const Real vy = u.my / u.rho;
+  // E_z = -(v x B)_z = vy*(b_x+B0_x) - vx*(b_y+B0_y).
+  return quasar::numerics::product_sum4(
+      vy, u.bx, vy, bg.b0x, vx, -u.by, vx, -bg.b0y);
+}
+
+__device__ inline Real direct_cell_ez(
+    const quasar::Grid2D& g, int i, int j, int collocation_order,
+    const CellStateView& u, const FaceBackgroundView& bg) {
+  const MhdState state = quasar::mhd::load_cell_state(
+      g, u.rho, u.mx, u.my, u.mz, u.energy, u.bx, u.by, u.bz,
+      i, j, collocation_order);
+  const auto background = bg.active != 0
+      ? quasar::mhd::load_cell_background(
+            g, bg.bx, bg.by, bg.bz, i, j, collocation_order)
+      : quasar::numerics::MhdBackground{};
+  return physical_ez(state, background);
+}
+
+__device__ inline Real cell_average_ez(
+    const quasar::Grid2D& g, int i, int j, int order, Real gamma,
+    const CellStateView& u, const FaceBackgroundView& bg) {
+  const int collocation_order = order <= 1 ? 1 : 0;
+  const Real fallback = direct_cell_ez(
+      g, i, j, collocation_order, u, bg);
+  if (order != 5 && order != 7) return fallback;
+
+  const int half = order == 5 ? 2 : 3;
+  const int lo_i = -g.nghost;
+  const int hi_i = g.nx + g.nghost - 1;
+  const int lo_j = -g.nghost;
+  const int hi_j = g.ny + g.nghost - 1;
+  if (i - half < lo_i || i + half > hi_i ||
+      j - half < lo_j || j + half > hi_j) {
+    // Only the outermost padded cells take this closure; every physical cell
+    // and the ghost layers used by interior high-order corners use the tensor
+    // quadrature below.
+    return fallback;
+  }
+
+  Real point[4][4]{};
+  const int count = order == 5 ? 3 : 4;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const MhdState state = point_cell_state(
+          g, i, j, order, qx, qy, u);
+      if (!quasar::mhd::detail::state_is_admissible(state, gamma)) {
+        return fallback;
+      }
+      const auto background = point_cell_background(
+          g, i, j, order, qx, qy, bg);
+      point[qy][qx] = physical_ez(state, background);
+    }
+  }
+
+  Real row[4]{};
+  for (int qy = 0; qy < count; ++qy) {
+    if (order == 5) {
+      row[qy] = quasar::mhd::detail::weighted_value(
+          quasar::mhd::detail::kMp5TransverseGaussWeights,
+          [&](int qx) { return point[qy][qx]; });
+    } else {
+      row[qy] = quasar::mhd::detail::weighted_value(
+          quasar::mhd::detail::kMp7TransverseGaussWeights,
+          [&](int qx) { return point[qy][qx]; });
+    }
+  }
+  if (order == 5) {
+    return quasar::mhd::detail::weighted_value(
+        quasar::mhd::detail::kMp5TransverseGaussWeights,
+        [&](int qy) { return row[qy]; });
+  }
+  return quasar::mhd::detail::weighted_value(
+      quasar::mhd::detail::kMp7TransverseGaussWeights,
+      [&](int qy) { return row[qy]; });
+}
+
+__global__ void cell_emf_kernel(
+    quasar::Grid2D g, int scheme_order, Real gamma, CellStateView u,
+    FaceBackgroundView bg, double* __restrict__ cell_ez) {
+  const int launch_i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int launch_j = blockIdx.y * blockDim.y + threadIdx.y;
+  if (launch_i >= g.nx + 2 * g.nghost ||
+      launch_j >= g.ny + 2 * g.nghost) return;
+  const int i = launch_i - g.nghost;
+  const int j = launch_j - g.nghost;
+  cell_ez[g.index(i, j)] =
+      cell_average_ez(g, i, j, scheme_order, gamma, u, bg);
+}
+
+__device__ inline Real cell_emf_to_corner(
+    const quasar::Grid2D& g, int i, int j, int order,
+    const double* cell_ez, quasar::mhd::BoundaryFlags4 modes) {
+  const auto value = [&](int ii, int jj) {
+    const int mapped_i = face_index(ii, g.nx, modes.side[0], modes.side[1]);
+    const int mapped_j = face_index(jj, g.ny, modes.side[2], modes.side[3]);
+    return cell_ez[g.index(mapped_i, mapped_j)];
+  };
+  if (order >= 7) {
+    Real line[8];
+    for (int q = 0; q < 8; ++q) {
+      const int jj = j - 4 + q;
+      line[q] = scaled_face_average_to_edge7(
+          value(i - 4, jj), value(i - 3, jj), value(i - 2, jj),
+          value(i - 1, jj), value(i, jj), value(i + 1, jj),
+          value(i + 2, jj), value(i + 3, jj));
+    }
+    return scaled_face_average_to_edge7(
+        line[0], line[1], line[2], line[3],
+        line[4], line[5], line[6], line[7]);
+  }
+  if (order >= 5) {
+    Real line[6];
+    for (int q = 0; q < 6; ++q) {
+      const int jj = j - 3 + q;
+      line[q] = scaled_face_average_to_edge5(
+          value(i - 3, jj), value(i - 2, jj), value(i - 1, jj),
+          value(i, jj), value(i + 1, jj), value(i + 2, jj));
+    }
+    return scaled_face_average_to_edge5(
+        line[0], line[1], line[2], line[3], line[4], line[5]);
+  }
+  const Real lo = scaled_face_average(
+      value(i - 1, j - 1), value(i, j - 1));
+  const Real hi = scaled_face_average(
+      value(i - 1, j), value(i, j));
+  return scaled_face_average(lo, hi);
+}
+
+// Exact local one-dimensionality check for the cell-centred reference.  Keep
+// the coordinate that may vary (`1-axis`) separate and require bit-identical
+// values along `axis` across the complete tensor edge-recovery stencil.
+__device__ inline bool cell_emf_is_constant_along_axis(
+    const quasar::Grid2D& g, int i, int j, int order,
+    const double* cell_ez, quasar::mhd::BoundaryFlags4 modes, int axis) {
+  const int lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
+  const int hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
+  const auto value = [&](int ii, int jj) {
+    const int mapped_i = face_index(ii, g.nx, modes.side[0], modes.side[1]);
+    const int mapped_j = face_index(jj, g.ny, modes.side[2], modes.side[3]);
+    return cell_ez[g.index(mapped_i, mapped_j)];
+  };
+  for (int varying = lo; varying <= hi; ++varying) {
+    const Real reference = axis == 0
+        ? value(i + lo, j + varying)
+        : value(i + varying, j + lo);
+    for (int invariant = lo + 1; invariant <= hi; ++invariant) {
+      const Real candidate = axis == 0
+          ? value(i + invariant, j + varying)
+          : value(i + varying, j + invariant);
+      if (candidate != reference) return false;
+    }
+  }
+  return true;
 }
 
 __global__ void ct_emf_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 modes, int scheme_order,
-    int cylindrical, int hll_only, Real gamma, InterfaceView ifx, InterfaceView ify,
-    BackgroundView bg,
+    int cylindrical, int hll_only, Real gamma, FaceInterfaceView ifx,
+    FaceInterfaceView ify, FaceBackgroundView bg,
+    const double* __restrict__ cell_ez,
     double* __restrict__ ez_edge, double* __restrict__ ex_edge,
     double* __restrict__ ey_edge) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -365,7 +469,32 @@ __global__ void ct_emf_kernel(
         g, i, j, scheme_order, hll_only, gamma, ifx, bg, modes);
     const Real ey = interp_y_to_corner(
         g, i, j, scheme_order, hll_only, gamma, ify, bg, modes);
-    ez_edge[k] = scaled_face_average(ex, ey);
+    const Real centered = cell_emf_to_corner(
+        g, i, j, scheme_order, cell_ez, modes);
+    // Upwind CT: the cell-centred transport is present once in each directional
+    // Godunov EMF.  Remove one copy while retaining BOTH directional dissipation
+    // terms.  In x-only data ey==centered, hence this reduces exactly to ex; the
+    // y-only identity is its rotation.  The exponent-scaled three-term reduction
+    // performs that cancellation before rounding, rather than first forming a
+    // potentially dominant ex+ey partial sum.
+    const bool x_only =
+        directional_corner_stencil_has_no_jump(
+            g, 1, i, j, scheme_order, ify, modes) &&
+        cell_emf_is_constant_along_axis(
+            g, i, j, scheme_order, cell_ez, modes, /*axis=*/1);
+    const bool y_only =
+        directional_corner_stencil_has_no_jump(
+            g, 0, i, j, scheme_order, ifx, modes) &&
+        cell_emf_is_constant_along_axis(
+            g, i, j, scheme_order, cell_ez, modes, /*axis=*/0);
+    if (x_only && !y_only) {
+      ez_edge[k] = ex;
+    } else if (y_only && !x_only) {
+      ez_edge[k] = ey;
+    } else {
+      ez_edge[k] = quasar::numerics::product_sum3(
+          ex, Real{1}, ey, Real{1}, centered, Real{-1});
+    }
   }
   // In-plane EMF components are zero for the 2D m=0 induction update (no z
   // gradient); populated for parity with the EmfField2D layout.
@@ -490,29 +619,40 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u,
                   (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   // When the background is inactive pass null device pointers; the kernel takes
   // the zero-background fast path and never dereferences them.
-  const InterfaceView xv{
+  const FaceInterfaceView xv{
       ifx.Lrho.device_ptr(), ifx.Lmx.device_ptr(), ifx.Lmy.device_ptr(),
       ifx.Lmz.device_ptr(), ifx.Lenergy.device_ptr(), ifx.Lbx.device_ptr(),
       ifx.Lby.device_ptr(), ifx.Lbz.device_ptr(), ifx.Rrho.device_ptr(),
       ifx.Rmx.device_ptr(), ifx.Rmy.device_ptr(), ifx.Rmz.device_ptr(),
       ifx.Renergy.device_ptr(), ifx.Rbx.device_ptr(), ifx.Rby.device_ptr(),
       ifx.Rbz.device_ptr()};
-  const InterfaceView yv{
+  const FaceInterfaceView yv{
       ify.Lrho.device_ptr(), ify.Lmx.device_ptr(), ify.Lmy.device_ptr(),
       ify.Lmz.device_ptr(), ify.Lenergy.device_ptr(), ify.Lbx.device_ptr(),
       ify.Lby.device_ptr(), ify.Lbz.device_ptr(), ify.Rrho.device_ptr(),
       ify.Rmx.device_ptr(), ify.Rmy.device_ptr(), ify.Rmz.device_ptr(),
       ify.Renergy.device_ptr(), ify.Rbx.device_ptr(), ify.Rby.device_ptr(),
       ify.Rbz.device_ptr()};
-  const BackgroundView bg{
+  const FaceBackgroundView bg{
       b0.active ? 1 : 0,
       b0.active ? b0.b0x_face.device_ptr() : nullptr,
       b0.active ? b0.b0y_face.device_ptr() : nullptr,
       b0.active ? b0.b0z_cell.device_ptr() : nullptr};
+  const CellStateView state{
+      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(), u.mz.device_ptr(),
+      u.energy.device_ptr(), u.bx_face.device_ptr(), u.by_face.device_ptr(),
+      u.bz_cell.device_ptr()};
+  const dim3 cell_grid(
+      (static_cast<unsigned>(g.nx + 2 * g.nghost) + block.x - 1) / block.x,
+      (static_cast<unsigned>(g.ny + 2 * g.nghost) + block.y - 1) / block.y);
+  hipLaunchKernelGGL(cell_emf_kernel, cell_grid, block, 0,
+                     static_cast<hipStream_t>(stream), g, scheme_order, gamma,
+                     state, bg, emf.cell_ez_average.device_ptr());
+  QUASAR_HIP_CHECK(::hipGetLastError());
   hipLaunchKernelGGL(ct_emf_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, flags, scheme_order, cylindrical ? 1 : 0,
                      hll_only ? 1 : 0, gamma,
-                     xv, yv, bg,
+                     xv, yv, bg, emf.cell_ez_average.device_ptr(),
                      emf.ez_edge.device_ptr(), emf.ex_edge.device_ptr(),
                      emf.ey_edge.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());

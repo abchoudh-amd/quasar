@@ -61,11 +61,31 @@ These are harmless (but meaningless) on a Cartesian run, which never calls them.
 
 The stability bound also belongs here. ``cyl_cfl_dt(g, fdtd_order, c)`` is
 phrased separately from ``cfl_dt(g, fdtd_order, c)`` so callers select it
-explicitly in cylindrical mode. For the mimetic on-axis closure, the ``1/r``
-terms do not increase the volume-weighted operator norm: each supported order
-therefore has the corresponding Cartesian Courant limit over ``(dr, dz)``.
-Order four carries the same ``7/6`` spectral factor as its Cartesian staggered
-derivative and is consequently tighter than order two.
+explicitly in cylindrical mode. Order two has the corresponding Cartesian
+Courant limit over ``(dr, dz)``. At order four the regular-axis row is not
+exactly Fourier-diagonal, so reusing the Cartesian ``7/6`` radial factor is
+slightly unsafe. For example, the three-cell axis/outer-PEC radial operator has
+``rho(-A4 B4) = 5.4444536388582545 / dr^2``, just above ``49/9``; exactly,
+``det((49/9) I - (-A4 B4)) = -7/69120``.
+
+The all-grid proof used by the helper is
+
+.. math::
+
+   \lVert A_4\rVert_\infty \le {5\over 2\,\Delta r},\qquad
+   \lVert B_4\rVert_\infty \le {7\over 3\,\Delta r},
+
+so ``rho(-A4 B4) <= 35/(6 dr^2)``. The axial symbol remains
+``49/(9 dz^2)`` and leapfrog therefore uses the conservative bound
+
+.. math::
+
+   \Delta t \le {1\over c\sqrt{35/(24\,\Delta r^2)
+                                  +49/(36\,\Delta z^2)}}.
+
+This is a proved operator-norm bound, not an empirical margin. Both native and
+Python helpers evaluate it after scaling by the smaller spacing so extreme
+aspect ratios do not overflow intermediate inverse-spacing squares.
 
 Step 2 - Backend kernels and the ABI
 ------------------------------------
@@ -192,7 +212,9 @@ Wire the geometry into the Python deck layer (``python/quasar/pic``):
   non-periodic outer-radius (``x_hi``) wall for fields and particles. At
   ``origin_x_m == 0`` the default ``x_lo`` side is auto-replaced by the regular
   axis condition. At positive origin (an annulus), both ``x_lo`` boundaries must
-  instead be explicitly non-periodic. Orders 2 and 4 are supported.
+  instead be explicitly non-periodic. Orders 2 and 4 are supported; order four
+  requires at least two physical cells in each dimension because a one-cell
+  non-periodic domain has overlapping two-layer ghost sources.
 * **CFL selection** — ``cli.prepare_run`` branches on ``geometry`` to pick
   ``cyl_cfl_dt`` / ``cyl_cfl_limit`` (from ``python/quasar/pic/numerics.py``)
   for both the ``"auto"`` timestep and the explicit-``dt`` stability check,

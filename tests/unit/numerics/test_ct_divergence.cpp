@@ -59,6 +59,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -176,6 +177,20 @@ void seed_uniform_interface(quasar::numerics::MhdInterfaceStates<Real>& iface,
   fill(iface.Lbz, state.bz); fill(iface.Rbz, state.bz);
 }
 
+void seed_uniform_field(quasar::mhd::MhdField2D<Real>& field,
+                        const MhdState& state) {
+  const std::size_t n = field.grid.storage_size();
+  std::vector<Real> values(n);
+  const auto fill = [&](auto& buffer, Real value) {
+    std::fill(values.begin(), values.end(), value);
+    buffer.copy_from_host(values.data(), values.size());
+  };
+  fill(field.rho, state.rho); fill(field.mx, state.mx);
+  fill(field.my, state.my); fill(field.mz, state.mz);
+  fill(field.energy, state.energy); fill(field.bx_face, state.bx);
+  fill(field.by_face, state.by); fill(field.bz_cell, state.bz);
+}
+
 void copy_interface_states(quasar::numerics::MhdInterfaceStates<Real>& iface,
                            const std::vector<MhdState>& state) {
   const std::size_t n = iface.grid.storage_size();
@@ -196,6 +211,21 @@ void copy_interface_states(quasar::numerics::MhdInterfaceStates<Real>& iface,
   fill(iface.Lbz, iface.Rbz, &MhdState::bz);
 }
 
+void copy_field_states(quasar::mhd::MhdField2D<Real>& field,
+                       const std::vector<MhdState>& state) {
+  const std::size_t n = field.grid.storage_size();
+  ASSERT_EQ(state.size(), n);
+  std::vector<Real> values(n);
+  const auto fill = [&](auto& buffer, Real MhdState::*member) {
+    for (std::size_t k = 0; k < n; ++k) values[k] = state[k].*member;
+    buffer.copy_from_host(values.data(), values.size());
+  };
+  fill(field.rho, &MhdState::rho); fill(field.mx, &MhdState::mx);
+  fill(field.my, &MhdState::my); fill(field.mz, &MhdState::mz);
+  fill(field.energy, &MhdState::energy); fill(field.bx_face, &MhdState::bx);
+  fill(field.by_face, &MhdState::by); fill(field.bz_cell, &MhdState::bz);
+}
+
 void seed_smooth_interface(quasar::numerics::MhdInterfaceStates<Real>& iface,
                            Real gamma) {
   const Grid2D& g = iface.grid;
@@ -212,32 +242,6 @@ void seed_smooth_interface(quasar::numerics::MhdInterfaceStates<Real>& iface,
           Real{0.3} + Real{0.002} * j,
           Real{-0.1} + Real{0.003} * i,
           Real{0.05} + Real{0.001} * (i - j)};
-      state[g.index(i, j)] = quasar::numerics::to_conserved(primitive, gamma);
-    }
-  }
-  copy_interface_states(iface, state);
-}
-
-void seed_directional_emf_pattern(
-    quasar::numerics::MhdInterfaceStates<Real>& iface,
-    const std::vector<Real>& emf_pattern, Real gamma) {
-  const Grid2D& g = iface.grid;
-  const std::size_t n = g.storage_size();
-  std::vector<MhdState> state(n);
-  constexpr Real rho = Real{1e-308};
-  constexpr Real internal_energy = Real{1e300};
-  const Real p = (gamma - Real{1}) * internal_energy;
-  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
-    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
-      const int q = iface.dir == 0 ? j : i;
-      const Real ez = q >= 0 && q < static_cast<int>(emf_pattern.size())
-          ? emf_pattern[static_cast<std::size_t>(q)]
-          : Real{0};
-      const MhdPrim primitive = iface.dir == 0
-          ? MhdPrim{rho, Real{0}, ez, Real{0}, p,
-                    Real{1}, Real{0}, Real{0}}
-          : MhdPrim{rho, -ez, Real{0}, Real{0}, p,
-                    Real{0}, Real{1}, Real{0}};
       state[g.index(i, j)] = quasar::numerics::to_conserved(primitive, gamma);
     }
   }
@@ -268,8 +272,8 @@ TEST(MhdCtScheme, ConstructByRegistryNameSucceeds) {
   ASSERT_NE(ct, nullptr);
 }
 
-// MP5/MP7 face-to-corner coefficients reach 150/1225.  Multiplying those by a
-// constant near DBL_MAX before the final /256 or /2048 produces Inf even though
+// MP5/MP7 face-average-to-corner coefficients reach 37/533. Multiplying those by
+// a constant near DBL_MAX before the final /60 or /840 produces Inf even though
 // the interpolation and the final x/y average are exactly that constant.  Use
 // separate x/y states whose directional ideal-MHD electric field is the same
 // enormous, representable tangential velocity.
@@ -297,6 +301,7 @@ TEST(MhdCtScheme, HighOrderConstantNearMaxEmfRemainsFinite) {
   ASSERT_GT(quasar::numerics::pressure(ystate, gamma), Real{0});
 
   quasar::mhd::MhdField2D<Real> u{g};
+  seed_uniform_field(u, xstate);
   quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
   quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
   seed_uniform_interface(ifx, xstate);
@@ -319,6 +324,84 @@ TEST(MhdCtScheme, HighOrderConstantNearMaxEmfRemainsFinite) {
   }
 }
 
+TEST(MhdCtScheme, Mp5CommonDenominatorCancellationIsExact) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  Grid2D g{16, 16, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/4};
+  constexpr Real gamma = Real{5} / Real{3};
+  const Real scale = std::scalbn(Real{1}, 900);
+  const Real face_emf[2][6] = {
+      {Real{60} * scale,
+       Real{3.30859375} * scale,
+       Real{-0.765625} * scale,
+       Real{-0.140625} * scale,
+       Real{0}, Real{0}},
+      {Real{1.9171051776448014} * scale,
+       Real{1.8461202561526626} * scale,
+       Real{-1.6574366374011578} * scale,
+       Real{1.568143878640971} * scale,
+       Real{-1.8120937183404688} * scale,
+       Real{1.6589391989796616} * scale}};
+  // With MP5 face-average-to-edge weights [1,-8,37,37,-8,1]/60,
+  // both integer-coefficient numerators are exactly zero. The first catches a
+  // denominator distributed over the terms; the second catches the roundoff
+  // in coefficient*sample itself and requires an error-free FMA TwoProd.
+
+  const MhdState quiet = quasar::numerics::to_conserved(
+      MhdPrim{Real{1}, Real{0}, Real{0}, Real{0}, Real{1},
+              Real{1}, Real{0}, Real{0}}, gamma);
+  quasar::mhd::MhdField2D<Real> u{g};
+  seed_uniform_field(u, quiet);
+  quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
+  quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
+  seed_uniform_interface(ify, quiet);
+
+  const std::size_t n = g.storage_size();
+  std::vector<MhdState> xstate(n);
+  const Real rho = std::scalbn(Real{1}, -1020);
+  const Real bz_magnitude = std::scalbn(Real{1}, 400);
+  const Real gas_pressure = std::scalbn(Real{1}, 780);
+  const int corner_j = 6;
+  for (int regression = 0; regression < 2; ++regression) {
+    for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+      Real ez = Real{0};
+      const int sample = j - (corner_j - 3);
+      if (sample >= 0 && sample < 6) ez = face_emf[regression][sample];
+      const Real bz = ((j & 1) == 0 ? Real{1} : Real{-1}) * bz_magnitude;
+      const Real my = rho * ez;
+      const Real kinetic = Real{0.5} * my * ez;
+      const Real magnetic = Real{0.5} * bz * bz + Real{0.5};
+      const MhdState state{
+          rho, Real{0}, my, Real{0},
+          gas_pressure / (gamma - Real{1}) + kinetic + magnetic,
+          Real{1}, Real{0}, bz};
+      ASSERT_TRUE(std::isfinite(state.energy));
+      ASSERT_GT(quasar::numerics::pressure(state, gamma), Real{0});
+      for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+        xstate[g.index(i, j)] = state;
+      }
+    }
+    // Alternating Bz makes the MP5 midpoint recovery overshoot |Bz| while the
+    // face-average states remain admissible. Every nonlinear face solve in the
+    // six-point corner stencil therefore takes its exact base-face fallback,
+    // isolating the CT rational interpolation exercised by this regression.
+    copy_interface_states(ifx, xstate);
+
+    const quasar::mhd::MhdBackgroundField<Real> background{};
+    const quasar::mhd::BoundaryFlags4 flags{};
+    quasar::mhd::EmfField2D<Real> emf{g};
+    quasar::mhd::launch_mhd_ct_emf(
+        u, background, ifx, ify, flags, emf, gamma, /*stream=*/nullptr,
+        /*scheme_order=*/5, /*cylindrical=*/false, /*hll_only=*/true);
+    quasar::backend::device_synchronize(nullptr);
+
+    std::vector<Real> ez(n);
+    emf.ez_edge.copy_to_host(ez.data(), ez.size());
+    EXPECT_EQ(ez[g.index(/*i=*/6, corner_j)], Real{0})
+        << "regression=" << regression;
+  }
+}
+
 TEST(MhdCtScheme, Mp7EmfRetainsSmallSurvivorAfterGiantCancellation) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
@@ -326,18 +409,54 @@ TEST(MhdCtScheme, Mp7EmfRetainsSmallSurvivorAfterGiantCancellation) {
   constexpr Real gamma = Real{5} / Real{3};
   constexpr Real survivor = Real{21};
   const Real large = std::numeric_limits<Real>::max() / Real{4};
-  std::vector<Real> pattern(8, Real{0});
-  // MP7 weights are [-5,49,-245,1225,1225,-245,49,-5]/2048.
+  std::vector<Real> pattern(static_cast<std::size_t>(g.ny), Real{0});
+  // Finite-volume average-to-edge weights are
+  // [-3,29,-139,533,533,-139,29,-3]/840.
   // The two central contributions cancel exactly; sample zero carries 21.
-  pattern[0] = survivor * Real{2048} / Real{-5};
+  pattern[0] = survivor * Real{840} / Real{-3};
   pattern[3] = large;
   pattern[4] = -large;
 
   quasar::mhd::MhdField2D<Real> u{g};
   quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
   quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
-  seed_directional_emf_pattern(ifx, pattern, gamma);
-  seed_directional_emf_pattern(ify, pattern, gamma);
+  const std::size_t n = g.storage_size();
+  std::vector<MhdState> cell_state(n), yface_state(n);
+  constexpr Real rho = Real{1e-308};
+  constexpr Real internal_energy = Real{1e300};
+  const Real p = (gamma - Real{1}) * internal_energy;
+  const auto wrap = [](int q, int extent) {
+    int value = q % extent;
+    return value < 0 ? value + extent : value;
+  };
+  const auto edge_value = [&](int edge) {
+    constexpr Real weight[8] = {
+        Real{-3}, Real{29}, Real{-139}, Real{533},
+        Real{533}, Real{-139}, Real{29}, Real{-3}};
+    quasar::numerics::ScaledProductQuotientAccumulator<8> sum;
+    for (int q = 0; q < 8; ++q) {
+      quasar::numerics::append_scaled_product_quotient(
+          sum, weight[q],
+          pattern[static_cast<std::size_t>(wrap(edge - 4 + q, g.ny))],
+          Real{840}, Real{1});
+    }
+    return quasar::numerics::finish_scaled_product_quotient_sum(sum);
+  };
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real cell_emf = pattern[static_cast<std::size_t>(wrap(j, g.ny))];
+    const Real face_emf = edge_value(j);
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      cell_state[g.index(i, j)] = quasar::numerics::to_conserved(
+          MhdPrim{rho, Real{0}, cell_emf, Real{0}, p,
+                  Real{1}, Real{0}, Real{0}}, gamma);
+      yface_state[g.index(i, j)] = quasar::numerics::to_conserved(
+          MhdPrim{rho, Real{0}, face_emf, Real{0}, p,
+                  Real{1}, Real{0}, Real{0}}, gamma);
+    }
+  }
+  copy_field_states(u, cell_state);
+  copy_interface_states(ifx, cell_state);
+  copy_interface_states(ify, yface_state);
   const quasar::mhd::MhdBackgroundField<Real> background{};
   const quasar::mhd::BoundaryFlags4 flags{};
   quasar::mhd::EmfField2D<Real> emf{g};
@@ -598,4 +717,122 @@ TEST(MhdCtScheme, UpdatePreservesDivergenceFreeForLargeDt) {
   const Real bound = Real{1e3} * eps / g.dx();
   EXPECT_LT(divb1, bound) << "div(B) after large-dt CT step = " << divb1;
   EXPECT_LT(divb1, divb0 + bound);
+}
+
+namespace {
+
+struct OneDimensionalEmfResult {
+  Real corner{};
+  Real godunov{};
+};
+
+OneDimensionalEmfResult one_dimensional_emf(
+    int order, bool rotate_xy, bool active_background) {
+  Grid2D g{24, 24, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/4};
+  const std::size_t n = g.storage_size();
+  constexpr Real gamma = Real{5} / Real{3};
+  const MhdPrim left{Real{1.0}, Real{0.45}, Real{0.31}, Real{0.07},
+                     Real{1.0}, Real{0.5}, Real{0.82}, Real{-0.12}};
+  const MhdPrim right{Real{0.72}, Real{-0.24}, Real{-0.13}, Real{0.02},
+                      Real{0.63}, Real{0.5}, Real{-0.37}, Real{0.18}};
+  const auto rotated = [](MhdPrim w) {
+    std::swap(w.vx, w.vy);
+    std::swap(w.bx, w.by);
+    return w;
+  };
+
+  std::vector<Real> rho(n), mx(n), my(n), mz(n), energy(n);
+  std::vector<Real> bx(n), by(n), bz(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const int q = rotate_xy ? ((j % g.ny) + g.ny) % g.ny
+                              : ((i % g.nx) + g.nx) % g.nx;
+      MhdPrim w = q < g.nx / 2 ? left : right;
+      if (rotate_xy) w = rotated(w);
+      const MhdState s = quasar::numerics::to_conserved(w, gamma);
+      const std::size_t k = g.index(i, j);
+      rho[k] = s.rho; mx[k] = s.mx; my[k] = s.my; mz[k] = s.mz;
+      energy[k] = s.energy; bx[k] = s.bx; by[k] = s.by; bz[k] = s.bz;
+    }
+  }
+
+  quasar::mhd::MhdField2D<Real> u{g};
+  u.rho.copy_from_host(rho.data(), n);
+  u.mx.copy_from_host(mx.data(), n);
+  u.my.copy_from_host(my.data(), n);
+  u.mz.copy_from_host(mz.data(), n);
+  u.energy.copy_from_host(energy.data(), n);
+  u.bx_face.copy_from_host(bx.data(), n);
+  u.by_face.copy_from_host(by.data(), n);
+  u.bz_cell.copy_from_host(bz.data(), n);
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  if (active_background) {
+    background.active = true;
+    const Real b0x = rotate_xy ? Real{-0.19} : Real{0.27};
+    const Real b0y = rotate_xy ? Real{0.27} : Real{-0.19};
+    std::vector<Real> b0x_values(n, b0x), b0y_values(n, b0y);
+    std::vector<Real> b0z_values(n, Real{0.11});
+    background.b0x_face.copy_from_host(b0x_values.data(), n);
+    background.b0y_face.copy_from_host(b0y_values.data(), n);
+    background.b0z_cell.copy_from_host(b0z_values.data(), n);
+  }
+
+  quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
+  quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
+  const quasar::mhd::BoundaryFlags4 periodic{};
+  quasar::mhd::launch_mhd_reconstruct(
+      u, background, 0, ifx, order, periodic, gamma, nullptr);
+  quasar::mhd::launch_mhd_reconstruct(
+      u, background, 1, ify, order, periodic, gamma, nullptr);
+
+  quasar::mhd::MhdField2D<Real> directional_flux{g};
+  const int dir = rotate_xy ? 1 : 0;
+  quasar::mhd::launch_mhd_hlld_flux(
+      rotate_xy ? ify : ifx, background, dir, directional_flux, periodic,
+      gamma, nullptr, /*hll_only=*/false, /*momentum_parts=*/nullptr, order);
+  quasar::mhd::EmfField2D<Real> emf{g};
+  quasar::mhd::launch_mhd_ct_emf(
+      u, background, ifx, ify, periodic, emf, gamma, nullptr, order,
+      /*cylindrical=*/false, /*hll_only=*/false);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> edge(n), magnetic_flux(n);
+  emf.ez_edge.copy_to_host(edge.data(), n);
+  if (rotate_xy) {
+    directional_flux.bx_face.copy_to_host(magnetic_flux.data(), n);
+  } else {
+    directional_flux.by_face.copy_to_host(magnetic_flux.data(), n);
+  }
+  const int fixed = 7;
+  const int face = g.nx / 2;
+  const std::size_t k = rotate_xy ? g.index(fixed, face)
+                                  : g.index(face, fixed);
+  return OneDimensionalEmfResult{
+      edge[k], rotate_xy ? magnetic_flux[k] : -magnetic_flux[k]};
+}
+
+}  // namespace
+
+// A flux-CT arithmetic average retains only half of the normal Godunov
+// dissipation in this discontinuous one-dimensional problem.  Upwind CT must
+// instead collapse to the complete x-face EMF, and after x/y rotation to the
+// complete y-face EMF with the pseudovector sign reversal.  Exercise both the
+// ordinary and active-background HLLD paths.
+TEST(MhdCtScheme, OneDimensionalLimitIsExactAndRotationCovariant) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  for (const int order : {2, 5, 7}) {
+    for (const bool active_background : {false, true}) {
+      const OneDimensionalEmfResult x =
+          one_dimensional_emf(order, /*rotate_xy=*/false, active_background);
+      const OneDimensionalEmfResult y =
+          one_dimensional_emf(order, /*rotate_xy=*/true, active_background);
+      EXPECT_EQ(x.corner, x.godunov)
+          << "x-only order=" << order << " background=" << active_background;
+      EXPECT_EQ(y.corner, y.godunov)
+          << "y-only order=" << order << " background=" << active_background;
+      EXPECT_EQ(x.corner, -y.corner)
+          << "rotation order=" << order << " background=" << active_background;
+    }
+  }
 }

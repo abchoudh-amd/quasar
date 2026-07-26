@@ -8,14 +8,19 @@
 # refinement the third-order SSPRK temporal error eventually controls the
 # coupled rate; this deck does not by itself isolate the spatial order.
 #
-# nx / ny are deliberately PLAIN small integers; a convergence test doubles them
-# programmatically (32 -> 64 -> 128 -> ...) and checks the error ratio.
+# nx / ny are deliberately plain small integers. The convergence test rewrites
+# nx to 16 -> 32 -> 64 (the exact solution is y-invariant, so it uses eight y
+# cells) and checks both adjacent error ratios.
 #
 # Setup (standard CP Alfven wave, B0 along the propagation axis x):
 #   rho = 1, p = 0.1, B0x = 1 (background along x)
 #   transverse perturbations: dvy = -A sin(k x), dvz = -A cos(k x)
 #                             dBy =  A sin(k x), dBz =  A cos(k x)   (vA = 1)
-# with k = 2*pi / lx and amplitude A = 1e-6 (linear regime).
+# with k = 2*pi / lx and amplitude A = 1e-3.  This remains a small exact CP
+# wave while keeping convergence errors above accumulated float64 round-off.
+# The physical formulas above are pointwise. Conserved transverse components,
+# By face averages, and Bz cell averages are seeded with sinc(k*dx/2); the
+# circularly-polarized total energy is constant and retains its full A^2 term.
 #
 # Wave speed vA = B0 / sqrt(rho) = 1, so one period T = lx / vA = 1.0; t_end is
 # set to one full period.
@@ -31,7 +36,7 @@ initial:
     rho: 1.0
     p: 0.1
     b0: 1.0          # background field magnitude along the propagation axis (x)
-    amplitude: 1.0e-6
+    amplitude: 1.0e-3
     wavenumber: 1    # number of full wavelengths across lx
     polarization: circular
 time: {dt_s: auto, steps: 1000, t_end: 1.0}

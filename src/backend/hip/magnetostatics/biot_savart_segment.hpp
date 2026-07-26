@@ -379,8 +379,18 @@ segment_geometry(Vec3T<T> a, Vec3T<T> b, Vec3T<T> p,
         && fma(parameter, L.z, a.z) == p.z;
   }
   g.collinear = on_line;
+  // Once exact collinearity is known, decide segment membership without the
+  // rounded projection quotient.  Immediately outside an endpoint, forming
+  // (p-a)/(b-a) can round to exactly 0 or 1 (for example p=nextafter(b,+inf)
+  // on [-1,1]) and falsely report a filament collision.  The dominant segment
+  // coordinate is strictly monotone, so ordered endpoint comparisons classify
+  // the closed segment exactly and work for either endpoint orientation.
+  const T b_component = dominant == 0 ? b.x : dominant == 1 ? b.y : b.z;
+  const bool within_dominant_extent =
+      (a_component <= p_component && p_component <= b_component)
+      || (b_component <= p_component && p_component <= a_component);
   if (at_a || at_b
-      || (on_line && parameter >= T{0} && parameter <= T{1})) {
+      || (on_line && within_dominant_extent)) {
     singular = true;
     return g;
   }

@@ -24,6 +24,29 @@ __device__ inline void mark_deposit_error(unsigned int* error) {
   atomicExch(error, 1u);
 }
 
+// Atomically accumulate one already-validated finite node contribution and set
+// the sticky deposit flag if the *accumulated* value is non-finite. Checking
+// only each particle's contribution misses the common case where several
+// individually finite, collocated contributions overflow their grid slot.
+//
+// atomicAdd returns the value immediately before this operation in the atomic
+// serialization order. Repeating the same binary64 addition therefore checks
+// the actual transition, including a transient/order-dependent overflow that a
+// later cancellation must not hide. The solver drains the sticky flag before
+// Ampere or a public charge-density return can consume the invalid array.
+__device__ inline void checked_atomic_add(double* destination, double increment,
+                                          unsigned int* error) {
+  if (!isfinite(increment)) {
+    mark_deposit_error(error);
+    return;
+  }
+  const double previous = atomicAdd(destination, increment);
+  const double accumulated = previous + increment;
+  if (!isfinite(previous) || !isfinite(accumulated)) {
+    mark_deposit_error(error);
+  }
+}
+
 __device__ inline bool reduced_coordinate_representable(double value) {
   constexpr double margin = 16.0;
   return isfinite(value)

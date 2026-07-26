@@ -101,6 +101,16 @@ perturbation. It evolves on the field-split coil background plus the uniform
 toroidal guide field. The deck uses SI throughout: density is kg/m³, pressure
 and energy density are Pa, velocity is m/s, and magnetic input/output is tesla.
 
+The shipped pressures are `p_in = 1000 Pa` and `p_out = 100 Pa`.  The projected
+coil reaches about 0.6 T (magnetic pressure of order 10⁵ Pa), so this remains a
+strongly magnetized, low-beta case.  The earlier 1/0.1 Pa values put a
+discontinuous blob at beta of order 10⁻⁶—below the truncation scale
+of the supported cylindrical MUSCL grid—and its discrete evolution exhausted
+positive internal energy at a blob corner.  The current values are the lowest
+tested decade with a comfortable positive-pressure margin through all 400
+steps; they do not weaken the magnet or relax the conservative positivity
+check.
+
 ## Magnet
 
 `coil.yaml` contains only the axisymmetric square-cross-section current sheets

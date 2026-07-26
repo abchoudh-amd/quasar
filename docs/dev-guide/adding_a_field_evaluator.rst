@@ -55,6 +55,13 @@ vector potential A must override both
 ``provides_vector_potential()`` and ``evaluate_A()``; otherwise frontends reject
 A output requests before evaluation.
 
+A capability may depend on configuration. In that case the instance query is
+authoritative after ``configure``; the name-only registry helper reports the
+state of a default-constructed instance. ``FileGridEvaluator`` is the built-in
+example: it reports gradient support only for a configured map with at least two
+nodes on every axis. A singleton axis is one sampled geometric plane, not an
+invariant direction with a known zero normal derivative.
+
 The cylindrical PIC sampler treats prescribed ``B`` as a force-only external
 field, rather than as an FDTD-evolved unknown. It therefore verifies Maxwell's
 continuous constraint from ``trace(grad B)`` and requires

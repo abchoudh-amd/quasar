@@ -155,14 +155,44 @@ def cyl_cfl_limit(dr: float, dz: float, c: float = C_LIGHT,
                   fdtd_order: int = 2) -> float:
     """The axisymmetric (r-z, m=0) Yee CFL stability limit.
 
-    For the m=0 azimuthal mode the conservative (volume-weighted) curl operator
-    is mimetic: the small on-axis cell volume cancels the apparent 1/r
-    amplification, so the spectral radius — and hence the stability bound — is
-    exactly the planar Yee limit of the same order with (dx, dy) -> (dr, dz). This is the
-    geometry-named selector (mirroring C++ ``quasar::cyl_cfl_dt``); it delegates
-    to :func:`cfl_limit` so the formula lives in one place.
+    Order two has the planar Yee limit. For order four, the conservative radial
+    operator including its regular-axis closure obeys
+    ``rho(-A_r B_r) <= 35/(6*dr**2)``; the axial contribution remains
+    ``49/(9*dz**2)``. Leapfrog stability is therefore guaranteed by
+    ``1/(c*sqrt(35/(24*dr**2) + 49/(36*dz**2)))``. This mirrors C++
+    ``quasar::cyl_cfl_dt`` and is a proved sufficient bound, not a fitted
+    margin.
     """
-    return cfl_limit(dr, dz, c, fdtd_order=fdtd_order)
+    if fdtd_order == 2:
+        return cfl_limit(dr, dz, c, fdtd_order=fdtd_order)
+    if fdtd_order != 4:
+        raise ValueError("fdtd_order must be 2 or 4")
+    dr = float(dr)
+    dz = float(dz)
+    c = float(c)
+    if not (math.isfinite(dr) and dr > 0.0
+            and math.isfinite(dz) and dz > 0.0):
+        raise ValueError("dr and dz must be finite and positive")
+    if not (math.isfinite(c) and c > 0.0):
+        raise ValueError("c must be finite and positive")
+
+    # Algebraically identical to the expression in the docstring, evaluated
+    # after scaling by the smaller spacing so neither inverse-spacing square can
+    # overflow. Keep this operation order in sync with core/grid.hpp.
+    radial_squared = 35.0 / 24.0
+    axial_squared = 49.0 / 36.0
+    h_min = dr
+    ratio = dr / dz
+    spectral_squared = radial_squared + axial_squared * ratio * ratio
+    if dz < dr:
+        h_min = dz
+        ratio = dz / dr
+        spectral_squared = axial_squared + radial_squared * ratio * ratio
+    spectral_factor = math.sqrt(spectral_squared)
+    dt = _scaled_quotient3(h_min, spectral_factor, c)
+    if not (math.isfinite(dt) and dt > 0.0):
+        raise OverflowError("CFL timestep is not representable")
+    return dt
 
 
 def cyl_cfl_dt(dr: float, dz: float, c: float = C_LIGHT,

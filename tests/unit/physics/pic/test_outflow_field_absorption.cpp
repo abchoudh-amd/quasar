@@ -16,6 +16,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -83,6 +85,15 @@ TEST(PicOutflowFieldAbsorption, PulseLeavesLowReflectedEnergyOrder2) {
   const double e1 = quasar::pic::total_em_energy(solver.fields(), solver.grid());
   EXPECT_LT(e1, 0.10 * e0) << "outflow reflected too much energy: "
                            << e0 << " -> " << e1;
+}
+
+TEST(PicOutflowFieldAbsorption, RejectsChargedParticleSpecies) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  quasar::Grid2D g{8, 4, 1.0, 0.5, 0.0, 0.0, 1};
+  auto solver = make_channel(g, 2);
+  quasar::pic::ParticleSpecies charged{
+      quasar::pic::SpeciesConfig{"charged", -1.0, 1.0, 1}};
+  EXPECT_THROW(solver.add_species(std::move(charged)), std::invalid_argument);
 }
 
 TEST(PicOutflowFieldAbsorption, PulseLeavesLowReflectedEnergyOrder4) {

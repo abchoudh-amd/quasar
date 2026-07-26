@@ -8,6 +8,7 @@
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 
 #include "backend/hip/hip_check.hpp"
+#include "mhd_cell_quadrature.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -172,66 +173,203 @@ __device__ inline void append_flux_part(
       sum, value, coefficient, d0, d1);
 }
 
-// Append coefficient*C_{normal,momentum}(B0,cross_b)/(d0*d1) without ever
-// forming the background-linear Maxwell stress as a face scalar.
+struct CrossBPointView {
+  const double* x[4]{};
+  const double* y[4]{};
+  const double* z[4]{};
+  const int* quadrature_valid{};
+};
+
+struct CrossStressFace {
+  MhdBackground average_background{};
+  MhdBackground average_cross_b{};
+  MhdBackground point_background[4]{};
+  MhdBackground point_cross_b[4]{};
+  int point_count{};
+};
+
+__device__ inline MhdBackground load_cross_b_point(
+    const CrossBPointView& view, int q, std::size_t k) {
+  return MhdBackground{view.x[q][k], view.y[q][k], view.z[q][k]};
+}
+
+__device__ inline MhdBackground mapped_point_face_background(
+    quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
+    const double* b0x, const double* b0y, const double* b0z,
+    int i, int j, int scheme_order, int node) {
+  if (dir == 0 && i == g.nx && flags.side[0] == 0 && flags.side[1] == 0) {
+    i = 0;
+  }
+  if (dir == 1 && j == g.ny && flags.side[2] == 0 && flags.side[3] == 0) {
+    j = 0;
+  }
+  const auto component = [&](int component_index) {
+    return quasar::mhd::detail::cell_quadrature_point_value(
+        scheme_order, node, [&](int offset) {
+          const int is = dir == 0 ? i : i + offset;
+          const int js = dir == 0 ? j + offset : j;
+          const MhdBackground value = quasar::mhd::load_interface_background(
+              g, dir, b0x, b0y, b0z, is, js,
+              /*collocation_order=*/0);
+          return background_component(value, component_index);
+        });
+  };
+  return MhdBackground{component(0), component(1), component(2)};
+}
+
+__device__ inline CrossStressFace load_cross_stress_face(
+    quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
+    const double* b0x, const double* b0y, const double* b0z,
+    int i, int j, int collocation_order, int scheme_order,
+    const CrossBPointView& cross_b, std::size_t k) {
+  CrossStressFace face;
+  face.average_background = mapped_face_background(
+      g, flags, dir, b0x, b0y, b0z, i, j, collocation_order);
+  face.average_cross_b = load_cross_b_point(cross_b, 0, k);
+  if ((scheme_order != 5 && scheme_order != 7) ||
+      cross_b.quadrature_valid[k] == 0) {
+    return face;
+  }
+  face.point_count = scheme_order == 5 ? 3 : 4;
+  for (int q = 0; q < face.point_count; ++q) {
+    face.point_background[q] = mapped_point_face_background(
+        g, flags, dir, b0x, b0y, b0z, i, j, scheme_order, q);
+    face.point_cross_b[q] = load_cross_b_point(cross_b, q, k);
+  }
+  return face;
+}
+
+template <int Capacity>
+__device__ inline void append_scaled_flux_part(
+    quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
+    const quasar::numerics::ScaledValue& value, Real coefficient,
+    Real d0, Real d1) {
+  quasar::numerics::append_scaled_value_quotient(
+      sum, value, coefficient, d0, d1);
+}
+
+// Append coefficient*<C_{normal,momentum}(B0,cross_b)>/(d0*d1) without
+// forming a face stress.  A valid MP face contributes every transverse
+// w_q*B0(q)*cross_b(q) product directly.  Lower-order and inadmissible
+// recovered faces retain the conservative base-face factorization.
 template <int Capacity>
 __device__ inline void append_cross_momentum_stress(
     quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
-    const MhdBackground& bg, const MhdBackground& cross_b,
+    const CrossStressFace& face,
     int normal, int momentum, Real coefficient, Real d0, Real d1) {
+  if (face.point_count != 0) {
+    for (int q = 0; q < face.point_count; ++q) {
+      const Real weight = face.point_count == 3
+          ? quasar::numerics::kMp5TransverseGaussWeights[q]
+          : quasar::numerics::kMp7TransverseGaussWeights[q];
+      if (normal == momentum) {
+        for (int component = 0; component < 3; ++component) {
+          const Real sign = component == normal ? Real{-1} : Real{1};
+          quasar::numerics::append_scaled_triple_product_quotient(
+              sum, background_component(face.point_background[q], component),
+              background_component(face.point_cross_b[q], component),
+              coefficient * sign * weight, d0, d1);
+        }
+      } else {
+        quasar::numerics::append_scaled_triple_product_quotient(
+            sum, background_component(face.point_background[q], normal),
+            background_component(face.point_cross_b[q], momentum),
+            -coefficient * weight, d0, d1);
+        quasar::numerics::append_scaled_triple_product_quotient(
+            sum, background_component(face.point_background[q], momentum),
+            background_component(face.point_cross_b[q], normal),
+            -coefficient * weight, d0, d1);
+      }
+    }
+    return;
+  }
+
   if (normal == momentum) {
-    for (int q = 0; q < 3; ++q) {
-      const Real sign = q == normal ? Real{-1} : Real{1};
+    for (int component = 0; component < 3; ++component) {
+      const Real sign = component == normal ? Real{-1} : Real{1};
       quasar::numerics::append_scaled_product_quotient(
-          sum, background_component(bg, q),
-          (coefficient * sign) * background_component(cross_b, q),
+          sum, background_component(face.average_background, component),
+          (coefficient * sign) *
+              background_component(face.average_cross_b, component),
           d0, d1);
     }
     return;
   }
   quasar::numerics::append_scaled_product_quotient(
-      sum, background_component(bg, normal),
-      -coefficient * background_component(cross_b, momentum), d0, d1);
+      sum, background_component(face.average_background, normal),
+      -coefficient * background_component(face.average_cross_b, momentum),
+      d0, d1);
   quasar::numerics::append_scaled_product_quotient(
-      sum, background_component(bg, momentum),
-      -coefficient * background_component(cross_b, normal), d0, d1);
+      sum, background_component(face.average_background, momentum),
+      -coefficient * background_component(face.average_cross_b, normal),
+      d0, d1);
 }
 
-// For a validated divergence-free prescribed field, -div(T0)=(curl B0)xB0.
-// Use the curl form in Cartesian geometry: a curl-free field then produces
-// bit-zero force even when independently rounded O(B0^2) face stresses would
-// leave an O(epsilon*B0^2/h) residual.  Directional face samples are exactly
-// the collocations used by the Riemann solve.
-template <int Capacity>
-__device__ inline void append_cartesian_background_lorentz(
-    quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
-    const MhdBackground& centre,
-    const MhdBackground& xlo, const MhdBackground& xhi,
-    const MhdBackground& ylo, const MhdBackground& yhi,
-    int momentum, Real dx, Real dy) {
-  if (momentum == 0) {
-    // -(Bz*d_x Bz) -(By*d_x By) +(By*d_y Bx)
-    append_flux_part(sum, centre.b0z, -xhi.b0z, dx, Real{1});
-    append_flux_part(sum, centre.b0z, xlo.b0z, dx, Real{1});
-    append_flux_part(sum, centre.b0y, -xhi.b0y, dx, Real{1});
-    append_flux_part(sum, centre.b0y, xlo.b0y, dx, Real{1});
-    append_flux_part(sum, centre.b0y, yhi.b0x, dy, Real{1});
-    append_flux_part(sum, centre.b0y, -ylo.b0x, dy, Real{1});
-  } else if (momentum == 1) {
-    // +(Bx*d_x By) -(Bx*d_y Bx) -(Bz*d_y Bz)
-    append_flux_part(sum, centre.b0x, xhi.b0y, dx, Real{1});
-    append_flux_part(sum, centre.b0x, -xlo.b0y, dx, Real{1});
-    append_flux_part(sum, centre.b0x, -yhi.b0x, dy, Real{1});
-    append_flux_part(sum, centre.b0x, ylo.b0x, dy, Real{1});
-    append_flux_part(sum, centre.b0z, -yhi.b0z, dy, Real{1});
-    append_flux_part(sum, centre.b0z, ylo.b0z, dy, Real{1});
-  } else {
-    // +(By*d_y Bz) +(Bx*d_x Bz)
-    append_flux_part(sum, centre.b0y, yhi.b0z, dy, Real{1});
-    append_flux_part(sum, centre.b0y, -ylo.b0z, dy, Real{1});
-    append_flux_part(sum, centre.b0x, xhi.b0z, dx, Real{1});
-    append_flux_part(sum, centre.b0x, -xlo.b0z, dx, Real{1});
+struct BackgroundStressFace {
+  MhdBackground average{};
+  MhdBackground point[4]{};
+  int point_count{};
+};
+
+__device__ inline BackgroundStressFace load_background_stress_face(
+    quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
+    const double* b0x, const double* b0y, const double* b0z,
+    int i, int j, int collocation_order, int scheme_order) {
+  BackgroundStressFace face;
+  face.average = mapped_face_background(
+      g, flags, dir, b0x, b0y, b0z, i, j, collocation_order);
+  if (scheme_order != 5 && scheme_order != 7) return face;
+  face.point_count = scheme_order == 5 ? 3 : 4;
+  for (int q = 0; q < face.point_count; ++q) {
+    face.point[q] = mapped_point_face_background(
+        g, flags, dir, b0x, b0y, b0z, i, j, scheme_order, q);
   }
+  return face;
+}
+
+// Append one static Maxwell-stress face contribution.  MP5/MP7 integrate the
+// nonlinear product at transverse Gauss points, but retain both B0 factors
+// until the cell reduction.  Shared face factors make the periodic static
+// force conservative; a cell-volume J0 x B0 source is formally accurate but
+// does not telescope across cells.
+template <int Capacity>
+__device__ inline void append_background_momentum_stress(
+    quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
+    const BackgroundStressFace& face, int normal, int momentum,
+    Real coefficient, Real d0, Real d1) {
+  if (face.point_count != 0) {
+    for (int q = 0; q < face.point_count; ++q) {
+      const Real weight = face.point_count == 3
+          ? quasar::numerics::kMp5TransverseGaussWeights[q]
+          : quasar::numerics::kMp7TransverseGaussWeights[q];
+      if (normal == momentum) {
+        for (int component = 0; component < 3; ++component) {
+          const Real sign = component == normal ? Real{-0.5} : Real{0.5};
+          const Real value = background_component(face.point[q], component);
+          quasar::numerics::append_scaled_triple_product_quotient(
+              sum, value, value, coefficient * sign * weight, d0, d1);
+        }
+      } else {
+        quasar::numerics::append_scaled_triple_product_quotient(
+            sum, background_component(face.point[q], normal),
+            background_component(face.point[q], momentum),
+            -coefficient * weight, d0, d1);
+      }
+    }
+    return;
+  }
+  if (normal == momentum) {
+    for (int component = 0; component < 3; ++component) {
+      const Real sign = component == normal ? Real{-0.5} : Real{0.5};
+      const Real value = background_component(face.average, component);
+      quasar::numerics::append_scaled_product_quotient(
+          sum, value, coefficient * sign * value, d0, d1);
+    }
+    return;
+  }
+  quasar::numerics::append_scaled_product_quotient(
+      sum, background_component(face.average, normal),
+      -coefficient * background_component(face.average, momentum), d0, d1);
 }
 
 // Add -div(F_m(B0)) once per cell.  Both directions, and in cylindrical
@@ -240,7 +378,8 @@ __device__ inline void append_cartesian_background_lorentz(
 // an O(epsilon*B0^2/h) force merely because x/r and y/z were rounded first.
 __global__ void background_stress_correction_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
-    int collocation_order, const double* __restrict__ b0x,
+    int collocation_order, int scheme_order,
+    const double* __restrict__ b0x,
     const double* __restrict__ b0y, const double* __restrict__ b0z,
     double* __restrict__ dmx, double* __restrict__ dmy,
     double* __restrict__ dmz) {
@@ -258,22 +397,33 @@ __global__ void background_stress_correction_kernel(
       g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order);
 
   if (cylindrical == 0) {
-    const MhdBackground centre = quasar::mhd::load_cell_background(
-        g, b0x, b0y, b0z, i, j, collocation_order);
-    quasar::numerics::ScaledProductQuotientAccumulator<6> mx_sum;
-    append_cartesian_background_lorentz(
-        mx_sum, centre, xlo, xhi, ylo, yhi, 0, g.dx(), g.dy());
-    dmx[k] += quasar::numerics::finish_scaled_product_quotient_sum(mx_sum);
-
-    quasar::numerics::ScaledProductQuotientAccumulator<6> my_sum;
-    append_cartesian_background_lorentz(
-        my_sum, centre, xlo, xhi, ylo, yhi, 1, g.dx(), g.dy());
-    dmy[k] += quasar::numerics::finish_scaled_product_quotient_sum(my_sum);
-
-    quasar::numerics::ScaledProductQuotientAccumulator<4> mz_sum;
-    append_cartesian_background_lorentz(
-        mz_sum, centre, xlo, xhi, ylo, yhi, 2, g.dx(), g.dy());
-    dmz[k] += quasar::numerics::finish_scaled_product_quotient_sum(mz_sum);
+    const BackgroundStressFace xface_lo = load_background_stress_face(
+        g, flags, 0, b0x, b0y, b0z, i, j,
+        collocation_order, scheme_order);
+    const BackgroundStressFace xface_hi = load_background_stress_face(
+        g, flags, 0, b0x, b0y, b0z, i + 1, j,
+        collocation_order, scheme_order);
+    const BackgroundStressFace yface_lo = load_background_stress_face(
+        g, flags, 1, b0x, b0y, b0z, i, j,
+        collocation_order, scheme_order);
+    const BackgroundStressFace yface_hi = load_background_stress_face(
+        g, flags, 1, b0x, b0y, b0z, i, j + 1,
+        collocation_order, scheme_order);
+    const auto component = [&](int momentum) {
+      quasar::numerics::ScaledProductQuotientAccumulator<32> sum;
+      append_background_momentum_stress(
+          sum, xface_hi, 0, momentum, Real{-1}, g.dx(), Real{1});
+      append_background_momentum_stress(
+          sum, xface_lo, 0, momentum, Real{1}, g.dx(), Real{1});
+      append_background_momentum_stress(
+          sum, yface_hi, 1, momentum, Real{-1}, g.dy(), Real{1});
+      append_background_momentum_stress(
+          sum, yface_lo, 1, momentum, Real{1}, g.dy(), Real{1});
+      return quasar::numerics::finish_scaled_product_quotient_sum(sum);
+    };
+    dmx[k] += component(0);
+    dmy[k] += component(1);
+    dmz[k] += component(2);
     return;
   }
 
@@ -323,21 +473,19 @@ __global__ void background_stress_correction_kernel(
 // erase a small survivor beside a dominant cancelling stress.
 __global__ void split_momentum_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
-    int collocation_order,
+    int collocation_order, int scheme_order, int globally_curl_free,
     const double* __restrict__ b0x, const double* __restrict__ b0y,
     const double* __restrict__ b0z,
     const double* __restrict__ x_hx, const double* __restrict__ x_hy,
     const double* __restrict__ x_hz,
     const double* __restrict__ x_wx, const double* __restrict__ x_wy,
     const double* __restrict__ x_wz,
-    const double* __restrict__ x_cbx, const double* __restrict__ x_cby,
-    const double* __restrict__ x_cbz,
+    CrossBPointView x_cross,
     const double* __restrict__ y_hx, const double* __restrict__ y_hy,
     const double* __restrict__ y_hz,
     const double* __restrict__ y_wx, const double* __restrict__ y_wy,
     const double* __restrict__ y_wz,
-    const double* __restrict__ y_cbx, const double* __restrict__ y_cby,
-    const double* __restrict__ y_cbz,
+    CrossBPointView y_cross,
     double* __restrict__ dmx, double* __restrict__ dmy,
     double* __restrict__ dmz) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -347,48 +495,82 @@ __global__ void split_momentum_residual_kernel(
   const std::size_t kx = g.index(i + 1, j);
   const std::size_t ky = g.index(i, j + 1);
 
-  const MhdBackground xlo = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground xhi = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order);
-  const MhdBackground ylo = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground yhi = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order);
-  const MhdBackground xcross_lo{x_cbx[k], x_cby[k], x_cbz[k]};
-  const MhdBackground xcross_hi{x_cbx[kx], x_cby[kx], x_cbz[kx]};
-  const MhdBackground ycross_lo{y_cbx[k], y_cby[k], y_cbz[k]};
-  const MhdBackground ycross_hi{y_cbx[ky], y_cby[ky], y_cbz[ky]};
+  const CrossStressFace xface_lo = load_cross_stress_face(
+      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order,
+      scheme_order, x_cross, k);
+  const CrossStressFace xface_hi = load_cross_stress_face(
+      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order,
+      scheme_order, x_cross, kx);
+  const CrossStressFace yface_lo = load_cross_stress_face(
+      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order,
+      scheme_order, y_cross, k);
+  const CrossStressFace yface_hi = load_cross_stress_face(
+      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order,
+      scheme_order, y_cross, ky);
+  const MhdBackground& xlo = xface_lo.average_background;
+  const MhdBackground& xhi = xface_hi.average_background;
+  const MhdBackground& ylo = yface_lo.average_background;
+  const MhdBackground& yhi = yface_hi.average_background;
 
   if (cylindrical == 0) {
-    const MhdBackground centre = quasar::mhd::load_cell_background(
-        g, b0x, b0y, b0z, i, j, collocation_order);
+    const BackgroundStressFace xbackground_lo =
+        load_background_stress_face(
+            g, flags, 0, b0x, b0y, b0z, i, j,
+            collocation_order, scheme_order);
+    const BackgroundStressFace xbackground_hi =
+        load_background_stress_face(
+            g, flags, 0, b0x, b0y, b0z, i + 1, j,
+            collocation_order, scheme_order);
+    const BackgroundStressFace ybackground_lo =
+        load_background_stress_face(
+            g, flags, 1, b0x, b0y, b0z, i, j,
+            collocation_order, scheme_order);
+    const BackgroundStressFace ybackground_hi =
+        load_background_stress_face(
+            g, flags, 1, b0x, b0y, b0z, i, j + 1,
+            collocation_order, scheme_order);
     const auto cartesian_component = [&](int momentum,
                                          const double* x_h,
                                          const double* x_w,
                                          const double* y_h,
                                          const double* y_w) {
-      quasar::numerics::ScaledProductQuotientAccumulator<28> sum;
+      quasar::numerics::ScaledProductQuotientAccumulator<128> sum;
       append_flux_part(sum, x_h[kx], Real{-1}, g.dx(), Real{1});
       append_flux_part(sum, x_w[kx], Real{-1}, g.dx(), Real{1});
       append_flux_part(sum, x_h[k], Real{1}, g.dx(), Real{1});
       append_flux_part(sum, x_w[k], Real{1}, g.dx(), Real{1});
       append_cross_momentum_stress(
-          sum, xhi, xcross_hi, 0, momentum, Real{-1}, g.dx(), Real{1});
+          sum, xface_hi, 0, momentum, Real{-1},
+          g.dx(), Real{1});
       append_cross_momentum_stress(
-          sum, xlo, xcross_lo, 0, momentum, Real{1}, g.dx(), Real{1});
+          sum, xface_lo, 0, momentum, Real{1},
+          g.dx(), Real{1});
 
       append_flux_part(sum, y_h[ky], Real{-1}, g.dy(), Real{1});
       append_flux_part(sum, y_w[ky], Real{-1}, g.dy(), Real{1});
       append_flux_part(sum, y_h[k], Real{1}, g.dy(), Real{1});
       append_flux_part(sum, y_w[k], Real{1}, g.dy(), Real{1});
       append_cross_momentum_stress(
-          sum, yhi, ycross_hi, 1, momentum, Real{-1}, g.dy(), Real{1});
+          sum, yface_hi, 1, momentum, Real{-1},
+          g.dy(), Real{1});
       append_cross_momentum_stress(
-          sum, ylo, ycross_lo, 1, momentum, Real{1}, g.dy(), Real{1});
+          sum, yface_lo, 1, momentum, Real{1},
+          g.dy(), Real{1});
 
-      append_cartesian_background_lorentz(
-          sum, centre, xlo, xhi, ylo, yhi, momentum, g.dx(), g.dy());
+      if (globally_curl_free == 0) {
+        append_background_momentum_stress(
+            sum, xbackground_hi, 0, momentum, Real{-1},
+            g.dx(), Real{1});
+        append_background_momentum_stress(
+            sum, xbackground_lo, 0, momentum, Real{1},
+            g.dx(), Real{1});
+        append_background_momentum_stress(
+            sum, ybackground_hi, 1, momentum, Real{-1},
+            g.dy(), Real{1});
+        append_background_momentum_stress(
+            sum, ybackground_lo, 1, momentum, Real{1},
+            g.dy(), Real{1});
+      }
       return quasar::numerics::finish_scaled_product_quotient_sum(sum);
     };
     dmx[k] = cartesian_component(0, x_hx, x_wx, y_hx, y_wx);
@@ -400,7 +582,7 @@ __global__ void split_momentum_residual_kernel(
   // Cylindrical axial momentum: annular radial divergence plus ordinary axial
   // divergence, with the matching static stresses in the same reduction.
   const Real r = g.r_at_cell_center(i);
-  quasar::numerics::ScaledProductQuotientAccumulator<40> axial_sum;
+  quasar::numerics::ScaledProductQuotientAccumulator<96> axial_sum;
   for (int channel = 0; channel < 2; ++channel) {
     const double* radial = channel == 0 ? x_hy : x_wy;
     append_flux_part(axial_sum, radial[kx], Real{-1}, g.dx(), Real{1});
@@ -412,26 +594,34 @@ __global__ void split_momentum_residual_kernel(
     append_flux_part(axial_sum, axial[k], Real{1}, g.dy(), Real{1});
   }
   append_cross_momentum_stress(
-      axial_sum, xhi, xcross_hi, 0, 1, Real{-1}, g.dx(), Real{1});
+      axial_sum, xface_hi, 0, 1, Real{-1},
+      g.dx(), Real{1});
   append_cross_momentum_stress(
-      axial_sum, xlo, xcross_lo, 0, 1, Real{1}, g.dx(), Real{1});
+      axial_sum, xface_lo, 0, 1, Real{1},
+      g.dx(), Real{1});
   append_cross_momentum_stress(
-      axial_sum, xhi, xcross_hi, 0, 1, Real{-1}, r, Real{2});
+      axial_sum, xface_hi, 0, 1, Real{-1},
+      r, Real{2});
   append_cross_momentum_stress(
-      axial_sum, xlo, xcross_lo, 0, 1, Real{-1}, r, Real{2});
+      axial_sum, xface_lo, 0, 1, Real{-1},
+      r, Real{2});
   append_cross_momentum_stress(
-      axial_sum, yhi, ycross_hi, 1, 1, Real{-1}, g.dy(), Real{1});
+      axial_sum, yface_hi, 1, 1, Real{-1},
+      g.dy(), Real{1});
   append_cross_momentum_stress(
-      axial_sum, ylo, ycross_lo, 1, 1, Real{1}, g.dy(), Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xhi.b0x, xhi.b0y, g.dx(), Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xlo.b0x, -xlo.b0y, g.dx(), Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xhi.b0x, xhi.b0y, r, Real{2});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xlo.b0x, xlo.b0y, r, Real{2});
-  append_normal_background_stress(axial_sum, ylo, yhi, 1, g.dy());
+      axial_sum, yface_lo, 1, 1, Real{1},
+      g.dy(), Real{1});
+  if (globally_curl_free == 0) {
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xhi.b0x, xhi.b0y, g.dx(), Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xlo.b0x, -xlo.b0y, g.dx(), Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xhi.b0x, xhi.b0y, r, Real{2});
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xlo.b0x, xlo.b0y, r, Real{2});
+    append_normal_background_stress(axial_sum, ylo, yhi, 1, g.dy());
+  }
   dmy[k] = quasar::numerics::finish_scaled_product_quotient_sum(axial_sum);
 
   // Cylindrical azimuthal momentum uses the exact angular-momentum cell moment
@@ -443,7 +633,7 @@ __global__ void split_momentum_residual_kernel(
   const Real moment_norm = Real{1} + qmetric * qmetric / Real{3};
   const Real hi_weight = hi_ratio * hi_ratio;
   const Real lo_weight = lo_ratio * lo_ratio;
-  quasar::numerics::ScaledProductQuotientAccumulator<24> phi_sum;
+  quasar::numerics::ScaledProductQuotientAccumulator<64> phi_sum;
   for (int channel = 0; channel < 2; ++channel) {
     const double* radial = channel == 0 ? x_hz : x_wz;
     append_flux_part(
@@ -455,22 +645,29 @@ __global__ void split_momentum_residual_kernel(
     append_flux_part(phi_sum, axial[k], Real{1}, g.dy(), Real{1});
   }
   append_cross_momentum_stress(
-      phi_sum, xhi, xcross_hi, 0, 2, -hi_weight, g.dx(), moment_norm);
+      phi_sum, xface_hi, 0, 2, -hi_weight,
+      g.dx(), moment_norm);
   if (lo_weight != Real{0}) {
     append_cross_momentum_stress(
-        phi_sum, xlo, xcross_lo, 0, 2, lo_weight, g.dx(), moment_norm);
+        phi_sum, xface_lo, 0, 2, lo_weight,
+        g.dx(), moment_norm);
   }
   append_cross_momentum_stress(
-      phi_sum, yhi, ycross_hi, 1, 2, Real{-1}, g.dy(), Real{1});
+      phi_sum, yface_hi, 1, 2, Real{-1},
+      g.dy(), Real{1});
   append_cross_momentum_stress(
-      phi_sum, ylo, ycross_lo, 1, 2, Real{1}, g.dy(), Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      phi_sum, xhi.b0x, xhi.b0z, g.dx(), moment_norm / hi_weight);
-  if (lo_weight != Real{0}) {
+      phi_sum, yface_lo, 1, 2, Real{1},
+      g.dy(), Real{1});
+  if (globally_curl_free == 0) {
     quasar::numerics::append_scaled_product_quotient(
-        phi_sum, xlo.b0x, -xlo.b0z, g.dx(), moment_norm / lo_weight);
+        phi_sum, xhi.b0x, xhi.b0z, g.dx(), moment_norm / hi_weight);
+    if (lo_weight != Real{0}) {
+      quasar::numerics::append_scaled_product_quotient(
+          phi_sum, xlo.b0x, -xlo.b0z, g.dx(), moment_norm / lo_weight);
+    }
+    append_tangential_background_stress(
+        phi_sum, ylo, yhi, 1, 2, g.dy());
   }
-  append_tangential_background_stress(phi_sum, ylo, yhi, 1, 2, g.dy());
   dmz[k] = quasar::numerics::finish_scaled_product_quotient_sum(phi_sum);
 }
 
@@ -491,7 +688,8 @@ __global__ void split_momentum_residual_kernel(
 // + 2 axial static stress + 2 static curvature = 20 terms.
 __global__ void cylindrical_radial_momentum_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
-    int background_active, int decomposed_flux, int collocation_order,
+    int background_active, int globally_curl_free, int decomposed_flux,
+    int collocation_order, int scheme_order,
     const double* __restrict__ rho, const double* __restrict__ mr,
     const double* __restrict__ mphi, const double* __restrict__ br,
     const double* __restrict__ bphi,
@@ -501,12 +699,8 @@ __global__ void cylindrical_radial_momentum_residual_kernel(
     const double* __restrict__ axial_momentum_flux,
     const double* __restrict__ radial_wave,
     const double* __restrict__ axial_wave,
-    const double* __restrict__ radial_cbx,
-    const double* __restrict__ radial_cby,
-    const double* __restrict__ radial_cbz,
-    const double* __restrict__ axial_cbx,
-    const double* __restrict__ axial_cby,
-    const double* __restrict__ axial_cbz,
+    CrossBPointView radial_cross,
+    CrossBPointView axial_cross,
     double* __restrict__ radial_momentum_rate) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -517,7 +711,7 @@ __global__ void cylindrical_radial_momentum_residual_kernel(
   const std::size_t kz = g.index(i, j + 1);
   const Real r = g.r_at_cell_center(i);
 
-  quasar::numerics::ScaledProductQuotientAccumulator<36> sum;
+  quasar::numerics::ScaledProductQuotientAccumulator<64> sum;
 
   // Ordinary radial tensor derivative. Curvature is supplied explicitly by
   // T_phiphi-T_rr below; using the annular derivative here would double-count
@@ -539,35 +733,29 @@ __global__ void cylindrical_radial_momentum_residual_kernel(
     append_flux_part(sum, axial_wave[kz], Real{-1}, g.dy(), Real{1});
     append_flux_part(sum, axial_wave[k], Real{1}, g.dy(), Real{1});
 
-    const MhdBackground radial_lo = mapped_face_background(
-        g, flags, 0, b0r, b0z, b0phi, i, j, collocation_order);
-    const MhdBackground radial_hi = mapped_face_background(
-        g, flags, 0, b0r, b0z, b0phi, i + 1, j,
-        collocation_order);
-    const MhdBackground axial_lo = mapped_face_background(
-        g, flags, 1, b0r, b0z, b0phi, i, j, collocation_order);
-    const MhdBackground axial_hi = mapped_face_background(
-        g, flags, 1, b0r, b0z, b0phi, i, j + 1,
-        collocation_order);
-    const MhdBackground radial_cross_lo{
-        radial_cbx[k], radial_cby[k], radial_cbz[k]};
-    const MhdBackground radial_cross_hi{
-        radial_cbx[kr], radial_cby[kr], radial_cbz[kr]};
-    const MhdBackground axial_cross_lo{
-        axial_cbx[k], axial_cby[k], axial_cbz[k]};
-    const MhdBackground axial_cross_hi{
-        axial_cbx[kz], axial_cby[kz], axial_cbz[kz]};
+    const CrossStressFace radial_face_lo = load_cross_stress_face(
+        g, flags, 0, b0r, b0z, b0phi, i, j, collocation_order,
+        scheme_order, radial_cross, k);
+    const CrossStressFace radial_face_hi = load_cross_stress_face(
+        g, flags, 0, b0r, b0z, b0phi, i + 1, j, collocation_order,
+        scheme_order, radial_cross, kr);
+    const CrossStressFace axial_face_lo = load_cross_stress_face(
+        g, flags, 1, b0r, b0z, b0phi, i, j, collocation_order,
+        scheme_order, axial_cross, k);
+    const CrossStressFace axial_face_hi = load_cross_stress_face(
+        g, flags, 1, b0r, b0z, b0phi, i, j + 1, collocation_order,
+        scheme_order, axial_cross, kz);
     append_cross_momentum_stress(
-        sum, radial_hi, radial_cross_hi, 0, 0, Real{-1},
+        sum, radial_face_hi, 0, 0, Real{-1},
         g.dx(), Real{1});
     append_cross_momentum_stress(
-        sum, radial_lo, radial_cross_lo, 0, 0, Real{1},
+        sum, radial_face_lo, 0, 0, Real{1},
         g.dx(), Real{1});
     append_cross_momentum_stress(
-        sum, axial_hi, axial_cross_hi, 1, 0, Real{-1},
+        sum, axial_face_hi, 1, 0, Real{-1},
         g.dy(), Real{1});
     append_cross_momentum_stress(
-        sum, axial_lo, axial_cross_lo, 1, 0, Real{1},
+        sum, axial_face_lo, 1, 0, Real{1},
         g.dy(), Real{1});
   }
 
@@ -595,7 +783,7 @@ __global__ void cylindrical_radial_momentum_residual_kernel(
   quasar::numerics::append_scaled_product_quotient(
       sum, bphi_pert, -bphi_pert, Real{1}, r);
 
-  if (background_active != 0) {
+  if (background_active != 0 && globally_curl_free == 0) {
     const MhdBackground radial_lo = mapped_face_background(
         g, flags, 0, b0r, b0z, b0phi, i, j, collocation_order);
     const MhdBackground radial_hi = mapped_face_background(
@@ -626,27 +814,59 @@ __global__ void cylindrical_radial_momentum_residual_kernel(
       quasar::numerics::finish_scaled_product_quotient_sum(sum);
 }
 
-// Active-background split-energy equation, evaluated without any B0^2
-// intermediate.  For E'=rho*e+rho|v|^2/2+|b|^2/2 and B=B0+b,
+// Append coefficient*[Cov_face + (B0_face-B0_cell).F_B]/(d0*d1).
+// This is <B0.F_B>-B0_cell.<F_B>, but its dominant cell-reference product has
+// been cancelled before multiplication.  The transverse covariance was formed
+// in the Riemann quadrature and is retained as a scaled value.
+template <int Capacity>
+__device__ inline void append_conditioned_induction_flux(
+    quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
+    const MhdBackground& face_background,
+    const MhdBackground& cell_background,
+    const MhdBackground& induction_flux,
+    const quasar::numerics::ScaledValue& covariance,
+    Real coefficient, Real d0, Real d1) {
+  quasar::numerics::append_scaled_value_quotient(
+      sum, covariance, coefficient, d0, d1);
+  for (int component = 0; component < 3; ++component) {
+    quasar::numerics::append_scaled_difference_product_quotient(
+        sum, background_component(face_background, component),
+        background_component(cell_background, component),
+        background_component(induction_flux, component),
+        coefficient, d0, d1);
+  }
+}
+
+// Discretely CT-consistent active-background energy equation.  With
+// E'=E-B0.b-|B0|^2/2 and static B0,
 //
-//   d_t E' + div(F_E - B0.F_B) = v . [(curl B0) x (B0+b)].
+//   d_t E' = -div(F_E' + B0.F_B) - <B0 . db/dt>.
 //
-// The Riemann layer already emits F_E'=F_E-B0.F_B directly.  Compute curl B0
-// before multiplying by either B0 or b, then put the flux divergence and all
-// twelve expanded Lorentz-power products in one exponent reduction.  For a
-// solenoidal prescribed field this is the split conservation law itself; a
-// curl-free dominant background is bit-zero before any O(B0^2) product can be
-// formed.
+// Directly expanding that identity still exposes cancelling O(B0^2) products.
+// Choose the cell background Bc as a reference and evaluate the equivalent
+// conditioned correction
+//
+//   -D[Cov_f + (Bf-Bc).Ff] - Bc.(Rct-Rg) - Cov_V,
+//
+// where Rg=-D(F_B), Cov_f=<B0.F_B>-Bf.Ff, and
+// Cov_V=<B0.Rct>-Bc.Rct.  Every multiplication therefore contains either a
+// background difference, a rate difference, or a covariance.  Rct is read
+// only after the in-plane slots have been overwritten by the final CT curl.
 __global__ void split_energy_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
-    int collocation_order, const double* __restrict__ b0x,
+    int collocation_order, int scheme_order,
+    const double* __restrict__ b0x,
     const double* __restrict__ b0y, const double* __restrict__ b0z,
-    const double* __restrict__ rho, const double* __restrict__ mx,
-    const double* __restrict__ my, const double* __restrict__ mz,
-    const double* __restrict__ bx, const double* __restrict__ by,
-    const double* __restrict__ bz,
     const double* __restrict__ x_energy,
     const double* __restrict__ y_energy,
+    const double* __restrict__ x_bx, const double* __restrict__ x_by,
+    const double* __restrict__ x_bz,
+    const double* __restrict__ y_bx, const double* __restrict__ y_by,
+    const double* __restrict__ y_bz,
+    const quasar::numerics::ScaledValue* __restrict__ x_covariance,
+    const quasar::numerics::ScaledValue* __restrict__ y_covariance,
+    const double* __restrict__ dbx, const double* __restrict__ dby,
+    const double* __restrict__ dbz,
     double* __restrict__ denergy) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -654,115 +874,133 @@ __global__ void split_energy_residual_kernel(
   const std::size_t k = g.index(i, j);
   const std::size_t kx = g.index(i + 1, j);
   const std::size_t ky = g.index(i, j + 1);
-  const MhdBackground xlo = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground xhi = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order);
-  const MhdBackground ylo = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground yhi = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order);
-  const MhdBackground cc = quasar::mhd::load_cell_background(
+  const MhdBackground cell_background = quasar::mhd::load_cell_background(
       g, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground perturbation{
-      quasar::mhd::cell_bx(g, bx, i, j, collocation_order),
-      quasar::mhd::cell_by(g, by, i, j, collocation_order), bz[k]};
-  const Real vx = mx[k] / rho[k];
-  const Real vy = my[k] / rho[k];
-  const Real vz = mz[k] / rho[k];
+  const MhdBackground x_background_lo = mapped_face_background(
+      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order);
+  const MhdBackground x_background_hi = mapped_face_background(
+      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order);
+  const MhdBackground y_background_lo = mapped_face_background(
+      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order);
+  const MhdBackground y_background_hi = mapped_face_background(
+      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order);
+  const MhdBackground x_flux_lo{x_bx[k], x_by[k], x_bz[k]};
+  const MhdBackground x_flux_hi{x_bx[kx], x_by[kx], x_bz[kx]};
+  const MhdBackground y_flux_lo{y_bx[k], y_by[k], y_bz[k]};
+  const MhdBackground y_flux_hi{y_bx[ky], y_by[ky], y_bz[ky]};
 
-  const auto difference = [&](Real hi, Real lo, Real spacing) {
-    const Real a[2] = {hi, -lo};
-    const Real one[2] = {Real{1}, Real{1}};
-    const Real d[2] = {spacing, spacing};
-    return quasar::numerics::scaled_product_quotient_sum(a, one, d, one, 2);
-  };
-
-  Real jr{};
-  Real jz{};
-  Real jphi{};
-  if (cylindrical == 0) {
-    // Here (jr,jz,jphi) are simply the Cartesian (Jx,Jy,Jz) components.
-    jr = difference(yhi.b0z, ylo.b0z, g.dy());
-    jz = -difference(xhi.b0z, xlo.b0z, g.dx());
-    const Real a[4] = {xhi.b0y, -xlo.b0y, -yhi.b0x, ylo.b0x};
-    const Real one[4] = {Real{1}, Real{1}, Real{1}, Real{1}};
-    const Real d0[4] = {g.dx(), g.dx(), g.dy(), g.dy()};
-    jphi = quasar::numerics::scaled_product_quotient_sum(
-        a, one, d0, one, 4);
-  } else {
-    // Axisymmetric cylindrical curl in component order (r,z,phi):
-    // Jr=-d_z Bphi, Jphi=d_z Br-d_r Bz,
-    // Jz=(1/r)d_r(r Bphi).
-    const Real r = g.r_at_cell_center(i);
-    jr = -difference(yhi.b0z, ylo.b0z, g.dy());
-    const Real a_phi[4] = {
-        yhi.b0x, -ylo.b0x, -xhi.b0y, xlo.b0y};
-    const Real one4[4] = {Real{1}, Real{1}, Real{1}, Real{1}};
-    const Real d0_phi[4] = {g.dy(), g.dy(), g.dx(), g.dx()};
-    jphi = quasar::numerics::scaled_product_quotient_sum(
-        a_phi, one4, d0_phi, one4, 4);
-    const Real a_z[4] = {
-        xhi.b0z, -xlo.b0z, xhi.b0z, xlo.b0z};
-    const Real d0_z[4] = {g.dx(), g.dx(), r, r};
-    const Real d1_z[4] = {Real{1}, Real{1}, Real{2}, Real{2}};
-    jz = quasar::numerics::scaled_product_quotient_sum(
-        a_z, one4, d0_z, d1_z, 4);
-  }
-
-  quasar::numerics::ScaledQuaternaryAccumulator sum;
-  const auto append_flux_divergence = [&](Real flux, Real sign, Real spacing) {
-    quasar::numerics::append_scaled_quaternary_product(
-        sum, flux, sign, Real{1} / spacing, Real{1});
+  // The conditioned MP paths use at most 33 entries: 6 F_E terms, 24
+  // cylindrical face terms, and 3 rate-difference products. Cartesian MP7
+  // additionally uses three volume covariances but only four face occurrences.
+  quasar::numerics::ScaledProductQuotientAccumulator<40> sum;
+  const auto append_flux = [&](Real flux, Real sign, Real spacing) {
+    quasar::numerics::append_scaled_product_quotient(
+        sum, flux, sign, spacing, Real{1});
   };
 
   if (cylindrical != 0) {
     const Real r = g.r_at_cell_center(i);
-    append_flux_divergence(x_energy[kx], Real{-1}, g.dx());
-    append_flux_divergence(x_energy[k], Real{1}, g.dx());
-    append_flux_divergence(x_energy[kx], Real{-0.5}, r);
-    append_flux_divergence(x_energy[k], Real{-0.5}, r);
+    append_flux(x_energy[kx], Real{-1}, g.dx());
+    append_flux(x_energy[k], Real{1}, g.dx());
+    append_flux(x_energy[kx], Real{-0.5}, r);
+    append_flux(x_energy[k], Real{-0.5}, r);
+    append_conditioned_induction_flux(
+        sum, x_background_hi, cell_background, x_flux_hi,
+        x_covariance[kx], Real{-1}, g.dx(), Real{1});
+    append_conditioned_induction_flux(
+        sum, x_background_lo, cell_background, x_flux_lo,
+        x_covariance[k], Real{1}, g.dx(), Real{1});
+    append_conditioned_induction_flux(
+        sum, x_background_hi, cell_background, x_flux_hi,
+        x_covariance[kx], Real{-0.5}, r, Real{1});
+    append_conditioned_induction_flux(
+        sum, x_background_lo, cell_background, x_flux_lo,
+        x_covariance[k], Real{-0.5}, r, Real{1});
   } else {
-    append_flux_divergence(x_energy[kx], Real{-1}, g.dx());
-    append_flux_divergence(x_energy[k], Real{1}, g.dx());
+    append_flux(x_energy[kx], Real{-1}, g.dx());
+    append_flux(x_energy[k], Real{1}, g.dx());
+    append_conditioned_induction_flux(
+        sum, x_background_hi, cell_background, x_flux_hi,
+        x_covariance[kx], Real{-1}, g.dx(), Real{1});
+    append_conditioned_induction_flux(
+        sum, x_background_lo, cell_background, x_flux_lo,
+        x_covariance[k], Real{1}, g.dx(), Real{1});
   }
-  append_flux_divergence(y_energy[ky], Real{-1}, g.dy());
-  append_flux_divergence(y_energy[k], Real{1}, g.dy());
+  append_flux(y_energy[ky], Real{-1}, g.dy());
+  append_flux(y_energy[k], Real{1}, g.dy());
+  append_conditioned_induction_flux(
+      sum, y_background_hi, cell_background, y_flux_hi,
+      y_covariance[ky], Real{-1}, g.dy(), Real{1});
+  append_conditioned_induction_flux(
+      sum, y_background_lo, cell_background, y_flux_lo,
+      y_covariance[k], Real{1}, g.dy(), Real{1});
 
-  const auto append_power_for_field = [&](const MhdBackground& field) {
-    if (cylindrical == 0) {
-      // v . (J x B), Cartesian component order x,y,z.
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vx, jz, field.b0z, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vx, -jphi, field.b0y, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vy, jphi, field.b0x, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vy, -jr, field.b0z, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vz, jr, field.b0y, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vz, -jz, field.b0x, Real{1});
-    } else {
-      // Physical cylindrical order (r,phi,z), while storage is (r,z,phi).
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vx, jphi, field.b0y, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vx, -jz, field.b0z, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vy, jr, field.b0z, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vy, -jphi, field.b0x, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vz, jz, field.b0x, Real{1});
-      quasar::numerics::append_scaled_quaternary_product(
-          sum, vz, -jr, field.b0y, Real{1});
+  const quasar::mhd::detail::CellMagneticRateView rate{dbx, dby, dbz};
+  const MhdBackground rate_mean{
+      quasar::mhd::cell_bx(g, dbx, i, j, collocation_order),
+      quasar::mhd::cell_by(g, dby, i, j, collocation_order), dbz[k]};
+  const double* x_flux_component[3] = {x_bx, x_by, x_bz};
+  const double* y_flux_component[3] = {y_bx, y_by, y_bz};
+  for (int component = 0; component < 3; ++component) {
+    quasar::numerics::ScaledProductQuotientAccumulator<8> mismatch_sum;
+    const double* fx = x_flux_component[component];
+    const double* fy = y_flux_component[component];
+    quasar::numerics::append_scaled_product_quotient(
+        mismatch_sum, background_component(rate_mean, component),
+        Real{1}, Real{1}, Real{1});
+    // Rct-Rg = Rct + D_E(F_B).  Form that small mismatch in scaled form
+    // before multiplying by the potentially dominant cell background.
+    quasar::numerics::append_scaled_product_quotient(
+        mismatch_sum, fx[kx], Real{1}, g.dx(), Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        mismatch_sum, fx[k], Real{-1}, g.dx(), Real{1});
+    if (cylindrical != 0) {
+      const Real r = g.r_at_cell_center(i);
+      quasar::numerics::append_scaled_product_quotient(
+          mismatch_sum, fx[kx], Real{0.5}, r, Real{1});
+      quasar::numerics::append_scaled_product_quotient(
+          mismatch_sum, fx[k], Real{0.5}, r, Real{1});
     }
-  };
-  append_power_for_field(cc);
-  append_power_for_field(perturbation);
-  denergy[k] = quasar::numerics::finish_scaled_quaternary_sum(sum);
+    quasar::numerics::append_scaled_product_quotient(
+        mismatch_sum, fy[ky], Real{1}, g.dy(), Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        mismatch_sum, fy[k], Real{-1}, g.dy(), Real{1});
+    const quasar::numerics::ScaledValue mismatch =
+        quasar::numerics::finish_scaled_product_quotient_sum_to_value(
+            mismatch_sum);
+    quasar::numerics::append_scaled_value_quotient(
+        sum, mismatch,
+        -background_component(cell_background, component),
+        Real{1}, Real{1});
+  }
+
+  if (cylindrical == 0 && (scheme_order == 5 || scheme_order == 7)) {
+    for (int component = 0; component < 3; ++component) {
+      const Real background_mean =
+          background_component(cell_background, component);
+      const Real component_rate_mean =
+          background_component(rate_mean, component);
+      const quasar::numerics::ScaledValue covariance =
+          quasar::mhd::detail::cell_tensor_product_correction_scaled(
+              scheme_order, background_mean, component_rate_mean,
+              [&](int qx, int qy) {
+                const MhdBackground background =
+                    quasar::mhd::detail::point_cell_background(
+                        g, i, j, scheme_order, qx, qy,
+                        b0x, b0y, b0z);
+                return background_component(background, component);
+              },
+              [&](int qx, int qy) {
+                return quasar::mhd::detail::
+                    point_cell_magnetic_rate_component(
+                        g, i, j, scheme_order, qx, qy, rate, component);
+              });
+      quasar::numerics::append_scaled_value_quotient(
+          sum, covariance, Real{-1}, Real{1}, Real{1});
+    }
+  }
+  denergy[k] =
+      quasar::numerics::finish_scaled_product_quotient_sum(sum);
 }
 
 // Evaluate the Shu--Osher linear combination without reading an operand whose
@@ -1029,15 +1267,16 @@ void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
 void launch_mhd_background_stress_correction(
     const MhdBackgroundField<Real>& b0, MhdField2D<Real>& dudt,
     BoundaryFlags4 flags, stream_t stream, bool cylindrical,
-    int collocation_order) {
+    int collocation_order, int scheme_order) {
   if (!b0.active) return;
+  if (b0.globally_curl_free) return;
   const Grid2D g = dudt.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   hipLaunchKernelGGL(
       background_stress_correction_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags,
-      cylindrical ? 1 : 0, collocation_order,
+      cylindrical ? 1 : 0, collocation_order, scheme_order,
       b0.b0x_face.device_ptr(), b0.b0y_face.device_ptr(),
       b0.b0z_cell.device_ptr(), dudt.mx.device_ptr(),
       dudt.my.device_ptr(), dudt.mz.device_ptr());
@@ -1051,24 +1290,35 @@ void launch_mhd_split_momentum_residual(
     const MhdField2D<Real>& flux_y,
     const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    bool cylindrical, int collocation_order) {
+    bool cylindrical, int collocation_order, int scheme_order) {
   if (!b0.active) return;
   const Grid2D g = dudt.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
+  const auto point_view = [](const MhdMomentumFluxParts2D<Real>& parts) {
+    CrossBPointView view;
+    for (int q = 0; q < 4; ++q) {
+      view.x[q] = parts.cross_b_point[q].x.device_ptr();
+      view.y[q] = parts.cross_b_point[q].y.device_ptr();
+      view.z[q] = parts.cross_b_point[q].z.device_ptr();
+    }
+    view.quadrature_valid = parts.quadrature_valid.device_ptr();
+    return view;
+  };
+  const CrossBPointView x_cross = point_view(parts_x);
+  const CrossBPointView y_cross = point_view(parts_y);
   hipLaunchKernelGGL(
       split_momentum_residual_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags, cylindrical ? 1 : 0,
-      collocation_order, b0.b0x_face.device_ptr(),
+      collocation_order, scheme_order, b0.globally_curl_free ? 1 : 0,
+      b0.b0x_face.device_ptr(),
       b0.b0y_face.device_ptr(), b0.b0z_cell.device_ptr(),
       flux_x.mx.device_ptr(), flux_x.my.device_ptr(), flux_x.mz.device_ptr(),
       parts_x.wave_x.device_ptr(), parts_x.wave_y.device_ptr(),
-      parts_x.wave_z.device_ptr(), parts_x.cross_bx.device_ptr(),
-      parts_x.cross_by.device_ptr(), parts_x.cross_bz.device_ptr(),
+      parts_x.wave_z.device_ptr(), x_cross,
       flux_y.mx.device_ptr(), flux_y.my.device_ptr(), flux_y.mz.device_ptr(),
       parts_y.wave_x.device_ptr(), parts_y.wave_y.device_ptr(),
-      parts_y.wave_z.device_ptr(), parts_y.cross_bx.device_ptr(),
-      parts_y.cross_by.device_ptr(), parts_y.cross_bz.device_ptr(),
+      parts_y.wave_z.device_ptr(), y_cross,
       dudt.mx.device_ptr(), dudt.my.device_ptr(), dudt.mz.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
@@ -1077,7 +1327,7 @@ void launch_mhd_cylindrical_radial_momentum_residual(
     const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
     const MhdField2D<Real>& flux_r, const MhdField2D<Real>& flux_z,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    int collocation_order,
+    int collocation_order, int scheme_order,
     const MhdMomentumFluxParts2D<Real>* parts_r,
     const MhdMomentumFluxParts2D<Real>* parts_z) {
   const Grid2D g = u.grid;
@@ -1085,10 +1335,25 @@ void launch_mhd_cylindrical_radial_momentum_residual(
   const dim3 grid = mhd_grid_2d(g, block);
   const int decomposed_flux =
       (b0.active && parts_r != nullptr && parts_z != nullptr) ? 1 : 0;
+  const auto point_view = [](const MhdMomentumFluxParts2D<Real>* parts) {
+    CrossBPointView view;
+    if (parts == nullptr) return view;
+    for (int q = 0; q < 4; ++q) {
+      view.x[q] = parts->cross_b_point[q].x.device_ptr();
+      view.y[q] = parts->cross_b_point[q].y.device_ptr();
+      view.z[q] = parts->cross_b_point[q].z.device_ptr();
+    }
+    view.quadrature_valid = parts->quadrature_valid.device_ptr();
+    return view;
+  };
+  const CrossBPointView radial_cross = point_view(parts_r);
+  const CrossBPointView axial_cross = point_view(parts_z);
   hipLaunchKernelGGL(
       cylindrical_radial_momentum_residual_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags, b0.active ? 1 : 0,
-      decomposed_flux, collocation_order, u.rho.device_ptr(), u.mx.device_ptr(),
+      b0.globally_curl_free ? 1 : 0, decomposed_flux, collocation_order,
+      scheme_order,
+      u.rho.device_ptr(), u.mx.device_ptr(),
       u.mz.device_ptr(), u.bx_face.device_ptr(), u.bz_cell.device_ptr(),
       b0.active ? b0.b0x_face.device_ptr() : nullptr,
       b0.active ? b0.b0y_face.device_ptr() : nullptr,
@@ -1096,12 +1361,7 @@ void launch_mhd_cylindrical_radial_momentum_residual(
       flux_r.mx.device_ptr(), flux_z.mx.device_ptr(),
       decomposed_flux != 0 ? parts_r->wave_x.device_ptr() : nullptr,
       decomposed_flux != 0 ? parts_z->wave_x.device_ptr() : nullptr,
-      decomposed_flux != 0 ? parts_r->cross_bx.device_ptr() : nullptr,
-      decomposed_flux != 0 ? parts_r->cross_by.device_ptr() : nullptr,
-      decomposed_flux != 0 ? parts_r->cross_bz.device_ptr() : nullptr,
-      decomposed_flux != 0 ? parts_z->cross_bx.device_ptr() : nullptr,
-      decomposed_flux != 0 ? parts_z->cross_by.device_ptr() : nullptr,
-      decomposed_flux != 0 ? parts_z->cross_bz.device_ptr() : nullptr,
+      radial_cross, axial_cross,
       dudt.mx.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
@@ -1132,10 +1392,12 @@ void launch_mhd_rk_stage(MhdField2D<Real>& out, const MhdField2D<Real>& un,
 
 void launch_mhd_split_energy_residual(
     const MhdBackgroundField<Real>& b0,
-    const MhdField2D<Real>& state,
-    const MhdField2D<Real>& flux_x, const MhdField2D<Real>& flux_y,
+    const MhdField2D<Real>& flux_x,
+    const MhdMomentumFluxParts2D<Real>& parts_x,
+    const MhdField2D<Real>& flux_y,
+    const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& actual_rate, BoundaryFlags4 flags, stream_t stream,
-    bool cylindrical, int collocation_order) {
+    bool cylindrical, int collocation_order, int scheme_order) {
   if (!b0.active) return;
   const Grid2D g = actual_rate.grid;
   const dim3 block(kBlock2D, kBlock2D);
@@ -1143,12 +1405,16 @@ void launch_mhd_split_energy_residual(
   hipLaunchKernelGGL(
       split_energy_residual_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags, cylindrical ? 1 : 0,
-      collocation_order, b0.b0x_face.device_ptr(),
+      collocation_order, scheme_order, b0.b0x_face.device_ptr(),
       b0.b0y_face.device_ptr(), b0.b0z_cell.device_ptr(),
-      state.rho.device_ptr(), state.mx.device_ptr(), state.my.device_ptr(),
-      state.mz.device_ptr(), state.bx_face.device_ptr(),
-      state.by_face.device_ptr(), state.bz_cell.device_ptr(),
       flux_x.energy.device_ptr(), flux_y.energy.device_ptr(),
+      flux_x.bx_face.device_ptr(), flux_x.by_face.device_ptr(),
+      flux_x.bz_cell.device_ptr(), flux_y.bx_face.device_ptr(),
+      flux_y.by_face.device_ptr(), flux_y.bz_cell.device_ptr(),
+      parts_x.b0_induction_covariance.device_ptr(),
+      parts_y.b0_induction_covariance.device_ptr(),
+      actual_rate.bx_face.device_ptr(), actual_rate.by_face.device_ptr(),
+      actual_rate.bz_cell.device_ptr(),
       actual_rate.energy.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }

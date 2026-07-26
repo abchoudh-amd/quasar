@@ -204,7 +204,7 @@ def _validate_alfven_wave_params(deck: "MhdDeck", params: dict) -> None:
 
 def _validate_orszag_tang_params(params: dict) -> None:
     _reject_unknown(params, {"b0"}, "initial.params")
-    _require_finite(params.get("b0", 1.0 / math.sqrt(4.0 * math.pi)),
+    _require_finite(params.get("b0", 1.0),
                     "initial.params.b0")
 
 
@@ -530,12 +530,14 @@ class MhdDeck:
         _as_bool(bg.enabled, "background_field.enabled")
         if not bg.enabled:
             return
-        # The profile must be a live registered background-field profile so a
-        # newly-registered profile needs no Python edit (mirrors the numerics
-        # scheme validation).
-        _check_registered(bg.profile,
-                          _core.mhd.registered_mhd_background_profiles(),
-                          "background_field.profile")
+        analytic_mode = bg.file is None and bg.a_file is None
+        # A profile is consumed only in analytic mode. Explicit file modes
+        # replace all native placeholder samples, so a stale profile name must
+        # not make otherwise valid file input fail.
+        if analytic_mode:
+            _check_registered(bg.profile,
+                              _core.mhd.registered_mhd_background_profiles(),
+                              "background_field.profile")
         if not isinstance(bg.params, dict):
             raise ValueError("background_field.params must be a mapping")
         for key, value in bg.params.items():
@@ -550,7 +552,7 @@ class MhdDeck:
             if not isinstance(project, (bool, np.bool_)):
                 raise ValueError(
                     "background_field.params.vacuum_project must be a boolean")
-            if project and bg.a_file is None:
+            if bg.a_file is None:
                 raise ValueError(
                     "background_field.params.vacuum_project requires "
                     "background_field.a_file")
@@ -558,8 +560,9 @@ class MhdDeck:
                 raise ValueError(
                     "background_field.params.vacuum_project is currently "
                     "defined only for cylindrical A_phi data")
-        # Uniform-vector parameters must be finite. (They are still parsed/stored
-        # for a non-uniform profile, but only consumed by the uniform profile.)
+        # Legacy uniform-vector values are finite and mode-specific. Reject
+        # ignored nonzero values rather than silently accepting a misspelled or
+        # contradictory deck.
         _require_finite(bg.bx0, "background_field.bx0")
         _require_finite(bg.by0, "background_field.by0")
         _require_finite(bg.bz0, "background_field.bz0")
@@ -571,6 +574,28 @@ class MhdDeck:
             raise ValueError(
                 "background_field: set at most one of 'file' (staggered B0 arrays) "
                 "or 'a_file' (coil vector-potential A); they are mutually exclusive")
+        if bg.file is not None and bg.params:
+            raise ValueError(
+                "background_field.params is not used with background_field.file")
+        if bg.a_file is not None:
+            unknown = set(bg.params) - {"b_scale", "vacuum_project"}
+            if unknown:
+                names = ", ".join(sorted(unknown))
+                raise ValueError(
+                    "unknown background_field.params key(s) for a_file: " + names)
+        if analytic_mode and bg.profile != "uniform" and any(
+                value != 0.0 for value in (bg.bx0, bg.by0, bg.bz0)):
+            raise ValueError(
+                "background_field.bx0/by0/bz0 are valid only for profile "
+                "'uniform'")
+        if bg.file is not None and any(
+                value != 0.0 for value in (bg.bx0, bg.by0, bg.bz0)):
+            raise ValueError(
+                "background_field.bx0/by0/bz0 are not used with file input")
+        if bg.a_file is not None and (bg.bx0 != 0.0 or bg.by0 != 0.0):
+            raise ValueError(
+                "background_field.bx0/by0 are not used with a_file input; "
+                "bz0 is the supported uniform out-of-plane component")
         # An ABSOLUTE file path's existence is knowable now (independent of the
         # deck directory), so reject an enabled background whose only source is a
         # non-existent absolute file at parse time -- an enabled block must name a
@@ -739,11 +764,17 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
     _reject_unknown(
         d, {"enabled", "profile", "bx0", "by0", "bz0", "params", "file",
             "a_file"}, "background_field")
+    enabled = _as_bool(d.get("enabled", False), "background_field.enabled")
+    # `enabled` is a true master switch: ignored values in a disabled block do
+    # not participate in parsing, registry lookup, unit conversion, or native
+    # validation. Canonicalize it to the same defaults as an absent block.
+    if not enabled:
+        return BackgroundConfig()
     file_raw = d.get("file")
     a_file_raw = d.get("a_file")
     params = _mapping(d.get("params", {}), "background_field.params")
     return BackgroundConfig(
-        enabled=_as_bool(d.get("enabled", False), "background_field.enabled"),
+        enabled=enabled,
         profile=str(d.get("profile", "uniform")),
         bx0=float(d.get("bx0", 0.0)),
         by0=float(d.get("by0", 0.0)),
@@ -988,9 +1019,10 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     b0y = mhd_units.magnetic_to_internal(b0y, deck.units)
     b0z = mhd_units.magnetic_to_internal(b0z, deck.units)
 
-    # Use the same per-cell, common-exponent relative defect as the native live
-    # and background preflights.  This is invariant under field-unit and mesh
-    # rescaling; there is no unit-dependent absolute floor.
+    # Use the same per-cell directional-derivative defect as the native live
+    # and background preflights. Local Cartesian offsets cancel before the
+    # common-exponent ratio, so a strong DC field cannot hide a represented
+    # slope and there is no unit-dependent absolute floor.
     divb_defect = mhd_num.background_divergence_relative_linf(
         b0x, b0y, nx, ny, g, dx, dy,
         geometry=deck.geometry, origin_x=deck.domain.origin_x_m)
@@ -1413,7 +1445,15 @@ def _ic_alfven_wave(deck: MhdDeck, nghost: int) -> dict:
         vz = -sign(B0) A/sqrt(rho) cos(k xi)
 
     so dv = -dB/sqrt(rho) (a +x-propagating Alfven wave). Bx = B0 (uniform),
-    vx = 0, rho and p uniform. Energy from primitive_to_energy.
+    vx = 0, rho and p uniform.
+
+    The native state is finite-volume data, so the transverse momentum and
+    ``bz_cell`` entries are exact cell averages and ``by_face`` is the exact
+    average over its x-directed face.  All therefore carry
+    ``sinc(k*dx/2)`` relative to the value at the cell centre.  The exact total
+    energy does *not* carry that factor: circular polarization makes the sum of
+    the sine/cosine kinetic and magnetic energies spatially constant.  Preserve
+    that sub-cell variance explicitly after forming the averaged primitives.
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma
@@ -1429,6 +1469,8 @@ def _ic_alfven_wave(deck: MhdDeck, nghost: int) -> dict:
     state = _empty_state(shape)
     k = 2.0 * np.pi * n / deck.domain.lx_m
     phase = k * (xc - deck.domain.origin_x_m)
+    # numpy.sinc(q) = sin(pi*q)/(pi*q).  Here k*dx/2 = pi*n/nx.
+    fv_average = float(np.sinc(n / deck.domain.nx))
     # In SI the eigen-relation uses dB/sqrt(mu0*rho); normalized decks already
     # carry B in mu0=1 units.
     magnetic_velocity_scale = (1.0 / mhd_units.SQRT_MU0
@@ -1438,24 +1480,30 @@ def _ic_alfven_wave(deck: MhdDeck, nghost: int) -> dict:
 
     rho = np.full(shape, rho0)
     vx = np.zeros(shape)
-    # Transverse velocity perturbations evaluated at cell centers.
-    vy = -amp * inv_sqrt_rho * np.sin(phase)
-    vz = -amp * inv_sqrt_rho * np.cos(phase)
+    # Exact volume averages of the transverse velocity perturbations.
+    vy = -amp * inv_sqrt_rho * fv_average * np.sin(phase)
+    vz = -amp * inv_sqrt_rho * fv_average * np.cos(phase)
     # bx is uniform (background), so the face value equals the cell value.
     bx = np.full(shape, b0)
-    # by varies only with x; sample by_face at the bottom face -> same x as cell
-    # center is fine for an x-only field. Use cell-center x for consistency with
-    # the velocity sampling (div B stays ~0 because Bx is uniform and
-    # d(By)/dy = 0).
-    by = amp * np.sin(phase)
-    bz = amp * np.cos(phase)
+    # A y-normal face spans one cell in x, so its x-only By profile has the same
+    # sinc average as a cell volume.  Bz is cell-centred and volume-averaged.
+    # div B remains zero because Bx is uniform and By is independent of y.
+    by = amp * fv_average * np.sin(phase)
+    bz = amp * fv_average * np.cos(phase)
     pr = np.full(shape, pr0)
     _set_primitive(state, rho, vx, vy, vz, pr, bx, by, bz, gamma)
+    # _set_primitive sees averaged v and B and would therefore omit the
+    # unresolved sin/cos variance.  In internal magnetic units the missing
+    # kinetic and magnetic halves sum to this constant exact cell-average
+    # contribution.  build_initial_state's later face-collocation adjustment
+    # leaves this explicit sub-cell energy correction untouched.
+    state["energy"] += ((amp * magnetic_velocity_scale) ** 2
+                        * (1.0 - fv_average * fv_average))
     return _pack(state)
 
 
 def _ic_orszag_tang(deck: MhdDeck, nghost: int) -> dict:
-    """Orszag-Tang vortex (gamma-derived ambient state, b0 = 1/sqrt(4 pi)).
+    """Orszag-Tang vortex in the uniformly rescaled ``mu0 = 1`` convention.
 
     params: b0. In domain-relative coordinates
     ``xi=(x-origin_x)/lx``, ``eta=(y-origin_y)/ly``::
@@ -1472,7 +1520,7 @@ def _ic_orszag_tang(deck: MhdDeck, nghost: int) -> dict:
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma
-    b0 = float(p.get("b0", 1.0 / math.sqrt(4.0 * math.pi)))
+    b0 = float(p.get("b0", 1.0))
     xc, yc, xf, yf, dx, dy = _padded_grids(deck.domain, nghost)
     shape = xc.shape
     state = _empty_state(shape)
@@ -1566,9 +1614,14 @@ def _ic_rotor(deck: MhdDeck, nghost: int) -> dict:
     f = np.where(r >= r1, 0.0, f)
 
     rho = rho_out + f * (rho_in - rho_out)
-    # Rigid-body rotation inside; in the taper scale the rim speed by f. The rim
-    # speed at radius r for solid-body omega is omega*r; the taper damps it by f.
-    speed_factor = np.where(inside, omega, f * omega)
+    # Rigid-body rotation inside. In the transition use the standard rotor
+    # profile v_phi=f*u0, continuous with the rim speed at r=r0 and tapering to
+    # rest at r=r1. ``speed_factor`` is v_phi/r for the components below; the
+    # taper never contains r=0.
+    speed_factor = np.zeros_like(r)
+    speed_factor[inside] = omega
+    taper = (r > r0) & (r < r1)
+    speed_factor[taper] = f[taper] * u0 / r[taper]
     vx = -speed_factor * ry
     vy = speed_factor * rx
     # Zero exactly outside the taper.

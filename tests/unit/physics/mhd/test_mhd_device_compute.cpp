@@ -20,6 +20,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
+#include "quasar/numerics/finite_volume_quadrature.hpp"
 #include "quasar/numerics/mhd_state.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
@@ -618,7 +619,183 @@ TEST(MhdDeviceCompute, CflUsesReconstructedMpFaceSpeed) {
   }
   const Real expected = cfg.cfl / max_reconstructed_rate;
   const Real got = solver.cfl_limit();
-  EXPECT_NEAR(got, expected, Real{3e-13} * expected);
+  // This face-average reference is an upper bound on dt.  The production MP
+  // path also checks transverse Gauss points on the orthogonal faces; those
+  // points can expose a still-faster admissible state (covered exactly by the
+  // next regression), but the solver must never return a looser face CFL.
+  EXPECT_GT(got, Real{0});
+  EXPECT_LE(got, expected + Real{3e-13} * expected);
+}
+
+TEST(MhdDeviceCompute, CflUsesFasterTransverseGaussPoint) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D g{8, 8, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/4};
+  constexpr Real gamma = Real{5} / Real{3};
+  constexpr Real energy = Real{100};
+  const std::size_t n = g.storage_size();
+  quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
+  quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
+  std::vector<quasar::numerics::MhdState> xstate(n), ystate(n);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    const Real vx = (j & 1) == 0 ? Real{1} : Real{-1};
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      xstate[g.index(i, j)] = quasar::numerics::MhdState{
+          Real{1}, vx, Real{0}, Real{0}, energy,
+          Real{0}, Real{0}, Real{0}};
+      ystate[g.index(i, j)] = quasar::numerics::MhdState{
+          Real{1}, Real{0}, Real{0}, Real{0}, energy,
+          Real{0}, Real{0}, Real{0}};
+    }
+  }
+  const auto copy_states = [&](auto& iface, const auto& states) {
+    std::vector<Real> values(n);
+    const auto copy = [&](auto& left, auto& right,
+                          Real quasar::numerics::MhdState::*member) {
+      for (std::size_t k = 0; k < n; ++k) values[k] = states[k].*member;
+      left.copy_from_host(values.data(), n);
+      right.copy_from_host(values.data(), n);
+    };
+    copy(iface.Lrho, iface.Rrho, &quasar::numerics::MhdState::rho);
+    copy(iface.Lmx, iface.Rmx, &quasar::numerics::MhdState::mx);
+    copy(iface.Lmy, iface.Rmy, &quasar::numerics::MhdState::my);
+    copy(iface.Lmz, iface.Rmz, &quasar::numerics::MhdState::mz);
+    copy(iface.Lenergy, iface.Renergy, &quasar::numerics::MhdState::energy);
+    copy(iface.Lbx, iface.Rbx, &quasar::numerics::MhdState::bx);
+    copy(iface.Lby, iface.Rby, &quasar::numerics::MhdState::by);
+    copy(iface.Lbz, iface.Rbz, &quasar::numerics::MhdState::bz);
+  };
+  copy_states(ifx, xstate);
+  copy_states(ify, ystate);
+
+  // The MP5 midpoint recovery of an alternating face-average pattern is
+  // 1.24166..., exceeding |vx|=1 on every stored face average. The recovered
+  // energy and density remain constant, so this point is admissible and must
+  // tighten the finite-volume Courant coefficient.
+  Real recovered_vx = Real{0};
+  for (int k = 0; k < 5; ++k) {
+    const Real sample = (k & 1) == 0 ? Real{1} : Real{-1};
+    recovered_vx +=
+        quasar::numerics::kMp5TransversePointWeights[1][k] * sample;
+  }
+  ASSERT_GT(std::abs(recovered_vx), Real{1});
+  const quasar::numerics::MhdState base_x{
+      Real{1}, Real{1}, Real{0}, Real{0}, energy,
+      Real{0}, Real{0}, Real{0}};
+  const quasar::numerics::MhdState point_x{
+      Real{1}, recovered_vx, Real{0}, Real{0}, energy,
+      Real{0}, Real{0}, Real{0}};
+  const quasar::numerics::MhdState base_y{
+      Real{1}, Real{0}, Real{0}, Real{0}, energy,
+      Real{0}, Real{0}, Real{0}};
+  const Real base_alpha_x = Real{1} +
+      quasar::numerics::fast_magnetosonic_speed(base_x, 0, gamma);
+  const Real point_alpha_x = std::abs(recovered_vx) +
+      quasar::numerics::fast_magnetosonic_speed(point_x, 0, gamma);
+  const Real base_alpha_y =
+      quasar::numerics::fast_magnetosonic_speed(base_y, 1, gamma);
+  const Real base_only_rate =
+      base_alpha_x / g.dx() + base_alpha_y / g.dy();
+  const Real expected_rate =
+      point_alpha_x / g.dx() + base_alpha_y / g.dy();
+  ASSERT_GT(expected_rate, base_only_rate);
+
+  quasar::mhd::MhdBackgroundField<Real> background{};
+  quasar::backend::DeviceBuffer<Real> scratch;
+  quasar::mhd::ScaledCflRate reduced_rate{};
+  quasar::mhd::launch_mhd_cfl_max_rate(
+      ifx, ify, background, gamma, scratch, &reduced_rate,
+      /*stream=*/nullptr, /*scheme_order=*/5,
+      /*cylindrical=*/false, quasar::mhd::BoundaryFlags4{});
+  ASSERT_EQ(reduced_rate.rate_scale, Real{1});
+  const Real actual_rate = reduced_rate.scaled_max_rate;
+  EXPECT_GT(actual_rate, base_only_rate);
+  EXPECT_NEAR(actual_rate, expected_rate, Real{3e-13} * expected_rate);
+}
+
+TEST(MhdDeviceCompute, CflMatchesHlldCrossSideOuterFan) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D g{8, 8, Real{8}, Real{8}, Real{0}, Real{0}, /*nghost=*/2};
+  constexpr Real gamma = Real{5} / Real{3};
+  constexpr Real left_vx = Real{10};
+  constexpr Real left_p = Real{1};
+  constexpr Real right_p = Real{100};
+  constexpr Real y_p = Real{4};
+  const quasar::numerics::MhdState left{
+      Real{1}, left_vx, Real{0}, Real{0},
+      left_p / (gamma - Real{1}) + Real{0.5} * left_vx * left_vx,
+      Real{0}, Real{0}, Real{0}};
+  const quasar::numerics::MhdState right{
+      Real{1}, Real{0}, Real{0}, Real{0},
+      right_p / (gamma - Real{1}), Real{0}, Real{0}, Real{0}};
+  const quasar::numerics::MhdState y_state{
+      Real{1}, Real{0}, Real{0}, Real{0},
+      y_p / (gamma - Real{1}), Real{0}, Real{0}, Real{0}};
+
+  const std::size_t n = g.storage_size();
+  quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
+  quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
+  const std::vector<quasar::numerics::MhdState> x_left(n, left);
+  const std::vector<quasar::numerics::MhdState> x_right(n, right);
+  const std::vector<quasar::numerics::MhdState> y_side(n, y_state);
+  const auto copy_component = [&](auto& left_buffer, auto& right_buffer,
+                                  const auto& left_states,
+                                  const auto& right_states,
+                                  Real quasar::numerics::MhdState::*member) {
+    std::vector<Real> left_values(n), right_values(n);
+    for (std::size_t k = 0; k < n; ++k) {
+      left_values[k] = left_states[k].*member;
+      right_values[k] = right_states[k].*member;
+    }
+    left_buffer.copy_from_host(left_values.data(), n);
+    right_buffer.copy_from_host(right_values.data(), n);
+  };
+  const auto copy_interface = [&](auto& iface, const auto& left_states,
+                                  const auto& right_states) {
+    copy_component(iface.Lrho, iface.Rrho, left_states, right_states,
+                   &quasar::numerics::MhdState::rho);
+    copy_component(iface.Lmx, iface.Rmx, left_states, right_states,
+                   &quasar::numerics::MhdState::mx);
+    copy_component(iface.Lmy, iface.Rmy, left_states, right_states,
+                   &quasar::numerics::MhdState::my);
+    copy_component(iface.Lmz, iface.Rmz, left_states, right_states,
+                   &quasar::numerics::MhdState::mz);
+    copy_component(iface.Lenergy, iface.Renergy, left_states, right_states,
+                   &quasar::numerics::MhdState::energy);
+    copy_component(iface.Lbx, iface.Rbx, left_states, right_states,
+                   &quasar::numerics::MhdState::bx);
+    copy_component(iface.Lby, iface.Rby, left_states, right_states,
+                   &quasar::numerics::MhdState::by);
+    copy_component(iface.Lbz, iface.Rbz, left_states, right_states,
+                   &quasar::numerics::MhdState::bz);
+  };
+  copy_interface(ifx, x_left, x_right);
+  copy_interface(ify, y_side, y_side);
+
+  const Real left_fast =
+      quasar::numerics::fast_magnetosonic_speed(left, 0, gamma);
+  const Real right_fast =
+      quasar::numerics::fast_magnetosonic_speed(right, 0, gamma);
+  const Real y_fast =
+      quasar::numerics::fast_magnetosonic_speed(y_state, 1, gamma);
+  const Real hlld_x = std::max(std::abs(left_vx), Real{0}) +
+      std::max(left_fast, right_fast);
+  const Real old_per_side_x = std::max(
+      std::abs(left_vx) + left_fast, right_fast);
+  ASSERT_GT(hlld_x, Real{1.5} * old_per_side_x);
+  const Real expected_rate = hlld_x / g.dx() + y_fast / g.dy();
+
+  quasar::mhd::MhdBackgroundField<Real> background{};
+  quasar::backend::DeviceBuffer<Real> scratch;
+  quasar::mhd::ScaledCflRate reduced_rate{};
+  quasar::mhd::launch_mhd_cfl_max_rate(
+      ifx, ify, background, gamma, scratch, &reduced_rate,
+      /*stream=*/nullptr, /*scheme_order=*/2,
+      /*cylindrical=*/false, quasar::mhd::BoundaryFlags4{});
+  ASSERT_EQ(reduced_rate.rate_scale, Real{1});
+  const Real actual_rate = reduced_rate.scaled_max_rate;
+  EXPECT_NEAR(actual_rate, expected_rate, Real{3e-13} * expected_rate);
 }
 
 // A grid-scale curl field can have zero collocated B in every cell while its
@@ -687,6 +864,79 @@ TEST(MhdDeviceCompute, LiveStateRejectsResolvedDiscreteMagneticDivergence) {
   EXPECT_THROW(solver.step(Real{1e-6}), std::invalid_argument);
 }
 
+TEST(MhdDeviceCompute, LiveStateRejectsOneUlpSlopeOnLargeDcField) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = base_config();
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const Real offset = std::scalbn(Real{1}, 40);
+  seed_uniform(solver, cfg.grid, cfg.gamma,
+               /*rho=*/Real{1}, /*vx=*/Real{0}, /*vy=*/Real{0},
+               /*vz=*/Real{0}, /*p=*/offset * offset,
+               /*bx=*/offset, /*by=*/Real{0}, /*bz=*/Real{0});
+
+  auto bx = solver.state_component_to_host("bx_face");
+  bx[cfg.grid.index(3, 4)] = std::nextafter(
+      offset, std::numeric_limits<Real>::infinity());
+  solver.seed_state("bx_face", bx);
+
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+  EXPECT_THROW(solver.step(Real{1e-20}), std::invalid_argument);
+}
+
+TEST(MhdDeviceCompute, LiveStateRejectsSameSignUlpsOnLargeDcField) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = base_config();
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const Real offset = std::scalbn(Real{1}, 40);
+  seed_uniform(solver, cfg.grid, cfg.gamma,
+               /*rho=*/Real{1}, /*vx=*/Real{0}, /*vy=*/Real{0},
+               /*vz=*/Real{0}, /*p=*/offset * offset,
+               /*bx=*/offset, /*by=*/offset, /*bz=*/Real{0});
+
+  auto bx = solver.state_component_to_host("bx_face");
+  auto by = solver.state_component_to_host("by_face");
+  const Real upper = std::nextafter(
+      offset, std::numeric_limits<Real>::infinity());
+  // Both upper faces of cell (3,3) rise by one storage ulp. Their directional
+  // derivatives reinforce rather than cancel, so the forward-error envelope
+  // is unavailable even though each individual face change is tiny.
+  bx[cfg.grid.index(4, 3)] = upper;
+  by[cfg.grid.index(3, 4)] = upper;
+  solver.seed_state("bx_face", bx);
+  solver.seed_state("by_face", by);
+
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+  EXPECT_THROW(solver.step(Real{1e-20}), std::invalid_argument);
+}
+
+TEST(MhdDeviceCompute, MutableExposureRevokesSolverOwnedRoundoffEnvelope) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = base_config();
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const Real offset = std::scalbn(Real{1}, 40);
+  seed_uniform(solver, cfg.grid, cfg.gamma,
+               /*rho=*/Real{1}, /*vx=*/Real{0}, /*vy=*/Real{0},
+               /*vz=*/Real{0}, /*p=*/offset * offset,
+               /*bx=*/offset, /*by=*/Real{0}, /*bz=*/Real{0});
+
+  // A completed internal CT/RK step earns solver-owned provenance. Obtaining a
+  // mutable view permanently revokes it because the view can be retained and
+  // written between any later preflights.
+  const Real dt = Real{0.1} * solver.cfl_limit();
+  ASSERT_NO_THROW(solver.step_unchecked(dt));
+  auto bx = solver.state_component_to_host("bx_face");
+  auto& retained = solver.state();
+  bx[cfg.grid.index(3, 4)] = std::nextafter(
+      offset, std::numeric_limits<Real>::infinity());
+  retained.bx_face.copy_from_host(bx.data(), bx.size());
+
+  EXPECT_THROW((void)solver.cfl_limit(), std::invalid_argument);
+  EXPECT_THROW(solver.step_unchecked(dt), std::invalid_argument);
+}
+
 TEST(MhdDeviceCompute, LiveStateAcceptsRoundoffLevelMagneticDivergence) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
@@ -695,12 +945,27 @@ TEST(MhdDeviceCompute, LiveStateAcceptsRoundoffLevelMagneticDivergence) {
   seed_uniform(solver, cfg.grid, cfg.gamma,
                /*rho=*/Real{1}, /*vx=*/Real{0}, /*vy=*/Real{0},
                /*vz=*/Real{0}, /*p=*/Real{1},
-               /*bx=*/Real{0.2}, /*by=*/Real{-0.1}, /*bz=*/Real{0});
+               /*bx=*/Real{0}, /*by=*/Real{0}, /*bz=*/Real{0});
 
   auto bx = solver.state_component_to_host("bx_face");
-  bx[cfg.grid.index(3, 4)] +=
-      Real{32} * std::numeric_limits<Real>::epsilon();
+  auto by = solver.state_component_to_host("by_face");
+  constexpr int corner_i = 3;
+  constexpr int corner_j = 4;
+  constexpr Real x_potential = Real{1e-6};
+  const Real y_potential = std::nextafter(x_potential, Real{0});
+  // A one-corner discrete curl gives four cells equal/opposite directional
+  // derivatives. Use adjacent floating values for its x/y amplitudes so every
+  // cancellation has a genuine O(epsilon) residual rather than being exact.
+  bx[cfg.grid.index(corner_i, corner_j - 1)] +=
+      x_potential / cfg.grid.dy();
+  bx[cfg.grid.index(corner_i, corner_j)] -=
+      x_potential / cfg.grid.dy();
+  by[cfg.grid.index(corner_i - 1, corner_j)] -=
+      y_potential / cfg.grid.dx();
+  by[cfg.grid.index(corner_i, corner_j)] +=
+      y_potential / cfg.grid.dx();
   solver.seed_state("bx_face", bx);
+  solver.seed_state("by_face", by);
 
   const Real dt = solver.cfl_limit();
   ASSERT_TRUE(std::isfinite(dt));
@@ -708,11 +973,12 @@ TEST(MhdDeviceCompute, LiveStateAcceptsRoundoffLevelMagneticDivergence) {
   EXPECT_NO_THROW(solver.step(Real{0.1} * dt));
 }
 
-// A conservative state may have finite kinetic/internal energy even when
-// |m|/rho and c_fast exceed binary64's range. If the mesh spacing is comparably
-// large, their Courant rates remain ordinary finite numbers. The face reduction
-// must scale before dividing rather than rejecting the unmaterializable speed.
-TEST(MhdDeviceCompute, FaceCflKeepsRepresentableExtremeRates) {
+// A large mesh can make alpha/dx finite even when the physical Riemann fan
+// alpha is not representable. That quotient is not a usable CFL rate: HLLD
+// consumes alpha and the physical flux before applying the mesh metric. Reject
+// the state deterministically instead of returning a timestep that cannot be
+// advanced by the configured operator.
+TEST(MhdDeviceCompute, CflRejectsUnrepresentablePhysicalFaceFan) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   auto cfg = base_config();
@@ -752,21 +1018,65 @@ TEST(MhdDeviceCompute, FaceCflKeepsRepresentableExtremeRates) {
   solver.seed_state("by", zero);
   solver.seed_state("bz", zero);
 
-  const long double rho_ld = static_cast<long double>(rho0);
-  const long double p_ld = static_cast<long double>(p0);
-  const long double sound_ld = std::sqrt(
-      static_cast<long double>(cfg.gamma) * p_ld / rho_ld);
-  const long double vx_ld =
-      std::abs(static_cast<long double>(mx0)) / rho_ld;
-  const long double rate_ld =
-      (vx_ld + sound_ld) / static_cast<long double>(g.dx()) +
-      sound_ld / static_cast<long double>(g.dy());
-  const Real expected = static_cast<Real>(
-      static_cast<long double>(std::min(cfg.cfl, Real{0.2})) / rate_ld);
-  const Real got = solver.cfl_limit();
-  ASSERT_TRUE(std::isfinite(got));
-  ASSERT_GT(got, Real{0});
-  EXPECT_NEAR(got, expected, Real{3e-13} * expected);
+  EXPECT_THROW((void)solver.cfl_limit(), std::runtime_error);
+}
+
+// Here the physical state and every directional HLLD flux are ordinary O(1)
+// values. Only the tiny mesh metric makes each directional incident-face rate
+// approach DBL_MAX, and their unsplit two-dimensional sum overflows. A stable
+// positive subnormal timestep nevertheless exists; the homogeneous retry must
+// recover it and the full HLLD/flux-difference/RK path must advance it.
+TEST(MhdDeviceCompute, CflRecoversAdvanceableSubnormalMetricTimestep) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = base_config();
+  const Real spacing = std::scalbn(Real{1}, -1023);
+  cfg.grid = Grid2D{8, 8, Real{8} * spacing, Real{8} * spacing,
+                    Real{0}, Real{0}, /*nghost=*/4};
+  cfg.cfl = Real{0.2};
+  const Grid2D& g = cfg.grid;
+  ASSERT_EQ(g.dx(), spacing);
+  ASSERT_EQ(g.dy(), spacing);
+
+  constexpr Real rho0 = Real{1};
+  constexpr Real p0 = Real{1};
+  const Real sound = std::sqrt(cfg.gamma * p0 / rho0);
+  const Real directional_rate = sound / spacing;
+  ASSERT_TRUE(std::isfinite(directional_rate));
+  ASSERT_GT(directional_rate,
+            Real{0.5} * std::numeric_limits<Real>::max());
+  ASSERT_FALSE(std::isfinite(directional_rate + directional_rate));
+
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform(solver, g, cfg.gamma,
+               rho0, Real{0}, Real{0}, Real{0}, p0,
+               Real{0}, Real{0}, Real{0});
+
+  const Real expected = (cfg.cfl * spacing) / (Real{2} * sound);
+  ASSERT_GT(expected, Real{0});
+  ASSERT_EQ(std::fpclassify(expected), FP_SUBNORMAL);
+  const Real dt = solver.cfl_limit();
+  ASSERT_TRUE(std::isfinite(dt));
+  ASSERT_GT(dt, Real{0});
+  EXPECT_EQ(std::fpclassify(dt), FP_SUBNORMAL);
+  EXPECT_NEAR(
+      dt, expected, Real{16} * std::numeric_limits<Real>::denorm_min());
+
+  ASSERT_NO_THROW(solver.step(dt));
+  const auto rho = solver.state_component_to_host("rho");
+  const auto mx = solver.state_component_to_host("mx");
+  const auto my = solver.state_component_to_host("my");
+  const auto energy = solver.state_component_to_host("energy");
+  const Real energy0 = p0 / (cfg.gamma - Real{1});
+  for (int j = 0; j < g.ny; ++j) {
+    for (int i = 0; i < g.nx; ++i) {
+      const std::size_t k = g.index(i, j);
+      EXPECT_DOUBLE_EQ(rho[k], rho0);
+      EXPECT_DOUBLE_EQ(mx[k], Real{0});
+      EXPECT_DOUBLE_EQ(my[k], Real{0});
+      EXPECT_DOUBLE_EQ(energy[k], energy0);
+    }
+  }
 }
 
 // A pressureless seed is outside the strict ideal-MHD admissible set.  Reject it

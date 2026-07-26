@@ -26,7 +26,10 @@ class FileGridEvaluator final : public numerics::IFieldEvaluator {
 
   Field<Vec3> evaluate_B(const core::IFieldSource&,
                          const core::PointCloud& observations) const override;
-  bool provides_grad_B() const noexcept override { return true; }
+  // A complete Jacobian is determined only when the configured map has at
+  // least two nodes on every axis.  A singleton axis is one geometric plane,
+  // not an assertion that the field is invariant normal to that plane.
+  bool provides_grad_B() const noexcept override;
   Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
                                 const core::PointCloud& observations) const override;
 

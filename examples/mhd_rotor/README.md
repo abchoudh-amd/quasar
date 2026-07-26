@@ -18,18 +18,18 @@ PYTHONPATH=build/hip-gfx942-release/python \
   python -m quasar.mhd.cli run examples/mhd_rotor/input.yaml
 ```
 
-The deck is in `units: normalized` (`gamma = 5/3`). Output is written next to
+The deck is in `units: normalized` (`gamma = 1.4`). Output is written next to
 `input.yaml` as `out.npz`.
 
 ## Canonical setup
 
-On `[0,1] × [0,1]`, rotor centered at `(0.5, 0.5)`, with `gamma = 5/3`:
+On `[0,1] × [0,1]`, rotor centered at `(0.5, 0.5)`, with `gamma = 1.4`:
 
 ```
 r0 = 0.1 (disk radius),  r1 = 0.115 (linear taper to ambient)
 inside  (r < r0):  rho = 10,  v = omega * (-(y-0.5), (x-0.5), 0),  omega = u0/r0
 outside (r > r1):  rho = 1,   v = 0
-taper   (r0<r<r1): linear blend f = (r1-r)/(r1-r0) of rho and the rim velocity
+taper   (r0<r<r1): rho = 1+9f and v_phi = f*u0, f = (r1-r)/(r1-r0)
 everywhere:        p = 1,  B = (5/sqrt(4*pi), 0, 0)
 ```
 

@@ -174,6 +174,12 @@ class VelocityPerturbation:
 
 @dataclass
 class SpeciesInitial:
+    """Physical particle distribution at ``t=0``.
+
+    ``drift_v`` and any ``velocity_perturbation`` are integer-time velocities;
+    the solver applies the initial half-width Boris force update. Deck authors
+    must not pre-stagger them to ``t=-dt/2``.
+    """
     distribution: str = "maxwellian_uniform"
     density_per_m3: float = 1.0e18
     temperature_eV: float = 1.0
@@ -210,7 +216,10 @@ class BoundaryConfig:
 
     ``particle`` is one of ``periodic`` (no-op), ``specular`` (reflect), or
     ``absorbing`` (mark out-of-domain particles as dead). ``field`` is one of
-    ``periodic`` or ``pec`` (perfect electric conductor / reflecting wall).
+    ``periodic``, ``pec`` (perfect electric conductor / reflecting wall), or
+    vacuum-only first-order Mur ``outflow``. The solver rejects charged species
+    with an ``outflow`` field side because that closure is not charge/current
+    compatible.
     """
     particle: tuple[str, str, str, str] = (
         "periodic", "periodic", "periodic", "periodic")
@@ -490,6 +499,11 @@ class PicDeck:
         _as_integer(self.numerics.fdtd_order, "numerics.fdtd_order")
         if self.numerics.fdtd_order not in (2, 4):
             raise ValueError("numerics.fdtd_order must be 2 or 4")
+        if (self.numerics.fdtd_order == 4
+                and (self.domain.nx < 2 or self.domain.ny < 2)):
+            raise ValueError(
+                "numerics.fdtd_order 4 requires domain.nx and domain.ny "
+                "to be at least 2")
         if self.numerics.shape not in ("cic", "tsc"):
             raise ValueError("numerics.shape must be 'cic' or 'tsc'")
         allowed_filters = set(_core.pic.registered_current_filters())

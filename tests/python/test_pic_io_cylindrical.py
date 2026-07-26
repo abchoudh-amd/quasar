@@ -184,6 +184,18 @@ class CylindricalFdtdOrderTests(unittest.TestCase):
     def test_fdtd_order_2_accepted(self):
         _cyl_deck(numerics=Numerics(fdtd_order=2, shape="cic")).validate()
 
+    def test_fdtd_order_4_rejects_one_cell_axis(self):
+        for nx, ny in ((1, 8), (8, 1)):
+            with self.subTest(nx=nx, ny=ny):
+                with self.assertRaisesRegex(
+                        ValueError, r"fdtd_order 4 requires.*at least 2"):
+                    _cyl_deck(
+                        domain=Domain(
+                            nx=nx, ny=ny, lx_m=1.0, ly_m=1.0,
+                            origin_x_m=0.0),
+                        numerics=Numerics(fdtd_order=4, shape="cic"),
+                    ).validate()
+
 
 class CylindricalOuterRadiusBoundaryTests(unittest.TestCase):
 

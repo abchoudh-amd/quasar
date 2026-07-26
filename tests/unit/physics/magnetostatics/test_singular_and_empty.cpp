@@ -207,6 +207,47 @@ TEST(BiotSavartNumerics, OppositeSignObservationDifferenceDoesNotFalseSingular) 
   EXPECT_EQ(potential[0].z, Real{0});
 }
 
+TEST(BiotSavartNumerics,
+     NextRepresentablePointPastEndpointIsFiniteInEitherOrientation) {
+  if (!::quasar::backend::has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime";
+  }
+
+  const auto expect_finite_exterior = [](Vec3 a, Vec3 b, Real point_x) {
+    ConductorSystem conductors;
+    conductors.add(Filament{"endpoint_exterior", Real{1}, {a, b}});
+    PointCloud point;
+    point.add(Vec3{point_x, 0, 0});
+
+    const BiotSavartEvaluator eval;
+    const auto field = eval.evaluate_B(conductors, point);
+    const auto potential = eval.evaluate_A(conductors, point);
+    const auto gradient = eval.evaluate_grad_B(conductors, point);
+    ASSERT_EQ(field.size(), 1u);
+    ASSERT_EQ(potential.size(), 1u);
+    ASSERT_EQ(gradient.size(), 1u);
+
+    // A point on the exterior extension has exactly zero B.  A and grad(B)
+    // become large this close to the endpoint, but remain mathematically finite.
+    EXPECT_EQ(field[0].x, Real{0});
+    EXPECT_EQ(field[0].y, Real{0});
+    EXPECT_EQ(field[0].z, Real{0});
+    for (const Real value : {
+             potential[0].x, potential[0].y, potential[0].z,
+             gradient[0].r0.x, gradient[0].r0.y, gradient[0].r0.z,
+             gradient[0].r1.x, gradient[0].r1.y, gradient[0].r1.z,
+             gradient[0].r2.x, gradient[0].r2.y, gradient[0].r2.z}) {
+      EXPECT_TRUE(std::isfinite(value));
+    }
+  };
+
+  const Real infinity = std::numeric_limits<Real>::infinity();
+  expect_finite_exterior(
+      Vec3{-1, 0, 0}, Vec3{1, 0, 0}, std::nextafter(Real{1}, infinity));
+  expect_finite_exterior(
+      Vec3{1, 0, 0}, Vec3{-1, 0, 0}, std::nextafter(Real{-1}, -infinity));
+}
+
 TEST(BiotSavartNumerics, UnderflowedTransverseOffsetIsNotFalseSingular) {
   if (!::quasar::backend::has_hip_runtime()) {
     GTEST_SKIP() << "no HIP runtime";

@@ -5,7 +5,8 @@ Pins the ``bindings/python/bind_mhd.cpp`` surface added for the
 ``plans/mhd-onesided-bc-and-background-field-build-plan.md``):
 
 * ``_core.mhd.MhdBackgroundSpec`` -- default-constructible POD with read/write
-  ``enabled`` (bool), ``profile`` (str), ``bx0``/``by0``/``bz0`` (float),
+  ``enabled`` (bool), ``profile`` (str), ``bx0``/``by0``/``bz0`` and
+  ``profile_scale`` (float),
 * ``_core.mhd.MhdConfig.background`` -- a read/write ``MhdBackgroundSpec`` that
   round-trips,
 * ``_core.mhd.MhdSolver2D.seed_background(component, values)`` for
@@ -54,6 +55,7 @@ class MhdBackgroundSpecTests(unittest.TestCase):
         self.assertEqual(spec.bx0, 0.0)
         self.assertEqual(spec.by0, 0.0)
         self.assertEqual(spec.bz0, 0.0)
+        self.assertEqual(spec.profile_scale, 1.0)
         self.assertEqual(spec.params, {})
 
     def test_attributes_are_read_write(self):
@@ -63,12 +65,14 @@ class MhdBackgroundSpecTests(unittest.TestCase):
         spec.bx0 = 0.25
         spec.by0 = -0.5
         spec.bz0 = 1.0
+        spec.profile_scale = 2.5
         spec.params = {"gradient": 2.0, "shear": -0.25}
         self.assertIs(spec.enabled, True)
         self.assertEqual(spec.profile, "uniform")
         self.assertEqual(spec.bx0, 0.25)
         self.assertEqual(spec.by0, -0.5)
         self.assertEqual(spec.bz0, 1.0)
+        self.assertEqual(spec.profile_scale, 2.5)
         self.assertEqual(spec.params, {"gradient": 2.0, "shear": -0.25})
 
 
@@ -87,6 +91,7 @@ class MhdConfigBackgroundRoundTripTests(unittest.TestCase):
         spec.enabled = True
         spec.bz0 = 1.0
         spec.profile = "uniform"
+        spec.profile_scale = 3.0
         spec.params = {"bx0": 99.0}
         cfg.background = spec
 
@@ -94,6 +99,7 @@ class MhdConfigBackgroundRoundTripTests(unittest.TestCase):
         self.assertIs(got.enabled, True)
         self.assertEqual(got.bz0, 1.0)
         self.assertEqual(got.profile, "uniform")
+        self.assertEqual(got.profile_scale, 3.0)
         self.assertEqual(got.params, {"bx0": 99.0})
         # untouched components keep their defaults
         self.assertEqual(got.bx0, 0.0)

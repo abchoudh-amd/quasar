@@ -60,10 +60,36 @@ def _make_config(deck: mhd_io.MhdDeck):
     # config's default-constructed MhdBackgroundSpec in place, mirroring how
     # cfg.boundary is populated above.
     cfg.background.enabled = deck.background.enabled
-    cfg.background.profile = deck.background.profile
-    cfg.background.bx0 = deck.background.bx0
-    cfg.background.by0 = deck.background.by0
-    cfg.background.bz0 = deck.background.bz0
+    if not deck.background.enabled:
+        return cfg
+    analytic_profile = (
+        deck.background.file is None and deck.background.a_file is None
+    )
+    # Explicit modes need the native buffers allocated, but their deck profile
+    # is intentionally irrelevant. Construct a harmless zero placeholder until
+    # prepare_run replaces all three components; this avoids validating or
+    # sampling an ignored analytic profile first.
+    cfg.background.profile = (
+        deck.background.profile if analytic_profile else "uniform"
+    )
+    cfg.background.bx0 = deck.background.bx0 if analytic_profile else 0.0
+    cfg.background.by0 = deck.background.by0 if analytic_profile else 0.0
+    cfg.background.bz0 = deck.background.bz0 if analytic_profile else 0.0
+    # Keep analytic sampling inside the native solver so the registry profile's
+    # trusted curl-free capability survives. A uniform output scale performs
+    # the SI tesla -> mu0=1 conversion without replacing those samples.
+    cfg.background.profile_scale = (
+        float(mhd_units.magnetic_to_internal(1.0, deck.units))
+        if analytic_profile else 1.0
+    )
+    # The opt-in annular vacuum solve is the only explicitly seeded construction
+    # that carries a trusted domain-wide curl-free proof. Native validation is a
+    # defense-in-depth contradiction check, not the source of that proof.
+    cfg.background.curl_free = bool(
+        deck.background.enabled
+        and deck.background.a_file is not None
+        and deck.background.params.get("vacuum_project", False)
+    )
     # Only analytic mode configures the native registry profile. File and
     # vector-potential modes override all three buffers immediately after
     # construction; their params (for example b_scale/vacuum_project) belong to
@@ -93,14 +119,18 @@ def prepare_run(deck: mhd_io.MhdDeck):
     for component, buf in state.items():
         solver.seed_state(component, buf)
 
-    # Static background field B0 (field-split B = B0 + b). Seed it BEFORE the
-    # cfl_limit() probe so the CFL guard sees the total field B0 + b: the fast
-    # magnetosonic speed uses the total field, so a guide field B0 tightens the
-    # stable dt relative to the B0 = 0 case. build_background_field returns None
-    # when the background is disabled (zero-B0 fast path), in which case nothing
-    # is seeded.
-    background = mhd_io.build_background_field(deck, nghost)
-    if background is not None:
+    # Static background field B0 (field-split B = B0 + b). Analytic profiles
+    # were already sampled by the native constructor; only file/vector-potential
+    # modes replace those buffers here. Do this BEFORE cfl_limit() so the fast
+    # magnetosonic speed sees the final total field B0+b.
+    explicit_background = (
+        deck.background.enabled
+        and (deck.background.file is not None
+             or deck.background.a_file is not None)
+    )
+    if explicit_background:
+        background = mhd_io.build_background_field(deck, nghost)
+        assert background is not None
         for component in ("b0x", "b0y", "b0z"):
             solver.seed_background(component, background[component])
 

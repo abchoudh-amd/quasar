@@ -63,8 +63,8 @@ pages under ``docs/dev-guide`` for how to add one.
 Positivity and configured floors
 --------------------------------
 
-The automatic ``troubled_cell`` controller preserves the mathematical open
-admissible set
+The automatic ``troubled_cell`` controller makes the mathematical open
+admissible set a safety condition for every state it accepts:
 
 .. math::
 
@@ -72,7 +72,16 @@ admissible set
 
 If an SSP-RK stage leaves this set, the entire conservative stage is discarded
 and retried with a smaller substep and a first-order HLL anchor. It never clamps
-one cell's mass or adds energy to repair its pressure.
+one cell's mass or adds energy to repair its pressure. If subdivision cannot
+make a positive, representable conservative advance, the call raises an error
+and restores the state from the start of the requested step.
+
+This is a safety contract, not a guarantee of progress for every admissible but
+under-resolved state. In particular, the complete cylindrical operator with
+constrained transport and a spatially varying background field has no claimed
+invariant-domain proof. A sufficiently sharp, very-low-beta discontinuity can
+therefore exhaust representable subdivision. Refine the grid or rescale the
+problem into a resolved regime rather than relying on a hidden pressure floor.
 
 ``numerics.rho_floor`` and ``numerics.p_floor`` are thresholds retained for the
 explicit low-level repair API; they are **not** invariant bounds enforced by
@@ -83,6 +92,29 @@ repair an initial condition to these thresholds either: initial density and gas
 pressure must already be finite and strictly positive. This distinction avoids
 the non-conservative mass and energy injection caused by applying a positive
 floor after every stage.
+
+Live-state solenoidality and mutable views
+------------------------------------------
+
+Every externally seeded or imported face field is checked with the strict
+directional divergence predicate before the CFL or residual kernels consume
+it. Cartesian DC offsets cancel before normalization. Its local 1024-face-ULP
+forward-error allowance is available only when two nonzero, opposite-sign
+directional contributions genuinely cancel; a one-direction or same-sign
+one-ULP defect is rejected even on a very large field.
+
+A successfully accepted internal CT/SSP-RK update has additional provenance:
+in exact arithmetic it inherits the already-proved divergence, while storing
+the two face components independently can leave a few ULPs of residual and can
+round one directional term to zero. Only for such a solver-owned state, the
+preflight admits a residual within 1024 metric-weighted face-storage ULPs
+without requiring both represented directional terms to remain nonzero. This
+permission is never inferred from field values. Seeding any component revokes
+it until another complete internal update succeeds. Obtaining a mutable C++
+``state()``, ``rk_register()``, or ``residual_register()`` view revokes it
+permanently for that solver instance, because the retained device-buffer handle
+can be written after any later preflight. Failed steps restore both the state
+buffers and their request-start provenance.
 
 Output
 ------

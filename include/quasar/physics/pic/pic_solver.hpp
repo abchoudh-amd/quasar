@@ -77,10 +77,12 @@ class EmPic2D3V {
 
   void add_species(ParticleSpecies s);
   // Solver-owned host upload for a species that has already been inserted.
-  // Initial positions are checked against this solver's physical domain and all
+  // Initial positions are checked against this solver's physical domain. The
+  // uploaded velocity components are physical values at t=0, not a pre-staggered
+  // v^-1/2; step() advances them over dt/2 before the first drift. All
   // charge/background caches are invalidated. Uploads are forbidden after the
-  // first evolution step begins because particle velocity/B live on leapfrog
-  // half steps from that point onward.
+  // first evolution step begins because velocity then lives on leapfrog half
+  // steps.
   void set_species_particles(std::size_t index,
                              const std::vector<Real>& x,
                              const std::vector<Real>& y,
@@ -96,8 +98,8 @@ class EmPic2D3V {
   Real cfl_limit() const;
   // Drains each species' persistent deposit-error flag and throws if any
   // coordinate/value was nonrepresentable or a trajectory spilled outside the
-  // deposition window. step() drains before Ampere; finalize() remains a public
-  // end-of-run safety drain for low-level/asynchronous integrations.
+  // deposition window. step() drains before the separate post-processing source
+  // finiteness gate; finalize() remains a defensive public drain.
   void finalize();
 
   const EmPicConfig& config() const noexcept { return cfg_; }
@@ -129,6 +131,10 @@ class EmPic2D3V {
   JField2D<Real> current_{};
   ScalarGrid2D<Real> charge_{};
   ScalarGrid2D<Real> next_charge_{};
+  // Shared sticky flag for the synchronous post-processing source scan. Unlike
+  // the per-species deposit flags, this also covers wall foldback, filters,
+  // order-four correction, periodic restoration, and background addition.
+  backend::DeviceBuffer<unsigned int> source_finite_error_{1};
   bool charge_valid_{false};
   bool evolution_started_{false};
   bool background_initialized_{false};
@@ -141,9 +147,10 @@ class EmPic2D3V {
   backend::DeviceBuffer<Real> current_iter_y_{};
   bool periodic_x_{true};
   bool periodic_y_{true};
-  // Width of the preceding position step. B and particle velocity live at
-  // half steps, so a changed dt advances them over (dt_prev + dt)/2 and uses
-  // unequal interpolation weights to recover B at the integer force time.
+  // Width of the preceding position step. After the special startup kick from
+  // uploaded v(t=0) to v^1/2, B and particle velocity live at half steps, so a
+  // changed dt advances them over (dt_prev + dt)/2 and uses unequal
+  // interpolation weights to recover B at the integer force time.
   Real previous_dt_{Real{0}};
   bool has_previous_dt_{false};
   std::vector<ParticleSpecies> species_{};

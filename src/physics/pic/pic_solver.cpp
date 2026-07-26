@@ -9,6 +9,7 @@
 #include <cmath>
 #include <initializer_list>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -428,6 +429,16 @@ EmPicConfig validate_config(EmPicConfig cfg) {
   if (cfg.fdtd_order != 2 && cfg.fdtd_order != 4) {
     throw std::invalid_argument{"EmPic2D3V: fdtd_order must be 2 or 4"};
   }
+  // A fourth-order non-periodic face needs two distinct source layers for its
+  // centred ghost continuation. With one physical cell the low and high ghost
+  // fills overlap and an active stencil can consume a not-yet-defined ghost.
+  // Apply the same minimum uniformly across boundary topologies so a later BC
+  // change cannot turn an accepted grid into an ill-defined scheme.
+  if (cfg.fdtd_order == 4 && (cfg.grid.nx < 2 || cfg.grid.ny < 2)) {
+    throw std::invalid_argument{
+        "EmPic2D3V: fourth-order FDTD requires at least two cells in each "
+        "dimension"};
+  }
   if (cfg.shape != "cic" && cfg.shape != "tsc") {
     throw std::invalid_argument{"EmPic2D3V: shape must be 'cic' or 'tsc'"};
   }
@@ -728,6 +739,15 @@ void EmPic2D3V::add_species(ParticleSpecies s) {
     throw std::logic_error{
         "EmPic2D3V::add_species: species cannot be added after evolution begins"};
   }
+  const bool has_outflow = std::any_of(
+      cfg_.boundary.field.begin(), cfg_.boundary.field.end(),
+      [](const auto& name) { return name == "outflow"; });
+  if (s.charge() != Real{0} && has_outflow) {
+    throw std::invalid_argument{
+        "EmPic2D3V::add_species: charged particles are not supported with "
+        "Mur outflow field boundaries because the boundary correction is not "
+        "charge/current compatible; use periodic or PEC field boundaries"};
+  }
   if (std::any_of(species_.begin(), species_.end(), [&](const auto& existing) {
         return existing.name() == s.name();
       })) {
@@ -908,6 +928,11 @@ void EmPic2D3V::ensure_charge_density() {
   // Drain it here so a diagnostic or the first step never accepts a partially
   // deposited initial charge field.
   check_deposit_overflow();
+  // Foldback and uniform-background addition run after the atomic deposit and
+  // can overflow independently of its per-species flag. Do not publish charge
+  // until the fully transformed allocation, including ghosts, is finite.
+  ::launch_pic_validate_finite_sources(
+      grid_, nullptr, &charge_, source_finite_error_.device_ptr(), nullptr);
   charge_valid_ = true;
 }
 
@@ -1013,17 +1038,35 @@ void EmPic2D3V::step(Real dt) {
   }
   check_cfl(dt);
 
-  // B and particle velocity are stored at half steps.  If the position-step
-  // width changes (notably for advance()'s exact final step), their update spans
-  // from t^n-dt_prev/2 to t^n+dt/2, hence force_dt=(dt_prev+dt)/2.  The old and
-  // new half-step B values bracket t^n asymmetrically and must be linearly
-  // interpolated with the opposite interval widths.
-  Real force_dt = dt;
+  // Public/deck velocities are physical values at t=0, while a seeded magnetic
+  // field is already at t=-dt/2.  The first Faraday update must therefore keep
+  // its full width dt (B^-1/2 -> B^+1/2), but the first Boris force update spans
+  // only 0 -> dt/2.  Its drift then uses the correctly centred v^1/2.
+  //
+  // After startup, B and velocity are both stored at half steps.  If the next
+  // position-step width changes (notably for advance()'s exact final step), both
+  // updates span from t^n-dt_prev/2 to t^n+dt/2, hence
+  // (dt_prev+dt)/2.  The old and new half-step B values bracket t^n
+  // asymmetrically and are interpolated with the opposite interval widths.
+  Real magnetic_dt = dt;
+  Real force_dt = Real{0.5} * dt;
+  const bool has_charged_particles = std::any_of(
+      species_.cbegin(), species_.cend(),
+      [](const ParticleSpecies& species) {
+        return species.size() != 0 && species.charge() != Real{0};
+      });
+  if (has_charged_particles &&
+      !(std::isfinite(force_dt) && force_dt > Real{0})) {
+    throw std::overflow_error{
+        "EmPic2D3V::step: first charged-particle half timestep is not "
+        "representable"};
+  }
   Real previous_b_weight = Real{0.5};
   Real current_b_weight = Real{0.5};
   if (has_previous_dt_) {
-    force_dt = Real{0.5} * previous_dt_ + Real{0.5} * dt;
-    if (!(std::isfinite(force_dt) && force_dt > Real{0})) {
+    magnetic_dt = std::midpoint(previous_dt_, dt);
+    force_dt = magnetic_dt;
+    if (!(std::isfinite(magnetic_dt) && magnetic_dt > Real{0})) {
       throw std::overflow_error{
           "EmPic2D3V::step: centered leapfrog timestep is not representable"};
     }
@@ -1036,7 +1079,7 @@ void EmPic2D3V::step(Real dt) {
       previous_b_weight = Real{1} / (Real{1} + ratio);
       current_b_weight = ratio * previous_b_weight;
     }
-    check_cfl(force_dt);
+    check_cfl(magnetic_dt);
   }
   // Validate/materialize the initial charge before locking species mutation.
   // A rejected non-neutral periodic setup has not changed leapfrog state and
@@ -1060,10 +1103,10 @@ void EmPic2D3V::step(Real dt) {
   // apply their linear continuation.
   fill_field_ghosts();
   ::launch_pic_copy_b(grid_, fields_, previous_b_, nullptr);
-  field_solver_->advance_b(fields_, force_dt);
+  field_solver_->advance_b(fields_, magnetic_dt);
   // Refresh PEC/outflow boundary continuations after the B update; periodic
   // correction remains a no-op because its pre-curl wrap is already complete.
-  correct_field_boundaries_b(force_dt);
+  correct_field_boundaries_b(magnetic_dt);
   // Capture characteristic wall/corner history while E is still at t^n. The
   // first post-Ampere correction must compare against this state, not merely
   // seed itself from E^{n+1}.
@@ -1117,6 +1160,14 @@ void EmPic2D3V::step(Real dt) {
   ::launch_pic_current_periodic_high_faces(
       grid_, current_, periodic_x_ ? 1 : 0, periodic_y_ ? 1 : 0, nullptr);
   fill_field_ghosts();
+  // The deposit flag above covers only deposition itself. Wall foldback,
+  // filters, the compact order-four solve, periodic-face restoration, and
+  // charge background/foldback all perform additional floating-point
+  // arithmetic. Reject a non-finite source before Ampere consumes current or
+  // next_charge_ becomes the live diagnostic field.
+  ::launch_pic_validate_finite_sources(
+      grid_, &current_, &next_charge_, source_finite_error_.device_ptr(),
+      nullptr);
   field_solver_->advance_e(fields_, current_, dt);
   // Outflow Mur reads the just-updated adjacent interior E node, so the E-side
   // correction runs after advance_e. PEC refreshes its parity; periodic is a no-op.
