@@ -29,7 +29,7 @@ inline dim3 mhd_grid_2d(const quasar::Grid2D& g, dim3 block) {
 // x_lo/y_lo face of cell (i,j); the i+1/2 face of cell (i,j) is therefore the
 // stored flux of cell (i+di, j+dj). Accumulates so the caller can sum both
 // directions into a single dudt (zeroed before the first direction).
-__global__ void flux_difference_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 flux_difference_kernel(
     quasar::Grid2D g, int dir, int cylindrical,
     const double* __restrict__ Frho, const double* __restrict__ Fmx,
     const double* __restrict__ Fmy, const double* __restrict__ Fmz,
@@ -376,7 +376,7 @@ __device__ inline void append_background_momentum_stress(
 // geometry the radial curvature source, enter the same common-exponent sum for
 // each momentum component.  This prevents a curl-free dominant B0 from leaving
 // an O(epsilon*B0^2/h) force merely because x/r and y/z were rounded first.
-__global__ void background_stress_correction_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 background_stress_correction_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
     int collocation_order, int scheme_order,
     const double* __restrict__ b0x,
@@ -471,7 +471,7 @@ __global__ void background_stress_correction_kernel(
 // Riemann correction W until this single reduction.  Static T0 terms share the
 // same accumulator, so neither a directional update nor a later correction can
 // erase a small survivor beside a dominant cancelling stress.
-__global__ void split_momentum_residual_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
     int collocation_order, int scheme_order, int globally_curl_free,
     const double* __restrict__ b0x, const double* __restrict__ b0y,
@@ -686,7 +686,7 @@ __global__ void split_momentum_residual_kernel(
 // and the static curvature is B0r^2-B0phi^2. The maximum active path is
 // 2 radial flux + 2 axial flux + 6 reduced curvature + 6 radial static stress
 // + 2 axial static stress + 2 static curvature = 20 terms.
-__global__ void cylindrical_radial_momentum_residual_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
     int background_active, int globally_curl_free, int decomposed_flux,
     int collocation_order, int scheme_order,
@@ -852,7 +852,7 @@ __device__ inline void append_conditioned_induction_flux(
 // Cov_V=<B0.Rct>-Bc.Rct.  Every multiplication therefore contains either a
 // background difference, a rate difference, or a covariance.  Rct is read
 // only after the in-plane slots have been overwritten by the final CT curl.
-__global__ void split_energy_residual_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 split_energy_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
     int collocation_order, int scheme_order,
     const double* __restrict__ b0x,
@@ -1038,7 +1038,7 @@ __device__ inline Real rk_weighted_sum(Real a, Real un, Real b, Real ustage,
 // physical high-face layer: bx on i=nx and by on j=ny. Those faces participate
 // in the divergence of the last cell and must receive the same SSP-RK combine as
 // the other CT faces; only face slots beyond them are derived ghosts.
-__global__ void rk_stage_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 rk_stage_kernel(
     quasar::Grid2D g, Real a, Real b, Real c_dt,
     const double* __restrict__ un_rho, const double* __restrict__ un_mx,
     const double* __restrict__ un_my, const double* __restrict__ un_mz,
@@ -1117,7 +1117,7 @@ __global__ void rk_stage_kernel(
 // bit-for-bit pressure(s, gamma)), so with B0 inactive this is bit-identical to
 // the original body. `b0_active` is accepted for ABI/signature parity; the floor
 // re-derivation does not depend on it.
-__global__ void apply_floors_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 apply_floors_kernel(
     quasar::Grid2D g, int /*b0_active*/, Real rho_floor, Real p_floor, Real gamma,
     double* __restrict__ rho, double* __restrict__ mx, double* __restrict__ my,
     double* __restrict__ mz, double* __restrict__ energy, double* __restrict__ bx,
@@ -1169,7 +1169,7 @@ __global__ void apply_floors_kernel(
 // other column. Only a non-positive or non-finite radius (which cannot occur for
 // a cell center on a valid grid, but is guarded defensively) is skipped to avoid
 // a division by zero.
-__global__ void geometric_source_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 geometric_source_kernel(
     quasar::Grid2D g, int b0_active, Real gamma, int collocation_order,
     const double* __restrict__ rho, const double* __restrict__ mx,
     const double* __restrict__ my, const double* __restrict__ mz,

@@ -18,7 +18,7 @@ namespace {
 using namespace quasar::backend::pic;
 
 template <int ShapeOrder>
-__global__ void gather_push_kernel(quasar::Grid2D g, std::size_t n, double qm,
+__global__ void QUASAR_LAUNCH_BOUNDS_256 gather_push_kernel(quasar::Grid2D g, std::size_t n, double qm,
                                    double* __restrict__ x, double* __restrict__ y,
                                    double* __restrict__ x_prev, double* __restrict__ y_prev,
                                    double* __restrict__ vx, double* __restrict__ vy,

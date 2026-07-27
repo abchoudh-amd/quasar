@@ -120,7 +120,7 @@ __device__ inline Real convex_internal_energy(
 // the candidate violates its bound a bracketed bisection finds the unique edge
 // of the admissible interval without modifying either state. Bounds are strict;
 // the conservative solver passes zero to enforce rho>0 and q>0.
-__global__ void admissible_fraction_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 admissible_fraction_kernel(
     quasar::Grid2D g, Real rho_floor, Real q_floor, int collocation_order,
     const double* __restrict__ a_rho, const double* __restrict__ a_mx,
     const double* __restrict__ a_my, const double* __restrict__ a_mz,
@@ -392,7 +392,7 @@ __device__ inline Real reconstructed_face_rate(
 // The half-sums are the exact self-weights of the local LF updates. Cylindrical
 // mode takes the largest radial self-weight among the annular fluid, exact
 // angular-momentum, and metric-free B_phi operators.
-__global__ void cfl_max_rate_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 cfl_max_rate_kernel(
     quasar::Grid2D g, int b0_active, Real gamma, Real dx, Real dy,
     Real rate_scale, int scheme_order, int cylindrical,
     quasar::mhd::BoundaryFlags4 flags,
@@ -478,7 +478,7 @@ __global__ void cfl_max_rate_kernel(
 
 // Per-cell |div B| from the face-staggered in-plane field, reduced to one partial
 // max per block. Same stencil as the host ChristliebFdCt::divergence_b_linf.
-__global__ void ct_divb_linf_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 ct_divb_linf_kernel(
     quasar::Grid2D g, int cylindrical,
     const double* __restrict__ bx, const double* __restrict__ by,
     double* __restrict__ block_partials) {
@@ -682,7 +682,7 @@ __device__ inline bool residual_is_roundoff_explained(
 //   ||d_1+d_2||_inf / || |d_1|+|d_2| ||_inf.
 // Mantissa/exponent maxima retain values outside binary64's materialized range
 // and let the host make the threshold decision without a log2/exp2 round trip.
-__global__ void ct_divb_relative_linf_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 ct_divb_relative_linf_kernel(
     quasar::Grid2D g, int cylindrical, int solver_owned,
     const double* __restrict__ bx, const double* __restrict__ by,
     double* __restrict__ block_partials) {

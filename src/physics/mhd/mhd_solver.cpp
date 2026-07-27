@@ -887,6 +887,9 @@ void MhdSolver2D::seed_state(std::string_view component, const std::vector<Real>
         "MhdSolver2D::seed_state: host buffer must contain only finite values"};
   }
   buf.copy_from_host(host_buf.data(), host_buf.size());
+  // Direct register write with no ghost refill, so it does not pass through the
+  // fill_ghosts invalidation hook. Invalidate explicitly.
+  invalidate_interface_cache();
   // Component-wise seeding is external provenance. The complete state is
   // strictly revalidated before use; a later successful internal step may earn
   // solver-owned provenance again only if no retainable mutable view exists.
@@ -926,6 +929,9 @@ void MhdSolver2D::seed_background(std::string_view component,
         "MhdSolver2D::seed_background: host buffer must contain only finite values"};
   }
   buf->copy_from_host(host_buf.data(), host_buf.size());
+  // Reconstruction consumes B0, so a background edit invalidates the cached
+  // interface states even though no state register moved.
+  invalidate_interface_cache();
   // Component-wise overrides no longer carry an analytic profile's proof. An
   // explicit caller may retain only the config-level curl_free assertion; the
   // completed three-component field is independently checked before use.
@@ -999,6 +1005,23 @@ void MhdSolver2D::fill_ghosts(MhdField2D<Real>& u) const {
     fluid_bcs_[side]->fill_ghosts(u, static_cast<Side>(side));
     field_bcs_[side]->fill_ghosts(u, static_cast<Side>(side));
   }
+  // Every register write in this class is followed by a ghost refill of the
+  // register it wrote (combine_stage, copy_state and its rollbacks, seed_state,
+  // the positivity floors, and the CFL/divB preflights all do this), so hooking
+  // invalidation here catches all of them from one place instead of relying on
+  // each future mutation site to remember. A refill is itself a reason to
+  // invalidate: reconstruction reads ghost cells, so their values are part of
+  // its input.
+  //
+  // Only a refill of the CACHED register invalidates. Refilling a different one
+  // -- copy_state(rk_[0], step_backup_) snapshotting the live state, for
+  // instance -- cannot change what ifx_/ify_ describe, and invalidating on it
+  // would destroy the cache before the stage that reuses it ever ran. This is
+  // an address comparison, so it stays correct if registers are ever swapped
+  // rather than copied. Logically const, like the ghost write it accompanies.
+  if (interface_cache_source_ == &u) {
+    const_cast<MhdSolver2D&>(*this).invalidate_interface_cache();
+  }
 }
 
 BoundaryFlags4 MhdSolver2D::boundary_flags() const {
@@ -1025,6 +1048,12 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   // static field before any reconstruction, Riemann, CT, or source kernel reads
   // it; constructor-sampled and previously validated fields take the cached path.
   ensure_background_solenoidal();
+  // Sample the cache BEFORE fill_ghosts, which invalidates unconditionally. In
+  // the auto-dt loop cfl_limit() has just filled these same ghosts and
+  // reconstructed this same register at this same order, so the refill below is
+  // idempotent and the recorded states are still the ones reconstruction would
+  // produce.
+  const bool interfaces_current = interface_cache_valid(u, order);
   // Boundary fills may set physical high faces as well as ghost cells. Refresh
   // first so a live-state preflight validates exactly the collocation consumed
   // by reconstruction and the Riemann/CT kernels below.
@@ -1058,7 +1087,9 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   // toroidal B keeps its physical flux difference. With active B0, energy is
   // also overwritten below by one fused invariant assembled from both retained
   // directional fluxes and the final CT rate.
-  launch_mhd_reconstruct(u, b0_, 0, ifx_, order, flags, gamma, nullptr);
+  if (!interfaces_current) {
+    launch_mhd_reconstruct(u, b0_, 0, ifx_, order, flags, gamma, nullptr);
+  }
   const bool low_order = order <= 1;
   launch_mhd_hlld_flux(
       ifx_, b0_, 0, flux_x_, flags, gamma, nullptr, low_order,
@@ -1066,7 +1097,9 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   launch_mhd_flux_difference(
       flux_x_, 0, dudt, nullptr, is_cylindrical());
 
-  launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr);
+  if (!interfaces_current) {
+    launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr);
+  }
   launch_mhd_hlld_flux(
       ify_, b0_, 1, flux_y_, flags, gamma, nullptr, low_order,
       b0_.active ? &momentum_flux_y_ : nullptr, order);
@@ -1415,6 +1448,10 @@ void MhdSolver2D::advance_positive(Real dt) {
 void MhdSolver2D::note_external_mutable_state_access() noexcept {
   external_mutable_state_exposed_ = true;
   live_state_solver_owned_ = false;
+  // A writable reference just escaped, and the holder can change any register
+  // without going through fill_ghosts. Assume it did: this is the conservative
+  // direction, and these accessors are not on the hot path.
+  invalidate_interface_cache();
 }
 
 MhdField2D<Real>& MhdSolver2D::state() noexcept {
@@ -1524,6 +1561,18 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
   launch_mhd_reconstruct(
       self.rk_[0], b0_, 1, self.ify_, order, flags, cfg_.gamma, nullptr,
       /*rate_only=*/true);
+  // ifx_/ify_ now hold the reconstruction of the live register at `order`. In
+  // the auto-dt loop the very next thing that happens is compute_residual on
+  // this same unchanged register, which would recompute exactly this. Record
+  // the cache AFTER the fill_ghosts above (which invalidates) so the recorded
+  // generation is the post-fill one the reconstruction actually read.
+  //
+  // rate_only=true is recorded as equivalent to the residual path's
+  // rate_only=false because the flag's only effect is choosing
+  // reconstructed_rate_state_admissible over reconstructed_state_admissible,
+  // and the former forwards directly to the latter. If those two predicates
+  // ever diverge, this cache must start distinguishing them.
+  self.note_interface_cache(self.rk_[0], order);
   ScaledCflRate max_rate{};
   launch_mhd_cfl_max_rate(
       self.ifx_, self.ify_, b0_, cfg_.gamma, cfl_scratch_,

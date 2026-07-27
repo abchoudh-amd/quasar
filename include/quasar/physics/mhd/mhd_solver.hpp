@@ -31,6 +31,7 @@
 #include "quasar/physics/mhd/mhd_field.hpp"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -192,6 +193,50 @@ class MhdSolver2D {
   MhdMomentumFluxParts2D<Real> momentum_flux_y_{};
   numerics::MhdInterfaceStates<Real> ifx_;  // dir=0 reconstructed interface states
   numerics::MhdInterfaceStates<Real> ify_;  // dir=1 reconstructed interface states
+
+  // Reuse of the CFL reconstruction by the first residual stage.
+  //
+  // cfl_limit() reconstructs both directions of the live register to obtain one
+  // scalar dt, and the auto-dt loop then immediately calls compute_residual on
+  // that same unchanged register, which reconstructs it again into the same two
+  // buffers. The two launches are the same computation: the only parameter that
+  // differs is rate_only, which selects reconstructed_rate_state_admissible --
+  // a direct forward to reconstructed_state_admissible. So the second launch
+  // can be skipped when the buffers still describe the state it would read.
+  //
+  // Validity is tracked with a monotonic generation counter rather than a bare
+  // bool: EVERY write to any register (combine_stage, copy_state and its
+  // rollbacks, seed_state, floors, ghost refills) bumps state_generation_, so a
+  // cache entry is only honoured when its recorded generation, register address,
+  // and reconstruction order all still match. Anything not explicitly accounted
+  // for invalidates by default, because a missed bump is the one failure mode
+  // that would silently corrupt a run.
+  std::uint64_t state_generation_{1};
+  const MhdField2D<Real>* interface_cache_source_{nullptr};
+  std::uint64_t interface_cache_generation_{0};
+  int interface_cache_order_{-1};
+
+  // Called by every state mutation. Invalidating on ghost refills too is
+  // deliberate: reconstruction reads ghost cells, so a refill changes its input
+  // even when no interior cell moved.
+  void invalidate_interface_cache() noexcept {
+    ++state_generation_;
+    interface_cache_source_ = nullptr;
+    interface_cache_order_ = -1;
+  }
+
+  // True when ifx_/ify_ already hold the reconstruction of `u` at `order`.
+  bool interface_cache_valid(const MhdField2D<Real>& u, int order) const noexcept {
+    return interface_cache_source_ == &u
+        && interface_cache_generation_ == state_generation_
+        && interface_cache_order_ == order;
+  }
+
+  void note_interface_cache(const MhdField2D<Real>& u, int order) noexcept {
+    interface_cache_source_ = &u;
+    interface_cache_generation_ = state_generation_;
+    interface_cache_order_ = order;
+  }
   EmfField2D<Real> emf_{};       // corner-staggered CT EMF
   // Static background field B0 (field split B = B0 + b). active iff the deck
   // enabled the background; inactive (default) => zero B0 fast path.

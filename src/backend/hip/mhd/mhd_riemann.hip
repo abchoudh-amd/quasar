@@ -50,7 +50,7 @@ struct CrossBPointOutputView {
   quasar::numerics::ScaledValue* b0_induction_covariance{};
 };
 
-__global__ void hlld_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 hlld_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
     int dir, int scheme_order, int hll_only, Real gamma,
     // Field-split background B0 (perturbation-only state evolved; physics uses

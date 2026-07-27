@@ -51,7 +51,7 @@ namespace {
 using namespace quasar::backend::pic;
 
 template <int ShapeOrder>
-__global__ void deposit_cyl_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
+__global__ void QUASAR_LAUNCH_BOUNDS_256 deposit_cyl_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
                                    bool periodic_x, bool periodic_y,
                                    const double* __restrict__ x, const double* __restrict__ y,
                                    const double* __restrict__ x_prev,
@@ -349,7 +349,7 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
 }
 
 template <int ShapeOrder>
-__global__ void charge_cyl_kernel(quasar::Grid2D g, std::size_t n, double q,
+__global__ void QUASAR_LAUNCH_BOUNDS_256 charge_cyl_kernel(quasar::Grid2D g, std::size_t n, double q,
                                   bool periodic_y,
                                   const double* __restrict__ r,
                                   const double* __restrict__ z,
@@ -448,7 +448,7 @@ __device__ inline int cyl_correction_z(int j, int n) {
 // to q=r_face*Jr, but each row is analytically divided by its own radius below.
 // This avoids ever materialising r*J, which can overflow on a large-radius
 // annulus even when J and the radius ratios in the final solve are representable.
-__global__ void cyl_current_correct_init_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 cyl_current_correct_init_kernel(
     quasar::Grid2D g, const double* j_r, const double* j_z,
     double* rhs_r, double* rhs_z, double* iter_r, double* iter_z) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -473,7 +473,7 @@ __global__ void cyl_current_correct_init_kernel(
 // while rows i>1 contain the shared S(q)_0=-q_1/12 axis flux:
 //   13 q_i/12 - (q_{i-1}+q_{i+1})/24 + q_1/12 = q_raw,i.
 // These are precisely D4+(q)=D2+(q_raw) after cumulative summation from r=0.
-__global__ void cyl_current_correct_step_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 cyl_current_correct_step_kernel(
     quasar::Grid2D g, const double* rhs_r, const double* rhs_z,
     const double* in_r, const double* in_z,
     double* out_r, double* out_z, int r_lo_mode, int r_hi_mode,
@@ -570,7 +570,7 @@ __global__ void cyl_current_correct_step_kernel(
   }
 }
 
-__global__ void cyl_current_correct_finish_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 cyl_current_correct_finish_kernel(
     quasar::Grid2D g, const double* corrected_r, double* j_r,
     const double* corrected_z, double* j_z, bool periodic_z) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;

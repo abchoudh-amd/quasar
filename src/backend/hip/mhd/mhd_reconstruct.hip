@@ -195,28 +195,38 @@ inline constexpr int kMaxWidth = 2 * kMaxHalf + 1;  // 7
 // left-face value. `half` is the stencil half-width (2 for MP5, 3 for MP7).
 // from_char zeroes the normal-B DOF; the caller overwrites it with the CT face
 // value. Reads inputs ONLY through the raw device pointers.
-__device__ inline MhdState recon_char_state(
-    const quasar::Grid2D& g, int dir, int i, int j, int center_off, bool mirror,
-    int half, const MhdEigensystem& eig, const MhdState& ref,
+// Union of the two per-face stencils. The L state centres on cell (i-1) and the
+// R state on cell (i), so together they span offsets [-1-half, half]: one more
+// cell than either alone, and 2*half of the cells are common to both.
+inline constexpr int kMaxUnionWidth = kMaxWidth + 1;  // 8
+
+// Project every cell of the union stencil once. Both interface states share the
+// same reference and eigensystem, so a cell's characteristic amplitudes are the
+// same bits whichever state consumes them -- projecting per state re-derived
+// 2*half of them (6 of 14 loads for MP7). Each entry also carries a load_state
+// call, whose cell_bx/cell_by are themselves multi-tap reductions.
+//
+// chars[u] holds the projection of stencil offset (u + union_lo), where
+// union_lo = -1 - half.
+__device__ inline void project_union_stencil(
+    const quasar::Grid2D& g, int dir, int i, int j, int half,
+    const MhdEigensystem& eig, const MhdState& ref,
     const double* rho, const double* mx, const double* my, const double* mz,
-    const double* energy, const double* bx, const double* by, const double* bz) {
-  const int width = 2 * half + 1;
+    const double* energy, const double* bx, const double* by, const double* bz,
+    CharVec7* chars) {
   const int di = (dir == 0) ? 1 : 0;
   const int dj = (dir == 0) ? 0 : 1;
-
-  // Project each stencil cell's delta-from-ref into the 7 characteristic waves.
-  // chars[s].w[k]: s over stencil (0..width-1), k over 7 waves.
-  CharVec7 chars[kMaxWidth];
-  for (int s = 0; s < width; ++s) {
-    const int off = center_off + (s - half);
-    const int is = i + off * di;
-    const int js = j + off * dj;
+  const int union_lo = -1 - half;
+  const int union_width = 2 * half + 2;
+  for (int u = 0; u < union_width; ++u) {
+    const int off = union_lo + u;
     // The eigensystem is already transformed to the stored split variables.
     // Projecting U'-U'_ref directly avoids ever constructing the enormous total
     // energy E'+B0.b+|B0|^2/2. B0 is frozen at this interface, so prescribed
     // background gradients are not reconstructed as evolved waves.
     MhdState delta = rotate_xy(
-        load_state(g, rho, mx, my, mz, energy, bx, by, bz, is, js), dir);
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                   i + off * di, j + off * dj), dir);
     delta.rho    -= ref.rho;
     delta.mx     -= ref.mx;
     delta.my     -= ref.my;
@@ -225,8 +235,17 @@ __device__ inline MhdState recon_char_state(
     delta.bx     -= ref.bx;
     delta.by     -= ref.by;
     delta.bz     -= ref.bz;
-    chars[s] = CharacteristicProjector::to_char(delta, eig);
+    chars[u] = CharacteristicProjector::to_char(delta, eig);
   }
+}
+
+__device__ inline MhdState recon_char_state(
+    int dir, int center_off, bool mirror, int half,
+    const MhdEigensystem& eig, const MhdState& ref, const CharVec7* chars) {
+  const int width = 2 * half + 1;
+  // This state's stencil cell s sits at offset center_off + (s - half); the
+  // shared table is indexed from union_lo = -1 - half.
+  const int base = center_off + 1;
 
   // Reconstruct each of the 7 characteristic fields at the interface.
   CharVec7 w_face{};
@@ -234,7 +253,7 @@ __device__ inline MhdState recon_char_state(
   for (int k = 0; k < 7; ++k) {
     for (int s = 0; s < width; ++s) {
       const int src = mirror ? (width - 1 - s) : s;
-      scalar[s] = chars[src].w[k];
+      scalar[s] = chars[base + src].w[k];
     }
     if (half == 2) {
       w_face.w[k] = quasar::numerics::mp5_reconstruct(
@@ -371,7 +390,7 @@ __device__ inline MhdState invalid_reconstruction_sentinel() {
                   invalid, invalid, invalid, invalid};
 }
 
-__global__ void reconstruct_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     quasar::Grid2D g, int dir, int scheme_order, Real gamma, int rate_only,
     // Non-periodic boundary flags along this axis: lo/hi correspond to
     // (x_lo,x_hi) for dir==0 and (y_lo,y_hi) for dir==1.
@@ -451,14 +470,18 @@ __global__ void reconstruct_kernel(
 
     const int half = (scheme_order == 5) ? 2 : 3;
 
+    // Both states read the same reference and eigensystem, so project the union
+    // of their two stencils once and let each pick its window out of it.
+    CharVec7 chars[kMaxUnionWidth];
+    project_union_stencil(g, dir, i, j, half, eig, canonical_ref,
+                          rho, mx, my, mz, energy, bx, by, bz, chars);
+
     // L state: stencil centered on cell (i-1), reconstruct its RIGHT face.
-    ul = recon_char_state(g, dir, i, j, /*center_off=*/-1, /*mirror=*/false,
-                          half, eig, canonical_ref,
-                          rho, mx, my, mz, energy, bx, by, bz);
+    ul = recon_char_state(dir, /*center_off=*/-1, /*mirror=*/false,
+                          half, eig, canonical_ref, chars);
     // R state: stencil centered on cell (i), reconstruct its LEFT face (mirror).
-    ur = recon_char_state(g, dir, i, j, /*center_off=*/0, /*mirror=*/true,
-                          half, eig, canonical_ref,
-                          rho, mx, my, mz, energy, bx, by, bz);
+    ur = recon_char_state(dir, /*center_off=*/0, /*mirror=*/true,
+                          half, eig, canonical_ref, chars);
 
     // ---- Per-interface robustness fallback (finiteness / positivity) ------
     // Characteristic MP reconstruction carries NO positivity guarantee: at a

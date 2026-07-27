@@ -83,7 +83,7 @@ __device__ inline void ghost_indices(int n, int layer, bool lo, int mode,
 // periodic/outflow, -1 for a wall (rule (c)); every other component
 // is even.
 // ---------------------------------------------------------------------------
-__global__ void fill_ghosts_fluid_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 fill_ghosts_fluid_kernel(
     Grid2D g, int side, int mode, Real s_normal,
     double* __restrict__ rho, double* __restrict__ mx, double* __restrict__ my,
     double* __restrict__ mz, double* __restrict__ energy) {
@@ -138,7 +138,7 @@ __global__ void fill_ghosts_fluid_kernel(
 // owns it, so it must not be overwritten as if it were a cell ghost. Layers 2+
 // extrapolate that face value into the actual face ghosts.
 // ---------------------------------------------------------------------------
-__global__ void fill_ghosts_field_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 fill_ghosts_field_kernel(
     Grid2D g, int side, int mode, Real s_normal,
     double* __restrict__ bx_face, double* __restrict__ by_face,
     double* __restrict__ bz_cell) {

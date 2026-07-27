@@ -153,128 +153,142 @@ __device__ inline bool directional_corner_stencil_has_no_jump(
   return true;
 }
 
+// Directional face EMFs, read from the precomputed per-face tables. face_index
+// maps any requested tap into [0,n] (one-sided closure) or [0,n) (periodic
+// wrap), so a table covering [0,nx] x [0,ny] holds every value a corner stencil
+// can ask for. The mapping is applied here, exactly as the original
+// compute-on-demand form did, so the table index matches the value that form
+// would have computed.
 __device__ inline Real xface_ez(const quasar::Grid2D& g, int i, int j,
-                                int order, int hll_only, Real gamma,
-                                const FaceInterfaceView& x,
-                                const FaceBackgroundView& bg,
+                                const double* __restrict__ table,
                                 quasar::mhd::BoundaryFlags4 modes) {
   const int ii = face_index(i, g.nx, modes.side[0], modes.side[1]);
   const int jj = face_index(j, g.ny, modes.side[2], modes.side[3]);
-  return face_ez(g, 0, ii, jj, order, hll_only, gamma, x, bg);
+  return table[g.index(ii, jj)];
 }
 
 __device__ inline Real yface_ez(const quasar::Grid2D& g, int i, int j,
-                                int order, int hll_only, Real gamma,
-                                const FaceInterfaceView& y,
-                                const FaceBackgroundView& bg,
+                                const double* __restrict__ table,
                                 quasar::mhd::BoundaryFlags4 modes) {
   const int ii = face_index(i, g.nx, modes.side[0], modes.side[1]);
   const int jj = face_index(j, g.ny, modes.side[2], modes.side[3]);
-  return face_ez(g, 1, ii, jj, order, hll_only, gamma, y, bg);
+  return table[g.index(ii, jj)];
 }
 
 __device__ inline Real interp_x_to_corner(
-    const quasar::Grid2D& g, int i, int j, int order, int hll_only, Real gamma,
-    const FaceInterfaceView& x, const FaceBackgroundView& bg,
-    quasar::mhd::BoundaryFlags4 modes) {
+    const quasar::Grid2D& g, int i, int j, int order,
+    const double* __restrict__ x_table, quasar::mhd::BoundaryFlags4 modes) {
   if (order >= 7) {
     return scaled_face_average_to_edge7(
-        xface_ez(g, i, j - 4, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 3, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 2, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 1, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 1, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 2, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 3, order, hll_only, gamma, x, bg, modes));
+        xface_ez(g, i, j - 4, x_table, modes),
+        xface_ez(g, i, j - 3, x_table, modes),
+        xface_ez(g, i, j - 2, x_table, modes),
+        xface_ez(g, i, j - 1, x_table, modes),
+        xface_ez(g, i, j, x_table, modes),
+        xface_ez(g, i, j + 1, x_table, modes),
+        xface_ez(g, i, j + 2, x_table, modes),
+        xface_ez(g, i, j + 3, x_table, modes));
   }
   if (order >= 5) {
     return scaled_face_average_to_edge5(
-        xface_ez(g, i, j - 3, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 2, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j - 1, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 1, order, hll_only, gamma, x, bg, modes),
-        xface_ez(g, i, j + 2, order, hll_only, gamma, x, bg, modes));
+        xface_ez(g, i, j - 3, x_table, modes),
+        xface_ez(g, i, j - 2, x_table, modes),
+        xface_ez(g, i, j - 1, x_table, modes),
+        xface_ez(g, i, j, x_table, modes),
+        xface_ez(g, i, j + 1, x_table, modes),
+        xface_ez(g, i, j + 2, x_table, modes));
   }
   return scaled_face_average(
-      xface_ez(g, i, j - 1, order, hll_only, gamma, x, bg, modes),
-      xface_ez(g, i, j, order, hll_only, gamma, x, bg, modes));
+      xface_ez(g, i, j - 1, x_table, modes),
+      xface_ez(g, i, j, x_table, modes));
 }
 
 __device__ inline Real interp_y_to_corner(
-    const quasar::Grid2D& g, int i, int j, int order, int hll_only, Real gamma,
-    const FaceInterfaceView& y, const FaceBackgroundView& bg,
-    quasar::mhd::BoundaryFlags4 modes) {
+    const quasar::Grid2D& g, int i, int j, int order,
+    const double* __restrict__ y_table, quasar::mhd::BoundaryFlags4 modes) {
   if (order >= 7) {
     return scaled_face_average_to_edge7(
-        yface_ez(g, i - 4, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 3, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 2, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 1, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 1, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 2, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 3, j, order, hll_only, gamma, y, bg, modes));
+        yface_ez(g, i - 4, j, y_table, modes),
+        yface_ez(g, i - 3, j, y_table, modes),
+        yface_ez(g, i - 2, j, y_table, modes),
+        yface_ez(g, i - 1, j, y_table, modes),
+        yface_ez(g, i, j, y_table, modes),
+        yface_ez(g, i + 1, j, y_table, modes),
+        yface_ez(g, i + 2, j, y_table, modes),
+        yface_ez(g, i + 3, j, y_table, modes));
   }
   if (order >= 5) {
     return scaled_face_average_to_edge5(
-        yface_ez(g, i - 3, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 2, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i - 1, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 1, j, order, hll_only, gamma, y, bg, modes),
-        yface_ez(g, i + 2, j, order, hll_only, gamma, y, bg, modes));
+        yface_ez(g, i - 3, j, y_table, modes),
+        yface_ez(g, i - 2, j, y_table, modes),
+        yface_ez(g, i - 1, j, y_table, modes),
+        yface_ez(g, i, j, y_table, modes),
+        yface_ez(g, i + 1, j, y_table, modes),
+        yface_ez(g, i + 2, j, y_table, modes));
   }
   return scaled_face_average(
-      yface_ez(g, i - 1, j, order, hll_only, gamma, y, bg, modes),
-      yface_ez(g, i, j, order, hll_only, gamma, y, bg, modes));
+      yface_ez(g, i - 1, j, y_table, modes),
+      yface_ez(g, i, j, y_table, modes));
+}
+
+// Fill the directional face-EMF tables over [0,nx] x [0,ny], the exact index
+// range face_index can map into. Each entry is the value the previous
+// compute-on-demand xface_ez/yface_ez would have produced at that mapped index.
+__global__ void QUASAR_LAUNCH_BOUNDS_256 face_emf_kernel(
+    quasar::Grid2D g, int scheme_order, int hll_only, Real gamma,
+    FaceInterfaceView ifx, FaceInterfaceView ify, FaceBackgroundView bg,
+    double* __restrict__ xface_table, double* __restrict__ yface_table) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int j = blockIdx.y * blockDim.y + threadIdx.y;
+  if (i > g.nx || j > g.ny) return;
+  const std::size_t k = g.index(i, j);
+  xface_table[k] = face_ez(g, 0, i, j, scheme_order, hll_only, gamma, ifx, bg);
+  yface_table[k] = face_ez(g, 1, i, j, scheme_order, hll_only, gamma, ify, bg);
 }
 
 struct CellStateView {
   const double *rho, *mx, *my, *mz, *energy, *bx, *by, *bz;
 };
 
+// Widest transverse stencil: MP7 reads 7 taps, MP5 reads 5 and leaves the tail
+// of each row table unused.
+inline constexpr int kMaxCellTaps = 7;
+
+// The tensor point reconstruction at cell node (node_x, node_y) is
+//   point_value_y( oy -> point_value_x( ox -> sample(ox, oy) ) ),
+// whose INNER factor depends on (node_x, oy) only -- not on node_y. The two
+// helpers below split that tensor product so the inner factor is built once per
+// x-node and reused across every y-node, instead of being recomputed for each
+// of the `count` y-nodes as the nested form did.
+//
+// This is pure common-subexpression elimination: `sample` is a side-effect-free
+// function of memory, so each reused value is bit-identical to the one the
+// nested form recomputed, and `point_value` still receives exactly the same
+// operands in exactly the same order. The reduction order -- and therefore the
+// floating-point result -- is unchanged.
+
+// rows[k] is the x-direction point reconstruction on the cell row at transverse
+// offset k-half, for k in [0, taps).
 template <class Sample>
-__device__ inline Real cell_point_value(
-    int order, int node_x, int node_y, const Sample& sample) {
-  return quasar::mhd::detail::point_value(order, node_y, [&](int oy) {
-    return quasar::mhd::detail::point_value(order, node_x, [&](int ox) {
-      return sample(ox, oy);
-    });
-  });
+__device__ inline void cell_point_rows(int order, int node_x,
+                                       const Sample& sample, Real* rows) {
+  const int half = order >= 7 ? 3 : 2;
+  const int taps = order >= 7 ? 7 : 5;
+  for (int k = 0; k < taps; ++k) {
+    const int oy = k - half;
+    rows[k] = quasar::mhd::detail::point_value(
+        order, node_x, [&](int ox) { return sample(ox, oy); });
+  }
 }
 
-__device__ inline MhdState point_cell_state(
-    const quasar::Grid2D& g, int i, int j, int order, int node_x, int node_y,
-    const CellStateView& u) {
-  const auto raw = [&](const double* values) {
-    return cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
-      return static_cast<Real>(values[g.index(i + ox, j + oy)]);
-    });
-  };
-  const Real bx = cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
-    return quasar::mhd::cell_bx(g, u.bx, i + ox, j + oy);
-  });
-  const Real by = cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
-    return quasar::mhd::cell_by(g, u.by, i + ox, j + oy);
-  });
-  return MhdState{raw(u.rho), raw(u.mx), raw(u.my), raw(u.mz), raw(u.energy),
-                  bx, by, raw(u.bz)};
-}
-
-__device__ inline quasar::numerics::MhdBackground point_cell_background(
-    const quasar::Grid2D& g, int i, int j, int order, int node_x, int node_y,
-    const FaceBackgroundView& bg) {
-  if (bg.active == 0) return {};
-  const auto component = [&](int which) {
-    return cell_point_value(order, node_x, node_y, [&](int ox, int oy) {
-      const auto value = quasar::mhd::load_cell_background(
-          g, bg.bx, bg.by, bg.bz, i + ox, j + oy);
-      return which == 0 ? value.b0x : which == 1 ? value.b0y : value.b0z;
-    });
-  };
-  return {component(0), component(1), component(2)};
+// Reduce a row table to the tensor point value at y-node `node_y`. point_value
+// samples transverse offsets oy in [-half, half] (plus the centre reference),
+// which index the table as oy+half.
+__device__ inline Real cell_point_from_rows(int order, int node_y,
+                                            const Real* rows) {
+  const int half = order >= 7 ? 3 : 2;
+  return quasar::mhd::detail::point_value(
+      order, node_y, [&](int oy) { return rows[oy + half]; });
 }
 
 __device__ inline Real physical_ez(
@@ -299,9 +313,33 @@ __device__ inline Real direct_cell_ez(
   return physical_ez(state, background);
 }
 
+// Block-shared cell-centred Bx/By tile.
+//
+// cell_bx/cell_by turn staggered face storage into a cell average with their
+// own multi-tap reduction, and every cell in a block needs that value for the
+// whole (2*half+1)^2 stencil around it. Neighbouring cells therefore ask for
+// the same cell's value repeatedly -- across the block, each one is recomputed
+// up to (2*half+1) times. Deriving the tile once per block and reading it from
+// LDS removes that; the reduction itself is untouched, so each stored value is
+// the same bits cell_bx/cell_by returned before.
+//
+// Sized for the 16x16 launch block plus the MP7 halo (3 each side).
+inline constexpr int kEmfTileHalo = 3;
+inline constexpr int kEmfTileDim = 16 + 2 * kEmfTileHalo;  // 22
+
+struct CellBTile {
+  // [x][y], indexed by (cell - tile_origin) + halo.
+  Real bx[kEmfTileDim][kEmfTileDim];
+  Real by[kEmfTileDim][kEmfTileDim];
+  int origin_i;
+  int origin_j;
+  int valid;  // 0 => tile not usable, fall back to direct evaluation
+};
+
 __device__ inline Real cell_average_ez(
     const quasar::Grid2D& g, int i, int j, int order, Real gamma,
-    const CellStateView& u, const FaceBackgroundView& bg) {
+    const CellStateView& u, const FaceBackgroundView& bg,
+    const CellBTile* tile) {
   const int collocation_order = order <= 1 ? 1 : 0;
   const Real fallback = direct_cell_ez(
       g, i, j, collocation_order, u, bg);
@@ -322,15 +360,107 @@ __device__ inline Real cell_average_ez(
 
   Real point[4][4]{};
   const int count = order == 5 ? 3 : 4;
-  for (int qy = 0; qy < count; ++qy) {
-    for (int qx = 0; qx < count; ++qx) {
-      const MhdState state = point_cell_state(
-          g, i, j, order, qx, qy, u);
+  const int taps = 2 * half + 1;
+
+  // Cell-centred Bx/By and the background are recovered from staggered face
+  // storage by their own multi-tap reductions (cell_bx / cell_by /
+  // load_cell_background). Their value at (i+ox, j+oy) depends only on that
+  // cell, so the whole stencil block is materialised ONCE here. Sampling them
+  // inside cell_point_rows instead would re-derive each of the taps x taps
+  // cells for every x-node -- `count` times over -- and each re-derivation is
+  // itself an 8-tap noinline reduction. Indexed [ox+half][oy+half].
+  Real bx_block[kMaxCellTaps][kMaxCellTaps];
+  Real by_block[kMaxCellTaps][kMaxCellTaps];
+  Real bg_block[3][kMaxCellTaps][kMaxCellTaps];
+  // Read Bx/By from the block-shared tile when this cell's whole stencil lies
+  // inside it (the common case); otherwise derive them here. Both paths call
+  // the same cell_bx/cell_by, so the values are identical either way.
+  //
+  // The stencil must also stay inside the padded domain, because tile entries
+  // outside it were filled with zero rather than evaluated. The caller's
+  // in-range guard above already established that for THIS cell's stencil, so
+  // the tile-extent test is the only additional condition.
+  const bool use_tile =
+      tile != nullptr && tile->valid != 0 &&
+      i - half >= tile->origin_i - kEmfTileHalo &&
+      i + half <= tile->origin_i + kEmfTileDim - 1 - kEmfTileHalo &&
+      j - half >= tile->origin_j - kEmfTileHalo &&
+      j + half <= tile->origin_j + kEmfTileDim - 1 - kEmfTileHalo;
+  for (int a = 0; a < taps; ++a) {
+    for (int b = 0; b < taps; ++b) {
+      const int ii = i + a - half;
+      const int jj = j + b - half;
+      if (use_tile) {
+        const int ti = ii - tile->origin_i + kEmfTileHalo;
+        const int tj = jj - tile->origin_j + kEmfTileHalo;
+        bx_block[a][b] = tile->bx[ti][tj];
+        by_block[a][b] = tile->by[ti][tj];
+      } else {
+        bx_block[a][b] = quasar::mhd::cell_bx(g, u.bx, ii, jj);
+        by_block[a][b] = quasar::mhd::cell_by(g, u.by, ii, jj);
+      }
+      if (bg.active != 0) {
+        const auto value = quasar::mhd::load_cell_background(
+            g, bg.bx, bg.by, bg.bz, ii, jj);
+        bg_block[0][a][b] = value.b0x;
+        bg_block[1][a][b] = value.b0y;
+        bg_block[2][a][b] = value.b0z;
+      }
+    }
+  }
+
+  // Per x-node row tables for the eight state components and (when active) the
+  // three background components. Built once per qx and reused for every qy,
+  // which is where the redundant work in the nested formulation was: the inner
+  // x-reconstruction does not depend on qy.
+  const double* const raw_components[6] = {u.rho, u.mx, u.my, u.mz,
+                                           u.energy, u.bz};
+  Real raw_rows[6][kMaxCellTaps];
+  Real bx_rows[kMaxCellTaps];
+  Real by_rows[kMaxCellTaps];
+  Real bg_rows[3][kMaxCellTaps];
+
+  for (int qx = 0; qx < count; ++qx) {
+    for (int c = 0; c < 6; ++c) {
+      const double* values = raw_components[c];
+      cell_point_rows(order, qx, [&](int ox, int oy) {
+        return static_cast<Real>(values[g.index(i + ox, j + oy)]);
+      }, raw_rows[c]);
+    }
+    cell_point_rows(order, qx, [&](int ox, int oy) {
+      return bx_block[ox + half][oy + half];
+    }, bx_rows);
+    cell_point_rows(order, qx, [&](int ox, int oy) {
+      return by_block[ox + half][oy + half];
+    }, by_rows);
+    if (bg.active != 0) {
+      for (int which = 0; which < 3; ++which) {
+        cell_point_rows(order, qx, [&](int ox, int oy) {
+          return bg_block[which][ox + half][oy + half];
+        }, bg_rows[which]);
+      }
+    }
+
+    for (int qy = 0; qy < count; ++qy) {
+      const MhdState state{
+          cell_point_from_rows(order, qy, raw_rows[0]),
+          cell_point_from_rows(order, qy, raw_rows[1]),
+          cell_point_from_rows(order, qy, raw_rows[2]),
+          cell_point_from_rows(order, qy, raw_rows[3]),
+          cell_point_from_rows(order, qy, raw_rows[4]),
+          cell_point_from_rows(order, qy, bx_rows),
+          cell_point_from_rows(order, qy, by_rows),
+          cell_point_from_rows(order, qy, raw_rows[5])};
       if (!quasar::mhd::detail::state_is_admissible(state, gamma)) {
         return fallback;
       }
-      const auto background = point_cell_background(
-          g, i, j, order, qx, qy, bg);
+      const quasar::numerics::MhdBackground background =
+          bg.active == 0
+              ? quasar::numerics::MhdBackground{}
+              : quasar::numerics::MhdBackground{
+                    cell_point_from_rows(order, qy, bg_rows[0]),
+                    cell_point_from_rows(order, qy, bg_rows[1]),
+                    cell_point_from_rows(order, qy, bg_rows[2])};
       point[qy][qx] = physical_ez(state, background);
     }
   }
@@ -357,17 +487,69 @@ __device__ inline Real cell_average_ez(
       [&](int qy) { return row[qy]; });
 }
 
-__global__ void cell_emf_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
     quasar::Grid2D g, int scheme_order, Real gamma, CellStateView u,
     FaceBackgroundView bg, double* __restrict__ cell_ez) {
   const int launch_i = blockIdx.x * blockDim.x + threadIdx.x;
   const int launch_j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (launch_i >= g.nx + 2 * g.nghost ||
-      launch_j >= g.ny + 2 * g.nghost) return;
   const int i = launch_i - g.nghost;
   const int j = launch_j - g.nghost;
-  cell_ez[g.index(i, j)] =
-      cell_average_ez(g, i, j, scheme_order, gamma, u, bg);
+
+  // Cooperatively derive this block's cell-centred Bx/By tile before any thread
+  // uses it. Only the MP paths read the tile; the others skip the fill so the
+  // low-order launches keep their old cost. Every thread must reach the barrier,
+  // so the out-of-range early return happens after it.
+  __shared__ CellBTile tile;
+  const bool tiled_order = (scheme_order == 5 || scheme_order == 7);
+  if (tiled_order) {
+    const int origin_i =
+        static_cast<int>(blockIdx.x * blockDim.x) - g.nghost;
+    const int origin_j =
+        static_cast<int>(blockIdx.y * blockDim.y) - g.nghost;
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+      tile.origin_i = origin_i;
+      tile.origin_j = origin_j;
+      // cell_bx/cell_by index face storage over the tile's own stencil, so the
+      // tile is only usable where that stays inside allocated storage. The
+      // consumer re-checks its individual stencil against the tile extent.
+      tile.valid = (blockDim.x == 16 && blockDim.y == 16) ? 1 : 0;
+    }
+    __syncthreads();
+    if (tile.valid != 0) {
+      // Flatten the (kEmfTileDim)^2 fill over the block's threads.
+      const int threads = static_cast<int>(blockDim.x * blockDim.y);
+      const int lane =
+          static_cast<int>(threadIdx.y * blockDim.x + threadIdx.x);
+      const int total = kEmfTileDim * kEmfTileDim;
+      const int lo_i = -g.nghost;
+      const int hi_i = g.nx + g.nghost - 1;
+      const int lo_j = -g.nghost;
+      const int hi_j = g.ny + g.nghost - 1;
+      for (int t = lane; t < total; t += threads) {
+        const int a = t / kEmfTileDim;
+        const int b = t % kEmfTileDim;
+        const int ii = origin_i + a - kEmfTileHalo;
+        const int jj = origin_j + b - kEmfTileHalo;
+        // Outside the padded domain cell_bx/cell_by would read unallocated
+        // storage. Those entries are never consumed (the guard in
+        // cell_average_ez rejects any stencil reaching them), so leave them
+        // zero rather than evaluating out of bounds.
+        if (ii < lo_i || ii > hi_i || jj < lo_j || jj > hi_j) {
+          tile.bx[a][b] = Real{0};
+          tile.by[a][b] = Real{0};
+          continue;
+        }
+        tile.bx[a][b] = quasar::mhd::cell_bx(g, u.bx, ii, jj);
+        tile.by[a][b] = quasar::mhd::cell_by(g, u.by, ii, jj);
+      }
+    }
+    __syncthreads();
+  }
+
+  if (launch_i >= g.nx + 2 * g.nghost ||
+      launch_j >= g.ny + 2 * g.nghost) return;
+  cell_ez[g.index(i, j)] = cell_average_ez(
+      g, i, j, scheme_order, gamma, u, bg, tiled_order ? &tile : nullptr);
 }
 
 __device__ inline Real cell_emf_to_corner(
@@ -436,11 +618,13 @@ __device__ inline bool cell_emf_is_constant_along_axis(
   return true;
 }
 
-__global__ void ct_emf_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 modes, int scheme_order,
     int cylindrical, int hll_only, Real gamma, FaceInterfaceView ifx,
     FaceInterfaceView ify, FaceBackgroundView bg,
     const double* __restrict__ cell_ez,
+    const double* __restrict__ xface_table,
+    const double* __restrict__ yface_table,
     double* __restrict__ ez_edge, double* __restrict__ ex_edge,
     double* __restrict__ ey_edge) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -466,9 +650,9 @@ __global__ void ct_emf_kernel(
     ez_edge[k] = Real{0};
   } else {
     const Real ex = interp_x_to_corner(
-        g, i, j, scheme_order, hll_only, gamma, ifx, bg, modes);
+        g, i, j, scheme_order, xface_table, modes);
     const Real ey = interp_y_to_corner(
-        g, i, j, scheme_order, hll_only, gamma, ify, bg, modes);
+        g, i, j, scheme_order, yface_table, modes);
     const Real centered = cell_emf_to_corner(
         g, i, j, scheme_order, cell_ez, modes);
     // Upwind CT: the cell-centred transport is present once in each directional
@@ -505,7 +689,7 @@ __global__ void ct_emf_kernel(
 // Face-B update: dB/dt = -curl E.
 //   bx_face(i,j) -= dt * (ez(i,j+1) - ez(i,j)) / dy
 //   by_face(i,j) += dt * (ez(i+1,j) - ez(i,j)) / dx
-__global__ void face_b_update_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 face_b_update_kernel(
     quasar::Grid2D g, int cylindrical, Real dt,
     double* __restrict__ bx_face, double* __restrict__ by_face,
     const double* __restrict__ ez_edge) {
@@ -560,7 +744,7 @@ __global__ void face_b_update_kernel(
 // left exactly as flux_difference wrote it. The indexing, dx/dy, and interior
 // loop bounds match face_b_update_kernel exactly so the telescoping div(B)
 // cancellation stays bit-for-bit identical.
-__global__ void emf_curl_rate_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 emf_curl_rate_kernel(
     quasar::Grid2D g, int cylindrical,
     double* __restrict__ dbx_face, double* __restrict__ dby_face,
     const double* __restrict__ ez_edge) {
@@ -649,10 +833,21 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u,
                      static_cast<hipStream_t>(stream), g, scheme_order, gamma,
                      state, bg, emf.cell_ez_average.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
+  // Evaluate each directional face EMF once, over the same [0,nx] x [0,ny]
+  // range the corner interpolation can index after face_index mapping. The
+  // corner kernel then reads these tables instead of re-solving the same face
+  // Riemann problem for every corner whose stencil covers it. Same stream, so
+  // the tables are complete before ct_emf_kernel starts.
+  hipLaunchKernelGGL(face_emf_kernel, grid, block, 0,
+                     static_cast<hipStream_t>(stream), g, scheme_order,
+                     hll_only ? 1 : 0, gamma, xv, yv, bg,
+                     emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr());
+  QUASAR_HIP_CHECK(::hipGetLastError());
   hipLaunchKernelGGL(ct_emf_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, flags, scheme_order, cylindrical ? 1 : 0,
                      hll_only ? 1 : 0, gamma,
                      xv, yv, bg, emf.cell_ez_average.device_ptr(),
+                     emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr(),
                      emf.ez_edge.device_ptr(), emf.ex_edge.device_ptr(),
                      emf.ey_edge.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());

@@ -31,7 +31,7 @@ namespace {
 using namespace quasar::backend::pic;
 
 template <int ShapeOrder>
-__global__ void deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
+__global__ void QUASAR_LAUNCH_BOUNDS_256 deposit_kernel(quasar::Grid2D g, std::size_t n, double q, double dt,
                                bool periodic_x, bool periodic_y,
                                const double* __restrict__ x, const double* __restrict__ y,
                                const double* __restrict__ x_prev, const double* __restrict__ y_prev,
@@ -258,7 +258,7 @@ void launch(const quasar::Grid2D& g, const quasar::pic::ParticleSpecies& s,
 }
 
 template <int ShapeOrder>
-__global__ void charge_kernel(quasar::Grid2D g, std::size_t n, double q,
+__global__ void QUASAR_LAUNCH_BOUNDS_256 charge_kernel(quasar::Grid2D g, std::size_t n, double q,
                               bool periodic_x, bool periodic_y,
                               const double* __restrict__ x,
                               const double* __restrict__ y,
@@ -340,7 +340,7 @@ QUASAR_PIC_CHARGE_ABI(launch_pic_charge_shape2, 2)
 #undef QUASAR_PIC_CHARGE_ABI
 
 namespace {
-__global__ void add_uniform_charge_kernel(quasar::Grid2D g, double density,
+__global__ void QUASAR_LAUNCH_BOUNDS_256 add_uniform_charge_kernel(quasar::Grid2D g, double density,
                                           double* rho) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
@@ -364,7 +364,7 @@ extern "C" void launch_pic_add_uniform_charge(
 
 namespace {
 
-__global__ void validate_finite_sources_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 validate_finite_sources_kernel(
     std::size_t n, const double* jx, const double* jy, const double* jz,
     const double* charge, unsigned int* error) {
   const std::size_t k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -484,7 +484,7 @@ __device__ inline double correction_row(
 // Jx couples only along x and Jy only along y. The diagonal dominance gives a
 // contraction factor <=1/13, so seventeen fixed iterations reduce the initial
 // error below double roundoff without a device/host convergence reduction.
-__global__ void current_correct_o4_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 current_correct_o4_kernel(
     quasar::Grid2D g, const double* __restrict__ rhs_x,
     const double* __restrict__ rhs_y, const double* __restrict__ in_x,
     const double* __restrict__ in_y, double* __restrict__ out_x,
@@ -513,7 +513,7 @@ __global__ void current_correct_o4_kernel(
   }
 }
 
-__global__ void current_correct_periodic_high_faces_kernel(
+__global__ void QUASAR_LAUNCH_BOUNDS_256 current_correct_periodic_high_faces_kernel(
     quasar::Grid2D g, double* jx, double* jy, bool periodic_x,
     bool periodic_y) {
   const int line = blockIdx.x * blockDim.x + threadIdx.x;

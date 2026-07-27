@@ -115,12 +115,22 @@ struct EmfField2D {
   // it separate from ez_edge lets the corner kernel read a full tensor stencil
   // while writing the final edge field without an in-place race.
   backend::DeviceBuffer<T> cell_ez_average{};
+  // CT scratch: the directional upwind face EMFs, -F_By on x-faces and +F_Bx on
+  // y-faces.  Each is a pure function of the interface states at that one face,
+  // but the corner interpolation reads a 6/8-tap transverse stencil of them, so
+  // every face value is needed by that many neighbouring corners.  Evaluating
+  // them once per face here instead of once per (corner, tap) removes the
+  // redundant Riemann solves; same rationale and same race-avoidance as
+  // cell_ez_average above.
+  backend::DeviceBuffer<T> xface_ez{};
+  backend::DeviceBuffer<T> yface_ez{};
 
   EmfField2D() = default;
   explicit EmfField2D(Grid2D g)
     : grid{g},
       ez_edge{g.storage_size()}, ex_edge{g.storage_size()},
-      ey_edge{g.storage_size()}, cell_ez_average{g.storage_size()} {}
+      ey_edge{g.storage_size()}, cell_ez_average{g.storage_size()},
+      xface_ez{g.storage_size()}, yface_ez{g.storage_size()} {}
 
   std::size_t component_size() const noexcept { return grid.storage_size(); }
 };
