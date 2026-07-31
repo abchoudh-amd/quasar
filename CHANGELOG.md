@@ -361,6 +361,37 @@ interfaces may still change between entries.
   `reflecting` is rejected at validation.
 
 ### Optimized
+- MHD: the constrained-transport cell EMF no longer re-derives its tensor
+  quadrature per Gauss node. The point reconstruction at cell node `(qx, qy)`
+  factors into an x-pass whose result does not depend on `qy`, so those rows are
+  built once per x-node instead of once per node pair, and the cell-centred
+  `Bx`/`By` stencil block (each entry its own multi-tap face-to-cell reduction)
+  is materialised once per cell rather than re-derived for every x-node. That
+  block is further shared across a thread block through an LDS tile, since
+  neighbouring cells overlap in all but one row of it. Reduction order is
+  unchanged throughout, so the EMF is bit-for-bit what it was.
+- MHD: the CT corner EMF evaluates each directional face EMF once into a new
+  per-face table (`EmfField2D::xface_ez` / `yface_ez`) instead of re-solving the
+  same face Riemann problem for every corner whose interpolation stencil covers
+  it — six to eight corners per face, each solve an MP transverse quadrature over
+  up to four nodes.
+- MHD: MP5/MP7 characteristic reconstruction projects the union of the two
+  interface stencils once per face. The left and right states centre on adjacent
+  cells and share all but one stencil cell, and both use the same reference state
+  and eigensystem, so the shared cells' characteristic amplitudes were being
+  derived twice.
+- MHD: the auto-`dt` loop no longer reconstructs the live register twice per
+  step. `cfl_limit()` already reconstructs both normals to obtain the stable
+  timestep, and the first SSP-RK3 residual stage then reconstructed the same
+  unchanged register into the same buffers; that result is now reused. The cache
+  is keyed on register identity, a mutation generation counter, and the
+  reconstruction order, so any state write, ghost refill, background edit,
+  escaped mutable reference, or positivity-controller order change drops it.
+- HIP: kernels launched at the standard 256-thread block now declare
+  `__launch_bounds__(256)`. Without it the compiler must budget registers for the
+  1024-thread maximum, which caps a kernel at 128 VGPRs and forces spills to
+  scratch to stay under a limit no launch actually needs. This removes the
+  register spilling in the PIC gather/push and deposit kernels entirely.
 - MHD: the per-step CFL stable-timestep scan and the `div(B)` L-infinity
   diagnostic are now device reductions, removing the per-step copy of the whole
   field back to the host that those host-side scans required.
