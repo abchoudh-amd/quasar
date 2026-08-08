@@ -6,6 +6,13 @@
 // field-split formulation degenerate to the plain (non-split) MHD equations.
 // The per-component constants are implementation-internal and settable so a
 // driver may pin a non-zero uniform background after create("uniform").
+//
+// Both profiles in this TU are AFFINE over any element (constant, and linear in
+// (x,y) respectively). The finite-volume moment the sample() contract requires --
+// a face average for comp 0/1, a cell average for comp 2 -- therefore equals the
+// value at the element center exactly, with no curvature correction. A future
+// nonlinear profile must return the element average itself; see the contract
+// note on IMhdBackgroundProfile::sample.
 
 #include "quasar/numerics/mhd_background_profile.hpp"
 
@@ -55,6 +62,7 @@ class UniformBackgroundProfile : public IMhdBackgroundProfile {
 //   phi = 0.5*a*(x^2-y^2) + b*x*y,
 // hence B=(a*x+b*y, b*x-a*y, 0). It is analytically divergence-free and
 // curl-free and provides a small nonuniform profile for registry/deck coverage.
+// B is linear, so its element average equals its center value exactly.
 class LinearVacuumBackgroundProfile : public IMhdBackgroundProfile {
  public:
   bool globally_curl_free() const noexcept override { return true; }

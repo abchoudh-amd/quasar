@@ -22,12 +22,24 @@ class IMhdBackgroundProfile {
  public:
   virtual ~IMhdBackgroundProfile() = default;
 
-  // Sample a background-field component at position (x, y).
-  //   comp == 0 -> b0x, evaluated at the x-face location
-  //   comp == 1 -> b0y, evaluated at the y-face location
-  //   comp == 2 -> b0z, evaluated at the cell center
-  // The caller supplies the appropriate staggered (x, y) for the requested
-  // component; the profile only maps position+component to a field value.
+  // Return one background-field component for the staggered element whose
+  // CENTER is (x, y):
+  //   comp == 0 -> b0x, the x-face element centered at (x, y)
+  //   comp == 1 -> b0y, the y-face element centered at (x, y)
+  //   comp == 2 -> b0z, the cell element centered at (x, y)
+  // The caller supplies the appropriate staggered center for the requested
+  // component; the profile maps element+component to a field value.
+  //
+  // CONTRACT: the returned value is stored and consumed as that element's
+  // DISCRETE FINITE-VOLUME MOMENT -- a face average for comp 0/1 and a cell
+  // average for comp 2 -- not as a point value. The two are identical for any
+  // profile that is affine over an element (both built-ins, "uniform" and
+  // "linear_vacuum", are affine, so evaluating them at the supplied center is
+  // exact). A profile with nonzero curvature over an element must therefore
+  // return the element's average, e.g. by integrating its analytic form or by
+  // applying the standard midpoint correction (h^2/24) * laplacian; returning a
+  // bare midpoint value instead injects an O(h^2) projection error that caps the
+  // scheme's order regardless of the selected reconstruction.
   virtual Real sample(int comp, Real x, Real y) const = 0;
 
   // Optional scalar configuration hook used by the Python deck's ``params``

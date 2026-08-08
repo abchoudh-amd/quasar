@@ -27,6 +27,31 @@ positivity / boundary.*) are validated against the LIVE C++ registries exposed a
 ``initial.type`` must be one of the canonical tokens
 ``{brio_wu, alfven_wave, orszag_tang, blast, rotor, confined_blob}``;
 ``initial.params`` is validated for the selected generator below.
+
+Initial-condition projection accuracy
+-------------------------------------
+
+The evolved state is finite-volume data: cell averages for the fluid variables
+and ``bz``, face averages for ``bx``/``by``. The builders below differ in how
+exactly they realize that projection, which matters only for formal convergence
+studies:
+
+* ``alfven_wave`` is an **exact finite-volume projection**. It applies the
+  analytic ``sinc(k*dx/2)`` element averages and restores the unresolved
+  sub-cell sin/cos energy variance, so it is suitable for measuring the design
+  order of MP5/MP7.
+* ``orszag_tang`` is a **midpoint (second-order) projection**. Its smooth
+  trigonometric profile is evaluated at element centers and stored as if it were
+  the element average, which differs from the true moment by ``O(h^2)``. This is
+  a valid, standard, reproducible benchmark state, but it caps a continuum
+  convergence study at second-order *initialization* accuracy regardless of the
+  reconstruction selected. Use ``alfven_wave`` for formal order verification, or
+  upgrade this builder to averaged moments first.
+* ``brio_wu``, ``blast``, ``rotor``, and ``confined_blob`` are **discontinuous
+  benchmarks**, evaluated at element centers. Away from the discontinuity the
+  states are piecewise constant, so the midpoint value *is* the exact element
+  average; only the cut elements differ from the true moment. These problems have
+  no high-order continuum convergence rate to cap.
 """
 
 from __future__ import annotations
@@ -1400,6 +1425,11 @@ def _ic_brio_wu(deck: MhdDeck, nghost: int) -> dict:
     params: interface (float), left/right each {rho,p,vx,vy,vz,bx,by,bz}.
     bx is the normal (continuous) face field, uniform across the interface; by is
     seeded into by_face; bz cell-centered. Convert primitive -> conserved.
+
+    The two states are piecewise constant, so evaluating at element centers gives
+    the exact element average everywhere except the single cut cell containing
+    ``interface``. This is a discontinuous benchmark with no high-order continuum
+    convergence rate; see the module docstring.
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma
@@ -1517,6 +1547,17 @@ def _ic_orszag_tang(deck: MhdDeck, nghost: int) -> dict:
     standard cell-centered->face sampling for OT; with this analytic profile the
     discrete div B from the staggered seed is at round-off because Bx depends
     only on y and By only on x.
+
+    .. note::
+
+       This is a **midpoint projection, not an exact finite-volume one**. Every
+       primitive is evaluated at its element center and stored in an
+       average-valued field. Because the profile is smooth and nonlinear
+       (sin/cos), the midpoint value differs from the true element moment by
+       ``O(h^2)``. The resulting discrete state is a valid and standard OT
+       benchmark, but initialization error alone limits a continuum convergence
+       study to second order even under MP5/MP7. ``alfven_wave`` is the
+       exactly-projected case; see the module docstring.
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma
@@ -1547,6 +1588,10 @@ def _ic_blast(deck: MhdDeck, nghost: int) -> dict:
     params: rho_ambient, p_ambient, p_core, r_in, center [x,y], bx, by, bz.
     Uniform B everywhere (face value = cell value); pressure is p_core inside
     r < r_in, p_ambient outside; density uniform = rho_ambient. v = 0.
+
+    Every field is piecewise constant, so element-center evaluation is the exact
+    element average except in the cells cut by the disk edge. Discontinuous
+    benchmark; see the module docstring.
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma
@@ -1584,6 +1629,12 @@ def _ic_rotor(deck: MhdDeck, nghost: int) -> dict:
     omega = u0/r0), p, bx, by, bz.
     Inside the disk v = omega*(-(y-cy), (x-cx), 0); in the taper rho and the rim
     speed blend linearly (f = (r1-r)/(r1-r0)); ambient is static. Uniform p, B.
+
+    Sampled at element centers. rho, p and B are piecewise constant and the disk
+    velocity is linear in (x,y), so the midpoint value is the exact element
+    average away from the r0/r1 taper edges; the radial taper and those edges are
+    the only cells that differ from the true moment. Discontinuous benchmark; see
+    the module docstring.
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma
@@ -1651,6 +1702,10 @@ def _ic_confined_blob(deck: MhdDeck, nghost: int) -> dict:
       bz        : uniform out-of-plane (toroidal) field (default 0.1).
       rho_in/out, p_in/out : confined-blob vs ambient density/pressure.
       blob_half : half-width (m) of the centered square plasma blob.
+
+    Sampled at element centers. All fields are piecewise constant, so this is the
+    exact element average except in the cells cut by the square bore edge.
+    Discontinuous benchmark; see the module docstring.
     """
     p = deck.initial.params
     gamma = deck.numerics.gamma

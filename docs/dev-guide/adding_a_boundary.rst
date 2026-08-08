@@ -35,8 +35,8 @@ Field boundary mechanisms
    ``hypot(dx, dy)``. This keeps boxes open on all four sides stable while each
    face retains its ordinary one-dimensional Mur update away from the corners.
 
-Ideal-MHD boundaries: one-sided non-periodic stencils
------------------------------------------------------
+Ideal-MHD boundaries: ghost closures and MUSCL one-sided stencils
+-----------------------------------------------------------------
 
 The ideal-MHD vertical slice derives its boundaries from ``IMhdFluidBoundary``
 and ``IMhdFieldBoundary`` (declared in ``include/quasar/boundary/mhd_boundary.hpp``),
@@ -118,20 +118,37 @@ all-periodic fast path and is bit-identical to the pre-flags behavior.
 The one-sided mechanism
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-At a **non-periodic** side (``outflow`` / ``wall``), the boundary-face
-reconstruction switches to an **interior-biased one-sided slope**: it drops its
-dependence on the ghost *gradient* near the edge while **still reading the filled
-ghost value** that supplies the wall closure. A **periodic** side keeps the
-two-sided stencil and wraps through the ghosts, exactly as before.
+At a **non-periodic** side (``outflow`` / ``wall``), the second-order
+``muscl_minmod`` boundary-face reconstruction switches to an **interior-biased
+one-sided slope**: it drops its dependence on the ghost *gradient* near the edge
+while **still reading the filled ghost value** that supplies the wall closure. A
+**periodic** side keeps the two-sided stencil and wraps through the ghosts,
+exactly as before.
+
+.. important::
+
+   **This applies to the order-2 MUSCL path only.** The high-order ``mp5`` and
+   ``mp7`` characteristic reconstructions keep their **symmetric two-sided
+   stencils at every side**, including non-periodic ones, exactly as the host MP
+   driver does (``src/backend/hip/mhd/mhd_reconstruct.hip``). They close the
+   boundary entirely through the filled ghost values — the deck sizes ``nghost``
+   to the scheme halo, so every stencil read stays in bounds — and they do not
+   special-case the boundary at all.
+
+   The practical consequence is that at a non-periodic boundary the MP schemes'
+   *formal* order rests on the accuracy of the ghost closure itself: the wall /
+   outflow extrapolation is not a high-order boundary reconstruction, so boundary
+   accuracy there is set by the closure, not by the interior design order. This
+   does not affect conservation (see below), only the boundary truncation error.
 
 .. important::
 
    The ghost layers are **still filled and still read** — ``fill_ghosts`` is not
    disabled at a non-periodic side. The wall / outflow closure
-   continues to come from the mirrored / zero-gradient ghost **values**. The
-   one-sided change removes only the dependence on the ghost **gradient** in the
-   slope used at the edge interface, replacing the two-sided central slope with
-   an interior-biased one.
+   continues to come from the mirrored / zero-gradient ghost **values**. For the
+   MUSCL path the one-sided change removes only the dependence on the ghost
+   **gradient** in the slope used at the edge interface, replacing the two-sided
+   central slope with an interior-biased one.
 
 Conservation
 ~~~~~~~~~~~~~
@@ -151,6 +168,7 @@ This is the MHD analogue of the PIC **post-curl node correction** described abov
 stencils). The intent is the same — avoid letting a one-sided edge depend on
 information that has no two-sided neighbor — but the realization differs by
 scheme: PIC applies it as a post-update fix to the boundary-node field values,
-whereas MHD applies it inside the finite-volume **reconstruction** of the
-boundary-face states (with the ghost values still participating as the wall
-closure).
+whereas MHD (on its ``muscl_minmod`` path) applies it inside the finite-volume
+**reconstruction** of the boundary-face states, with the ghost values still
+participating as the wall closure. The MHD MP5/MP7 paths have no analogue: they
+rely on the ghost closure alone.

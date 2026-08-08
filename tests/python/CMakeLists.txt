@@ -46,6 +46,14 @@ set(_quasar_python_tests
   test_pic_smoke
 )
 
+# Tests labelled "slow" are excluded by the default ctest presets because they
+# dominate a full run (test_examples drives every example CLI end-to-end and
+# takes over an hour). Run them with the "-all" test presets, or directly with
+# `ctest -L slow`.
+set(_quasar_python_slow_tests
+  test_examples
+)
+
 foreach(_test IN LISTS _quasar_python_tests)
   add_test(
     NAME    python_${_test}
@@ -60,4 +68,7 @@ foreach(_test IN LISTS _quasar_python_tests)
   set_property(TEST python_${_test}
     APPEND PROPERTY DEPENDS core_test_registry
   )
+  if(_test IN_LIST _quasar_python_slow_tests)
+    set_property(TEST python_${_test} APPEND PROPERTY LABELS slow)
+  endif()
 endforeach()

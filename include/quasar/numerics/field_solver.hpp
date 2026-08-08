@@ -6,8 +6,12 @@
 namespace quasar::numerics {
 
 // Generalized field-solver interface. A field solver advances a field state in
-// two half-updates: advance_b (source-free) and advance_e (driven by a source
-// term, e.g. the deposited current for EM-PIC). It is templated over the field
+// two staggered sub-updates: advance_b (source-free) and advance_e (driven by a
+// source term, e.g. the deposited current for EM-PIC). Neither is a half-step:
+// each is a FULL staggered update over whatever interval the caller supplies.
+// In the EM-PIC leapfrog, E sits at integer times and B at half times, and one
+// step calls each exactly once with the full dt (advance_b takes the midpoint of
+// the old and new dt when the step size changes). It is templated over the field
 // state type `Field` and the source type `Source` so a future non-PIC consumer
 // (e.g. an MHD module with its own state/flux types) can reuse the same contract
 // without touching the EM-PIC instantiation below.
@@ -23,7 +27,8 @@ class IFieldSolverT {
 // concrete solvers (YeeFdtd2D / YeeFdtdCyl2D), and the registry registrations all
 // keep using `IFieldSolver` unchanged — it resolves to the same concrete type as
 // before, so the registry key (Registry<IFieldSolver>) and the deck-facing names
-// ("yee_o2" / "yee_o4" / "yee_cyl_o2") are byte-for-byte equivalent in behavior.
+// ("yee_o2" / "yee_o4" / "yee_cyl_o2" / "yee_cyl_o4") are byte-for-byte
+// equivalent in behavior.
 //
 // EM-PIC remains phrased in the concrete YeeField2D/JField2D types, and the
 // concrete solvers' definitions + registrations still live in

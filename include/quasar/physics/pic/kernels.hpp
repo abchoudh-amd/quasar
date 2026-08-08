@@ -214,11 +214,14 @@ void launch_pic_particle_error_check(const quasar::pic::ParticleSpecies&,
                                      quasar_stream_t);
 
 // -- Current filtering -------------------------------------------------------
-// `scratch` is caller-owned ping-pong storage of at least 3*grid.storage_size()
-// Real values (one strip per current component; the three are filtered in one
-// fused launch), hoisted out of the per-step path. `periodic_x`/`periodic_y`
-// select whether the smoothing stencil wraps on that axis; non-periodic axes
-// clamp at the edge so a filter cannot couple current across a wall.
+// `scratch` is caller-owned ping-pong storage of at least grid.storage_size()
+// Real values, hoisted out of the per-step path. Only `jz` is smoothed: in 2D it
+// does not enter charge continuity, whereas convolving the in-plane Jx/Jy pair
+// without applying the same operator to both endpoint charge densities would
+// change div(J) and violate Gauss's law. Jx/Jy are therefore left untouched, and
+// one strip is enough. `periodic_x`/`periodic_y` select whether the smoothing
+// stencil wraps on that axis; non-periodic axes clamp at the edge so a filter
+// cannot couple current across a wall.
 void launch_pic_filter_binomial(const quasar::Grid2D&, quasar::JField2D<quasar::Real>&,
                                 quasar::Real* scratch, int, int periodic_x, int periodic_y,
                                 int cylindrical, quasar_stream_t);

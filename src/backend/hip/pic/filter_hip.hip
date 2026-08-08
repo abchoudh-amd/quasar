@@ -60,9 +60,9 @@ __global__ void stencil_kernel(quasar::Grid2D g,
   }
 }
 
-// One separable (x then y) pass over all three current components, using the
-// three per-component `scratch` strips as ping-pong storage. Leaves the result
-// back in the JField2D buffers.
+// One separable (x then y) pass over Jz, using the single `scratch` strip as
+// ping-pong storage between the two axis sweeps. Jx/Jy are not read or written.
+// Leaves the result back in the JField2D buffer.
 void filter_pass(const quasar::Grid2D& g, quasar::JField2D<double>& j,
                  double* sz,
                  double a, double b, bool periodic_x, bool periodic_y,
@@ -85,9 +85,8 @@ void run_passes(const quasar::Grid2D& g, quasar::JField2D<double>& j, double* sc
                 int passes, double a, double b, bool periodic_x, bool periodic_y,
                 bool cylindrical, hipStream_t stream) {
   if (passes <= 0) return;
-  // `scratch` holds three contiguous storage_size() strips, one per component.
-  const std::size_t n = g.storage_size();
-  double* sz = scratch + 2 * n;
+  // `scratch` is one storage_size() strip: only Jz is smoothed.
+  double* sz = scratch;
   for (int p = 0; p < passes; ++p) {
     filter_pass(g, j, sz, a, b, periodic_x, periodic_y, cylindrical, stream);
   }
@@ -95,10 +94,10 @@ void run_passes(const quasar::Grid2D& g, quasar::JField2D<double>& j, double* sc
 
 }  // namespace
 
-// `scratch` is caller-owned ping-pong storage of at least 3*g.storage_size()
-// Real values (one storage_size() strip per current component, since the three
-// components are filtered in one fused launch), hoisted out of the per-step hot
-// path (see numerics/filter.cpp).
+// `scratch` is caller-owned ping-pong storage of at least g.storage_size() Real
+// values, hoisted out of the per-step hot path (see numerics/filter.cpp). Only
+// Jz is smoothed, so one strip suffices; Jx/Jy are left untouched to preserve
+// discrete charge continuity.
 extern "C" void launch_pic_filter_binomial(const quasar::Grid2D& g,
                                            quasar::JField2D<quasar::Real>& j,
                                            quasar::Real* scratch, int passes, int periodic_x,

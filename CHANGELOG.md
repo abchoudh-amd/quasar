@@ -23,10 +23,13 @@ interfaces may still change between entries.
   Enabled via a `background_field:` deck block (`enabled`, `profile`, uniform
   `bx0/by0/bz0`, `file:`, or a coil `a_file:`). `B0` comes from the pluggable
   `IMhdBackgroundProfile` registry (built-ins `"uniform"` and
-  `"linear_vacuum"`) or an `.npz` file. Setup accepts a fixed divergence
-  residual no larger than
-  `1e-9 * max(1, max(||B0x||inf, ||B0y||inf) / min(dx,dy))` and rejects larger
-  residuals. The physical total field `B0 + b` enters the
+  `"linear_vacuum"`) or an `.npz` file. Setup validates solenoidality with a
+  scale-free predicate: the discrete divergence residual is normalized by the
+  magnitudes of the directional derivative terms that form it (not by the raw
+  field values, so a large DC offset cannot mask a real derivative) and must
+  stay within `1024` machine epsilon. A residual at an exact cross-direction
+  cancellation is additionally admitted when it is explained by the accumulated
+  per-face rounding uncertainty. The physical total field `B0 + b` enters the
   eigensystem, Riemann fluxes, Maxwell stress, and fast-magnetosonic CFL speed
   (so a nonzero `B0` can tighten the stable timestep). The stored split-energy
   variable is internal energy plus kinetic energy plus `0.5|b|^2`; it is not the
@@ -39,12 +42,15 @@ interfaces may still change between entries.
   `MhdSolver2D.seed_background`/`has_background`,
   `registered_mhd_background_profiles`), and a new `examples/mhd_guide_field`
   guide-field case.
-- MHD: one-sided non-periodic boundary stencils — at `outflow`/`wall`
-  boundaries the boundary-face reconstruction uses an interior-biased one-sided
-  slope (dropping dependence on the ghost gradient) while still reading the
-  ghost values that impose the wall closure; periodic boundaries keep the
-  two-sided wrap stencil unchanged. The conservative flux difference is
-  unchanged, so discrete conservation still telescopes. The per-side periodic
+- MHD: one-sided non-periodic boundary stencils for the order-2 MUSCL path — at
+  `outflow`/`wall` boundaries the `muscl_minmod` boundary-face reconstruction
+  uses an interior-biased one-sided slope (dropping dependence on the ghost
+  gradient) while still reading the ghost values that impose the wall closure;
+  periodic boundaries keep the two-sided wrap stencil unchanged. The `mp5`/`mp7`
+  characteristic reconstructions are unaffected: they retain their symmetric
+  two-sided stencils at every side and close a non-periodic boundary through the
+  filled ghost values alone. The conservative flux difference is unchanged in
+  all cases, so discrete conservation still telescopes. The per-side periodic
   classification is owned by the boundary axis
   (`quasar::boundary::mhd_boundary_is_periodic`).
 - MHD: the `wall` boundary — a perfectly-conducting wall imposing `n·B = 0` on
@@ -263,6 +269,13 @@ interfaces may still change between entries.
   like the grid/plane/line observation kinds.
 
 ### Changed
+- Testing: long-running tests are now labelled `slow` and excluded from the
+  default `ctest` presets, so `ctest --preset <name>` completes in minutes
+  instead of over an hour. Only `python_test_examples` currently carries the
+  label — it drives every example CLI end-to-end. New `<name>-all` test presets
+  run the complete suite including labelled tests, and `ctest -L slow` selects
+  just them. Run the `-all` preset before a release and after changing
+  `examples/`, a physics CLI, or the deck schema.
 - MHD: the ideal-MHD solver hot path now runs entirely on device (HIP, gfx942).
   Previously several pieces staged device buffers back to the host each step and
   computed there; those are now device kernels:

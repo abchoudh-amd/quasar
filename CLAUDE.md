@@ -17,12 +17,21 @@ Configure/build/test via CMake presets:
 python -m pip install -r tests/python/requirements.txt
 cmake --preset hip-gfx942-release
 cmake --build --preset hip-gfx942-release -j
-ctest --preset hip-gfx942-release            # all tests
+ctest --preset hip-gfx942-release            # default suite (excludes 'slow')
+ctest --preset hip-gfx942-release-all        # everything, including 'slow'
 ctest --preset hip-gfx942-release -R <regex> # single test by name regex
 ```
 
 Preset build trees live under `build/<preset>/`; release and debug presets are
 provided for both `gfx942` and `gfx950`.
+
+Tests labelled `slow` are excluded from the default test presets because they
+dominate a full run — currently just `python_test_examples`, which drives every
+example CLI end-to-end and takes over an hour. Use the matching `-all` test
+preset (or `ctest -L slow` in a build tree) to run them; do that before
+releasing, and whenever a change touches `examples/`, a physics CLI, or the deck
+schema. Add the label in `tests/python/CMakeLists.txt`
+(`_quasar_python_slow_tests`) when a new test crosses that cost threshold.
 
 The compiled Python extension `quasar._core` lands at `build/hip-gfx942-release/python/quasar/_core*.so`. To run Python entry points or pytest against the build tree:
 
@@ -69,6 +78,8 @@ CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target 
 ## Examples and tests
 
 `examples/<case>/` contains a YAML input deck plus a `README.md` documenting how to run it and its analytical reference. Each example has a corresponding integration test in `tests/python/test_examples.py`. When adding a new physics example, add both the README and the matching test entry — the test runs the CLI against the deck and compares the output `.npz` to the closed-form reference.
+
+`python_test_examples` is labelled `slow` and is therefore **not** run by the default `ctest --preset` invocation. After changing an example, a physics CLI, or the deck schema, run it explicitly with the `-all` test preset (or `ctest -L slow`).
 
 C++ unit tests under `tests/unit/<axis>/` mirror the public header tree. Python tests under `tests/python/` cover bindings, deck I/O, CLI, and post-processing.
 

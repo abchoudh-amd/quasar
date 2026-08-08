@@ -88,7 +88,7 @@ MhdConfig validate_config(MhdConfig cfg) {
         "reconstruction='muscl_minmod'; MP5/MP7 require r-weighted radial "
         "finite-volume moments"};
   }
-  // The device residual currently has one concrete Riemann and CT algorithm.
+  // The device residual currently has one concrete algorithm per numerics axis.
   // A registry entry alone must not be accepted and then silently ignored.
   if (cfg.riemann != "hlld") {
     throw std::invalid_argument{
@@ -98,6 +98,24 @@ MhdConfig validate_config(MhdConfig cfg) {
     throw std::invalid_argument{
         "MhdSolver2D: device evolution supports only ct='fd_ct_christlieb'"};
   }
+  // compute_residual() launches a built-in MUSCL/MP5/MP7 device kernel selected
+  // by reconstruction_order(), which maps the scheme's required_nghost() back to
+  // order 2/5/7. A custom IFluxReconstruction's reconstruct_faces() is therefore
+  // never called on the evolution path: accepting one would run built-in MP5
+  // under the custom scheme's name. Reject by name rather than silently
+  // substituting a different algorithm.
+  if (cfg.reconstruction != "muscl_minmod" && cfg.reconstruction != "mp5" &&
+      cfg.reconstruction != "mp7") {
+    throw std::invalid_argument{
+        "MhdSolver2D: device evolution supports only "
+        "reconstruction='muscl_minmod', 'mp5', or 'mp7'; a custom registered "
+        "reconstruction would be silently replaced by the built-in kernel of "
+        "the same halo width"};
+  }
+  // The integrator axis is a SEQUENCING seam, not a coefficient-carrying one:
+  // ISsprkIntegrator::advance() is genuinely invoked, but combine_stage() owns
+  // the Shu-Osher weights and accepts only stages 0/1/2 (see the structural
+  // n_stages() check in the constructor, which needs the built object).
   for (int side = 0; side < 4; ++side) {
     require_registered_name<boundary::IMhdFluidBoundary>(
         cfg.boundary.fluid[side], "fluid boundary");
@@ -848,6 +866,18 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
   riemann_ = make_scheme<numerics::IRiemannSolver>(cfg_.riemann, "Riemann solver");
   ct_ = make_scheme<numerics::ICtScheme>(cfg_.ct, "CT scheme");
   integrator_ = make_scheme<numerics::ISsprkIntegrator>(cfg_.integrator, "integrator");
+  // combine_stage() owns the Shu-Osher weights and implements exactly the
+  // three-stage SSP-RK3 tableau, rejecting any stage index outside {0,1,2}. An
+  // integrator advertising a different stage count would therefore either throw
+  // partway through a step or silently run with SSPRK3's coefficients. Reject it
+  // here instead, while the failure is still a construction-time error.
+  if (integrator_->n_stages() != 3) {
+    throw std::invalid_argument{
+        "MhdSolver2D: integrator '" + cfg_.integrator + "' declares " +
+        std::to_string(integrator_->n_stages()) +
+        " stages, but combine_stage applies the fixed three-stage SSPRK3 "
+        "Shu-Osher coefficients; only a 3-stage integrator is supported"};
+  }
   positivity_ = make_scheme<numerics::IPositivityLimiter>(cfg_.positivity, "positivity limiter");
 
   // Per-side fluid + field boundaries, built through the registry (the documented

@@ -140,8 +140,11 @@ Geometry
 
 ``geometry: cylindrical`` runs the axisymmetric ``(r, z)`` form: the x-axis is
 the radius ``r`` (with ``origin_x_m`` the inner radius, ``0`` to include the
-axis) and the y-axis is ``z``. Radial fluid fluxes use exact annular face/volume
-weights; only the radial/azimuthal curvature stresses remain as point sources.
+axis) and the y-axis is ``z``. Radial fluid fluxes use exact discrete weights
+chosen per equation (annular ring-volume for the mass-like variables, an
+:math:`r^2` angular-momentum moment for :math:`m_\phi`, and no radial weight for
+:math:`B_\phi` — see "Discrete radial measures" below); only the
+radial/azimuthal curvature stresses remain as point sources.
 Constrained transport uses the matching annular curl and preserves
 ``(1/r) d(r B_r)/dr + dB_z/dz`` at round-off. A domain with ``origin_x_m > 0``
 is an annulus and uses an ordinary physical x-low boundary; only ``r=0`` uses
@@ -150,12 +153,47 @@ the ``axis`` parity boundary.
 .. important::
 
    Cylindrical runs currently require
-   ``numerics.reconstruction: muscl_minmod`` and are second-order in space.
-   Their radial conserved values are ring-volume averages with measure
-   :math:`r\,dr\,dz`; the Cartesian MP5/MP7 coefficients assume the uniform
-   measure :math:`dr\,dz`. Both the C++ constructor and Python deck validator
-   reject MP5/MP7 in cylindrical geometry instead of silently reporting a
-   design order that the radial metric treatment does not attain.
+   ``numerics.reconstruction: muscl_minmod`` and are second-order in space. The
+   Cartesian MP5/MP7 coefficients assume the uniform measure :math:`dr\,dz`,
+   which the radial metric does not provide, so both the C++ constructor and the
+   Python deck validator reject MP5/MP7 in cylindrical geometry instead of
+   silently reporting a design order the radial treatment does not attain.
+
+Discrete radial measures
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The cylindrical conserved variables are **not** all averages under a single
+:math:`r\,dr\,dz` measure. Each equation is discretized with its own natural
+measure, chosen so that the quantity the equation actually conserves telescopes
+exactly (``src/backend/hip/mhd/mhd_update.hip``):
+
+* **Mass-like variables** (:math:`\rho`, axial momentum :math:`m_z`, energy) use
+  the **annular ring-volume average** with measure :math:`r\,dr`. Their radial
+  residual is the ring-flux divergence
+  :math:`[r_{hi}F_{hi} - r_{lo}F_{lo}] / \int r\,dr`, evaluated in the factored
+  form :math:`(F_{hi}-F_{lo})/dr + (F_{hi}+F_{lo})/(2r_c)` so it avoids
+  differences of squared radii and stays regular in the :math:`r=0` axis cell.
+
+* **Azimuthal momentum** :math:`m_\phi` is stored as a piecewise-constant annular
+  cell value, but the conserved integral is **angular momentum**
+  :math:`\int r^2 m_\phi\,dr`. Its residual therefore uses that :math:`r^2`
+  moment directly, rather than an annular divergence plus a pointwise
+  :math:`-F/r` source, so it telescopes exactly under the angular-momentum
+  weight.
+
+* **Radial momentum** :math:`m_r` is excluded from the generic annular
+  divergence and handled by a dedicated kernel that rounds its tensor
+  derivatives, its pressure-free curvature difference, and any static-background
+  stress together — the curvature cancellation must happen before rounding.
+
+* **Toroidal field** :math:`B_\phi` obeys the **metric-free** point equation
+  :math:`\partial_t B_\phi + \partial_r F_{B_\phi} = 0` and so uses an ordinary
+  radial face difference with no :math:`r` weighting at all.
+
+These component-specific measures are internally consistent, and the second-order
+cylindrical path is conservative in each variable's own invariant. Do not assume
+a single uniform :math:`r\,dr\,dz` average when post-processing or when adding a
+cylindrical source term.
 
 For a static background ("guide") field ``B = B0 + b``, see
 :doc:`mhd_background_field`.

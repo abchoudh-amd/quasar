@@ -23,12 +23,31 @@ scalar parameter hook::
 * ``1`` -> ``b0y``, the y-normal component on y-faces,
 * ``2`` -> ``b0z``, the out-of-plane component at cell centers.
 
-The caller passes the staggered ``(x, y)`` for the requested component; the
-profile only maps position + component to a field value. The interface is never
-called from device code — it is sampled host-side at setup time to fill the
-background buffers (see "How the profile reaches the device" below).
+The caller passes the *center* of the staggered element for the requested
+component; the profile maps element + component to a field value. The interface
+is never called from device code — it is sampled host-side at setup time to fill
+the background buffers (see "How the profile reaches the device" below).
 ``set_parameter`` rejects every key by default; override it for the finite scalar
 values accepted by the profile's deck ``params`` mapping.
+
+.. important::
+
+   **Return the element's finite-volume moment, not a point value.** The MHD
+   state is a finite-volume discretization: ``b0x``/``b0y`` are stored and
+   consumed as *face averages* and ``b0z`` as a *cell average*, exactly like the
+   evolved ``bx_face``/``by_face``/``bz_cell`` they are added to. For a profile
+   that is affine over an element the two coincide, so simply evaluating the
+   analytic form at the supplied center is exact — this is why both built-ins
+   (``"uniform"``, constant; ``"linear_vacuum"``, linear) are correct as written.
+
+   A profile with nonzero curvature over an element must return the average
+   instead: integrate the analytic form over the element, or apply the standard
+   midpoint correction :math:`\bar{f} = f(x_c) + \frac{h^2}{24}\nabla^2 f +
+   O(h^4)`. Returning a bare midpoint value for a nonlinear profile injects an
+   :math:`O(h^2)` projection error into ``B0`` that caps the achieved order at
+   two no matter which reconstruction the deck selects. The divergence check
+   below will *not* catch this: a midpoint-sampled field can be discretely
+   divergence-free and still be the wrong finite-volume moment.
 
 Adding a profile
 ----------------

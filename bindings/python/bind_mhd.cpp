@@ -58,7 +58,8 @@ py::array_t<T> vector_to_numpy(const std::vector<T>& v) {
 
 void bind_mhd(py::module_& m) {
   py::module_ mhd =
-      m.def_submodule("mhd", "2D ideal-MHD (finite-difference + CT) scaffolding.");
+      m.def_submodule(
+          "mhd", "2D ideal-MHD (finite-volume + constrained transport) scaffolding.");
 
   // -- Grid -----------------------------------------------------------------
   // Alias the already-registered quasar::Grid2D pybind class (bound by bind_pic,

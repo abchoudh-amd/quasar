@@ -34,10 +34,14 @@
 // Consecutive faces therefore telescope under the forward divergence; at i=0
 // this naturally retains the outward flux while the r=0 inner flux vanishes.
 // The axial current Jz telescopes as in Cartesian but is normalised by the same
-// cylindrical V_cell so its divergence matches. Jphi (out-of-plane, no grid axis)
-// is deposited with the time-centred shape as a density over V_cell. The axis
-// cell (i=0) uses cell_volume(0), the wedge volume of the on-axis ring, so the
-// on-axis charge is weighted correctly.
+// cylindrical V_cell so its divergence matches. The axis cell (i=0) uses
+// cell_volume(0), the wedge volume of the on-axis ring, so the on-axis charge is
+// weighted correctly.
+//
+// Jphi enters no continuity relation and is NOT a charge-centred density. It is
+// collocated with Ephi on the radial faces, so it is deposited with the
+// time-centred shape on the (offset 0, 1/2) lattice and normalised by that
+// face's radial dual annulus -- not by the charge cell's V_cell.
 //
 // The per-axis periodic/clamp indexing and the deposition-window overflow guard
 // are identical to the Cartesian deposit; only the r-weighting and the V_cell
@@ -125,9 +129,11 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 deposit_cyl_kernel(quasar::Grid2D g, st
   }
 
   const int pitch = g.pitch();
-  int colr[kWindow];        // radial charge/Jphi cell index
+  // Charge-centred indices, used by the Jr/Jz prefix deposits below. Jphi is not
+  // charge-centred: it builds its own indices on the radial-face lattice.
+  int colr[kWindow];        // radial charge cell index
   int colr_face[kWindow];   // Jr upper-face index
-  int rowz[kWindow];        // axial charge/Jphi cell row
+  int rowz[kWindow];        // axial charge cell row
   int rowz_face[kWindow];   // Jz upper-face row
   int gnode[kWindow];  // un-wrapped radial node, for the r-weight metric
   bool colr_valid[kWindow];
@@ -170,9 +176,10 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 deposit_cyl_kernel(quasar::Grid2D g, st
   const double dr = g.dx();
   const double dz = g.dy();
 
-  // All three components are normalised by the SAME cylindrical cell volume
-  // V(i) = cell_volume(i) so that, with rho(i,j) = qw*Sr(i)*Sz(j)/V(i), the
-  // discrete cylindrical continuity (solver-compatible forward divergence)
+  // The two continuity-carrying components (Jr, Jz) are normalised by the SAME
+  // cylindrical cell volume V(i) = cell_volume(i) so that, with
+  // rho(i,j) = qw*Sr(i)*Sz(j)/V(i), the discrete cylindrical continuity
+  // (solver-compatible forward divergence)
   //   (rho1-rho0)/dt + ( r_e(i+1) Jr(i+1) - r_e(i) Jr(i) )/(r_c dr)
   //                  + ( Jz(j+1) - Jz(j) )/dz = 0
   // holds exactly term-by-term, independent of any constant (e.g. 2*pi) factor

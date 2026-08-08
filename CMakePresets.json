@@ -67,24 +67,61 @@
   ],
   "testPresets": [
     {
+      "name": "default-fast",
+      "hidden": true,
+      "description": "Excludes tests labelled 'slow' (python_test_examples, >1h).",
+      "output": { "outputOnFailure": true },
+      "filter": { "exclude": { "label": "slow" } }
+    },
+    {
+      "name": "default-all",
+      "hidden": true,
+      "description": "Every test, including those labelled 'slow'.",
+      "output": { "outputOnFailure": true }
+    },
+    {
       "name": "hip-gfx942-release",
       "configurePreset": "hip-gfx942-release",
-      "output": { "outputOnFailure": true }
+      "inherits": "default-fast"
+    },
+    {
+      "name": "hip-gfx942-release-all",
+      "displayName": "HIP gfx942 Release (including slow tests)",
+      "configurePreset": "hip-gfx942-release",
+      "inherits": "default-all"
     },
     {
       "name": "hip-gfx942-debug",
       "configurePreset": "hip-gfx942-debug",
-      "output": { "outputOnFailure": true }
+      "inherits": "default-fast"
+    },
+    {
+      "name": "hip-gfx942-debug-all",
+      "displayName": "HIP gfx942 Debug (including slow tests)",
+      "configurePreset": "hip-gfx942-debug",
+      "inherits": "default-all"
     },
     {
       "name": "hip-gfx950-release",
       "configurePreset": "hip-gfx950-release",
-      "output": { "outputOnFailure": true }
+      "inherits": "default-fast"
+    },
+    {
+      "name": "hip-gfx950-release-all",
+      "displayName": "HIP gfx950 Release (including slow tests)",
+      "configurePreset": "hip-gfx950-release",
+      "inherits": "default-all"
     },
     {
       "name": "hip-gfx950-debug",
       "configurePreset": "hip-gfx950-debug",
-      "output": { "outputOnFailure": true }
+      "inherits": "default-fast"
+    },
+    {
+      "name": "hip-gfx950-debug-all",
+      "displayName": "HIP gfx950 Debug (including slow tests)",
+      "configurePreset": "hip-gfx950-debug",
+      "inherits": "default-all"
     }
   ]
 }

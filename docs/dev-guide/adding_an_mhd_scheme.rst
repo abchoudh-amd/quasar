@@ -5,8 +5,20 @@ The ideal-MHD module resolves each of its numerics axes by deck-facing string
 name through the plugin registry, exactly like the PIC field-solver / pusher /
 deposit guides. ``MhdSolver2D`` (``src/physics/mhd/mhd_solver.cpp``) builds every
 scheme through ``make_scheme<Base>(name, what)``, so the driver carries no
-``if/else`` over scheme types and a new scheme is selectable from a deck without
-touching the solver.
+``if/else`` over scheme types.
+
+.. warning::
+
+   **Read "What is actually pluggable today" below before writing a new scheme.**
+   Registering a class is necessary but *not* sufficient to have it run. Only the
+   **positivity** axis dispatches through its registry object on the hot path;
+   the **integrator** axis drives the stage loop but not the coefficients. The
+   **reconstruction**, **Riemann**, and **CT** axes are currently **fixed
+   built-ins**: the device evolution path launches one hard-coded algorithm each,
+   and ``MhdSolver2D`` rejects any other name at construction rather than
+   accepting a scheme and silently ignoring it. Adding a genuinely new algorithm
+   on one of those three axes requires extending the device path as well, not
+   just registering a class.
 
 This guide covers the four MHD-specific pluggable axes. Each has a public
 interface header under ``include/quasar/numerics/``, a concrete implementation
@@ -55,10 +67,13 @@ Steps
    device code), mirroring the existing ``hlld_riemann.cpp`` / ``ct_scheme.cpp`` /
    ``ssprk_integrator.cpp`` / ``positivity_limiter.cpp`` entries.
 
-#. **Expose it to decks.** The Python loader validates ``numerics.*`` names; add
-   the new name to the relevant token list / validation in
-   ``python/quasar/mhd/io.py`` so a deck selecting it is accepted, and update the
-   MHD user guide if the new scheme changes deck-facing behavior.
+#. **Expose it to decks.** The Python loader validates ``numerics.*`` names
+   against the live registry, so registration alone makes the name pass Python
+   validation; update the MHD user guide if the new scheme changes deck-facing
+   behavior. For any axis other than positivity you must **also** add the device
+   dispatch and relax the matching name check in ``validate_config`` — see
+   "What is actually pluggable today" below — otherwise a deck selecting the new
+   name is rejected by the C++ constructor.
 
 #. **Test it.** Add a C++ unit test under ``tests/unit/numerics/`` mirroring the
    header (e.g. ``test_hlld_riemann.cpp`` for the Riemann axis). A registry-linkage
@@ -79,3 +94,58 @@ typo in ``numerics.riemann`` reports ``unknown Riemann solver '<name>'`` rather
 than a raw registry error. The reconstruction scheme is built first because its
 ``required_nghost()`` fixes the working-grid ghost halo that sizes every field and
 register.
+
+What is actually pluggable today
+--------------------------------
+
+Constructing a scheme object is not the same as running it. The MHD evolution
+path (``MhdSolver2D::compute_residual`` / ``combine_stage``) launches fused
+``launch_mhd_*`` device kernels, and only some of them dispatch through the
+registry object:
+
+=============================  ===================================================
+Axis                           How the constructed object is used on the hot path
+=============================  ===================================================
+Positivity limiter             **Fully pluggable.** ``positivity_->admissible_fraction()`` is called directly on every stage and retry.
+Flux reconstruction            **Fixed built-in.** Only ``required_nghost()`` is read; it is mapped back to order 2/5/7 by ``reconstruction_order()`` and the built-in MUSCL / MP5 / MP7 device kernel is launched. ``reconstruct_faces()`` is never called during evolution.
+Riemann solver                 **Fixed built-in.** ``riemann_`` is constructed but never invoked; the residual always launches the built-in HLLD kernel.
+CT scheme                      **Fixed built-in.** ``ct_`` is constructed but never invoked; the face-B rate always comes from the built-in FD-CT corner-EMF kernel.
+SSP-RK integrator              **Sequencing only.** ``integrator_->advance()`` *is* called and drives the stage loop, so a custom integrator can control stage ordering, retries, and error handling. But ``combine_stage()`` owns the Shu-Osher coefficients and implements exactly the 3-stage SSPRK3 tableau, so a scheme cannot supply its own weights.
+=============================  ===================================================
+
+Because a silently ignored scheme is worse than a rejected one, ``validate_config``
+rejects any name outside the supported set **by name**, before construction:
+
+* ``numerics.reconstruction`` must be ``muscl_minmod``, ``mp5``, or ``mp7``
+  (and ``muscl_minmod`` only, in cylindrical geometry);
+* ``numerics.riemann`` must be ``hlld``;
+* ``numerics.ct`` must be ``fd_ct_christlieb``.
+
+The integrator axis is checked *structurally* rather than by name, because its
+``advance()`` really does run: the constructor rejects any integrator whose
+``n_stages()`` is not 3, since ``combine_stage`` would otherwise throw partway
+through a step. A registered 3-stage integrator that drives the documented
+``compute_residual`` / ``combine_stage`` sequence is therefore usable — this is
+how the rollback tests in
+``tests/unit/physics/mhd/test_mhd_positivity_preservation.cpp`` inject faults —
+but it inherits SSPRK3's coefficients rather than supplying its own.
+
+So registering ``HllcRiemann`` makes the name visible in
+``_core.mhd.registered_riemann_solvers()`` and the Python deck validator, but a
+deck selecting it is rejected by the C++ constructor rather than run as HLLD.
+
+Adding a real scheme to one of the fixed axes therefore also requires:
+
+#. a device kernel implementing it (declared in
+   ``include/quasar/physics/mhd/kernels.hpp``, defined under
+   ``src/backend/hip/mhd/``);
+#. a dispatch seam in ``compute_residual`` (or ``combine_stage`` for an
+   integrator) that routes to it instead of the hard-coded launcher — the
+   interfaces as written do not yet carry everything the kernels need
+   (background field, boundary flags, quadrature rule, stage routing); and
+#. relaxing the corresponding name check in ``validate_config``.
+
+Extending the ``IFluxReconstruction`` / ``IRiemannSolver`` / ``ICtScheme`` /
+``ISsprkIntegrator`` interfaces to cover those inputs, so the hot path can
+dispatch through them generically, is the outstanding work that would make these
+axes pluggable in the same sense as the positivity axis.

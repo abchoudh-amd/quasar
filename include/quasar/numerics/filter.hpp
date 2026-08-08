@@ -15,6 +15,13 @@ struct BoundarySpec;
 
 namespace quasar::numerics {
 
+// A current filter smooths the deposited current in place. The built-in
+// smoothers deliberately act on `jz` ALONE: in 2D the out-of-plane component
+// does not enter charge continuity, whereas convolving the in-plane Jx/Jy pair
+// without applying the identical operator to both endpoint charge densities
+// changes div(J) and breaks Gauss's law. A filter that smooths Jx/Jy must
+// therefore supply its own continuity-preserving (e.g. longitudinal/transverse)
+// projection rather than reusing the separable stencil below.
 class ICurrentFilter {
  public:
   virtual ~ICurrentFilter() = default;

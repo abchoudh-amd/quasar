@@ -14,10 +14,19 @@ The implementation exposes two compile-time kernel choices:
 
 Particle gather/deposit uses shape-specialized kernels. ``shape = cic`` uses a
 bilinear four-cell support, while ``shape = tsc`` uses a quadratic B-spline
-nine-cell support. ``Esirkepov2D`` deposits face current whose forward discrete
-divergence satisfies the cellwise continuity equation with the matching charge
-shape. For the fourth-order curl, a compact correction maps that second-order
-identity onto the fourth-order divergence operator.
+nine-cell support. ``Esirkepov2D`` deposits the in-plane continuity currents
+``Jx``/``Jy`` on their **faces**, so that their forward discrete divergence
+satisfies the cellwise continuity equation with the matching charge shape. For
+the fourth-order curl, a compact correction maps that second-order identity onto
+the fourth-order divergence operator.
+
+The out-of-plane current is not face current. Each ``J`` component is collocated
+with the ``E`` component it drives in Ampère's law
+(``include/quasar/core/yee_field.hpp``), so in Cartesian geometry ``Jz`` sits at
+the **cell center** with ``Ez``, and in the axisymmetric layout ``Jphi`` sits on
+the **radial faces** with ``Ephi``. Only the in-plane pair carries the continuity
+constraint; the out-of-plane component does not enter it in 2D, which is also why
+the digital filters may smooth it and not the others.
 
 On a doubly periodic grid the discrete divergence telescopes exactly, just as
 the continuum divergence integrates to zero on a torus.  Consequently a

@@ -102,10 +102,27 @@ likewise ``bx -> Br``, ``by -> Bz``, ``bz -> Bphi``). Particle slots map
 ``x -> r``, ``y -> z`` for position and ``vx -> vr``, ``vy -> vz``,
 ``vz -> vphi`` for velocity. The axial field and velocity therefore live in the
 ``ey`` / ``by`` / ``vy`` slots. Keeping the same six-component storage means the
-gather and the Boris half-rotation are unchanged — the local
-``(e_r, e_z, e_phi)`` frame is orthonormal — and only the position advance picks
-up the azimuthal rotation of the ``(vr, vphi)`` pair across ``r``
-(``gather_push_cyl_hip.hip``).
+gather and Boris *machinery* is reused verbatim (``gather_index``,
+``gather_pair``, and the ``boris`` half-rotation itself are shared with the
+Cartesian kernel), but two details do change (``gather_push_cyl_hip.hip``):
+
+* **Gather locations differ**, because the cylindrical Yee lattice assigns
+  different staggering to the same storage slots. ``Ephi`` (the ``ez`` slot) is
+  gathered on the **radial-face** lattice, not the cell center its Cartesian
+  ``Ez`` counterpart uses; and ``Br``/``Bz`` (the ``bx``/``by`` slots) are
+  gathered at the **corner**/**center** lattices respectively, exchanging the
+  Cartesian ``Bx``/``By`` face assignments. Passing Cartesian offsets here would
+  silently interpolate the wrong points.
+
+* **The storage order must be permuted before the Boris rotation.** The physical
+  right-handed basis is ``(e_r, e_phi, e_z)``, whereas the storage order
+  ``(r, z, phi)`` is **left-handed**. The kernel therefore permutes ``(r,z,phi)
+  -> (r,phi,z)``, applies the ordinary Cartesian cross product there, and maps
+  back. Applying the cross product directly in storage order would reverse the
+  magnetic force.
+
+Beyond those, the position advance picks up the azimuthal rotation of the
+``(vr, vphi)`` pair across ``r``.
 
 **On-axis closure (the subtle correctness point).** The axisymmetric ``Ez``/
 ``Bz`` curls use the radial-flux operator ``(1/r) d(r A_phi)/dr`` in

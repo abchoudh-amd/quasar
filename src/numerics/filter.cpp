@@ -25,11 +25,9 @@ bool is_axis_periodic(const boundary::BoundarySpec& bc, int lo, int hi) {
 void BinomialFilter::apply(JField2D<Real>& current,
                            const boundary::BoundarySpec& bc,
                            bool cylindrical) const {
-  // Three contiguous strips are retained for the fused ABI. The kernel smooths
-  // only Jz and copies the continuity-carrying Jx/Jy pair unchanged.
-  const std::size_t scratch_size = backend::detail::checked_size_product(
-      current.grid.storage_size(), 3,
-      "BinomialFilter: scratch element count is not representable");
+  // One strip: the kernel smooths only Jz and leaves the continuity-carrying
+  // Jx/Jy pair untouched, so it ping-pongs through a single scratch buffer.
+  const std::size_t scratch_size = current.grid.storage_size();
   Real* scratch = ensure_scratch(scratch_, scratch_size);
   ::launch_pic_filter_binomial(current.grid, current, scratch, n_passes_,
                                is_axis_periodic(bc, 0, 1) ? 1 : 0,
@@ -40,11 +38,9 @@ void BinomialFilter::apply(JField2D<Real>& current,
 void CompensatedBinomialFilter::apply(JField2D<Real>& current,
                                       const boundary::BoundarySpec& bc,
                                       bool cylindrical) const {
-  // Three contiguous strips are retained for the fused ABI. The kernel smooths
-  // only Jz and copies the continuity-carrying Jx/Jy pair unchanged.
-  const std::size_t scratch_size = backend::detail::checked_size_product(
-      current.grid.storage_size(), 3,
-      "CompensatedBinomialFilter: scratch element count is not representable");
+  // One strip: the kernel smooths only Jz and leaves the continuity-carrying
+  // Jx/Jy pair untouched, so it ping-pongs through a single scratch buffer.
+  const std::size_t scratch_size = current.grid.storage_size();
   Real* scratch = ensure_scratch(scratch_, scratch_size);
   ::launch_pic_filter_compensated(current.grid, current, scratch, n_passes_,
                                   is_axis_periodic(bc, 0, 1) ? 1 : 0,

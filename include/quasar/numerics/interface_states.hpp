@@ -2,10 +2,20 @@
 
 // Container for reconstructed CONSERVED left/right MHD states on the interfaces
 // normal to `dir` (0=x, 1=y). Each of the 8 conserved components has an L and an
-// R DeviceBuffer sized grid.storage_size(); the bx/by/bz components are the
-// cell-reconstructed magnetic field used to form fluxes / the EMF -- they are NOT
-// the staggered constrained-transport face storage. Component order matches
-// MhdState: (rho, mx, my, mz, energy, bx, by, bz).
+// R DeviceBuffer sized grid.storage_size(); these buffers are reconstruction
+// output, not the staggered constrained-transport face storage itself.
+// Component order matches MhdState: (rho, mx, my, mz, energy, bx, by, bz).
+//
+// The TANGENTIAL and out-of-plane magnetic components (and, for dir==1, bx) are
+// genuinely cell-reconstructed values that may differ between L and R. The
+// NORMAL component is not: after reconstructing, mhd_reconstruct.hip overwrites
+// it (via set_normal_b) with `normal_face_b`, the single exact staggered CT face
+// value shared by the two adjacent cells. So for dir==0 the Lbx and Rbx entries
+// are identical to each other and to the stored bx_face sample, and likewise for
+// Lby/Rby when dir==1 -- this is what makes the Riemann problem see a continuous
+// normal field, as constrained transport requires. Reading the normal component
+// back from here therefore yields the CT face value, not an independently
+// reconstructed one.
 
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/grid.hpp"
