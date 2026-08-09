@@ -462,12 +462,26 @@ __device__ inline double correction_row(
                 + in[correction_storage_index(g, ip, line, along_x)]);
   }
   if (face == 0) {
+    if (lo_mode == 4) {
+      return (12.0 / 13.0) * rhs[k]
+           + (1.0 / 26.0) *
+                 (in[correction_storage_index(g, -1, line, along_x)]
+                  + in[correction_storage_index(g, 1, line, along_x)]);
+    }
     if (lo_mode == 2) return rhs[k];  // linear ghost => S(J)_0=J_0
     return (12.0 / 13.0) * rhs[k]
          + (1.0 / 13.0)
              * in[correction_storage_index(g, 1, line, along_x)];
   }
   if (face == n_faces - 1) {
+    if (hi_mode == 4) {
+      return (12.0 / 13.0) * rhs[k]
+           + (1.0 / 26.0) *
+                 (in[correction_storage_index(g, n_faces - 2, line,
+                                              along_x)]
+                  + in[correction_storage_index(g, n_faces, line,
+                                                along_x)]);
+    }
     if (hi_mode == 2) return rhs[k];
     return (12.0 / 13.0) * rhs[k]
          + (1.0 / 13.0)
@@ -533,6 +547,12 @@ extern "C" void launch_pic_current_correct_order4(
     quasar::Real* iter_x, quasar::Real* iter_y,
     int x_lo_mode, int x_hi_mode, int y_lo_mode, int y_hi_mode,
     quasar_stream_t stream) {
+  if (x_lo_mode == 4 || x_hi_mode == 4 ||
+      y_lo_mode == 4 || y_hi_mode == 4) {
+    throw std::invalid_argument{
+        "tile-internal fourth-order PIC correction requires the distributed "
+        "halo-refreshed solve"};
+  }
   auto hip_stream = static_cast<hipStream_t>(stream);
   const std::size_t bytes = g.storage_size() * sizeof(quasar::Real);
   QUASAR_HIP_CHECK(::hipMemcpyAsync(rhs_x, j.jx.device_ptr(), bytes,

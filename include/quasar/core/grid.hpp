@@ -89,6 +89,12 @@ struct Grid2D {
   Real origin_x{0};
   Real origin_y{0};
   int  nghost{1};
+  // Optional authoritative spacing for partitioned grids.  A subdomain length
+  // computed as global_dx * local_n generally does not divide back to the exact
+  // global spacing; retaining the parent spacing prevents adjacent tiles from
+  // drifting by an ulp.  Zero keeps the legacy length-derived representation.
+  Real cell_dx{0};
+  Real cell_dy{0};
 
   constexpr Grid2D() = default;
 
@@ -99,8 +105,29 @@ struct Grid2D {
     validate();
   }
 
-  QUASAR_HOST_DEVICE constexpr Real dx() const noexcept { return lx / static_cast<Real>(nx); }
-  QUASAR_HOST_DEVICE constexpr Real dy() const noexcept { return ly / static_cast<Real>(ny); }
+  static Grid2D from_cell_spacing(
+      int nx_in, int ny_in, Real dx_in, Real dy_in,
+      Real ox = Real{0}, Real oy = Real{0}, int halo = 1) {
+    Grid2D result;
+    result.nx = nx_in;
+    result.ny = ny_in;
+    result.lx = dx_in * static_cast<Real>(nx_in);
+    result.ly = dy_in * static_cast<Real>(ny_in);
+    result.origin_x = ox;
+    result.origin_y = oy;
+    result.nghost = halo;
+    result.cell_dx = dx_in;
+    result.cell_dy = dy_in;
+    result.validate();
+    return result;
+  }
+
+  QUASAR_HOST_DEVICE constexpr Real dx() const noexcept {
+    return cell_dx > Real{0} ? cell_dx : lx / static_cast<Real>(nx);
+  }
+  QUASAR_HOST_DEVICE constexpr Real dy() const noexcept {
+    return cell_dy > Real{0} ? cell_dy : ly / static_cast<Real>(ny);
+  }
   QUASAR_HOST_DEVICE constexpr int  pitch() const noexcept { return nx + 2 * nghost; }
   QUASAR_HOST_DEVICE constexpr int  height() const noexcept { return ny + 2 * nghost; }
   QUASAR_HOST_DEVICE constexpr std::size_t interior_size() const noexcept {
@@ -171,6 +198,16 @@ struct Grid2D {
     if (!(std::isfinite(origin_x) && std::isfinite(origin_y))) {
       throw std::invalid_argument{"Grid2D: origin must be finite"};
     }
+    if ((cell_dx != Real{0}
+         && (!(std::isfinite(cell_dx) && cell_dx > Real{0})
+             || lx != cell_dx * static_cast<Real>(nx)))
+        || (cell_dy != Real{0}
+            && (!(std::isfinite(cell_dy) && cell_dy > Real{0})
+                || ly != cell_dy * static_cast<Real>(ny)))) {
+      throw std::invalid_argument{
+          "Grid2D: explicit cell spacing must be finite, positive, and "
+          "consistent with the stored domain length"};
+    }
     if (nghost < 0) {
       throw std::invalid_argument{"Grid2D: ghost halo must be non-negative"};
     }
@@ -186,8 +223,8 @@ struct Grid2D {
     if (nghost > (imax - nx) / 2 || nghost > (imax - ny) / 2) {
       throw std::overflow_error{"Grid2D: dimensions plus ghost halo exceed int range"};
     }
-    const Real dx_value = lx / static_cast<Real>(nx);
-    const Real dy_value = ly / static_cast<Real>(ny);
+    const Real dx_value = dx();
+    const Real dy_value = dy();
     if (!(std::isfinite(dx_value) && dx_value > Real{0}
           && std::isfinite(dy_value) && dy_value > Real{0})) {
       throw std::overflow_error{"Grid2D: cell spacing is not representable"};

@@ -52,6 +52,7 @@ struct CrossBPointOutputView {
 
 __global__ void QUASAR_LAUNCH_BOUNDS_256 hlld_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
+    quasar::mhd::FaceOwnershipFlags4 ownership,
     int dir, int scheme_order, int hll_only, Real gamma,
     // Field-split background B0 (perturbation-only state evolved; physics uses
     // total B = B0 + b). `bg_active`==0 takes the zero-background fast path and
@@ -81,6 +82,15 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 hlld_kernel(
   // reconstruction kernel writes its L/R interface states over the same extended
   // range, and index nx/ny is an in-bounds ghost slot (nghost>=2).
   if (i > g.nx || j > g.ny) return;
+  // A shared face is evaluated only on its canonical tile. The non-owner's
+  // output slot deliberately remains untouched until the runtime broadcasts
+  // the complete owner record before launching any divergence/update kernel.
+  if ((dir == 0 && ((i == 0 && ownership.side[0] == 0) ||
+                    (i == g.nx && ownership.side[1] == 0))) ||
+      (dir == 1 && ((j == 0 && ownership.side[2] == 0) ||
+                    (j == g.ny && ownership.side[3] == 0)))) {
+    return;
+  }
   const std::size_t k = g.index(i, j);
   int sample_i = i;
   int sample_j = j;
@@ -133,7 +143,8 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
                           Real gamma, stream_t stream,
                           bool hll_only,
                           MhdMomentumFluxParts2D<Real>* momentum_parts,
-                          int scheme_order) {
+                          int scheme_order,
+                          FaceOwnershipFlags4 ownership) {
   const Grid2D g = iface.grid;
   const dim3 block(kBlock2D, kBlock2D);
   // Launch over nx+1 x ny+1 so the high-edge face flux (index nx/ny) consumed by
@@ -161,7 +172,8 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
         momentum_parts->b0_induction_covariance.device_ptr();
   }
   hipLaunchKernelGGL(hlld_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, flags, dir, scheme_order, hll_only ? 1 : 0, gamma,
+                     g, flags, ownership, dir, scheme_order,
+                     hll_only ? 1 : 0, gamma,
                      bg_active, b0x, b0y, b0z,
                      iface.Lrho.device_ptr(), iface.Lmx.device_ptr(), iface.Lmy.device_ptr(),
                      iface.Lmz.device_ptr(), iface.Lenergy.device_ptr(), iface.Lbx.device_ptr(),

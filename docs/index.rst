@@ -35,6 +35,7 @@ ships three physics vertical slices:
    user-guide/pic_cylindrical
    user-guide/mhd_simulation
    user-guide/mhd_background_field
+   user-guide/distributed_simulation
 
 .. toctree::
    :maxdepth: 2
@@ -49,6 +50,7 @@ ships three physics vertical slices:
    dev-guide/adding_a_filter
    dev-guide/adding_a_background_field
    dev-guide/adding_an_mhd_scheme
+   dev-guide/adding_distributed_physics
 
 Indices and tables
 ------------------

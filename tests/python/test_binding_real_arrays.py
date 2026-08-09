@@ -124,6 +124,9 @@ class SolverArrayTests(unittest.TestCase):
         solver.set_species_particles(
             index, positions, positions, zeros, zeros, zeros, weights)
         snapshot = solver.species_at(index).to_host()
+        self.assertEqual(
+            set(snapshot),
+            {"x", "y", "vx", "vy", "vz", "weight", "alive"})
         np.testing.assert_array_equal(snapshot["x"], positions)
         np.testing.assert_array_equal(snapshot["weight"], weights)
 

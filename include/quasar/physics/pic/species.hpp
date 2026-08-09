@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+namespace quasar::distributed {
+class PicTileAccess;
+}
+
 namespace quasar::pic {
 
 struct SpeciesConfig {
@@ -37,12 +41,26 @@ class ParticleSpecies {
                           const std::vector<Real>& vx, const std::vector<Real>& vy,
                           const std::vector<Real>& vz,
                           const std::vector<Real>& weight);
+  void set_host_particles(const std::vector<Real>& x, const std::vector<Real>& y,
+                          const std::vector<Real>& vx, const std::vector<Real>& vy,
+                          const std::vector<Real>& vz,
+                          const std::vector<Real>& weight,
+                          const std::vector<std::uint64_t>& id);
 
   struct HostSnapshot {
-    std::vector<Real> x, y, vx, vy, vz, weight;
+    std::vector<Real> x, y, x_prev, y_prev, vx, vy, vz;
+    std::vector<Real> vphi_deposit, weight;
     std::vector<std::uint8_t> alive;
+    std::vector<std::uint64_t> id;
   };
   HostSnapshot to_host() const;
+
+  // Grow particle and compaction storage without changing active state.
+  // Capacity never shrinks. Migrating particles can be appended with their
+  // complete trajectory/deposition state and stable global identifiers.
+  void reserve(std::size_t new_capacity);
+  void replace_host_particles(const HostSnapshot& particles);
+  void append_host_particles(const HostSnapshot& particles);
 
   Real* x() noexcept { return x_.device_ptr(); }
   Real* y() noexcept { return y_.device_ptr(); }
@@ -54,6 +72,7 @@ class ParticleSpecies {
   Real* vphi_deposit() noexcept { return vphi_deposit_.device_ptr(); }
   Real* weight() noexcept { return weight_.device_ptr(); }
   std::uint8_t* alive() noexcept { return alive_.device_ptr(); }
+  std::uint64_t* id() noexcept { return id_.device_ptr(); }
 
   const Real* x() const noexcept { return x_.device_ptr(); }
   const Real* y() const noexcept { return y_.device_ptr(); }
@@ -65,6 +84,7 @@ class ParticleSpecies {
   const Real* vphi_deposit() const noexcept { return vphi_deposit_.device_ptr(); }
   const Real* weight() const noexcept { return weight_.device_ptr(); }
   const std::uint8_t* alive() const noexcept { return alive_.device_ptr(); }
+  const std::uint64_t* id() const noexcept { return id_.device_ptr(); }
 
   const Grid2D& grid() const noexcept { return grid_; }
   void set_grid(Grid2D g) noexcept { grid_ = g; }
@@ -83,10 +103,14 @@ class ParticleSpecies {
   Real* compact_vphi_deposit() noexcept { return c_vphi_deposit_.device_ptr(); }
   Real* compact_weight() noexcept { return c_weight_.device_ptr(); }
   std::uint8_t* compact_alive() noexcept { return c_alive_.device_ptr(); }
+  std::uint64_t* compact_id() noexcept { return c_id_.device_ptr(); }
   unsigned int* compact_counter() noexcept { return c_counter_.device_ptr(); }
   // const overload: the counter is device scratch (mutable), so a logically-const
   // read-only reduction (alive_count) can reuse it without copying the species.
   unsigned int* compact_counter() const noexcept { return c_counter_.device_ptr(); }
+  unsigned int* departure_counter() const noexcept {
+    return c_counter_.device_ptr() + 1;
+  }
 
   // Persistent device flag the charge/current deposit atomically sets when a
   // particle coordinate/value is nonrepresentable or its displacement spills
@@ -102,6 +126,16 @@ class ParticleSpecies {
   unsigned int* particle_error() const noexcept { return particle_error_.device_ptr(); }
 
  private:
+  friend class ::quasar::distributed::PicTileAccess;
+
+  // Migration has already validated these records at seed/restart and only
+  // permutes them thereafter. Keep the structural/counter checks, but avoid an
+  // O(N) hash set and two hypot calls per particle on every crossing step.
+  void replace_migrated_particles(const HostSnapshot& particles,
+                                  backend::stream_t stream);
+  void append_migrated_particles(const HostSnapshot& particles,
+                                 backend::stream_t stream);
+
   struct ValidatedConfigTag {};
   ParticleSpecies(SpeciesConfig cfg, ValidatedConfigTag);
 
@@ -123,6 +157,7 @@ class ParticleSpecies {
   backend::DeviceBuffer<Real> vphi_deposit_{};
   backend::DeviceBuffer<Real> weight_{};
   backend::DeviceBuffer<std::uint8_t> alive_{};
+  backend::DeviceBuffer<std::uint64_t> id_{};
   // Compaction scratch (capacity-sized, allocated alongside the particle arrays).
   backend::DeviceBuffer<Real> c_x_{};
   backend::DeviceBuffer<Real> c_y_{};
@@ -134,6 +169,7 @@ class ParticleSpecies {
   backend::DeviceBuffer<Real> c_vphi_deposit_{};
   backend::DeviceBuffer<Real> c_weight_{};
   backend::DeviceBuffer<std::uint8_t> c_alive_{};
+  backend::DeviceBuffer<std::uint64_t> c_id_{};
   // mutable: device scratch reused by the logically-const alive_count reduction.
   mutable backend::DeviceBuffer<unsigned int> c_counter_{};
   // mutable: persistent deposit-error flag, accumulated only by atomic

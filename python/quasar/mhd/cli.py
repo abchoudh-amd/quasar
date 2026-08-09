@@ -13,6 +13,7 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import copy
 import time
 from pathlib import Path
 from typing import Sequence
@@ -20,6 +21,7 @@ from typing import Sequence
 import numpy as np
 
 from .. import _core
+from .. import distributed as _distributed
 from .._paths import confine_output_path, positive_int as _positive_int
 from . import io as mhd_io
 from . import _units as mhd_units
@@ -183,18 +185,27 @@ def _orszag_tang_invariants(solver, deck: mhd_io.MhdDeck) -> dict:
             "energy_initial": float(energy.sum())}
 
 
-def _do_run(args: argparse.Namespace) -> int:
-    deck_path = Path(args.input).resolve()
-    deck = mhd_io.load(deck_path)
-    if args.steps_override is not None:
-        deck.time = mhd_io.Time(dt_s=deck.time.dt_s, steps=args.steps_override,
+def _serial_run(input_deck: mhd_io.MhdDeck | str | Path, *,
+                steps_override: int | None, verbose: bool, print_config: bool,
+                log_every: int) -> _distributed.RunResult:
+    if isinstance(input_deck, mhd_io.MhdDeck):
+        deck_path: Path | None = None
+        deck = input_deck
+    else:
+        deck_path = Path(input_deck).resolve()
+        deck = mhd_io.load(deck_path)
+    if steps_override is not None:
+        # Keep run-local termination policy from mutating an in-memory deck
+        # supplied by a Python caller.
+        deck = copy.deepcopy(deck)
+        deck.time = mhd_io.Time(dt_s=deck.time.dt_s, steps=steps_override,
                                 t_end=deck.time.t_end)
         deck.validate()
 
     solver, dt, dt_is_auto = prepare_run(deck)
 
-    if args.print_config:
-        print(f"deck    : {deck_path}")
+    if print_config:
+        print(f"deck    : {deck_path if deck_path is not None else '<in-memory>'}")
         print(f"grid    : {deck.domain.nx}x{deck.domain.ny}  "
               f"({deck.domain.lx_m}x{deck.domain.ly_m})  "
               f"origin=({deck.domain.origin_x_m}, {deck.domain.origin_y_m})  "
@@ -208,11 +219,87 @@ def _do_run(args: argparse.Namespace) -> int:
         print(f"initial : {deck.initial.type}")
         print(f"dt      : {dt:.6e}    steps: {deck.time.steps}")
 
-    out_path = confine_output_path(deck_path.parent, deck.diagnostics.output_path,
+    deck_directory = deck_path.parent if deck_path is not None else Path.cwd()
+    out_path = confine_output_path(deck_directory, deck.diagnostics.output_path,
                                    label="diagnostics.output_path")
-    _run_loop(solver, deck, dt, dt_is_auto, out_path, args)
-    if args.print_config or args.verbose:
+    final_step, final_time = _run_loop(
+        solver, deck, dt, dt_is_auto, out_path,
+        argparse.Namespace(log_every=log_every))
+    if print_config or verbose:
         print(f"wrote   : {out_path}")
+    return _distributed.RunResult(
+        final_step=final_step,
+        final_time=final_time,
+        diagnostics_path=out_path,
+        distributed=False,
+    )
+
+
+def run(input_deck: mhd_io.MhdDeck | str | Path, *,
+        options: _distributed.RunOptions | None = None,
+        steps_override: int | None = None, verbose: bool = False,
+        print_config: bool = False, log_every: int = 0,
+        ) -> _distributed.RunResult:
+    """Run an MHD deck through the serial or explicitly selected distributed path.
+
+    Passing ``options`` is an explicit distributed request; unavailable builds
+    raise rather than silently falling back to the serial solver.
+    """
+
+    if steps_override is not None:
+        if (isinstance(steps_override, bool)
+                or not isinstance(steps_override, int)
+                or steps_override <= 0):
+            raise ValueError("steps_override must be a positive integer")
+    if options is not None:
+        if not isinstance(options, _distributed.RunOptions):
+            raise TypeError(
+                "options must be a quasar.distributed.RunOptions instance")
+        return _distributed._execute(
+            "mhd", input_deck, options, steps_override=steps_override,
+            verbose=verbose, print_config=print_config,
+            log_every=log_every)
+    return _serial_run(
+        input_deck, steps_override=steps_override, verbose=verbose,
+        print_config=print_config, log_every=log_every)
+
+
+class _DistributedUsageError(ValueError):
+    """Internal marker for distributed CLI cross-option validation errors."""
+
+
+def _distributed_options_from_args(
+        args: argparse.Namespace) -> _distributed.RunOptions | None:
+    names = ("devices", "decomposition", "transport", "diagnostics_layout",
+             "checkpoint", "checkpoint_every", "restart")
+    if not any(getattr(args, name, None) is not None for name in names):
+        return None
+    try:
+        return _distributed.RunOptions(
+            devices=args.devices if args.devices is not None else "auto",
+            decomposition=(args.decomposition
+                           if args.decomposition is not None else "auto"),
+            transport=args.transport if args.transport is not None else "auto",
+            diagnostics_layout=(args.diagnostics_layout
+                                if args.diagnostics_layout is not None
+                                else "gathered"),
+            checkpoint=args.checkpoint,
+            checkpoint_every=args.checkpoint_every,
+            restart=args.restart,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _DistributedUsageError(str(exc)) from exc
+
+
+def _do_run(args: argparse.Namespace) -> int:
+    run(
+        args.input,
+        options=_distributed_options_from_args(args),
+        steps_override=args.steps_override,
+        verbose=args.verbose,
+        print_config=args.print_config,
+        log_every=args.log_every,
+    )
     return 0
 
 
@@ -288,7 +375,7 @@ def _flatten_for_npz(solver, deck: mhd_io.MhdDeck, final_step: int,
 
 
 def _run_loop(solver, deck: mhd_io.MhdDeck, dt: float, dt_is_auto: bool, out_path,
-              args: argparse.Namespace) -> None:
+              args: argparse.Namespace) -> tuple[int, float]:
     snapshots: list[dict] = []
     divb_series: list[float] = []
     sim_time = 0.0
@@ -392,6 +479,7 @@ def _run_loop(solver, deck: mhd_io.MhdDeck, dt: float, dt_is_auto: bool, out_pat
     # Open the already-confined path so diagnostics.output_path is exact.
     with out_path.open("wb") as stream:
         np.savez(stream, **flat)
+    return step_done, sim_time
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -408,13 +496,32 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Override deck.time.steps (useful for smoke tests).")
     run.add_argument("--log-every", type=int, default=0,
                      help="Print progress every N steps (0 = off).")
+    run.add_argument("--devices", default=None, metavar="auto|ID[,ID...]",
+                     help="Eligible node-local GPU pool (activates distributed execution).")
+    run.add_argument("--decomposition", default=None, metavar="auto|PXxPY",
+                     help="Virtual GPU tile decomposition.")
+    run.add_argument("--transport", choices=("auto", "staged", "direct"),
+                     default=None, help="Inter-process halo transport policy.")
+    run.add_argument("--diagnostics-layout", choices=("gathered", "sharded"),
+                     default=None, help="Distributed diagnostics file layout.")
+    run.add_argument("--checkpoint", default=None, metavar="PATH",
+                     help="Write the final collective HDF5 checkpoint to PATH.")
+    run.add_argument("--checkpoint-every", type=_positive_int, default=None,
+                     metavar="N", help="Replace --checkpoint at absolute step multiples of N.")
+    run.add_argument("--restart", default=None, metavar="PATH",
+                     help="Restart from a collective Quasar HDF5 checkpoint.")
     run.set_defaults(func=_do_run)
     return p
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-    return args.func(args)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except (_DistributedUsageError,
+            _distributed.DistributedUnavailableError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

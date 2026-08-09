@@ -6,6 +6,18 @@
 #include <limits>
 
 using quasar::Grid2D;
+
+TEST(Grid2D, ExplicitSpacingPreservesParentGridSpacing) {
+  const Grid2D parent{5, 7, 1.0, 1.0};
+  const Grid2D tile = Grid2D::from_cell_spacing(
+      3, 4, parent.dx(), parent.dy(), parent.origin_x, parent.origin_y, 2);
+
+  EXPECT_EQ(tile.dx(), parent.dx());
+  EXPECT_EQ(tile.dy(), parent.dy());
+  EXPECT_EQ(tile.lx, parent.dx() * 3.0);
+  EXPECT_EQ(tile.ly, parent.dy() * 4.0);
+  EXPECT_NO_THROW(tile.validate());
+}
 using quasar::Real;
 
 TEST(Grid2D, IndexingAndPeriodicWrap) {

@@ -12,6 +12,10 @@
 
 using ::quasar::Real;
 using ::quasar::backend::DeviceBuffer;
+using ::quasar::backend::DeviceEvent;
+using ::quasar::backend::DeviceGuard;
+using ::quasar::backend::DeviceStream;
+using ::quasar::backend::PinnedHostBuffer;
 using ::quasar::backend::has_hip_runtime;
 using ::quasar::backend::mirror_view;
 
@@ -101,6 +105,7 @@ TEST(DeviceBuffer, EmptyConstructionDoesNotAllocate) {
   EXPECT_EQ(buf.bytes(), 0u);
   EXPECT_TRUE(buf.empty());
   EXPECT_EQ(buf.device_ptr(), nullptr);
+  EXPECT_EQ(buf.owner_device(), -1);
 }
 
 TEST(DeviceBuffer, MoveOnlySemantics) {
@@ -124,6 +129,83 @@ TEST(DeviceBuffer, MoveOnlySemantics) {
   EXPECT_EQ(b.device_ptr(), nullptr);
   EXPECT_EQ(c.size(), 128u);
   EXPECT_EQ(c.device_ptr(), raw_ptr_a);
+}
+
+TEST(DeviceBuffer, RecordsAndRetainsOwningDevice) {
+  if (!has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime visible";
+  }
+  const int original = quasar::backend::current_device();
+  DeviceBuffer<int> buffer{4, quasar::backend::on_device(original)};
+  EXPECT_EQ(buffer.owner_device(), original);
+
+  DeviceBuffer<int> moved{std::move(buffer)};
+  EXPECT_EQ(moved.owner_device(), original);
+  EXPECT_EQ(buffer.owner_device(), -1);
+}
+
+TEST(DeviceGuard, RestoresCallingThreadsPreviousDevice) {
+  if (!has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime visible";
+  }
+  const int original = quasar::backend::current_device();
+  {
+    DeviceGuard guard{original};
+    EXPECT_EQ(quasar::backend::current_device(), original);
+  }
+  EXPECT_EQ(quasar::backend::current_device(), original);
+}
+
+TEST(DeviceDiscovery, ReportsStableIdentity) {
+  if (!has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime visible";
+  }
+  const int device = quasar::backend::current_device();
+  EXPECT_EQ(quasar::backend::device_uuid(device).size(), 32u);
+  EXPECT_FALSE(quasar::backend::device_pci_bus_id(device).empty());
+}
+
+TEST(PinnedHostBuffer, OwnsMoveOnlyPageLockedStorage) {
+  if (!has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime visible";
+  }
+  PinnedHostBuffer<int> buffer{16};
+  ASSERT_NE(buffer.data(), nullptr);
+  EXPECT_EQ(buffer.size(), 16u);
+  EXPECT_EQ(buffer.bytes(), 16u * sizeof(int));
+  for (std::size_t i = 0; i < buffer.size(); ++i) {
+    buffer[i] = static_cast<int>(i);
+  }
+
+  PinnedHostBuffer<int> moved{std::move(buffer)};
+  EXPECT_EQ(buffer.data(), nullptr);
+  EXPECT_EQ(buffer.size(), 0u);
+  EXPECT_EQ(moved[7], 7);
+}
+
+TEST(PinnedHostBuffer, EmptyStorageDoesNotNeedADevice) {
+  PinnedHostBuffer<double> buffer{0};
+  EXPECT_EQ(buffer.data(), nullptr);
+  EXPECT_EQ(buffer.size(), 0u);
+  EXPECT_EQ(buffer.bytes(), 0u);
+}
+
+TEST(DeviceStreamAndEvent, OrderAsynchronousWork) {
+  if (!has_hip_runtime()) {
+    GTEST_SKIP() << "no HIP runtime visible";
+  }
+  const int device = quasar::backend::current_device();
+  DeviceStream stream{quasar::backend::on_device(device)};
+  DeviceEvent event{quasar::backend::on_device(device)};
+  DeviceBuffer<int> buffer{8, quasar::backend::on_device(device)};
+
+  quasar::backend::device_memset_async(
+      buffer.device_ptr(), 0, buffer.bytes(), stream.get());
+  event.record(stream);
+  quasar::backend::stream_wait_event(stream.get(), event.get());
+  stream.synchronize();
+  EXPECT_EQ(stream.owner_device(), device);
+  EXPECT_EQ(event.owner_device(), device);
 }
 
 TEST(MirrorView, SyncsHostAndDeviceBidirectionally) {

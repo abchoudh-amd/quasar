@@ -6,6 +6,7 @@ set(_quasar_mhd_hip_sources
   mhd_reconstruct.hip
   mhd_riemann.hip
   mhd_ct.hip
+  mhd_halo.hip
   mhd_update.hip
   mhd_reduce.hip
   mhd_boundary_hip.hip

@@ -13,6 +13,7 @@ namespace quasar::boundary {
 // OutflowFieldBC (the registry builds one per side), so the strip is per-face.
 class OutflowFieldBC final : public IFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return 2; }
   void configure_geometry(bool cylindrical) override { cylindrical_ = cylindrical; }
   void set_corner_skip(bool skip_lo, bool skip_hi) override {
     skip_lo_ = skip_lo;
@@ -21,6 +22,10 @@ class OutflowFieldBC final : public IFieldBoundary {
   void fill_ghosts(YeeField2D<Real>& field, Side side) const override;
   void correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const override;
   void correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const override;
+  std::vector<Real> checkpoint_history() const override;
+  bool checkpoint_history_primed() const noexcept override { return primed_; }
+  void restore_checkpoint_history(std::span<const Real> history,
+                                  bool primed) override;
 
  private:
   int history_stride(const Grid2D& grid, Side side) const;

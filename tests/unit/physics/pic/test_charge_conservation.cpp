@@ -18,9 +18,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -228,6 +231,240 @@ TEST(PicChargeConservation, OrderFourCorrectionIncludesNonperiodicHighFaces) {
   }
   EXPECT_LT(worst, 2.0e-14);
   EXPECT_NE(corrected[g.index(g.nx, j)], raw[g.index(g.nx, j)]);
+}
+
+TEST(PicChargeConservation, DeviceCompactSolveRejectsInternalTileCuts) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const quasar::Grid2D g{4, 4, 1.0, 1.0, 0.0, 0.0, 2};
+  quasar::JField2D<double> current{g};
+  quasar::backend::DeviceBuffer<double> rhs_x{g.storage_size()};
+  quasar::backend::DeviceBuffer<double> rhs_y{g.storage_size()};
+  quasar::backend::DeviceBuffer<double> iter_x{g.storage_size()};
+  quasar::backend::DeviceBuffer<double> iter_y{g.storage_size()};
+  EXPECT_THROW(
+      launch_pic_current_correct_order4(
+          g, current, rhs_x.device_ptr(), rhs_y.device_ptr(),
+          iter_x.device_ptr(), iter_y.device_ptr(),
+          /*x_lo internal=*/4, /*x_hi PEC=*/1,
+          /*y_lo PEC=*/1, /*y_hi PEC=*/1, nullptr),
+      std::invalid_argument);
+  EXPECT_THROW(
+      launch_pic_current_correct_cyl_order4(
+          g, current, rhs_x.device_ptr(), rhs_y.device_ptr(),
+          iter_x.device_ptr(), iter_y.device_ptr(),
+          /*r_lo axis=*/3, /*r_hi internal=*/4,
+          /*z_lo PEC=*/1, /*z_hi PEC=*/1, nullptr),
+      std::invalid_argument);
+}
+
+TEST(PicDeviceHalo, PacksAndUnpacksOnlyPlannedScalars) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const quasar::Grid2D grid{3, 2, 3.0, 2.0, 0.0, 0.0, 2};
+  constexpr std::size_t components =
+      quasar::pic::pic_device_halo_component_count;
+  std::array<quasar::backend::DeviceBuffer<double>, components> source;
+  std::array<quasar::backend::DeviceBuffer<double>, components> destination;
+  quasar::pic::PicDeviceHaloConstComponents source_view;
+  quasar::pic::PicDeviceHaloComponents destination_view;
+  for (std::size_t component = 0; component < components; ++component) {
+    std::vector<double> host(grid.storage_size());
+    for (std::size_t index = 0; index < host.size(); ++index) {
+      host[index] = static_cast<double>(1000 * component + index);
+    }
+    source[component] =
+        quasar::backend::DeviceBuffer<double>{grid.storage_size()};
+    destination[component] =
+        quasar::backend::DeviceBuffer<double>{grid.storage_size()};
+    source[component].copy_from_host(host.data(), host.size());
+    source_view.component[component] = source[component].device_ptr();
+    destination_view.component[component] =
+        destination[component].device_ptr();
+  }
+
+  const std::vector<quasar::pic::PicDeviceHaloEntry> host_entries{
+      {.component = 0, .source_x = -1, .source_y = 0,
+       .destination_x = 2, .destination_y = 1},
+      {.component = 5, .source_x = 3, .source_y = 2,
+       .destination_x = -2, .destination_y = -1},
+      {.component = 2, .source_x = 1, .source_y = -2,
+       .destination_x = 0, .destination_y = 0},
+  };
+  quasar::backend::DeviceBuffer<quasar::pic::PicDeviceHaloEntry> entries{
+      host_entries.size()};
+  entries.copy_from_host(host_entries.data(), host_entries.size());
+  quasar::backend::DeviceBuffer<double> payload{5};
+  constexpr std::uint32_t all_components =
+      (std::uint32_t{1} << components) - 1;
+
+  quasar::pic::launch_pic_device_halo_pack(
+      grid, source_view, entries, payload.size(), all_components, payload,
+      nullptr);
+  std::vector<double> packed(payload.size(), -1.0);
+  payload.copy_to_host(packed.data(), packed.size());
+  EXPECT_DOUBLE_EQ(packed[0],
+                   static_cast<double>(grid.index(-1, 0)));
+  EXPECT_DOUBLE_EQ(packed[1],
+                   5000.0 + static_cast<double>(grid.index(3, 2)));
+  EXPECT_DOUBLE_EQ(packed[2],
+                   2000.0 + static_cast<double>(grid.index(1, -2)));
+  EXPECT_DOUBLE_EQ(packed[3], 0.0);
+  EXPECT_DOUBLE_EQ(packed[4], 0.0);
+
+  quasar::pic::launch_pic_device_halo_unpack(
+      grid, payload, payload.size(), entries, destination_view,
+      all_components, quasar::pic::PicDeviceHaloUpdate::assign, nullptr);
+  std::vector<double> received(grid.storage_size(), 0.0);
+  destination[5].copy_to_host(received.data(), received.size());
+  EXPECT_DOUBLE_EQ(received[grid.index(-2, -1)], packed[1]);
+  destination[2].copy_to_host(received.data(), received.size());
+  EXPECT_DOUBLE_EQ(received[grid.index(0, 0)], packed[2]);
+}
+
+TEST(PicDeviceHalo, AdditiveUnpackAccumulatesDuplicateDestinations) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const quasar::Grid2D grid{2, 2, 2.0, 2.0, 0.0, 0.0, 1};
+  const std::vector<quasar::pic::PicDeviceHaloEntry> host_entries{
+      {.component = 0, .destination_x = 1, .destination_y = 1},
+      {.component = 0, .destination_x = 1, .destination_y = 1},
+  };
+  quasar::backend::DeviceBuffer<quasar::pic::PicDeviceHaloEntry> entries{
+      host_entries.size()};
+  entries.copy_from_host(host_entries.data(), host_entries.size());
+  const std::vector<double> host_payload{1.25, -0.5};
+  quasar::backend::DeviceBuffer<double> payload{host_payload.size()};
+  payload.copy_from_host(host_payload.data(), host_payload.size());
+  quasar::backend::DeviceBuffer<double> destination{grid.storage_size()};
+  quasar::pic::PicDeviceHaloComponents components;
+  components.component[0] = destination.device_ptr();
+
+  quasar::pic::launch_pic_device_halo_unpack(
+      grid, payload, payload.size(), entries, components,
+      std::uint32_t{1}, quasar::pic::PicDeviceHaloUpdate::add, nullptr);
+  std::vector<double> result(grid.storage_size(), 0.0);
+  destination.copy_to_host(result.data(), result.size());
+  EXPECT_DOUBLE_EQ(result[grid.index(1, 1)], 0.75);
+}
+
+TEST(PicDeviceHalo, LocalSourceReductionAccumulatesPlannedGuards) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const quasar::Grid2D grid{2, 2, 2.0, 2.0, 0.0, 0.0, 1};
+  std::vector<double> host_source(grid.storage_size(), 0.0);
+  host_source[grid.index(-1, 0)] = 1.25;
+  host_source[grid.index(1, 0)] = -0.5;
+  quasar::backend::DeviceBuffer<double> source{grid.storage_size()};
+  source.copy_from_host(host_source.data(), host_source.size());
+  quasar::backend::DeviceBuffer<double> destination{grid.storage_size()};
+  const std::vector<quasar::pic::PicDeviceHaloEntry> host_entries{
+      {.component = 0, .source_x = -1, .source_y = 0,
+       .destination_x = 1, .destination_y = 0},
+      {.component = 0, .source_x = 1, .source_y = 0,
+       .destination_x = 1, .destination_y = 0},
+  };
+  quasar::backend::DeviceBuffer<quasar::pic::PicDeviceHaloEntry> entries{
+      host_entries.size()};
+  entries.copy_from_host(host_entries.data(), host_entries.size());
+  quasar::pic::PicDeviceHaloConstComponents sources;
+  sources.component[0] = source.device_ptr();
+  quasar::pic::PicDeviceHaloComponents destinations;
+  destinations.component[0] = destination.device_ptr();
+
+  quasar::pic::launch_pic_device_halo_accumulate(
+      grid, sources, entries, destinations, std::uint32_t{1}, nullptr);
+  std::vector<double> result(grid.storage_size(), 0.0);
+  destination.copy_to_host(result.data(), result.size());
+  EXPECT_DOUBLE_EQ(result[grid.index(1, 0)], 0.75);
+}
+
+TEST(PicDeviceHalo, DistributedFilterUsesInternalTileHalo) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const quasar::Grid2D grid = quasar::Grid2D::from_cell_spacing(
+      3, 2, 1.0, 1.0, 0.0, 0.0, 1);
+  std::vector<double> host_input(grid.storage_size(), 0.0);
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      host_input[grid.index(i, j)] = static_cast<double>(i * i);
+    }
+  }
+  quasar::backend::DeviceBuffer<double> input{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> output{grid.storage_size()};
+  input.copy_from_host(host_input.data(), host_input.size());
+  const quasar::pic::PicDeviceTileExtent tile{
+      .global_x_begin = 0,
+      .global_y_begin = 0,
+      .global_nx = 6,
+      .global_ny = 2,
+      .tile_x = 0,
+      .tile_y = 0,
+      .tiles_x = 2,
+      .tiles_y = 1,
+      .periodic_x = 0,
+      .periodic_y = 0,
+  };
+  quasar::pic::launch_pic_distributed_filter_axis(
+      grid, tile, input.device_ptr(), output.device_ptr(), /*axis=*/0,
+      /*neighbor_weight=*/0.25, /*center_weight=*/0.5,
+      /*cylindrical=*/0, nullptr);
+  std::vector<double> result(grid.storage_size(), 0.0);
+  output.copy_to_host(result.data(), result.size());
+  EXPECT_DOUBLE_EQ(result[grid.index(0, 0)], 0.25);
+  EXPECT_DOUBLE_EQ(result[grid.index(2, 0)], 4.5);
+  EXPECT_DOUBLE_EQ(result[grid.index(3, 0)], host_input[grid.index(3, 0)]);
+}
+
+TEST(PicDeviceHalo, CylindricalDistributedOrderFourUsesAxisCoupling) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  const quasar::Grid2D grid = quasar::Grid2D::from_cell_spacing(
+      3, 2, 1.0, 1.0, 3.0, 0.0, 2);
+  std::vector<double> radial(grid.storage_size(), 0.0);
+  std::vector<double> axial(grid.storage_size(), 0.0);
+  std::vector<double> rhs_radial(grid.storage_size(), 0.0);
+  std::vector<double> rhs_axial(grid.storage_size(), 0.0);
+  std::vector<double> axis(grid.storage_size(), 0.0);
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      radial[grid.index(i, j)] = static_cast<double>(3 + i);
+      rhs_radial[grid.index(i, j)] = 12.0;
+    }
+  }
+  axis[grid.index(0, 0)] = 2.0;
+  quasar::backend::DeviceBuffer<double> radial_device{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> axial_device{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> rhs_radial_device{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> rhs_axial_device{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> axis_device{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> radial_output{grid.storage_size()};
+  quasar::backend::DeviceBuffer<double> axial_output{grid.storage_size()};
+  radial_device.copy_from_host(radial.data(), radial.size());
+  axial_device.copy_from_host(axial.data(), axial.size());
+  rhs_radial_device.copy_from_host(rhs_radial.data(), rhs_radial.size());
+  rhs_axial_device.copy_from_host(rhs_axial.data(), rhs_axial.size());
+  axis_device.copy_from_host(axis.data(), axis.size());
+  const quasar::pic::PicDeviceTileExtent tile{
+      .global_x_begin = 3,
+      .global_y_begin = 0,
+      .global_nx = 6,
+      .global_ny = 2,
+      .tile_x = 1,
+      .tile_y = 0,
+      .tiles_x = 2,
+      .tiles_y = 1,
+      .periodic_x = 0,
+      .periodic_y = 0,
+  };
+  quasar::pic::launch_pic_distributed_current_correct_order4(
+      grid, tile, radial_device.device_ptr(), axial_device.device_ptr(),
+      rhs_radial_device.device_ptr(), rhs_axial_device.device_ptr(),
+      axis_device.device_ptr(), radial_output.device_ptr(),
+      axial_output.device_ptr(), /*x_lo=*/3, /*x_hi=*/1,
+      /*y_lo=*/1, /*y_hi=*/1, /*cylindrical=*/1, /*on_axis=*/1,
+      nullptr);
+  std::vector<double> result(grid.storage_size(), 0.0);
+  radial_output.copy_to_host(result.data(), result.size());
+  const double inner = radial[grid.index(2, 0)];
+  const double axis_term = (1.0 / 6.0) * 2.0;
+  const double expected = (12.0 / 13.0) *
+      (12.0 + inner / 12.0 - axis_term / 12.0);
+  EXPECT_NEAR(result[grid.index(3, 0)], expected, 2.0e-14);
 }
 
 TEST(PicChargeConservation, OrderFourStepPreservesGaussFromNeutralInitialState) {
@@ -755,6 +992,140 @@ TEST(PicChargeConservation, CompensatedFilterOverflowIsRejected) {
   EXPECT_THROW(launch_pic_validate_finite_sources(
                    g, &current, nullptr, error.device_ptr(), nullptr),
                std::overflow_error);
+}
+
+TEST(PicParticleStorage, ReservePreservesCompleteStateAndStableIdentifiers) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::pic::ParticleSpecies species{
+      quasar::pic::SpeciesConfig{"migrating", -1.0, 2.0, 2}};
+  species.set_host_particles(
+      {0.25, 0.75}, {0.5, 1.5}, {0.1, -0.2}, {0.2, 0.3},
+      {-0.1, 0.4}, {2.0, 3.0}, {17, 42});
+
+  const auto before = species.to_host();
+  species.reserve(9);
+  const auto after = species.to_host();
+
+  EXPECT_GE(species.capacity(), 9u);
+  EXPECT_EQ(after.x, before.x);
+  EXPECT_EQ(after.y, before.y);
+  EXPECT_EQ(after.x_prev, before.x_prev);
+  EXPECT_EQ(after.y_prev, before.y_prev);
+  EXPECT_EQ(after.vx, before.vx);
+  EXPECT_EQ(after.vy, before.vy);
+  EXPECT_EQ(after.vz, before.vz);
+  EXPECT_EQ(after.vphi_deposit, before.vphi_deposit);
+  EXPECT_EQ(after.weight, before.weight);
+  EXPECT_EQ(after.alive, before.alive);
+  EXPECT_EQ(after.id, (std::vector<std::uint64_t>{17, 42}));
+}
+
+TEST(PicParticleStorage, AppendGrowsCapacityAndKeepsSuppliedIdentifiers) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::pic::ParticleSpecies species{
+      quasar::pic::SpeciesConfig{"migrating", -1.0, 2.0, 1}};
+  species.set_host_particles(
+      {0.25}, {0.5}, {0.1}, {0.2}, {-0.1}, {2.0}, {17});
+
+  quasar::pic::ParticleSpecies::HostSnapshot incoming;
+  incoming.x = {0.75};
+  incoming.y = {1.5};
+  incoming.x_prev = {0.70};
+  incoming.y_prev = {1.45};
+  incoming.vx = {-0.2};
+  incoming.vy = {0.3};
+  incoming.vz = {0.4};
+  incoming.vphi_deposit = {0.35};
+  incoming.weight = {3.0};
+  incoming.alive = {1};
+  incoming.id = {42};
+
+  species.append_host_particles(incoming);
+  const auto snapshot = species.to_host();
+
+  ASSERT_EQ(snapshot.x.size(), 2u);
+  EXPECT_GE(species.capacity(), 2u);
+  EXPECT_EQ(snapshot.id, (std::vector<std::uint64_t>{17, 42}));
+  EXPECT_DOUBLE_EQ(snapshot.x_prev[1], 0.70);
+  EXPECT_DOUBLE_EQ(snapshot.y_prev[1], 1.45);
+  EXPECT_DOUBLE_EQ(snapshot.vphi_deposit[1], 0.35);
+}
+
+TEST(PicParticleStorage, CompactionPreservesIdentifierToParticleAssociation) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::pic::ParticleSpecies species{
+      quasar::pic::SpeciesConfig{"migrating", -1.0, 2.0, 3}};
+  species.set_host_particles(
+      {0.1, 0.2, 0.3}, {0.4, 0.5, 0.6},
+      {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0},
+      {1.0, 1.0, 1.0}, {101, 202, 303});
+  const std::vector<std::uint8_t> alive{1, 0, 1};
+  quasar::backend::device_memcpy_h2d(
+      species.alive(), alive.data(), alive.size() * sizeof(alive[0]));
+
+  launch_pic_particle_compact(species, nullptr);
+  const auto snapshot = species.to_host();
+
+  std::vector<std::pair<std::uint64_t, double>> particles;
+  for (std::size_t index = 0; index < snapshot.id.size(); ++index) {
+    particles.emplace_back(snapshot.id[index], snapshot.x[index]);
+  }
+  std::sort(particles.begin(), particles.end());
+  EXPECT_EQ(particles,
+            (std::vector<std::pair<std::uint64_t, double>>{
+                {101, 0.1}, {303, 0.3}}));
+}
+
+TEST(PicParticleStorage, DepartureExtractionTransfersOnlyLiveNonowners) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::pic::ParticleSpecies species{
+      quasar::pic::SpeciesConfig{"migrating", -1.0, 2.0, 4}};
+  species.set_grid(quasar::Grid2D{2, 2, 2.0, 2.0, 0.0, 0.0, 1});
+  species.set_host_particles(
+      {0.5, 2.0, -0.1, 5.0}, {0.5, 0.75, 1.25, 1.5},
+      {0.1, 0.2, 0.3, 0.4}, {0.0, 0.0, 0.0, 0.0},
+      {0.0, 0.0, 0.0, 0.0}, {1.0, 2.0, 3.0, 4.0},
+      {101, 202, 303, 404});
+  const std::vector<std::uint8_t> alive{1, 1, 1, 0};
+  quasar::backend::device_memcpy_h2d(
+      species.alive(), alive.data(), alive.size() * sizeof(alive[0]));
+
+  auto departing = quasar::pic::extract_pic_departing_particles(
+      species, /*include_x_high=*/0, /*include_y_high=*/1, nullptr);
+  auto resident = species.to_host();
+  std::sort(departing.id.begin(), departing.id.end());
+  std::sort(resident.id.begin(), resident.id.end());
+
+  EXPECT_EQ(departing.id,
+            (std::vector<std::uint64_t>{202, 303}));
+  EXPECT_EQ(resident.id,
+            (std::vector<std::uint64_t>{101, 404}));
+  EXPECT_EQ(species.size(), 2u);
+}
+
+TEST(PicParticleStorage, DepartureExtractionNoopPreservesResidentOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  quasar::pic::ParticleSpecies species{
+      quasar::pic::SpeciesConfig{"resident", -1.0, 2.0, 2}};
+  species.set_grid(quasar::Grid2D{2, 2, 2.0, 2.0, 0.0, 0.0, 1});
+  species.set_host_particles(
+      {0.25, 1.75}, {0.5, 1.5}, {0.1, -0.1}, {0.0, 0.0},
+      {0.0, 0.0}, {1.0, 2.0}, {17, 42});
+  const auto before = species.to_host();
+
+  const auto departing = quasar::pic::extract_pic_departing_particles(
+      species, /*include_x_high=*/1, /*include_y_high=*/1, nullptr);
+  const auto after = species.to_host();
+
+  EXPECT_TRUE(departing.x.empty());
+  EXPECT_EQ(after.id, before.id);
+  EXPECT_EQ(after.x, before.x);
+  EXPECT_EQ(after.y, before.y);
 }
 
 TEST(PicChargeConservation, DepositTypesExist) {

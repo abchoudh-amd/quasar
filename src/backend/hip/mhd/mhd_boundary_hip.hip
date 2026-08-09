@@ -28,13 +28,13 @@
 //      pins it; outflow leaves its CT-evolved value intact and fills only slots
 //      beyond it. The normal-face map therefore differs from cell-centred data.
 //
-//  (b) CORNER GHOST BLOCKS. Field x-side fills include the physical high-y
-//      face row j=ny, so by_face(i_ghost,ny) is derived from the current
-//      interior face before the y-side pass preserves that normal face. y-side
-//      fills then span the FULL storage width i in [-ng,nx+ng). The solver fills
-//      x-sides BEFORE y-sides, so copying those columns down/up fills all four
-//      corner blocks. Leaving either the high-face row or the full-width y pass
-//      untouched retains stale RK scratch at the high-high corner.
+//  (b) CORNER GHOST BLOCKS. Both axis fills span the FULL padded transverse
+//      range. In a serial solver the later y-side pass still deterministically
+//      overwrites all four corner blocks. In a distributed tile one axis may be
+//      an exchanged internal no-op; the orthogonal physical/periodic pass must
+//      then close the already-exchanged halo all the way through its corners.
+//      Restricting x-side work to interior y rows leaves stale RK scratch at a
+//      physical-x/internal-y corner and poisons transverse reconstruction.
 //
 //  (c) WALL SIGN. The odd (sign-flip) symmetry applies ONLY to the
 //      component normal to the wall -- the normal momentum (mx on an x-side,
@@ -77,8 +77,8 @@ __device__ inline void ghost_indices(int n, int layer, bool lo, int mode,
 
 // ---------------------------------------------------------------------------
 // Fluid ghost fill. One thread per (layer, line) slot. For an x-side the line is
-// the interior column j in [0, ny); for a y-side the line is the FULL storage
-// width i in [-ng, nx+ng) (rule (b), corner coverage). `s_normal` is the sign
+// the full padded y range; for a y-side the line is the full padded x range
+// (rule (b), corner coverage). `s_normal` is the sign
 // applied to the normal-momentum component (mx on x-side, my on y-side): +1 for
 // periodic/outflow, -1 for a wall (rule (c)); every other component
 // is even.
@@ -94,9 +94,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 fill_ghosts_fluid_kernel(
   const bool lo = (side == 0 || side == 2);
 
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  // line index range: x-side -> [0, ny); y-side -> [-ng, nx+ng)
-  const int line_lo = x_side ? 0 : -ng;
-  const int line_hi = x_side ? ny : (nx + ng);  // exclusive upper bound
+  const int line_lo = -ng;
+  const int line_hi = x_side ? (ny + ng) : (nx + ng);
   const int line_count = line_hi - line_lo;
   if (line_count <= 0) return;
   const int total = ng * line_count;
@@ -149,11 +148,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 fill_ghosts_field_kernel(
   const bool lo = (side == 0 || side == 2);
 
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-  const int line_lo = x_side ? 0 : -ng;
-  // Unlike cell-centred fluid data, the field has a physical high-y face at
-  // j=ny. Include that row in the x-boundary pass so tangential by is valid in
-  // x-ghost columns before the y-boundary pass sees it as its normal face.
-  const int line_hi = x_side ? (ny + 1) : (nx + ng);
+  const int line_lo = -ng;
+  const int line_hi = x_side ? (ny + ng) : (nx + ng);
   const int line_count = line_hi - line_lo;
   if (line_count <= 0) return;
   const int total = ng * line_count;
@@ -221,12 +217,11 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 fill_ghosts_field_kernel(
   }
 }
 
-// Total thread count covering (layer 1..nghost) x (line range). The line range
-// is the interior [0,ny)/[0,nx) on an x-side and the full storage width
-// [-ng, nx+ng) on a y-side (corner coverage, rule (b)).
+// Total thread count covering (layer 1..nghost) x the full padded transverse
+// range (corner coverage, rule (b)).
 inline unsigned fill_total_threads(const Grid2D& g, int side) {
   const bool x_side = (side == 0 || side == 1);
-  const int line_count = x_side ? g.ny : (g.nx + 2 * g.nghost);
+  const int line_count = (x_side ? g.ny : g.nx) + 2 * g.nghost;
   const long total = static_cast<long>(g.nghost) * static_cast<long>(line_count);
   return total > 0 ? static_cast<unsigned>(total) : 0u;
 }
@@ -258,8 +253,7 @@ void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode,
                                   stream_t stream) {
   const Grid2D g = u.grid;
   const bool x_side = (side == 0 || side == 1);
-  const int line_count = x_side ? (g.ny + 1)
-                                : (g.nx + 2 * g.nghost);
+  const int line_count = (x_side ? g.ny : g.nx) + 2 * g.nghost;
   const long total_long =
       static_cast<long>(g.nghost) * static_cast<long>(line_count);
   const unsigned total = total_long > 0
@@ -272,6 +266,21 @@ void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode,
                      static_cast<hipStream_t>(stream), g, side, mode, s_normal,
                      u.bx_face.device_ptr(), u.by_face.device_ptr(),
                      u.bz_cell.device_ptr());
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+void launch_mhd_fill_ghosts_background(MhdBackgroundField<Real>& b0, int side,
+                                       int mode, stream_t stream) {
+  const Grid2D g = b0.grid;
+  const unsigned total = fill_total_threads(g, side);
+  if (total == 0) return;
+  const Real s_normal = (mode == 2 || mode == 3) ? Real{-1} : Real{1};
+  const dim3 block(kBlock);
+  const dim3 grid((total + block.x - 1) / block.x);
+  hipLaunchKernelGGL(fill_ghosts_field_kernel, grid, block, 0,
+                     static_cast<hipStream_t>(stream), g, side, mode, s_normal,
+                     b0.b0x_face.device_ptr(), b0.b0y_face.device_ptr(),
+                     b0.b0z_cell.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 

@@ -66,6 +66,25 @@ void OutflowFieldBC::correct_after_e(YeeField2D<Real>& field, Side side, Real dt
   fill_ghosts(field, side);
 }
 
+std::vector<Real> OutflowFieldBC::checkpoint_history() const {
+  std::vector<Real> history(mur_.size());
+  if (!history.empty()) mur_.copy_to_host(history.data(), history.size());
+  return history;
+}
+
+void OutflowFieldBC::restore_checkpoint_history(
+    std::span<const Real> history, bool primed) {
+  if (primed && history.empty()) {
+    throw std::invalid_argument{
+        "OutflowFieldBC: a primed checkpoint requires Mur history"};
+  }
+  if (mur_.size() != history.size()) {
+    mur_ = backend::DeviceBuffer<Real>{history.size()};
+  }
+  if (!history.empty()) mur_.copy_from_host(history.data(), history.size());
+  primed_ = primed;
+}
+
 QUASAR_REGISTER_FIELD_BOUNDARY("outflow", OutflowFieldBC)
 
 }  // namespace quasar::boundary

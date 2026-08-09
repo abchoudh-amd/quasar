@@ -118,6 +118,10 @@ void bind_pic(py::module_& m) {
   // mirror. Adding a boundary/filter via QUASAR_REGISTER_* then needs no Python
   // edit. Sorted for stable error messages.
   auto sorted_names = [](std::vector<std::string> v) {
+    // "internal" is a runtime-only tile interface, never physics-deck
+    // vocabulary.  Keep registry introspection authoritative for public
+    // plug-ins without allowing users to request a no-op exterior boundary.
+    std::erase(v, "internal");
     std::sort(v.begin(), v.end());
     return v;
   };
@@ -229,7 +233,11 @@ void bind_pic(py::module_& m) {
       .def_readwrite("normalization", &quasar::pic::EmPicConfig::normalization)
       .def_readwrite("filters", &quasar::pic::EmPicConfig::filters)
       .def_readwrite("neutralizing_background",
-                     &quasar::pic::EmPicConfig::neutralizing_background);
+                     &quasar::pic::EmPicConfig::neutralizing_background)
+      .def_readwrite("external_field_signature",
+                     &quasar::pic::EmPicConfig::external_field_signature)
+      .def_readwrite("timestep_signature",
+                     &quasar::pic::EmPicConfig::timestep_signature);
 
   // -- Species --------------------------------------------------------------
 
@@ -257,6 +265,9 @@ void bind_pic(py::module_& m) {
       .def("to_host",
            [](const quasar::pic::ParticleSpecies& self) {
              auto snap = self.to_host();
+             // Preserve the established serial binding schema. Distributed
+             // migration/checkpoint state is exposed by bind_distributed.cpp's
+             // dedicated full-state converter, not this low-level snapshot.
              py::dict d;
              d["x"] = vector_to_numpy(snap.x);
              d["y"] = vector_to_numpy(snap.y);

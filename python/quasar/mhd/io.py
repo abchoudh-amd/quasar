@@ -523,12 +523,20 @@ class MhdDeck:
     def _validate_boundary(self) -> None:
         allowed_fluid = set(_core.mhd.registered_mhd_fluid_boundaries())
         for i, bc in enumerate(self.boundary.fluid):
+            if bc == "internal":
+                raise ValueError(
+                    f"boundary.fluid[{i}] = 'internal' is reserved for "
+                    "the distributed tile runtime")
             if bc not in allowed_fluid:
                 raise ValueError(
                     f"boundary.fluid[{i}] = {bc!r} must be one of "
                     f"{sorted(allowed_fluid)}")
         allowed_field = set(_core.mhd.registered_mhd_field_boundaries())
         for i, bc in enumerate(self.boundary.field):
+            if bc == "internal":
+                raise ValueError(
+                    f"boundary.field[{i}] = 'internal' is reserved for "
+                    "the distributed tile runtime")
             if bc not in allowed_field:
                 raise ValueError(
                     f"boundary.field[{i}] = {bc!r} must be one of "

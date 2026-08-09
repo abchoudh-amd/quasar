@@ -15,11 +15,101 @@
 #include "quasar/physics/pic/species.hpp"
 
 #include <cstddef>
+#include <cstdint>
 
 // The kernel-launch ABI speaks the backend-neutral stream handle so callers in
 // the physics/boundary/numerics layers never include a HIP header. The .hip
 // definitions cast it back to quasar_stream_t internally.
 using quasar_stream_t = ::quasar::backend::stream_t;
+
+namespace quasar::pic {
+
+// Device-resident execution form of one fixed distributed PIC halo-plan
+// entry. The runtime uploads these immutable tables once when it constructs a
+// tile; every exchange thereafter moves only the referenced Real payloads.
+struct PicDeviceHaloEntry {
+  std::uint32_t component{0};
+  std::int32_t source_x{0};
+  std::int32_t source_y{0};
+  std::int32_t destination_x{0};
+  std::int32_t destination_y{0};
+};
+
+inline constexpr std::size_t pic_device_halo_component_count = 6;
+
+struct PicDeviceHaloConstComponents {
+  const Real* component[pic_device_halo_component_count]{};
+};
+
+struct PicDeviceHaloComponents {
+  Real* component[pic_device_halo_component_count]{};
+};
+
+// Topology facts needed by device-resident distributed source operations.
+// Global offsets/counts stay 64-bit even though one tile's Grid2D dimensions
+// are int-sized, so decomposition never narrows the canonical coordinates.
+struct PicDeviceTileExtent {
+  std::uint64_t global_x_begin{0};
+  std::uint64_t global_y_begin{0};
+  std::uint64_t global_nx{0};
+  std::uint64_t global_ny{0};
+  std::int32_t tile_x{0};
+  std::int32_t tile_y{0};
+  std::int32_t tiles_x{1};
+  std::int32_t tiles_y{1};
+  std::int32_t periodic_x{0};
+  std::int32_t periodic_y{0};
+};
+
+enum class PicDeviceHaloUpdate : int { assign = 0, add = 1 };
+
+void launch_pic_device_halo_pack(
+    Grid2D grid, const PicDeviceHaloConstComponents& components,
+    const backend::DeviceBuffer<PicDeviceHaloEntry>& entries,
+    std::size_t payload_count, std::uint32_t component_mask,
+    backend::DeviceBuffer<Real>& payload, backend::stream_t stream);
+void launch_pic_device_halo_unpack(
+    Grid2D grid, const backend::DeviceBuffer<Real>& payload,
+    std::size_t payload_count,
+    const backend::DeviceBuffer<PicDeviceHaloEntry>& entries,
+    const PicDeviceHaloComponents& components,
+    std::uint32_t component_mask, PicDeviceHaloUpdate update,
+    backend::stream_t stream);
+void launch_pic_device_halo_accumulate(
+    Grid2D grid, const PicDeviceHaloConstComponents& sources,
+    const backend::DeviceBuffer<PicDeviceHaloEntry>& entries,
+    const PicDeviceHaloComponents& destinations,
+    std::uint32_t component_mask, backend::stream_t stream);
+void launch_pic_device_components_copy(
+    Grid2D grid, const PicDeviceHaloConstComponents& sources,
+    const PicDeviceHaloComponents& destinations,
+    std::uint32_t component_mask, backend::stream_t stream);
+void launch_pic_distributed_source_background(
+    Grid2D grid, Real* charge, Real density, backend::stream_t stream);
+void launch_pic_distributed_filter_axis(
+    Grid2D grid, PicDeviceTileExtent tile, const Real* input, Real* output,
+    int axis, Real neighbor_weight, Real center_weight, int cylindrical,
+    backend::stream_t stream);
+void launch_pic_distributed_axis_values(
+    Grid2D grid, const Real* radial_current, Real* axis_values,
+    int owns_axis, backend::stream_t stream);
+void launch_pic_distributed_current_correct_order4(
+    Grid2D grid, PicDeviceTileExtent tile, const Real* radial_current,
+    const Real* axial_current, const Real* rhs_radial,
+    const Real* rhs_axial, const Real* axis_values, Real* output_radial,
+    Real* output_axial, int x_lo_mode, int x_hi_mode, int y_lo_mode,
+    int y_hi_mode, int cylindrical, int on_axis,
+    backend::stream_t stream);
+
+// Removes live particles that no longer belong to this tile, compacts every
+// resident record in device memory, and downloads only the departing records.
+// The returned records retain their complete trajectory/deposition state and
+// stable IDs for routing by the distributed runtime.
+ParticleSpecies::HostSnapshot extract_pic_departing_particles(
+    ParticleSpecies& species, int include_x_high, int include_y_high,
+    backend::stream_t stream);
+
+}  // namespace quasar::pic
 
 // The field-data ABI is phrased in quasar::Real (and YeeField2D<Real> /
 // JField2D<Real>), not literal double, so the kernel boundary tracks the same
@@ -184,9 +274,10 @@ void launch_pic_current_correct_order4(const quasar::Grid2D&,
                                        int y_lo_mode, int y_hi_mode,
                                        quasar_stream_t);
 // Boundary modes used by both compact correction launchers are 0=periodic,
-// 1=even normal-E continuation (PEC), 2=linear continuation (outflow), and
-// 3=the cylindrical r=0 axis. The correction must use the same continuation as
-// the field ghost closure or D4(J_corrected)=D2(J_raw) fails at boundary cells.
+// 1=even normal-E continuation (PEC), 2=linear continuation (outflow),
+// 3=the cylindrical r=0 axis, and 4=an exchanged internal-tile guard. The
+// correction must use the same continuation as the field ghost closure or
+// D4(J_corrected)=D2(J_raw) fails at boundary cells.
 // Cylindrical variant solves the radial compact system without materialising
 // r*Jr, and the axial system for Jz.
 void launch_pic_current_correct_cyl_order4(const quasar::Grid2D&,
@@ -304,5 +395,13 @@ void launch_pic_particle_compact(quasar::pic::ParticleSpecies&, quasar_stream_t)
 // Single-pass device reduction of the alive flags; returns the count to the
 // host. Cheaper than a full HostSnapshot when only the scalar is needed.
 std::size_t launch_pic_alive_count(const quasar::pic::ParticleSpecies&, quasar_stream_t);
+
+// Counts live particles outside a tile's half-open ownership box. Physical
+// high faces include their exact endpoint; internal high faces do not. The
+// scalar reduction lets the distributed runtime skip full particle snapshots
+// on the overwhelmingly common no-migration step.
+std::size_t launch_pic_particle_departure_count(
+    const quasar::pic::ParticleSpecies&, int include_x_high,
+    int include_y_high, quasar_stream_t);
 
 }  // extern "C"

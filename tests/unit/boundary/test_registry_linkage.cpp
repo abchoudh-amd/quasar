@@ -16,6 +16,7 @@ TEST(BoundaryRegistryLinkage, ParticleBoundariesAreRegistered) {
   EXPECT_TRUE(reg.contains("periodic"));
   EXPECT_TRUE(reg.contains("specular"));
   EXPECT_TRUE(reg.contains("absorbing"));
+  EXPECT_TRUE(reg.contains("internal"));
 }
 
 TEST(BoundaryRegistryLinkage, FieldBoundariesAreRegistered) {
@@ -24,4 +25,5 @@ TEST(BoundaryRegistryLinkage, FieldBoundariesAreRegistered) {
   EXPECT_TRUE(reg.contains("periodic"));
   EXPECT_TRUE(reg.contains("pec"));
   EXPECT_TRUE(reg.contains("outflow"));
+  EXPECT_TRUE(reg.contains("internal"));
 }

@@ -161,6 +161,12 @@ class MhdDeckLoadTests(unittest.TestCase):
     def test_minimal_deck_validates(self):
         _deck().validate()
 
+    def test_internal_tile_boundary_is_not_public_deck_vocabulary(self):
+        boundary = BoundaryConfig(
+            fluid=("internal",) * 4, field=("internal",) * 4)
+        with self.assertRaisesRegex(ValueError, "reserved.*distributed"):
+            _deck(boundary=boundary).validate()
+
     def test_geometry_defaults_to_cartesian(self):
         self.assertEqual(_deck().geometry, "cartesian")
 

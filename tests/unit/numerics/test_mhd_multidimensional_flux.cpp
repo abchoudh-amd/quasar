@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -62,6 +63,107 @@ void expect_gauss_exact(const Real (&nodes)[Points],
   }
 }
 
+void expect_hlld_skips_non_owned_boundary(int dir, int skipped_side) {
+  Grid2D g{6, 5, Real{1}, Real{1}, Real{0}, Real{0}, /*nghost=*/4};
+  constexpr Real gamma = Real{5} / Real{3};
+  const std::size_t n = g.storage_size();
+  MhdInterfaceStates<Real> iface{g, dir};
+
+  const auto seed_interface = [n](auto& left, auto& right, Real value) {
+    const std::vector<Real> values(n, value);
+    left.copy_from_host(values.data(), n);
+    right.copy_from_host(values.data(), n);
+  };
+  seed_interface(iface.Lrho, iface.Rrho, Real{1});
+  seed_interface(iface.Lmx, iface.Rmx, Real{0.2});
+  seed_interface(iface.Lmy, iface.Rmy, Real{-0.1});
+  seed_interface(iface.Lmz, iface.Rmz, Real{0.05});
+  seed_interface(iface.Lenergy, iface.Renergy, Real{4});
+  seed_interface(iface.Lbx, iface.Rbx, Real{0.3});
+  seed_interface(iface.Lby, iface.Rby, Real{-0.2});
+  seed_interface(iface.Lbz, iface.Rbz, Real{0.1});
+
+  quasar::mhd::MhdBackgroundField<Real> background{g};
+  background.active = true;
+  const std::vector<Real> b0x(n, Real{0.03});
+  const std::vector<Real> b0y(n, Real{-0.02});
+  const std::vector<Real> b0z(n, Real{0.01});
+  background.b0x_face.copy_from_host(b0x.data(), n);
+  background.b0y_face.copy_from_host(b0y.data(), n);
+  background.b0z_cell.copy_from_host(b0z.data(), n);
+
+  quasar::mhd::MhdField2D<Real> flux{g};
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts{g};
+  constexpr Real real_sentinel = Real{-7654.25};
+  const std::vector<Real> real_sentinels(n, real_sentinel);
+  const std::array<quasar::backend::DeviceBuffer<Real>*, 11> scalar_records{
+      &flux.rho, &flux.mx, &flux.my, &flux.mz, &flux.energy,
+      &flux.bx_face, &flux.by_face, &flux.bz_cell,
+      &parts.wave_x, &parts.wave_y, &parts.wave_z};
+  for (auto* record : scalar_records) {
+    record->copy_from_host(real_sentinels.data(), n);
+  }
+  for (auto& point : parts.cross_b_point) {
+    point.x.copy_from_host(real_sentinels.data(), n);
+    point.y.copy_from_host(real_sentinels.data(), n);
+    point.z.copy_from_host(real_sentinels.data(), n);
+  }
+  constexpr int valid_sentinel = -17;
+  const std::vector<int> valid_sentinels(n, valid_sentinel);
+  parts.quadrature_valid.copy_from_host(valid_sentinels.data(), n);
+  const quasar::numerics::ScaledValue covariance_sentinel{Real{0.625}, 123};
+  const std::vector<quasar::numerics::ScaledValue> covariance_sentinels(
+      n, covariance_sentinel);
+  parts.b0_induction_covariance.copy_from_host(
+      covariance_sentinels.data(), n);
+
+  quasar::mhd::FaceOwnershipFlags4 ownership{};
+  ownership.side[skipped_side] = 0;
+  const quasar::mhd::BoundaryFlags4 boundaries{{4, 4, 4, 4}};
+  quasar::mhd::launch_mhd_hlld_flux(
+      iface, background, dir, flux, boundaries, gamma, /*stream=*/nullptr,
+      /*hll_only=*/false, &parts, /*scheme_order=*/2, ownership);
+  quasar::backend::device_synchronize(nullptr);
+
+  int skipped_i = 2;
+  int skipped_j = 2;
+  if (skipped_side == 0) skipped_i = 0;
+  if (skipped_side == 1) skipped_i = g.nx;
+  if (skipped_side == 2) skipped_j = 0;
+  if (skipped_side == 3) skipped_j = g.ny;
+  const std::size_t skipped = g.index(skipped_i, skipped_j);
+  const std::size_t owned = g.index(2, 2);
+
+  const auto expect_real_record = [&](const auto& record) {
+    std::vector<Real> values(n);
+    record.copy_to_host(values.data(), n);
+    EXPECT_EQ(values[skipped], real_sentinel);
+    EXPECT_NE(values[owned], real_sentinel);
+    EXPECT_TRUE(std::isfinite(values[owned]));
+  };
+  for (std::size_t record = 0; record < scalar_records.size(); ++record) {
+    SCOPED_TRACE(::testing::Message{} << "scalar record " << record);
+    expect_real_record(*scalar_records[record]);
+  }
+  for (std::size_t q = 0; q < parts.cross_b_point.size(); ++q) {
+    SCOPED_TRACE(::testing::Message{} << "cross-B point " << q);
+    expect_real_record(parts.cross_b_point[q].x);
+    expect_real_record(parts.cross_b_point[q].y);
+    expect_real_record(parts.cross_b_point[q].z);
+  }
+
+  std::vector<int> valid(n);
+  parts.quadrature_valid.copy_to_host(valid.data(), n);
+  EXPECT_EQ(valid[skipped], valid_sentinel);
+  EXPECT_NE(valid[owned], valid_sentinel);
+  std::vector<quasar::numerics::ScaledValue> covariance(n);
+  parts.b0_induction_covariance.copy_to_host(covariance.data(), n);
+  EXPECT_EQ(covariance[skipped].mantissa, covariance_sentinel.mantissa);
+  EXPECT_EQ(covariance[skipped].exponent, covariance_sentinel.exponent);
+  EXPECT_FALSE(covariance[owned].mantissa == covariance_sentinel.mantissa &&
+               covariance[owned].exponent == covariance_sentinel.exponent);
+}
+
 TEST(MhdMultidimensionalFlux, TransverseQuadratureIsPolynomialExact) {
   expect_point_recovery_exact(
       quasar::numerics::kMp5TransverseNodes,
@@ -96,6 +198,13 @@ TEST(MhdMultidimensionalFlux,
   }
   EXPECT_EQ(quasar::numerics::finish_scaled_product_quotient_sum(sum),
             Real{1});
+}
+
+TEST(MhdMultidimensionalFlux,
+     HlldComputesOnlyCanonicalSharedBoundaryRecords) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  expect_hlld_skips_non_owned_boundary(/*dir=*/0, /*skipped_side=*/0);
+  expect_hlld_skips_non_owned_boundary(/*dir=*/1, /*skipped_side=*/3);
 }
 
 TEST(MhdMultidimensionalFlux,

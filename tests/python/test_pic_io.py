@@ -44,6 +44,12 @@ class PicIoTests(unittest.TestCase):
     def test_schema_validation_minimal(self):
         _deck().validate()
 
+    def test_internal_tile_boundary_is_not_public_deck_vocabulary(self):
+        boundary = BoundaryConfig(
+            particle=("internal",) * 4, field=("internal",) * 4)
+        with self.assertRaisesRegex(ValueError, "reserved.*distributed"):
+            _deck(boundary=boundary).validate()
+
     def test_required_nghost_binding_rejects_unsupported_orders(self):
         from quasar import _core
 

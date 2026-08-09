@@ -13,6 +13,7 @@ namespace quasar::boundary {
 // per-call Side is only used to gate the closure to the x_lo face.
 class AxisFieldBC final : public IFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return 3; }
   void fill_ghosts(YeeField2D<Real>& field, Side side) const override;
   void correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const override;
   void correct_after_e(YeeField2D<Real>& field, Side side, Real dt) const override;

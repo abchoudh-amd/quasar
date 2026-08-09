@@ -17,6 +17,10 @@
 #include <string_view>
 #include <vector>
 
+namespace quasar::distributed {
+class PicTileAccess;
+}
+
 namespace quasar::pic {
 
 // One current-smoothing filter in the deck-configured pipeline: a registry name
@@ -54,6 +58,15 @@ struct EmPicConfig {
   // particles leave, so boundary loss produces the physically expected net
   // charge. This must be explicit; the solver never silently assumes ions.
   bool neutralizing_background{false};
+  // Topology-independent identity of the resolved prescribed external-field
+  // source (evaluator kind, parameters, conductors, plane, and unit scales).
+  // The serial solver does not interpret this value; distributed checkpoints
+  // use it only to reject a restart against a different physical background.
+  std::string external_field_signature{};
+  // Distributed checkpoint compatibility identity for the run-loop timestep
+  // policy and nominal internal dt.  The solver itself continues to accept the
+  // dt passed to step(); termination targets are deliberately excluded.
+  std::string timestep_signature{};
 };
 
 class EmPic2D3V {
@@ -105,6 +118,8 @@ class EmPic2D3V {
   const EmPicConfig& config() const noexcept { return cfg_; }
 
  private:
+  friend class ::quasar::distributed::PicTileAccess;
+
   void fill_field_ghosts();
   void correct_field_boundaries_b(Real dt);
   void correct_field_boundaries_e(Real dt);

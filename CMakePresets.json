@@ -57,13 +57,63 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "hip-gfx942-distributed-release",
+      "displayName": "HIP gfx942 Distributed Release",
+      "inherits": "hip-gfx942-release",
+      "cacheVariables": {
+        "QUASAR_ENABLE_DISTRIBUTED": "ON"
+      }
+    },
+    {
+      "name": "hip-gfx942-distributed-debug",
+      "displayName": "HIP gfx942 Distributed Debug",
+      "inherits": "hip-gfx942-debug",
+      "cacheVariables": {
+        "QUASAR_ENABLE_DISTRIBUTED": "ON",
+        "QUASAR_DISTRIBUTED_TEST_HOOKS": "ON"
+      }
+    },
+    {
+      "name": "hip-gfx950-distributed-release",
+      "displayName": "HIP gfx950 Distributed Release",
+      "inherits": "hip-gfx950-release",
+      "cacheVariables": {
+        "QUASAR_ENABLE_DISTRIBUTED": "ON"
+      }
+    },
+    {
+      "name": "hip-gfx950-distributed-debug",
+      "displayName": "HIP gfx950 Distributed Debug",
+      "inherits": "hip-gfx950-debug",
+      "cacheVariables": {
+        "QUASAR_ENABLE_DISTRIBUTED": "ON",
+        "QUASAR_DISTRIBUTED_TEST_HOOKS": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "hip-gfx942-release", "configurePreset": "hip-gfx942-release" },
     { "name": "hip-gfx942-debug",   "configurePreset": "hip-gfx942-debug"   },
     { "name": "hip-gfx950-release", "configurePreset": "hip-gfx950-release" },
-    { "name": "hip-gfx950-debug",   "configurePreset": "hip-gfx950-debug"   }
+    { "name": "hip-gfx950-debug",   "configurePreset": "hip-gfx950-debug"   },
+    {
+      "name": "hip-gfx942-distributed-release",
+      "configurePreset": "hip-gfx942-distributed-release"
+    },
+    {
+      "name": "hip-gfx942-distributed-debug",
+      "configurePreset": "hip-gfx942-distributed-debug"
+    },
+    {
+      "name": "hip-gfx950-distributed-release",
+      "configurePreset": "hip-gfx950-distributed-release"
+    },
+    {
+      "name": "hip-gfx950-distributed-debug",
+      "configurePreset": "hip-gfx950-distributed-debug"
+    }
   ],
   "testPresets": [
     {
@@ -122,6 +172,74 @@
       "displayName": "HIP gfx950 Debug (including slow tests)",
       "configurePreset": "hip-gfx950-debug",
       "inherits": "default-all"
+    },
+    {
+      "name": "hip-gfx942-distributed-release",
+      "configurePreset": "hip-gfx942-distributed-release",
+      "inherits": "default-fast",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx942-distributed-release-all",
+      "displayName": "HIP gfx942 Distributed Release (including slow tests)",
+      "configurePreset": "hip-gfx942-distributed-release",
+      "inherits": "default-all",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx942-distributed-debug",
+      "configurePreset": "hip-gfx942-distributed-debug",
+      "inherits": "default-fast",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx942-distributed-debug-all",
+      "displayName": "HIP gfx942 Distributed Debug (including slow tests)",
+      "configurePreset": "hip-gfx942-distributed-debug",
+      "inherits": "default-all",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx950-distributed-release",
+      "configurePreset": "hip-gfx950-distributed-release",
+      "inherits": "default-fast",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx950-distributed-release-all",
+      "displayName": "HIP gfx950 Distributed Release (including slow tests)",
+      "configurePreset": "hip-gfx950-distributed-release",
+      "inherits": "default-all",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx950-distributed-debug",
+      "configurePreset": "hip-gfx950-distributed-debug",
+      "inherits": "default-fast",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
+    },
+    {
+      "name": "hip-gfx950-distributed-debug-all",
+      "displayName": "HIP gfx950 Distributed Debug (including slow tests)",
+      "configurePreset": "hip-gfx950-distributed-debug",
+      "inherits": "default-all",
+      "execution": {
+        "resourceSpecFile": "${sourceDir}/tests/ctest_gpus.json"
+      }
     }
   ]
 }

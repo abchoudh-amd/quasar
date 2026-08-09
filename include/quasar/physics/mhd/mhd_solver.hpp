@@ -37,6 +37,10 @@
 #include <string_view>
 #include <vector>
 
+namespace quasar::distributed {
+class MhdTileAccess;
+}
+
 namespace quasar::mhd {
 
 // Deck-facing configuration for the MHD solver. Every scheme axis is a registry
@@ -62,6 +66,12 @@ struct MhdConfig {
   // field, but the Python deck passes one; added here so cfl_limit() scales the
   // stable step by it. Default 0.4 is a conservative MHD multidimensional value.
   Real cfl{Real{0.4}};
+  // Distributed checkpoint compatibility identity for the run-loop timestep
+  // policy.  The solver does not interpret this value: the Python distributed
+  // runner records "auto" or the exact fixed dt, while native orchestration may
+  // supply an equivalent stable identity.  Absolute termination targets are
+  // intentionally not part of this signature.
+  std::string timestep_signature{};
   boundary::MhdBoundarySpec boundary{};
   // Static background magnetic field B0 for the field-split formulation
   // B = B0 + b. Disabled by default (enabled=false => zero-B0 fast path,
@@ -145,6 +155,12 @@ class MhdSolver2D {
   int n_rk_registers() const noexcept { return kNumRkRegisters; }
 
  private:
+  friend class ::quasar::distributed::MhdTileAccess;
+
+  struct PositivityRetry {
+    Real theta{Real{0}};
+  };
+
   // Map a component spelling to its DeviceBuffer in a field (throws on unknown).
   static backend::DeviceBuffer<Real>& component_buffer(MhdField2D<Real>& f,
                                                        std::string_view component);
@@ -156,6 +172,28 @@ class MhdSolver2D {
   bool is_cylindrical() const noexcept { return cfg_.geometry == "cylindrical"; }
   void fill_ghosts(MhdField2D<Real>& u) const;
   void copy_state(const MhdField2D<Real>& src, MhdField2D<Real>& dst);
+  // Distributed stepping stops after derived-EMF preparation to exchange the
+  // cell/face tables. It also stops after the HLLD face records are produced,
+  // before any flux divergence consumes them, so the runtime can broadcast
+  // one canonical complete record at every shared face. The ordinary serial
+  // residual calls these phases back-to-back.
+  void prepare_residual_face_records(const MhdField2D<Real>& u,
+                                     MhdField2D<Real>& dudt,
+                                     FaceOwnershipFlags4 ownership = {});
+  void consume_residual_face_records(const MhdField2D<Real>& u,
+                                     MhdField2D<Real>& dudt);
+  void compute_residual_flux_and_emf(const MhdField2D<Real>& u,
+                                     MhdField2D<Real>& dudt);
+  void finish_ct_emf();
+  void compute_ct_rate_from_emf(MhdField2D<Real>& dudt);
+  void finish_split_energy(MhdField2D<Real>& dudt);
+  // The distributed driver must reconcile the just-written face fields before
+  // positivity samples the high-order cell-collocated magnetic field.  Keep the
+  // ordinary serial seam as one call, but expose its two internal phases to the
+  // friend runtime so an internal-tile halo exchange can sit between them.
+  int apply_stage_update(int stage, Real dt);
+  Real stage_admissible_fraction(int stage);
+  Real combine_stage_fraction(int stage, Real dt);
   void advance_positive(Real dt);
   void note_external_mutable_state_access() noexcept;
   int reconstruction_order() const;

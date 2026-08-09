@@ -127,9 +127,10 @@ class ThrowAfterAcceptedPieceIntegrator final
 };
 
 // Completes eight public requests normally, then performs the ninth full update
-// and throws. This lets the provenance regression accumulate a solver-owned
-// CT/RK storage residual and verify that whole-request rollback restores both
-// its bytes and its validation privilege.
+// and throws. On the eighth request it models a one-ulp CT/RK storage residual
+// through the integrator's internal state access. The same bytes therefore
+// have solver-owned provenance until a mutable view escapes, giving the
+// rollback regression a deterministic witness for the validation privilege.
 class ThrowOnNinthRequestIntegrator final
     : public quasar::numerics::ISsprkIntegrator {
  public:
@@ -141,7 +142,17 @@ class ThrowOnNinthRequestIntegrator final
                               solver.residual_register());
       solver.combine_stage(stage, dt);
     }
-    if (++requests_ == 9) {
+    ++requests_;
+    if (requests_ == 8) {
+      auto& live = solver.rk_register(0);
+      std::vector<Real> bx(live.grid.storage_size());
+      live.bx_face.copy_to_host(bx.data(), bx.size());
+      const std::size_t witness = live.grid.index(3, 4);
+      bx[witness] = std::nextafter(
+          bx[witness], std::numeric_limits<Real>::infinity());
+      live.bx_face.copy_from_host(bx.data(), bx.size());
+    }
+    if (requests_ == 9) {
       throw std::runtime_error{
           "test integrator failure on ninth public request"};
     }
@@ -282,33 +293,19 @@ StiffSeed seed_stiff(quasar::mhd::MhdSolver2D& solver, const Grid2D& g, Real gam
   return StiffSeed{rho_min, p_min};
 }
 
-void seed_smooth_uniform_field(
+void seed_uniform_static_field(
     quasar::mhd::MhdSolver2D& solver, const Grid2D& g, Real gamma) {
   const std::size_t n = g.storage_size();
-  std::vector<Real> rho(n), mx(n), my(n), mz(n, Real{0}), energy(n);
-  std::vector<Real> bx(n, Real{0.05}), by(n, Real{0.05}), bz(n, Real{0});
-  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
-    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
-      const std::size_t k = g.index(i, j);
-      const Real x = g.x_at_cell_center(g.wrap_i(i));
-      const Real y = g.y_at_cell_center(g.wrap_j(j));
-      const Real dx = x - Real{0.5};
-      const Real dy = y - Real{0.5};
-      const Real bump = std::exp(
-          -(dx * dx + dy * dy) / (Real{2} * Real{0.15} * Real{0.15}));
-      const Real density = Real{1} + Real{0.3} * bump;
-      const Real pressure = Real{1} + Real{0.3} * bump;
-      const Real vx = Real{0.1} * std::sin(Real{2} * quasar::pi * y);
-      const Real vy = Real{0.1} * std::sin(Real{2} * quasar::pi * x);
-      rho[k] = density;
-      mx[k] = density * vx;
-      my[k] = density * vy;
-      energy[k] = pressure / (gamma - Real{1})
-          + quasar::numerics::kinetic_from_velocity(
-                density, vx, vy, Real{0})
-          + Real{0.5} * (bx[k] * bx[k] + by[k] * by[k]);
-    }
-  }
+  const Real density = Real{1};
+  const Real pressure = Real{1};
+  const Real bx_value = Real{0.05};
+  const Real by_value = Real{0.05};
+  std::vector<Real> rho(n, density), mx(n, Real{0}), my(n, Real{0});
+  std::vector<Real> mz(n, Real{0});
+  std::vector<Real> energy(
+      n, pressure / (gamma - Real{1})
+          + Real{0.5} * (bx_value * bx_value + by_value * by_value));
+  std::vector<Real> bx(n, bx_value), by(n, by_value), bz(n, Real{0});
   solver.seed_state("rho", rho);
   solver.seed_state("mx", mx);
   solver.seed_state("my", my);
@@ -680,28 +677,30 @@ TEST(MhdPositivityPreservation,
   cfg.integrator = "test_throw_on_ninth_request";
   quasar::mhd::MhdSolver2D solver{cfg};
   quasar::mhd::MhdSolver2D exposed_twin{cfg};
-  seed_smooth_uniform_field(solver, cfg.grid, cfg.gamma);
-  seed_smooth_uniform_field(exposed_twin, cfg.grid, cfg.gamma);
+  seed_uniform_static_field(solver, cfg.grid, cfg.gamma);
+  seed_uniform_static_field(exposed_twin, cfg.grid, cfg.gamma);
 
   const Real dt = Real{0.4} * solver.cfl_limit();
   for (int step = 0; step < 8; ++step) {
     ASSERT_NO_THROW(solver.step_unchecked(dt));
-    ASSERT_NO_THROW(exposed_twin.step_unchecked(dt));
   }
   ASSERT_NO_THROW((void)solver.cfl_limit());
-
-  // This exact eight-step state contains only CT/RK storage roundoff. A mutable
-  // view permanently revokes solver-owned provenance, so the twin demonstrates
-  // that the strict external-data predicate would reject these same bytes.
-  (void)exposed_twin.state();
-  ASSERT_THROW((void)exposed_twin.cfl_limit(), std::invalid_argument);
 
   const std::vector<std::string> components = {
       "rho", "mx", "my", "mz", "energy", "bx_face", "by_face", "bz"};
   std::vector<std::vector<Real>> before;
   for (const auto& component : components) {
     before.push_back(solver.state_component_to_host(component));
+    exposed_twin.seed_state(component, before.back());
+    ASSERT_EQ(exposed_twin.state_component_to_host(component), before.back());
   }
+
+  // The eighth internally owned update leaves the controlled one-ulp storage
+  // witness above. Copying those exact buffers through the external seed API
+  // and then escaping a mutable view denies solver-owned provenance, proving
+  // that the strict external-data predicate rejects the saved rollback bytes.
+  (void)exposed_twin.state();
+  ASSERT_THROW((void)exposed_twin.cfl_limit(), std::invalid_argument);
 
   EXPECT_THROW(solver.step_unchecked(dt), std::runtime_error);
   for (std::size_t c = 0; c < components.size(); ++c) {

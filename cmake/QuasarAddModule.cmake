@@ -5,13 +5,15 @@
 #
 #   quasar_add_module(<name> SOURCES <files...>)
 #     - Plain C++ sources only.
+#     - DETACHED keeps the target off the quasar_core aggregate while retaining
+#       the shared include and language-standard policy.
 #
 #   quasar_add_hip_module(<name> SOURCES <files...>)
 #     - Tags every *.hip source with LANGUAGE HIP before adding the target.
 
 include_guard(GLOBAL)
 
-function(_quasar_define_module_target name sources is_hip registers)
+function(_quasar_define_module_target name sources is_hip registers detached)
   set(_target "quasar_${name}")
   add_library(${_target} STATIC ${sources})
 
@@ -35,7 +37,7 @@ function(_quasar_define_module_target name sources is_hip registers)
 
   target_compile_features(${_target} PUBLIC cxx_std_20)
 
-  if(TARGET quasar_core)
+  if(TARGET quasar_core AND NOT detached)
     if(registers)
       # This module self-registers concrete schemes via namespace-scope static
       # initializers (core/registry.hpp). Those objects carry no externally
@@ -51,15 +53,16 @@ function(_quasar_define_module_target name sources is_hip registers)
 endfunction()
 
 function(quasar_add_module name)
-  cmake_parse_arguments(QAM "REGISTERS" "" "SOURCES" ${ARGN})
+  cmake_parse_arguments(QAM "DETACHED;REGISTERS" "" "SOURCES" ${ARGN})
   if(NOT QAM_SOURCES)
     message(FATAL_ERROR "quasar_add_module(${name}): SOURCES is required.")
   endif()
-  _quasar_define_module_target("${name}" "${QAM_SOURCES}" FALSE "${QAM_REGISTERS}")
+  _quasar_define_module_target(
+    "${name}" "${QAM_SOURCES}" FALSE "${QAM_REGISTERS}" "${QAM_DETACHED}")
 endfunction()
 
 function(quasar_add_hip_module name)
-  cmake_parse_arguments(QAHM "REGISTERS" "" "SOURCES" ${ARGN})
+  cmake_parse_arguments(QAHM "DETACHED;REGISTERS" "" "SOURCES" ${ARGN})
   if(NOT QAHM_SOURCES)
     message(FATAL_ERROR "quasar_add_hip_module(${name}): SOURCES is required.")
   endif()
@@ -67,7 +70,8 @@ function(quasar_add_hip_module name)
     message(FATAL_ERROR
       "quasar_add_hip_module(${name}) requires QUASAR_ENABLE_HIP=ON.")
   endif()
-  _quasar_define_module_target("${name}" "${QAHM_SOURCES}" TRUE "${QAHM_REGISTERS}")
+  _quasar_define_module_target(
+    "${name}" "${QAHM_SOURCES}" TRUE "${QAHM_REGISTERS}" "${QAHM_DETACHED}")
 endfunction()
 
 # Grants a backend target access to the private src/ tree so its translation

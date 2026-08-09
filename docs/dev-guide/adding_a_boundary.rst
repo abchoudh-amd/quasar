@@ -27,6 +27,24 @@ Field boundary mechanisms
   BC pick its order-dependent kernel, and ``set_corner_skip`` lets a y-face cede
   a shared corner node to the x-face that runs first.
 
+Field boundaries also describe how their ghost values continue into the
+compact fourth-order current correction.  Override
+``IFieldBoundary::ghost_continuation_mode()`` with the mode implemented by the
+backend (``0`` periodic, ``1`` PEC, ``2`` outflow, ``3`` axis, or ``4`` an
+exchanged internal interface).  The default value, ``-1``, deliberately rejects
+an order-4 run: registering a fill/correction kernel alone is not enough to make
+that boundary compatible with the compact solve.
+
+Do not recover this capability by comparing the registry name in a solver.
+Physical boundaries return ``false`` from ``is_internal_cut()``.  The
+distributed coordinator installs the reserved ``"internal"`` field and particle
+boundaries on tile interfaces; both return ``true`` from ``is_internal_cut()``
+so the solver can leave halo fill and particle transfer to the coordinator.  The
+PIC-only no-op implementations live in
+``include/quasar/boundary/internal.hpp`` and ``src/boundary/internal.cpp`` rather
+than in a physical boundary's files.  A physics deck must never select this
+reserved name.
+
 .. note::
 
    Where two ``outflow`` walls meet, neither independent one-dimensional Mur
@@ -83,37 +101,50 @@ isolation holds — all ``.hip`` / device code stays under
 ``src/backend/hip/mhd/``, and the registry BC classes reach it only through the
 launch ABI in ``include/quasar/physics/mhd/kernels.hpp``.
 
-Where the MHD axis differs from PIC is in how a *non-periodic* side reaches into
-the finite-volume reconstruction. The solver classifies each side with the free
-function
+Where the MHD axis differs from PIC is in how each side reaches into the
+finite-volume reconstruction.  Both ``IMhdFluidBoundary`` and
+``IMhdFieldBoundary`` require concrete boundaries to advertise their
+``ghost_continuation_mode()`` directly.  The current mode contract is
+``0 = periodic``, ``1 = outflow``, ``2 = wall``, ``3 = cylindrical axis``, and
+``4 = exchanged internal tile interface``.  The interface derives
+``is_periodic()`` and ``is_internal_cut()`` from that capability; solver code
+must not classify a boundary by its registry string.
+
+For example, a field boundary implements the capability beside its ghost fill:
 
 .. code-block:: cpp
 
-   // include/quasar/boundary/mhd_boundary.hpp
-   bool quasar::boundary::mhd_boundary_is_periodic(const std::string& name);
+   class NewFieldBC final : public IMhdFieldBoundary {
+    public:
+     int ghost_continuation_mode() const noexcept override { return mode; }
+     void fill_ghosts(mhd::MhdField2D<Real>& field,
+                      Side side) const override;
+   };
 
-which returns ``true`` only for ``"periodic"`` (defined in
-``src/physics/mhd/mhd_boundary.cpp``). Owning this classification in the boundary
-axis keeps the solver free of any ``if/else`` chain over concrete BC names: it
-simply asks "is this side periodic?" per side.
+The compatibility helper ``mhd_boundary_is_periodic(name)`` also constructs the
+registered boundary and asks its advertised capability; it does not encode a
+list of names.
 
 Per-side flags
 ~~~~~~~~~~~~~~~
 
-From ``cfg.boundary.field`` the solver builds a small per-side descriptor
+From its constructed field-boundary objects the solver builds a small per-side
+descriptor
 
 .. code-block:: cpp
 
    // include/quasar/physics/mhd/kernels.hpp
    struct BoundaryFlags4 {
-     int side[4];  // [x_lo, x_hi, y_lo, y_hi]; 1 = non-periodic, 0 = periodic
+     // [x_lo, x_hi, y_lo, y_hi]; continuation modes listed above.
+     int side[4];
    };
 
-(see ``MhdSolver2D::boundary_flags()`` in ``src/physics/mhd/mhd_solver.cpp``,
-which maps each name through ``mhd_boundary_is_periodic``). The flags are threaded
-into the reconstruction (``launch_mhd_reconstruct``) and the constrained-transport
-corner-EMF kernel (``launch_mhd_ct_emf``). An all-zero ``BoundaryFlags4`` is the
-all-periodic fast path and is bit-identical to the pre-flags behavior.
+(see ``MhdSolver2D::boundary_flags()`` in ``src/physics/mhd/mhd_solver.cpp``).
+The flags are threaded into the reconstruction (``launch_mhd_reconstruct``) and
+the constrained-transport corner-EMF kernel (``launch_mhd_ct_emf``).  An
+all-zero ``BoundaryFlags4`` is the all-periodic fast path.  Mode 4 tells those
+kernels that the distributed coordinator supplied the neighbouring tile's
+guards; physical continuation must not overwrite them.
 
 The one-sided mechanism
 ~~~~~~~~~~~~~~~~~~~~~~~~~

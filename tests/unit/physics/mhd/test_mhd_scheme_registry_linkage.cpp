@@ -73,10 +73,12 @@ TEST(MhdSchemeRegistryLinkage, FluidBoundariesAreRegistered) {
   ASSERT_TRUE(reg.contains("periodic"));
   ASSERT_TRUE(reg.contains("outflow"));
   ASSERT_TRUE(reg.contains("wall"));
+  ASSERT_TRUE(reg.contains("internal"));
   EXPECT_FALSE(reg.contains("reflecting"));
   EXPECT_NE(reg.create("periodic"), nullptr);
   EXPECT_NE(reg.create("outflow"), nullptr);
   EXPECT_NE(reg.create("wall"), nullptr);
+  EXPECT_NE(reg.create("internal"), nullptr);
 }
 
 TEST(MhdSchemeRegistryLinkage, FieldBoundariesAreRegistered) {
@@ -84,8 +86,10 @@ TEST(MhdSchemeRegistryLinkage, FieldBoundariesAreRegistered) {
   ASSERT_TRUE(reg.contains("periodic"));
   ASSERT_TRUE(reg.contains("outflow"));
   ASSERT_TRUE(reg.contains("wall"));
+  ASSERT_TRUE(reg.contains("internal"));
   EXPECT_FALSE(reg.contains("reflecting"));
   EXPECT_NE(reg.create("periodic"), nullptr);
   EXPECT_NE(reg.create("outflow"), nullptr);
   EXPECT_NE(reg.create("wall"), nullptr);
+  EXPECT_NE(reg.create("internal"), nullptr);
 }

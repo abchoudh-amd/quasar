@@ -20,10 +20,23 @@ cmake --build --preset hip-gfx942-release -j
 ctest --preset hip-gfx942-release            # default suite (excludes 'slow')
 ctest --preset hip-gfx942-release-all        # everything, including 'slow'
 ctest --preset hip-gfx942-release -R <regex> # single test by name regex
+cmake --preset hip-gfx942-distributed-debug  # require MPI + parallel HDF5
+cmake --build --preset hip-gfx942-distributed-debug -j
+ctest --preset hip-gfx942-distributed-debug  # CTest GPU resource scheduling
+ctest --preset hip-gfx942-distributed-debug-all
 ```
 
 Preset build trees live under `build/<preset>/`; release and debug presets are
-provided for both `gfx942` and `gfx950`.
+provided for both `gfx942` and `gfx950`. Distributed release/debug presets set
+`QUASAR_ENABLE_DISTRIBUTED=ON`, so a missing MPI or parallel-HDF5 dependency is
+a configuration error rather than silent test deregistration. Distributed
+debug presets also enable the dedicated, default-off
+`QUASAR_DISTRIBUTED_TEST_HOOKS` fault-injection option.
+
+Distributed test presets load `tests/ctest_gpus.json`; CTest assigns declared
+`RESOURCE_GROUPS` and `tests/run_with_ctest_gpus.sh` maps them to
+`HIP_VISIBLE_DEVICES`. Pass a site-local `--resource-spec-file` when the visible
+GPU inventory differs from the checked-in eight-GPU node description.
 
 Tests labelled `slow` are excluded from the default test presets because they
 dominate a full run — currently just `python_test_examples`, which drives every
@@ -46,7 +59,14 @@ A single GoogleTest binary can be run directly, for example
 
 ## Architecture
 
-The codebase is organized around **four orthogonal axes**: `physics × numerics × boundary × backend`. Each axis has matching trees under `include/quasar/<axis>/` (public interfaces) and `src/<axis>/` (private implementations). Adding a scheme in one axis should not touch the others.
+The codebase is organized around **four orthogonal solver axes**:
+`physics × numerics × boundary × backend`, plus a cross-cutting **distributed
+execution axis**. The solver axes have matching trees under
+`include/quasar/<axis>/` and `src/<axis>/`; distributed has the same public/private
+pair but deliberately depends on the complete solver slices while remaining off
+the `quasar_core` aggregate target. Adding a serial scheme in one solver axis
+should not touch the others. Extending distributed execution follows
+`docs/dev-guide/adding_distributed_physics.rst`.
 
 Key conventions:
 
@@ -73,7 +93,11 @@ Concrete physics modules currently present:
 - `physics/analytic_fields` — analytic and rectilinear file-backed fields used
   by simulations, tests, and examples.
 
-CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target creation), `QuasarHipRuntime.cmake` (HIP runtime detection), `QuasarLaunchParams.cmake` (per-arch kernel launch tuning).
+CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target
+creation, including `DETACHED` modules such as distributed),
+`QuasarDistributed.cmake` (tri-state MPI/parallel-HDF5 discovery),
+`QuasarHipRuntime.cmake` (HIP runtime detection), and
+`QuasarLaunchParams.cmake` (per-arch kernel launch tuning).
 
 ## Examples and tests
 
@@ -84,3 +108,5 @@ CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target 
 C++ unit tests under `tests/unit/<axis>/` mirror the public header tree. Python tests under `tests/python/` cover bindings, deck I/O, CLI, and post-processing.
 
 Dev-guide RST under `docs/dev-guide/` (`adding_a_background_field`, `adding_a_boundary`, `adding_a_deposit_scheme`, `adding_a_field_evaluator`, `adding_a_field_solver`, `adding_a_filter`, `adding_a_geometry`, `adding_an_mhd_scheme`, `adding_a_pusher`) is the source of truth for the steps to add a new pluggable component — consult these before adding a new scheme. The MHD numerics axes (Riemann solver, CT scheme, SSP-RK integrator, positivity limiter) are covered by `adding_an_mhd_scheme`.
+`adding_distributed_physics` is the corresponding source of truth for adding a
+new physics slice to MPI/multi-GPU execution.

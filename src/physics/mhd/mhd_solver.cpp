@@ -40,6 +40,12 @@ void require_registered_name(const std::string& name, const char* what) {
   }
 }
 
+template <class Base>
+int registered_boundary_mode(const std::string& name, const char* what) {
+  require_registered_name<Base>(name, what);
+  return Registry<Base>::instance().create(name)->ghost_continuation_mode();
+}
+
 // Validate every scalar/configuration value before registry construction or any
 // grid-sized device allocation. Python performs the same checks for a deck, but
 // MhdSolver2D is also a public C++ API and must not send invalid thermodynamics
@@ -116,25 +122,29 @@ MhdConfig validate_config(MhdConfig cfg) {
   // ISsprkIntegrator::advance() is genuinely invoked, but combine_stage() owns
   // the Shu-Osher weights and accepts only stages 0/1/2 (see the structural
   // n_stages() check in the constructor, which needs the built object).
+  std::array<int, 4> fluid_modes{};
+  std::array<int, 4> field_modes{};
   for (int side = 0; side < 4; ++side) {
-    require_registered_name<boundary::IMhdFluidBoundary>(
+    fluid_modes[side] = registered_boundary_mode<boundary::IMhdFluidBoundary>(
         cfg.boundary.fluid[side], "fluid boundary");
-    require_registered_name<boundary::IMhdFieldBoundary>(
+    field_modes[side] = registered_boundary_mode<boundary::IMhdFieldBoundary>(
         cfg.boundary.field[side], "field boundary");
-    const bool fluid_periodic = cfg.boundary.fluid[side] == "periodic";
-    const bool field_periodic = cfg.boundary.field[side] == "periodic";
-    if (fluid_periodic != field_periodic) {
+    const bool fluid_periodic = fluid_modes[side] == 0;
+    const bool field_periodic = field_modes[side] == 0;
+    const bool fluid_internal = fluid_modes[side] == 4;
+    const bool field_internal = field_modes[side] == 4;
+    if (fluid_periodic != field_periodic || fluid_internal != field_internal) {
       throw std::invalid_argument{
-          "MhdSolver2D: fluid and field periodicity must match on every side"};
+          "MhdSolver2D: fluid and field topology must match on every side"};
     }
   }
   for (int axis = 0; axis < 2; ++axis) {
     const int lo = 2 * axis;
     const int hi = lo + 1;
-    const bool fluid_lo = cfg.boundary.fluid[lo] == "periodic";
-    const bool fluid_hi = cfg.boundary.fluid[hi] == "periodic";
-    const bool field_lo = cfg.boundary.field[lo] == "periodic";
-    const bool field_hi = cfg.boundary.field[hi] == "periodic";
+    const bool fluid_lo = fluid_modes[lo] == 0;
+    const bool fluid_hi = fluid_modes[hi] == 0;
+    const bool field_lo = field_modes[lo] == 0;
+    const bool field_hi = field_modes[hi] == 0;
     if (fluid_lo != fluid_hi || field_lo != field_hi) {
       throw std::invalid_argument{
           "MhdSolver2D: periodic boundaries must be selected on both sides of an axis"};
@@ -146,8 +156,8 @@ MhdConfig validate_config(MhdConfig cfg) {
         "MhdSolver2D: cylindrical geometry requires a non-negative radial origin"};
   }
   for (int side = 0; side < 4; ++side) {
-    const bool fluid_axis = cfg.boundary.fluid[side] == "axis";
-    const bool field_axis = cfg.boundary.field[side] == "axis";
+    const bool fluid_axis = fluid_modes[side] == 3;
+    const bool field_axis = field_modes[side] == 3;
     if (fluid_axis != field_axis) {
       throw std::invalid_argument{
           "MhdSolver2D: fluid and field axis closures must be selected together"};
@@ -159,14 +169,12 @@ MhdConfig validate_config(MhdConfig cfg) {
     }
   }
   if (cylindrical && cfg.grid.origin_x == Real{0} &&
-      (cfg.boundary.fluid[0] != "axis" ||
-       cfg.boundary.field[0] != "axis")) {
+      (fluid_modes[0] != 3 || field_modes[0] != 3)) {
     throw std::invalid_argument{
         "MhdSolver2D: cylindrical r=0 requires paired fluid/field 'axis' boundaries"};
   }
   if (cylindrical &&
-      (cfg.boundary.fluid[0] == "periodic" ||
-       cfg.boundary.fluid[1] == "periodic")) {
+      (fluid_modes[0] == 0 || fluid_modes[1] == 0)) {
     throw std::invalid_argument{
         "MhdSolver2D: the radial axis cannot use periodic boundaries"};
   }
@@ -212,7 +220,8 @@ MhdConfig validate_config(MhdConfig cfg) {
 // a positive value it must be at least the scheme's required halo, else the
 // reconstruction would read past the allocated ghosts.
 Grid2D resolve_working_grid(const Grid2D& deck_grid, int required,
-                            const std::string& geometry) {
+                            const std::string& geometry,
+                            bool internal_radial_low) {
   Grid2D g = deck_grid;
   if (deck_grid.nghost > 0 && deck_grid.nghost < required) {
     throw std::invalid_argument{
@@ -229,10 +238,18 @@ Grid2D resolve_working_grid(const Grid2D& deck_grid, int required,
   if (geometry == "cylindrical" && g.origin_x > Real{0}) {
     const Real padded_r_lo =
         g.origin_x - static_cast<Real>(g.nghost) * g.dx();
-    if (!(std::isfinite(padded_r_lo) && padded_r_lo > Real{0})) {
+    const bool valid = std::isfinite(padded_r_lo) &&
+        (internal_radial_low ? padded_r_lo >= Real{0}
+                             : padded_r_lo > Real{0});
+    if (!valid) {
       throw std::invalid_argument{
-          "MhdSolver2D: annular geometry requires origin_x - nghost*dr > 0 "
-          "so the full reconstruction halo stays at positive radius"};
+          internal_radial_low
+              ? "MhdSolver2D: an internal annular tile requires "
+                "origin_x - nghost*dr >= 0 so its reconstruction halo does "
+                "not cross the global axis"
+              : "MhdSolver2D: annular geometry requires "
+                "origin_x - nghost*dr > 0 so the full reconstruction halo "
+                "stays at positive radius"};
     }
   }
   return g;
@@ -763,21 +780,18 @@ std::unique_ptr<Base> make_scheme(const std::string& name, const char* what) {
   }
 }
 
-// Internal control-flow signal: a stage candidate crossed the admissible set.
-// `theta` is the minimum per-cell convex fraction returned by the selected
-// positivity limiter and provides a quantitative retry step reduction.
-struct PositivityRetry {
-  Real theta;
-};
-
 }  // namespace
 
 MhdSolver2D::MhdSolver2D(MhdConfig cfg)
   : cfg_{validate_config(std::move(cfg))},
     reconstruction_{make_scheme<numerics::IFluxReconstruction>(cfg_.reconstruction,
                                                               "reconstruction scheme")},
-    grid_{resolve_working_grid(cfg_.grid, reconstruction_->required_nghost(),
-                              cfg_.geometry)},
+    grid_{resolve_working_grid(
+        cfg_.grid, reconstruction_->required_nghost(), cfg_.geometry,
+        registered_boundary_mode<boundary::IMhdFluidBoundary>(
+            cfg_.boundary.fluid[0], "fluid boundary") == 4 &&
+            registered_boundary_mode<boundary::IMhdFieldBoundary>(
+                cfg_.boundary.field[0], "field boundary") == 4)},
     rk_{MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}},
     step_backup_{grid_},
     request_backup_{grid_},
@@ -1055,21 +1069,35 @@ void MhdSolver2D::fill_ghosts(MhdField2D<Real>& u) const {
 }
 
 BoundaryFlags4 MhdSolver2D::boundary_flags() const {
-  // Per-side mode: periodic=0, outflow=1, wall=2, cylindrical axis=3.
-  // (the device path drops the ghost-gradient dependence at that side),
-  // periodic => 0 (two-sided wrap). cfg_.boundary.field is ordered
+  // Per-side mode: periodic=0, outflow=1, wall=2, cylindrical axis=3,
+  // exchanged internal tile side=4. Physical sides drop the ghost-gradient
+  // dependence; periodic sides wrap and internal sides consume exchanged guards.
+  // cfg_.boundary.field is ordered
   // [x_lo, x_hi, y_lo, y_hi], matching BoundaryFlags4::side. An all-periodic
   // deck yields all-zero flags (the periodic fast path).
   BoundaryFlags4 flags{};
   for (int side = 0; side < 4; ++side) {
-    const auto& name = cfg_.boundary.field[side];
-    flags.side[side] = name == "periodic" ? 0 : name == "outflow" ? 1 :
-                       name == "wall" ? 2 : name == "axis" ? 3 : 1;
+    flags.side[side] = field_bcs_[side]->ghost_continuation_mode();
   }
   return flags;
 }
 
 void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& dudt) {
+  compute_residual_flux_and_emf(u, dudt);
+  finish_ct_emf();
+  compute_ct_rate_from_emf(dudt);
+  finish_split_energy(dudt);
+}
+
+void MhdSolver2D::compute_residual_flux_and_emf(
+    const MhdField2D<Real>& u, MhdField2D<Real>& dudt) {
+  prepare_residual_face_records(u, dudt);
+  consume_residual_face_records(u, dudt);
+}
+
+void MhdSolver2D::prepare_residual_face_records(
+    const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
+    FaceOwnershipFlags4 ownership) {
   const int order = positivity_reconstruction_order_ > 0
                         ? positivity_reconstruction_order_
                         : reconstruction_order();
@@ -1108,31 +1136,43 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   const Real gamma = cfg_.gamma;
   const BoundaryFlags4 flags = boundary_flags();
 
-  // dir = 0 (x faces) then dir = 1 (y faces). Each direction: reconstruct L/R
-  // interface states, form the HLLD flux, then accumulate the conservative flux
-  // difference (-dF/dx) into dudt. This writes ALL 8 slots, including the face-B
-  // slots bx_face/by_face -- but the CT invariant forbids advancing the staggered
-  // poloidal field by the (non-div-free) Godunov flux divergence, so those two
-  // slots are OVERWRITTEN below by the pure EMF-curl rate. The cell-centred
-  // toroidal B keeps its physical flux difference. With active B0, energy is
-  // also overwritten below by one fused invariant assembled from both retained
-  // directional fluxes and the final CT rate.
+  // Reconstruct both directions and produce the complete HLLD face records,
+  // including the factored active-background auxiliary channels. Distributed
+  // stepping pauses after this phase so a single canonical owner can broadcast
+  // each shared record before either adjacent tile consumes its divergence.
   if (!interfaces_current) {
     launch_mhd_reconstruct(u, b0_, 0, ifx_, order, flags, gamma, nullptr);
   }
   const bool low_order = order <= 1;
   launch_mhd_hlld_flux(
       ifx_, b0_, 0, flux_x_, flags, gamma, nullptr, low_order,
-      b0_.active ? &momentum_flux_x_ : nullptr, order);
-  launch_mhd_flux_difference(
-      flux_x_, 0, dudt, nullptr, is_cylindrical());
+      b0_.active ? &momentum_flux_x_ : nullptr, order, ownership);
 
   if (!interfaces_current) {
     launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr);
   }
   launch_mhd_hlld_flux(
       ify_, b0_, 1, flux_y_, flags, gamma, nullptr, low_order,
-      b0_.active ? &momentum_flux_y_ : nullptr, order);
+      b0_.active ? &momentum_flux_y_ : nullptr, order, ownership);
+}
+
+void MhdSolver2D::consume_residual_face_records(
+    const MhdField2D<Real>& u, MhdField2D<Real>& dudt) {
+  const int order = positivity_reconstruction_order_ > 0
+                        ? positivity_reconstruction_order_
+                        : reconstruction_order();
+  const int collocation_order = order <= 1 ? 1 : 0;
+  const BoundaryFlags4 flags = boundary_flags();
+  const Real gamma = cfg_.gamma;
+
+  // Accumulate -div(F) from the already-canonical face records. This writes
+  // all eight slots, including bx_face/by_face, but CT overwrites those two
+  // staggered rates below with the pure EMF curl. The cell-centred toroidal B
+  // retains its physical flux difference. With active B0, energy is overwritten
+  // later by one fused invariant assembled from both directional records and
+  // the final CT rate.
+  launch_mhd_flux_difference(
+      flux_x_, 0, dudt, nullptr, is_cylindrical());
   launch_mhd_flux_difference(
       flux_y_, 1, dudt, nullptr, is_cylindrical());
   if (b0_.active) {
@@ -1158,10 +1198,29 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
   // div-free, div(B) is preserved at round-off through every stage. There is
   // therefore NO separate launch_mhd_face_b_update step (that was the double-count
   // bug: face B advanced by both the flux divergence and the CT curl).
-  launch_mhd_ct_emf(u, b0_, ifx_, ify_, flags, emf_, gamma, nullptr,
-                    order, is_cylindrical(), low_order);
-  launch_mhd_emf_curl_rate(emf_, dudt, grid_, nullptr, is_cylindrical());
+  const bool low_order = order <= 1;
+  launch_mhd_ct_emf_prepare(u, b0_, ifx_, ify_, flags, emf_, gamma, nullptr,
+                            order, low_order);
+}
 
+void MhdSolver2D::finish_ct_emf() {
+  const int order = positivity_reconstruction_order_ > 0
+                        ? positivity_reconstruction_order_
+                        : reconstruction_order();
+  launch_mhd_ct_emf_finish(boundary_flags(), emf_, nullptr, order,
+                           is_cylindrical());
+}
+
+void MhdSolver2D::compute_ct_rate_from_emf(MhdField2D<Real>& dudt) {
+  launch_mhd_emf_curl_rate(emf_, dudt, grid_, nullptr, is_cylindrical());
+}
+
+void MhdSolver2D::finish_split_energy(MhdField2D<Real>& dudt) {
+  const int order = positivity_reconstruction_order_ > 0
+                        ? positivity_reconstruction_order_
+                        : reconstruction_order();
+  const int collocation_order = order <= 1 ? 1 : 0;
+  const BoundaryFlags4 flags = boundary_flags();
   // Derive the CT-rate ghost closure before its order-matched cell collocation
   // near a physical boundary. Then overwrite the active-background energy with
   // the complete invariant in one common-exponent sum. Retaining flux_x/y until
@@ -1180,6 +1239,18 @@ void MhdSolver2D::compute_residual(const MhdField2D<Real>& u, MhdField2D<Real>& 
 }
 
 void MhdSolver2D::combine_stage(int stage, Real dt) {
+  const Real theta = combine_stage_fraction(stage, dt);
+  if (!(theta >= Real{1})) {
+    throw PositivityRetry{std::isfinite(theta) ? theta : Real{0}};
+  }
+}
+
+Real MhdSolver2D::combine_stage_fraction(int stage, Real dt) {
+  apply_stage_update(stage, dt);
+  return stage_admissible_fraction(stage);
+}
+
+int MhdSolver2D::apply_stage_update(int stage, Real dt) {
   if (!internal_integrator_access_) {
     note_external_mutable_state_access();
   }
@@ -1244,6 +1315,16 @@ void MhdSolver2D::combine_stage(int stage, Real dt) {
   //      downstream reader (e.g. divergence_b_max).
   fill_ghosts(*out);
 
+  return stage == 2 ? 0 : stage + 1;
+}
+
+Real MhdSolver2D::stage_admissible_fraction(int stage) {
+  if (stage < 0 || stage >= kNumRkRegisters) {
+    throw std::invalid_argument{
+        "MhdSolver2D::stage_admissible_fraction: stage must be 0, 1, or 2"};
+  }
+  MhdField2D<Real>& out = rk_[stage == 2 ? 0 : stage + 1];
+
   // Conservative positivity control. The selected limiter computes a per-cell
   // convex admissible fraction relative to the saved start of this substep and
   // returns the global minimum.  Evolution uses the mathematical admissible set
@@ -1255,9 +1336,10 @@ void MhdSolver2D::combine_stage(int stage, Real dt) {
   // never clamp a cell or inject energy here: a non-positive candidate is
   // discarded and the whole conservative SSP-RK substep is retried at a smaller
   // CFL fraction by advance_positive().
+  Real theta = Real{1};
   if (positivity_control_active_) {
-    Real theta = positivity_->admissible_fraction(
-        step_backup_, *out, Real{0}, Real{0}, cfg_.gamma,
+    theta = positivity_->admissible_fraction(
+        step_backup_, out, Real{0}, Real{0}, cfg_.gamma,
         positivity_reconstruction_order_);
     if (stage == 2 && positivity_reconstruction_order_ == 0 &&
         positivity_low_order_anchor_available_) {
@@ -1268,7 +1350,7 @@ void MhdSolver2D::combine_stage(int stage, Real dt) {
       // first-order base. Intermediate high-order stages need only their own EOS
       // because any rejection rolls all the way back to step_backup_.
       theta = std::min(theta, positivity_->admissible_fraction(
-          step_backup_, *out, Real{0}, Real{0}, cfg_.gamma,
+          step_backup_, out, Real{0}, Real{0}, cfg_.gamma,
           /*collocation_order=*/1));
     } else if (stage == 2 && positivity_reconstruction_order_ == 1) {
       // A completed fallback piece returns to the configured operator after the
@@ -1276,13 +1358,11 @@ void MhdSolver2D::combine_stage(int stage, Real dt) {
       // low-order intermediate stages are intentionally judged only by the
       // adjacent-face EOS used to compute their residuals.
       theta = std::min(theta, positivity_->admissible_fraction(
-          step_backup_, *out, Real{0}, Real{0}, cfg_.gamma,
+          step_backup_, out, Real{0}, Real{0}, cfg_.gamma,
           /*collocation_order=*/0));
     }
-    if (!(theta >= Real{1})) {
-      throw PositivityRetry{std::isfinite(theta) ? theta : Real{0}};
-    }
   }
+  return std::isfinite(theta) ? theta : Real{0};
 }
 
 void MhdSolver2D::copy_state(const MhdField2D<Real>& src, MhdField2D<Real>& dst) {

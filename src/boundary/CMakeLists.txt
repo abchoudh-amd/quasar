@@ -1,5 +1,6 @@
 set(_quasar_boundary_sources
   periodic.cpp
+  internal.cpp
   wall.cpp
   outflow.cpp
   axis.cpp

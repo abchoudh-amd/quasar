@@ -18,3 +18,10 @@ add_subdirectory(backend)
 add_subdirectory(numerics)
 add_subdirectory(boundary)
 add_subdirectory(physics)
+
+# The distributed runtime deliberately does not register itself on
+# quasar_core: MPI, Threads, and parallel HDF5 remain isolated on the
+# explicitly linked quasar::distributed target.
+if(QUASAR_DISTRIBUTED_AVAILABLE)
+  add_subdirectory(distributed)
+endif()

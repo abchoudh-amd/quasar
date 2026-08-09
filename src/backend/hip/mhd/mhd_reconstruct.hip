@@ -135,8 +135,11 @@ __device__ inline MhdPrim muscl_face(const MhdPrim& wm, const MhdPrim& wc,
 // upper (ghost) neighbor. Everywhere else (and on periodic sides) the slope is
 // two-sided. Interior cells (0 < c < n-1) are never one-sided.
 __device__ inline int slope_drop(int c, int n, int lo, int hi) {
-  if (lo != 0 && c <= 0) return -1;
-  if (hi != 0 && c >= n - 1) return +1;
+  // Mode 4 is an internal tile side whose guards were supplied by the
+  // distributed coordinator.  It is two-sided like an interior face, but must
+  // not be confused with mode 0's local periodic wrap in downstream kernels.
+  if (lo != 0 && lo != 4 && c <= 0) return -1;
+  if (hi != 0 && hi != 4 && c >= n - 1) return +1;
   return 0;
 }
 

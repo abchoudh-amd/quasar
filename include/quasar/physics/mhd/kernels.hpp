@@ -35,12 +35,89 @@ namespace quasar::mhd {
 using stream_t = ::quasar::backend::stream_t;
 
 // Per-side boundary modes threaded into reconstruction and CT.  The entries are
-// [x_lo,x_hi,y_lo,y_hi]: 0 periodic, 1 outflow, 2 conducting wall, 3 r=0 axis.
-// Reconstruction treats every nonzero value as one-sided; CT additionally uses
-// the distinction to pin the tangential EMF on conducting/axis edges.
+// [x_lo,x_hi,y_lo,y_hi]: 0 periodic, 1 outflow, 2 conducting wall, 3 r=0 axis,
+// 4 exchanged internal tile side.  Reconstruction treats physical modes 1--3
+// as one-sided; mode 4 consumes the already-exchanged guard cells without
+// wrapping or applying a physical closure. CT additionally uses the distinction
+// to pin the tangential EMF on conducting/axis edges.
 struct BoundaryFlags4 {
   int side[4];
 };
+
+// Per-side ownership of the two boundary faces in each directional HLLD
+// launch, ordered [x_lo,x_hi,y_lo,y_hi]. Serial launches keep the all-owned
+// default. A distributed tile clears only a shared side for which another tile
+// is the canonical owner; the skipped output is populated by the subsequent
+// owner-record exchange before any flux divergence consumes it.
+struct FaceOwnershipFlags4 {
+  int side[4]{1, 1, 1, 1};
+};
+
+// -- Distributed halo packing ----------------------------------------------
+// Device-side packing keeps the distributed runtime's fixed eight-lane wire
+// representation independent of the concrete solver scratch object being
+// exchanged. A lane can expose ordinary Real storage, an integer table, or one
+// member of a ScaledValue table. Missing lanes are written as exact zeroes and
+// ignored on receive, preserving the symmetric payload used by every MHD halo
+// family without allocating dummy full-field buffers.
+inline constexpr std::size_t mhd_device_halo_component_count = 8;
+
+enum class MhdDeviceHaloDirection : int {
+  x_low = 0,
+  x_high = 1,
+  y_low = 2,
+  y_high = 3,
+};
+
+enum class MhdDeviceHaloValueKind : int {
+  absent = 0,
+  real = 1,
+  int32 = 2,
+  scaled_mantissa = 3,
+  scaled_exponent = 4,
+};
+
+enum class MhdDeviceHaloLayout : int {
+  cell = 0,
+  cell_extended_y = 1,
+  x_face = 2,
+  x_face_extended_y = 3,
+  y_face = 4,
+  node = 5,
+};
+
+struct MhdDeviceHaloConstComponent {
+  const void* values{nullptr};
+  MhdDeviceHaloValueKind kind{MhdDeviceHaloValueKind::absent};
+};
+
+struct MhdDeviceHaloComponent {
+  void* values{nullptr};
+  MhdDeviceHaloValueKind kind{MhdDeviceHaloValueKind::absent};
+  MhdDeviceHaloLayout layout{MhdDeviceHaloLayout::cell};
+};
+
+struct MhdDeviceHaloConstComponents {
+  MhdDeviceHaloConstComponent component[mhd_device_halo_component_count]{};
+};
+
+struct MhdDeviceHaloComponents {
+  MhdDeviceHaloComponent component[mhd_device_halo_component_count]{};
+};
+
+// The payload layout is byte-for-byte identical to
+// distributed::pack_mhd_register_halo: x transfers contain nghost+1 columns
+// by ny+1 rows per lane; y transfers contain nghost+1 rows over the complete
+// padded pitch. `receive_shared_face` applies the canonical face-owner rule.
+void launch_mhd_device_halo_pack(
+    Grid2D grid, MhdDeviceHaloDirection direction,
+    const MhdDeviceHaloConstComponents& components,
+    backend::DeviceBuffer<Real>& payload, stream_t stream);
+void launch_mhd_device_halo_unpack(
+    Grid2D grid, MhdDeviceHaloDirection direction,
+    const backend::DeviceBuffer<Real>& payload,
+    const MhdDeviceHaloComponents& components, bool receive_shared_face,
+    stream_t stream);
 
 // -- Flux reconstruction -----------------------------------------------------
 // Reconstruct the LEFT/RIGHT conserved interface states on every interface
@@ -105,7 +182,8 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
                           Real gamma, stream_t stream,
                           bool hll_only = false,
                           MhdMomentumFluxParts2D<Real>* momentum_parts = nullptr,
-                          int scheme_order = 2);
+                          int scheme_order = 2,
+                          FaceOwnershipFlags4 ownership = {});
 
 // -- Conservative flux difference --------------------------------------------
 // Accumulate the conservative finite-volume face-flux divergence into `dudt`:
@@ -173,6 +251,20 @@ void launch_mhd_cylindrical_radial_momentum_residual(
 // BoundaryFlags4): at a non-periodic boundary the corner-EMF averaging uses a
 // one-sided stencil that drops the ghost-GRADIENT dependence. With `flags`
 // all-zero and `b0` inactive this is bit-identical to the original body.
+//
+// The prepare/finish seam lets the distributed runtime exchange the derived
+// cell/face tables and exact one-dimensional masks without enlarging the
+// numerical state halo.  The ordinary launcher remains the serial API and
+// invokes both phases back-to-back on one stream.
+void launch_mhd_ct_emf_prepare(
+    const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+    const quasar::numerics::MhdInterfaceStates<Real>& ifx,
+    const quasar::numerics::MhdInterfaceStates<Real>& ify,
+    BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
+    stream_t stream, int scheme_order = 2, bool hll_only = false);
+void launch_mhd_ct_emf_finish(BoundaryFlags4 flags, EmfField2D<Real>& emf,
+                              stream_t stream, int scheme_order = 2,
+                              bool cylindrical = false);
 void launch_mhd_ct_emf(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                        const quasar::numerics::MhdInterfaceStates<Real>& ifx,
                        const quasar::numerics::MhdInterfaceStates<Real>& ify,
@@ -403,5 +495,11 @@ void launch_mhd_fill_ghosts_fluid(MhdField2D<Real>& u, int side, int mode, strea
 //                         even. Run after the fluid fill so the CT face field
 //                         and the cell field carry a consistent boundary.
 void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode, stream_t stream);
+
+// Apply the identical staggered magnetic closure directly to a static
+// background field. This avoids staging all three B0 arrays through host
+// memory after an internal halo exchange.
+void launch_mhd_fill_ghosts_background(MhdBackgroundField<Real>& b0, int side,
+                                       int mode, stream_t stream);
 
 }  // namespace quasar::mhd

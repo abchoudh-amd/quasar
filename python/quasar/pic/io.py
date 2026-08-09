@@ -787,11 +787,19 @@ class PicDeck:
         # needs no Python edit (the registry is the single source of truth).
         allowed_pbc = set(_core.pic.registered_particle_boundaries())
         for i, bc in enumerate(self.boundary.particle):
+            if bc == "internal":
+                raise ValueError(
+                    f"boundary.particle[{i}] = 'internal' is reserved for "
+                    "the distributed tile runtime")
             if bc not in allowed_pbc:
                 raise ValueError(
                     f"boundary.particle[{i}] = {bc!r} must be one of {sorted(allowed_pbc)}")
         allowed_fbc = set(_core.pic.registered_field_boundaries())
         for i, bc in enumerate(self.boundary.field):
+            if bc == "internal":
+                raise ValueError(
+                    f"boundary.field[{i}] = 'internal' is reserved for "
+                    "the distributed tile runtime")
             if bc not in allowed_fbc:
                 raise ValueError(
                     f"boundary.field[{i}] = {bc!r} must be one of {sorted(allowed_fbc)}")

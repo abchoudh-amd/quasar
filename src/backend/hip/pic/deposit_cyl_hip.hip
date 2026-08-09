@@ -9,6 +9,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include <stdexcept>
+
 // Charge-conserving (Esirkepov density-decomposition) current deposition in
 // axisymmetric (m=0) cylindrical (r,z) coordinates.
 //
@@ -510,7 +512,14 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cyl_current_correct_step_kernel(
     } else {
       const double ri = g.r_at_edge(i);
       if (!on_axis && i == 0) {
-        if (r_lo_mode == 2) {
+        if (r_lo_mode == 4) {
+          const double rm_ratio = g.r_at_edge(-1) / ri;
+          const double rp_ratio = g.r_at_edge(1) / ri;
+          out_r[k] = (12.0 / 13.0)
+                   * (rhs_r[k]
+                      + (rm_ratio * in_r[g.index(-1, j)]
+                         + rp_ratio * in_r[g.index(1, j)]) / 24.0);
+        } else if (r_lo_mode == 2) {
           // Linear E ghost: E_-1=2E_0-E_1. Since q=rE, the metric leaves a
           // small dr/r correction in the endpoint row.
           const double delta = g.dx() / ri;
@@ -527,7 +536,15 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cyl_current_correct_step_kernel(
         const double axis_term = on_axis
             ? (g.r_at_edge(1) / ri) * in_r[g.index(1, j)]
             : 0.0;
-        if (r_hi_mode == 2) {
+        if (r_hi_mode == 4) {
+          const double rm_ratio = g.r_at_edge(i - 1) / ri;
+          const double rp_ratio = g.r_at_edge(i + 1) / ri;
+          out_r[k] = (12.0 / 13.0)
+                   * (rhs_r[k]
+                      + (rm_ratio * inner
+                         + rp_ratio * in_r[g.index(i + 1, j)]) / 24.0
+                      - axis_term / 12.0);
+        } else if (r_hi_mode == 2) {
           out_r[k] = (12.0 * rhs_r[k] - delta * inner - axis_term)
                    / (12.0 - delta);
         } else {
@@ -560,15 +577,28 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cyl_current_correct_step_kernel(
                + (1.0 / 26.0) *
                  (in_z[g.index(i, jm)] + in_z[g.index(i, jp)]);
     } else if (j == 0) {
-      out_z[k] = z_lo_mode == 2
-          ? rhs_z[k]
-          : (12.0 / 13.0) * rhs_z[k]
-              + (1.0 / 13.0) * in_z[g.index(i, 1)];
+      if (z_lo_mode == 4) {
+        out_z[k] = (12.0 / 13.0) * rhs_z[k]
+                 + (1.0 / 26.0) *
+                       (in_z[g.index(i, -1)] + in_z[g.index(i, 1)]);
+      } else {
+        out_z[k] = z_lo_mode == 2
+            ? rhs_z[k]
+            : (12.0 / 13.0) * rhs_z[k]
+                + (1.0 / 13.0) * in_z[g.index(i, 1)];
+      }
     } else if (j == z_faces - 1) {
-      out_z[k] = z_hi_mode == 2
-          ? rhs_z[k]
-          : (12.0 / 13.0) * rhs_z[k]
-              + (1.0 / 13.0) * in_z[g.index(i, z_faces - 2)];
+      if (z_hi_mode == 4) {
+        out_z[k] = (12.0 / 13.0) * rhs_z[k]
+                 + (1.0 / 26.0) *
+                       (in_z[g.index(i, z_faces - 2)]
+                        + in_z[g.index(i, z_faces)]);
+      } else {
+        out_z[k] = z_hi_mode == 2
+            ? rhs_z[k]
+            : (12.0 / 13.0) * rhs_z[k]
+                + (1.0 / 13.0) * in_z[g.index(i, z_faces - 2)];
+      }
     } else {
       out_z[k] = (12.0 / 13.0) * rhs_z[k]
                + (1.0 / 26.0) *
@@ -603,6 +633,12 @@ extern "C" void launch_pic_current_correct_cyl_order4(
     quasar::Real* iter_r, quasar::Real* iter_z,
     int r_lo_mode, int r_hi_mode, int z_lo_mode, int z_hi_mode,
     quasar_stream_t stream) {
+  if (r_lo_mode == 4 || r_hi_mode == 4 ||
+      z_lo_mode == 4 || z_hi_mode == 4) {
+    throw std::invalid_argument{
+        "tile-internal cylindrical fourth-order PIC correction requires "
+        "the distributed axis-coupled, halo-refreshed solve"};
+  }
   const auto hip_stream = static_cast<hipStream_t>(stream);
   const dim3 block(quasar::backend::pic::kLaunchBlock2D,
                    quasar::backend::pic::kLaunchBlock2D);

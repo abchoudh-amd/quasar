@@ -836,3 +836,136 @@ TEST(MhdCtScheme, OneDimensionalLimitIsExactAndRotationCovariant) {
     }
   }
 }
+
+TEST(MhdCtScheme,
+     HighOrderOneDimensionalProofIncludesEachFaceRecoveryHalo) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // At the tested corner, MP5/MP7 interpolate y-face EMFs over one window, and
+  // each of those faces recovers Gauss-point states from another two/three face
+  // averages on either side. A jump just beyond the first window must therefore
+  // invalidate the exact-1D shortcut even though every central interface in
+  // that window has L==R.
+  const Grid2D g{24, 24, Real{1}, Real{1}, Real{0}, Real{0},
+                 /*nghost=*/4};
+  constexpr Real gamma = Real{5} / Real{3};
+  constexpr int corner_i = 10;
+  constexpr int corner_j = 10;
+  const std::size_t n = g.storage_size();
+  const MhdState rest{Real{1}, Real{0}, Real{0}, Real{0}, Real{20},
+                      Real{0}, Real{0}, Real{0}};
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(::testing::Message{} << "order=" << order);
+    const int interpolation_lo = order == 5 ? -3 : -4;
+    const int recovery_half = order == 5 ? 2 : 3;
+
+    quasar::mhd::MhdField2D<Real> u{g};
+    seed_uniform_field(u, rest);
+    quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
+    quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
+    seed_uniform_interface(ifx, rest);
+    seed_uniform_interface(ify, rest);
+
+    // Keep the x-face induction flux exactly zero while making the orthogonal
+    // no-jump proof false, so only the x-only shortcut can be selected.
+    std::vector<Real> left_rho(n, rest.rho);
+    std::vector<Real> right_rho(n, rest.rho);
+    right_rho[g.index(corner_i, corner_j)] = Real{1.5};
+    ifx.Lrho.copy_from_host(left_rho.data(), n);
+    ifx.Rrho.copy_from_host(right_rho.data(), n);
+
+    // This jump is outside the face-to-edge interpolation window, but inside
+    // the transverse recovery stencil of its first y face.
+    std::vector<Real> left_bx(n, rest.bx);
+    std::vector<Real> right_bx(n, rest.bx);
+    const std::size_t remote = g.index(
+        corner_i + interpolation_lo - recovery_half, corner_j);
+    left_bx[remote] = Real{2};
+    right_bx[remote] = Real{-2};
+    ify.Lbx.copy_from_host(left_bx.data(), n);
+    ify.Rbx.copy_from_host(right_bx.data(), n);
+
+    quasar::mhd::MhdBackgroundField<Real> background{g};
+    quasar::mhd::EmfField2D<Real> emf{g};
+    const quasar::mhd::BoundaryFlags4 periodic{};
+    quasar::mhd::launch_mhd_ct_emf_prepare(
+        u, background, ifx, ify, periodic, emf, gamma, nullptr, order,
+        /*hll_only=*/false);
+    quasar::backend::device_synchronize(nullptr);
+
+    std::vector<int> yface_no_jump(n);
+    emf.yface_no_jump.copy_to_host(yface_no_jump.data(), n);
+    const std::size_t first_face =
+        g.index(corner_i + interpolation_lo, corner_j);
+    EXPECT_EQ(yface_no_jump[first_face], 0)
+        << "the per-face proof ignored its transverse recovery halo";
+
+    // Isolate the shortcut decision from HLLD details. The synthetic first tap
+    // contributes exactly one to either MP5 or MP7 interpolation. The old
+    // central-interface-only summary falsely selected the zero x-face EMF.
+    std::vector<Real> zero(n, Real{0});
+    std::vector<Real> synthetic_yface(n, Real{0});
+    synthetic_yface[first_face] = order == 5 ? Real{60} : Real{-280};
+    emf.xface_ez.copy_from_host(zero.data(), n);
+    emf.yface_ez.copy_from_host(synthetic_yface.data(), n);
+    emf.cell_ez_average.copy_from_host(zero.data(), n);
+    quasar::mhd::launch_mhd_ct_emf_finish(
+        periodic, emf, nullptr, order, /*cylindrical=*/false);
+    quasar::backend::device_synchronize(nullptr);
+
+    std::vector<Real> edge(n);
+    emf.ez_edge.copy_to_host(edge.data(), n);
+    EXPECT_EQ(edge[g.index(corner_i, corner_j)], Real{1});
+  }
+}
+
+TEST(MhdCtScheme,
+     HighOrderOneDimensionalProofPreservesBoundaryCoordinateMapping) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D g{16, 16, Real{1}, Real{1}, Real{0}, Real{0},
+                 /*nghost=*/4};
+  constexpr Real gamma = Real{5} / Real{3};
+  constexpr int face_j = 8;
+  const std::size_t n = g.storage_size();
+  const MhdState rest{Real{1}, Real{0}, Real{0}, Real{0}, Real{10},
+                      Real{0}, Real{0}, Real{0}};
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(::testing::Message{} << "order=" << order);
+    const int recovery_half = order == 5 ? 2 : 3;
+    quasar::mhd::MhdField2D<Real> u{g};
+    seed_uniform_field(u, rest);
+    quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
+    quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
+    seed_uniform_interface(ifx, rest);
+    seed_uniform_interface(ify, rest);
+
+    // Make only the raw low-x recovery guard unequal. Periodic and physical
+    // proofs map this coordinate to their serial wrap/closure; an internal tile
+    // must instead consume and validate the exchanged guard itself.
+    std::vector<Real> right_rho(n, rest.rho);
+    right_rho[g.index(-recovery_half, face_j)] = Real{1.5};
+    ify.Rrho.copy_from_host(right_rho.data(), n);
+
+    const auto proof_at_low_x = [&](quasar::mhd::BoundaryFlags4 flags) {
+      quasar::mhd::MhdBackgroundField<Real> background{g};
+      quasar::mhd::EmfField2D<Real> emf{g};
+      quasar::mhd::launch_mhd_ct_emf_prepare(
+          u, background, ifx, ify, flags, emf, gamma, nullptr, order,
+          /*hll_only=*/false);
+      quasar::backend::device_synchronize(nullptr);
+      std::vector<int> proof(n);
+      emf.yface_no_jump.copy_to_host(proof.data(), n);
+      return proof[g.index(0, face_j)];
+    };
+
+    EXPECT_EQ(proof_at_low_x(quasar::mhd::BoundaryFlags4{}), 1)
+        << "periodic recovery coordinates must wrap";
+    EXPECT_EQ(proof_at_low_x(quasar::mhd::BoundaryFlags4{{1, 1, 1, 1}}), 1)
+        << "physical recovery coordinates must use the one-sided closure";
+    EXPECT_EQ(proof_at_low_x(quasar::mhd::BoundaryFlags4{{4, 4, 4, 4}}), 0)
+        << "internal recovery coordinates must retain exchanged guards";
+  }
+}

@@ -124,13 +124,21 @@ struct EmfField2D {
   // cell_ez_average above.
   backend::DeviceBuffer<T> xface_ez{};
   backend::DeviceBuffer<T> yface_ez{};
+  // Exact per-face equality proofs for the one-dimensional CT fast paths.
+  // These are derived alongside the face EMFs and exchanged on the same
+  // staggered lattices in a distributed run.  Keeping the proof as a table
+  // avoids re-reading interface states beyond the actual corner interpolation
+  // reach (and therefore beyond the numerical 2/3/4-cell state halo).
+  backend::DeviceBuffer<int> xface_no_jump{};
+  backend::DeviceBuffer<int> yface_no_jump{};
 
   EmfField2D() = default;
   explicit EmfField2D(Grid2D g)
     : grid{g},
       ez_edge{g.storage_size()}, ex_edge{g.storage_size()},
       ey_edge{g.storage_size()}, cell_ez_average{g.storage_size()},
-      xface_ez{g.storage_size()}, yface_ez{g.storage_size()} {}
+      xface_ez{g.storage_size()}, yface_ez{g.storage_size()},
+      xface_no_jump{g.storage_size()}, yface_no_jump{g.storage_size()} {}
 
   std::size_t component_size() const noexcept { return grid.storage_size(); }
 };

@@ -74,6 +74,9 @@ void bind_mhd(py::module_& m) {
   // against the live C++ registry instead of a hardcoded mirror. Sorted for
   // stable error messages (mirrors the registered_* style in bind_pic.cpp).
   auto sorted_names = [](std::vector<std::string> v) {
+    // The distributed tile builder installs "internal" directly in native
+    // configs.  It is deliberately absent from YAML-facing introspection.
+    std::erase(v, "internal");
     std::sort(v.begin(), v.end());
     return v;
   };
@@ -257,6 +260,8 @@ void bind_mhd(py::module_& m) {
       .def_readwrite("rho_floor", &quasar::mhd::MhdConfig::rho_floor)
       .def_readwrite("p_floor", &quasar::mhd::MhdConfig::p_floor)
       .def_readwrite("cfl", &quasar::mhd::MhdConfig::cfl)
+      .def_readwrite("timestep_signature",
+                     &quasar::mhd::MhdConfig::timestep_signature)
       .def_readwrite("boundary", &quasar::mhd::MhdConfig::boundary)
       .def_readwrite("background", &quasar::mhd::MhdConfig::background);
 

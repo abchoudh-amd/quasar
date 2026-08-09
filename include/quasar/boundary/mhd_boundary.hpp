@@ -15,7 +15,8 @@ namespace quasar::boundary {
 // the cylindrical r=0 parity closure and is valid only on x_lo. The fluid axis
 // (rho, m, energy) and the magnetic-field axis (bx_face, by_face, bz_cell) have
 // independent selections because a wall imposes different symmetries
-// on momentum than on the magnetic field.
+// on momentum than on the magnetic field.  "internal" is reserved for the
+// distributed tile builder and is not valid physics-deck vocabulary.
 struct MhdBoundarySpec {
   std::array<std::string, 4> fluid{"periodic", "periodic", "periodic", "periodic"};
   std::array<std::string, 4> field{"periodic", "periodic", "periodic", "periodic"};
@@ -35,6 +36,13 @@ bool mhd_boundary_is_periodic(const std::string& name);
 class IMhdFluidBoundary {
  public:
   virtual ~IMhdFluidBoundary() = default;
+  virtual int ghost_continuation_mode() const noexcept = 0;
+  virtual bool is_periodic() const noexcept {
+    return ghost_continuation_mode() == 0;
+  }
+  virtual bool is_internal_cut() const noexcept {
+    return ghost_continuation_mode() == 4;
+  }
 
   // Fill the ghost layers of the fluid components on the given side from the
   // interior, applying the BC's symmetry (wrap / zero-gradient / wall mirror).
@@ -51,6 +59,13 @@ class IMhdFluidBoundary {
 class IMhdFieldBoundary {
  public:
   virtual ~IMhdFieldBoundary() = default;
+  virtual int ghost_continuation_mode() const noexcept = 0;
+  virtual bool is_periodic() const noexcept {
+    return ghost_continuation_mode() == 0;
+  }
+  virtual bool is_internal_cut() const noexcept {
+    return ghost_continuation_mode() == 4;
+  }
 
   // Fill the ghost layers of the magnetic-field components on the given side
   // from the interior, applying the BC's symmetry for face- and cell-staggered

@@ -122,6 +122,23 @@ interfaces may still change between entries.
   (`field_component_to_host`, `external_field_component_to_host`) so diagnostics
   copy only the requested Yee components from the device instead of the whole
   six-field dict every snapshot.
+- PIC/MHD: hybrid MPI and multi-GPU runs selected with `--devices` and
+  `--decomposition`, including gathered or sharded diagnostics and
+  repartitionable parallel-HDF5 checkpoint/restart.
+  * New `quasar.pic.run` and `quasar.mhd.run` entry points accept
+    `quasar.distributed.RunOptions` and return `RunResult`, exposing placement,
+    diagnostics, checkpoint, restart, and timing policy while plain calls retain
+    the serial path.
+  * `QUASAR_ENABLE_DISTRIBUTED=AUTO|ON|OFF` controls MPI C++ and parallel-HDF5
+    discovery; the Python availability API remains importable in serial-only
+    builds.
+  * `read_diagnostics_manifest` validates sharded completion records;
+    self-contained multi-node launcher examples cover PIC and MHD, and
+    collective failures produce a consistent decision on every rank.
+  * `hip-gfx942-distributed-{release,debug}` and
+    `hip-gfx950-distributed-{release,debug}` presets, plus their `-all` test
+    variants, require the distributed dependency set and schedule GPU tests
+    through a CTest resource specification.
 
 ### Fixed
 - MHD: split-background momentum fluxes no longer lose material-pressure and

@@ -9,6 +9,7 @@ namespace quasar::boundary {
 // tangential electric samples on a physical face are pinned by the same fill.
 class PecFieldBC final : public IFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return 1; }
   void configure_geometry(bool cylindrical) override { cylindrical_ = cylindrical; }
   void fill_ghosts(YeeField2D<Real>& field, Side side) const override;
   void correct_after_b(YeeField2D<Real>& field, Side side, Real dt) const override;

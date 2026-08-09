@@ -310,11 +310,10 @@ class ScaledCompensatedSum {
 
 bool is_cylindrical(const std::string& geometry) { return geometry == "cylindrical"; }
 
-int current_ghost_mode(std::string_view boundary_name) {
-  if (boundary_name == "periodic") return 0;
-  if (boundary_name == "pec") return 1;
-  if (boundary_name == "outflow") return 2;
-  if (boundary_name == "axis") return 3;
+int current_ghost_mode(const boundary::IFieldBoundary& boundary,
+                       std::string_view boundary_name) {
+  const int mode = boundary.ghost_continuation_mode();
+  if (mode >= 0 && mode <= 4) return mode;
   throw std::invalid_argument{
       "EmPic2D3V: fourth-order current correction does not know the field "
       "ghost continuation for boundary '" + std::string{boundary_name} + "'"};
@@ -481,6 +480,8 @@ EmPicConfig validate_config(EmPicConfig cfg) {
     cfg.boundary.particle[x_lo] = "axis";
   }
 
+  std::array<bool, 4> field_internal{};
+  std::array<bool, 4> particle_internal{};
   for (int side = 0; side < 4; ++side) {
     const bool axis_requested = cfg.boundary.field[side] == "axis"
                              || cfg.boundary.particle[side] == "axis";
@@ -495,10 +496,18 @@ EmPicConfig validate_config(EmPicConfig cfg) {
                                                   "field boundary");
     require_registered<boundary::IParticleBoundary>(cfg.boundary.particle[side],
                                                      "particle boundary");
+    auto field_boundary =
+        Registry<boundary::IFieldBoundary>::instance().create(
+            cfg.boundary.field[side]);
+    auto particle_boundary =
+        Registry<boundary::IParticleBoundary>::instance().create(
+            cfg.boundary.particle[side]);
+    field_internal[side] = field_boundary->is_internal_cut();
+    particle_internal[side] = particle_boundary->is_internal_cut();
     if (cfg.fdtd_order == 4) {
       // Fail before allocating fields if a future plugin does not declare one
       // of the compact-current ghost continuations understood by this solver.
-      (void)current_ghost_mode(cfg.boundary.field[side]);
+      (void)current_ghost_mode(*field_boundary, cfg.boundary.field[side]);
     }
   }
 
@@ -507,6 +516,12 @@ EmPicConfig validate_config(EmPicConfig cfg) {
   require_periodic_pair(cfg.boundary.particle, 0, 1, "particle", "x/r");
   require_periodic_pair(cfg.boundary.particle, 2, 3, "particle", "y/z");
 
+  for (int side = 0; side < 4; ++side) {
+    if (field_internal[side] != particle_internal[side]) {
+      throw std::invalid_argument{
+          "EmPic2D3V: field and particle internal topology must match on every side"};
+    }
+  }
   const bool field_periodic_x = cfg.boundary.field[0] == "periodic";
   const bool field_periodic_y = cfg.boundary.field[2] == "periodic";
   const bool particle_periodic_x = cfg.boundary.particle[0] == "periodic";
@@ -589,10 +604,20 @@ EmPicConfig validate_config(EmPicConfig cfg) {
       }
       const Real padded_r_lo = cfg.grid.origin_x
           - static_cast<Real>(cfg.grid.nghost) * cfg.grid.dx();
-      if (!(std::isfinite(padded_r_lo) && padded_r_lo > Real{0})) {
+      const bool internal_radial_low =
+          field_internal[0] && particle_internal[0];
+      const bool valid = std::isfinite(padded_r_lo) &&
+          (internal_radial_low ? padded_r_lo >= Real{0}
+                               : padded_r_lo > Real{0});
+      if (!valid) {
         throw std::invalid_argument{
-            "EmPic2D3V: annular geometry requires origin_x - nghost*dr > 0 "
-            "so every radial ghost remains at positive radius"};
+            internal_radial_low
+                ? "EmPic2D3V: an internal annular tile requires "
+                  "origin_x - nghost*dr >= 0 so its radial halo does not "
+                  "cross the global axis"
+                : "EmPic2D3V: annular geometry requires "
+                  "origin_x - nghost*dr > 0 so every radial ghost remains "
+                  "at positive radius"};
       }
     }
     // Order-four curls and external-field sampling evaluate true radial ghosts,
@@ -1134,23 +1159,22 @@ void EmPic2D3V::step(Real dt) {
   }
   filters_.apply(current_, cfg_.boundary, is_cylindrical(cfg_.geometry));
   if (cfg_.fdtd_order == 4) {
-    const auto& field_boundary = cfg_.boundary.field;
     if (is_cylindrical(cfg_.geometry)) {
       ::launch_pic_current_correct_cyl_order4(
           grid_, current_, current_rhs_x_.device_ptr(), current_rhs_y_.device_ptr(),
           current_iter_x_.device_ptr(), current_iter_y_.device_ptr(),
-          current_ghost_mode(field_boundary[0]),
-          current_ghost_mode(field_boundary[1]),
-          current_ghost_mode(field_boundary[2]),
-          current_ghost_mode(field_boundary[3]), nullptr);
+          current_ghost_mode(*field_bcs_[0], cfg_.boundary.field[0]),
+          current_ghost_mode(*field_bcs_[1], cfg_.boundary.field[1]),
+          current_ghost_mode(*field_bcs_[2], cfg_.boundary.field[2]),
+          current_ghost_mode(*field_bcs_[3], cfg_.boundary.field[3]), nullptr);
     } else {
       ::launch_pic_current_correct_order4(
           grid_, current_, current_rhs_x_.device_ptr(), current_rhs_y_.device_ptr(),
           current_iter_x_.device_ptr(), current_iter_y_.device_ptr(),
-          current_ghost_mode(field_boundary[0]),
-          current_ghost_mode(field_boundary[1]),
-          current_ghost_mode(field_boundary[2]),
-          current_ghost_mode(field_boundary[3]), nullptr);
+          current_ghost_mode(*field_bcs_[0], cfg_.boundary.field[0]),
+          current_ghost_mode(*field_bcs_[1], cfg_.boundary.field[1]),
+          current_ghost_mode(*field_bcs_[2], cfg_.boundary.field[2]),
+          current_ghost_mode(*field_bcs_[3], cfg_.boundary.field[3]), nullptr);
     }
   }
   // Deposits wrap periodic normal flux into the unique low face. Filters and

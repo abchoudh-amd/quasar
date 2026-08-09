@@ -1,0 +1,25 @@
+units: normalized
+neutralizing_background: true
+domain: {nx: 32, ny: 16, lx_m: 1.0, ly_m: 0.5}
+numerics: {fdtd_order: 2, shape: cic, current_filter: []}
+species:
+  - name: electron_beam_left
+    charge_C: -1
+    mass_kg: 1
+    n_particles: 512
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.0
+      temperature_eV: 0.0
+      drift_v: [0.2, 0.0, 0.0]
+  - name: electron_beam_right
+    charge_C: -1
+    mass_kg: 1
+    n_particles: 512
+    initial:
+      distribution: maxwellian_uniform
+      density_per_m3: 1.0
+      temperature_eV: 0.0
+      drift_v: [-0.2, 0.0, 0.0]
+time: {dt_s: auto, steps: 8}
+diagnostics: {output_path: out_pic.npz, cadence: 2, fields: [ex], per_species: true}

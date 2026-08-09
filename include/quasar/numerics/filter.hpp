@@ -15,6 +15,17 @@ struct BoundarySpec;
 
 namespace quasar::numerics {
 
+// One separable nearest-neighbour stage used by a distributed current filter.
+// Each pass applies (a, b, a) along x and then y, with tile-halo exchange after
+// each axis. Keeping this contract on the registry interface lets plugins opt
+// into the same implementation path without distributed code dispatching on
+// registry names or concrete filter types.
+struct DistributedFilterStencil {
+  int passes{1};
+  Real neighbor_weight{Real{0}};
+  Real center_weight{Real{1}};
+};
+
 // A current filter smooths the deposited current in place. The built-in
 // smoothers deliberately act on `jz` ALONE: in 2D the out-of-plane component
 // does not enter charge continuity, whereas convolving the in-plane Jx/Jy pair
@@ -31,6 +42,8 @@ class ICurrentFilter {
   // constructed (one pass); the deck loader calls this to apply the configured
   // pass count without needing a type-specific constructor.
   virtual void set_passes(int n_passes) = 0;
+  virtual std::vector<DistributedFilterStencil>
+  distributed_stencils() const = 0;
 };
 
 class BinomialFilter final : public ICurrentFilter {
@@ -43,6 +56,10 @@ class BinomialFilter final : public ICurrentFilter {
       throw std::invalid_argument{"BinomialFilter: passes must be >= 1"};
     }
     n_passes_ = n_passes;
+  }
+  std::vector<DistributedFilterStencil>
+  distributed_stencils() const override {
+    return {{n_passes_, Real{0.25}, Real{0.5}}};
   }
   int passes() const noexcept { return n_passes_; }
 
@@ -63,6 +80,13 @@ class CompensatedBinomialFilter final : public ICurrentFilter {
       throw std::invalid_argument{"CompensatedBinomialFilter: passes must be >= 1"};
     }
     n_passes_ = n_passes;
+  }
+  std::vector<DistributedFilterStencil>
+  distributed_stencils() const override {
+    return {
+        {n_passes_, Real{0.25}, Real{0.5}},
+        {1, Real{-0.25} * static_cast<Real>(n_passes_),
+         Real{1} + Real{0.5} * static_cast<Real>(n_passes_)}};
   }
   int passes() const noexcept { return n_passes_; }
 

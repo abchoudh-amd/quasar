@@ -12,6 +12,7 @@ Run with::
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import time
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Sequence
 import numpy as np
 
 from .. import _core
+from .. import distributed as _distributed
 from .._paths import confine_output_path, positive_int as _positive_int
 from ..coil.io import build_conductor_system
 from . import initial_conditions as ic
@@ -110,7 +112,7 @@ def _macro_weight(configured_density: float, internal_density: float,
     return result
 
 
-def _make_solver(deck: pic_io.PicDeck, units: Units):
+def _make_config(deck: pic_io.PicDeck, units: Units):
     pic = _core.pic
     # Grid coordinates enter the solver in internal length units. The ghost halo
     # must be wide enough for the FDTD order (order 4 reads two cells past a
@@ -143,7 +145,12 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
                        passes=int(spec.get("n_passes", spec.get("passes", 1))))
         for spec in deck.numerics.current_filter
     ]
-    return pic.EmPic2D3V(cfg)
+    return cfg
+
+
+def _make_solver(deck: pic_io.PicDeck, units: Units):
+    """Construct the serial solver from the shared deck-to-config mapping."""
+    return _core.pic.EmPic2D3V(_make_config(deck, units))
 
 
 def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
@@ -518,8 +525,14 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
 
 
 def _species_to_si(host: dict, units: Units) -> dict:
-    # Positions are lengths; vx/vy/vz are velocities. weight/alive are unitless.
-    out = dict(host)
+    # Keep the established serial NPZ schema even when the native particle
+    # snapshot grows internal migration/restart fields (x_prev, y_prev,
+    # vphi_deposit, stable id, ...). Distributed diagnostics/checkpoint writers
+    # consume those fields separately; leaking them here would change legacy
+    # one-GPU output keys. Positions are lengths; velocities are velocities;
+    # weight/alive are unitless.
+    legacy_keys = ("x", "y", "vx", "vy", "vz", "weight", "alive")
+    out = {key: host[key] for key in legacy_keys if key in host}
     out["x"] = units.length_to_si(host["x"])
     out["y"] = units.length_to_si(host["y"])
     out["vx"] = units.velocity_to_si(host["vx"])
@@ -700,19 +713,28 @@ def prepare_run(deck: pic_io.PicDeck, units: Units, *, seed: int = 0):
     return solver, species_indices, dt, dt_si
 
 
-def _do_run(args: argparse.Namespace) -> int:
-    deck_path = Path(args.input).resolve()
-    deck = pic_io.load(deck_path)
-    if args.steps_override is not None:
+def _serial_run(input_deck: pic_io.PicDeck | str | Path, *, seed: int,
+                steps_override: int | None, verbose: bool, print_config: bool,
+                log_every: int, write_every: int) -> _distributed.RunResult:
+    if isinstance(input_deck, pic_io.PicDeck):
+        deck_path: Path | None = None
+        deck = input_deck
+    else:
+        deck_path = Path(input_deck).resolve()
+        deck = pic_io.load(deck_path)
+    if steps_override is not None:
+        # Do not mutate an in-memory deck supplied by an API caller merely to
+        # apply a run-local termination override.
+        deck = copy.deepcopy(deck)
         deck.time = pic_io.Time(dt_s=deck.time.dt_s,
-                                steps=args.steps_override,
+                                steps=steps_override,
                                 t_end_s=deck.time.t_end_s)
         deck.validate()
 
     units = Units(deck)
-    solver, species_indices, dt, dt_si = prepare_run(deck, units, seed=args.seed)
-    if args.print_config:
-        print(f"deck   : {deck_path}")
+    solver, species_indices, dt, dt_si = prepare_run(deck, units, seed=seed)
+    if print_config:
+        print(f"deck   : {deck_path if deck_path is not None else '<in-memory>'}")
         print(f"grid   : {deck.domain.nx}x{deck.domain.ny}  "
               f"({deck.domain.lx_m}x{deck.domain.ly_m}) m  "
               f"origin=({deck.domain.origin_x_m}, {deck.domain.origin_y_m})")
@@ -726,17 +748,112 @@ def _do_run(args: argparse.Namespace) -> int:
 
     # Confine the deck-supplied output path to the deck's own directory so a
     # stray absolute path or "../" cannot write outside it.
-    out_path = confine_output_path(deck_path.parent, deck.diagnostics.output_path,
+    deck_directory = deck_path.parent if deck_path is not None else Path.cwd()
+    out_path = confine_output_path(deck_directory, deck.diagnostics.output_path,
                                    label="diagnostics.output_path")
-    _run_loop(solver, deck, species_indices, units, dt, dt_si, out_path, args)
-    if args.print_config or args.verbose:
+    loop_args = argparse.Namespace(log_every=log_every, write_every=write_every)
+    final_step, final_time = _run_loop(
+        solver, deck, species_indices, units, dt, dt_si, out_path, loop_args)
+    if print_config or verbose:
         print(f"wrote  : {out_path}")
+    return _distributed.RunResult(
+        final_step=final_step,
+        final_time=final_time,
+        diagnostics_path=out_path,
+        distributed=False,
+    )
+
+
+def run(input_deck: pic_io.PicDeck | str | Path, *,
+        options: _distributed.RunOptions | None = None,
+        seed: int | None = None, steps_override: int | None = None,
+        verbose: bool = False, print_config: bool = False,
+        log_every: int = 0, write_every: int = 0,
+        ) -> _distributed.RunResult:
+    """Run a PIC deck through the serial or explicitly selected distributed path.
+
+    ``options=None`` retains the established one-process/one-GPU runtime.  A
+    :class:`quasar.distributed.RunOptions` instance is an explicit distributed
+    request and never falls back to serial execution.
+    """
+
+    if steps_override is not None:
+        # The CLI already applies its argparse type; the public Python API needs
+        # the same guard without accepting bool as an integer cadence.
+        if (isinstance(steps_override, bool)
+                or not isinstance(steps_override, int)
+                or steps_override <= 0):
+            raise ValueError("steps_override must be a positive integer")
+    if options is not None:
+        if not isinstance(options, _distributed.RunOptions):
+            raise TypeError(
+                "options must be a quasar.distributed.RunOptions instance")
+        if options.restart is not None and seed is not None:
+            raise ValueError("PIC seed cannot be supplied with restart")
+        return _distributed._execute(
+            "pic", input_deck, options, seed=seed,
+            steps_override=steps_override, verbose=verbose,
+            print_config=print_config, log_every=log_every,
+            write_every=write_every)
+    return _serial_run(
+        input_deck, seed=0 if seed is None else seed,
+        steps_override=steps_override, verbose=verbose,
+        print_config=print_config, log_every=log_every,
+        write_every=write_every)
+
+
+class _DistributedUsageError(ValueError):
+    """Internal marker for distributed CLI cross-option validation errors."""
+
+
+def _distributed_options_from_args(
+        args: argparse.Namespace) -> _distributed.RunOptions | None:
+    names = ("devices", "decomposition", "transport", "diagnostics_layout",
+             "checkpoint", "checkpoint_every", "restart")
+    if not any(getattr(args, name, None) is not None for name in names):
+        return None
+    try:
+        return _distributed.RunOptions(
+            devices=args.devices if args.devices is not None else "auto",
+            decomposition=(args.decomposition
+                           if args.decomposition is not None else "auto"),
+            transport=args.transport if args.transport is not None else "auto",
+            diagnostics_layout=(args.diagnostics_layout
+                                if args.diagnostics_layout is not None
+                                else "gathered"),
+            checkpoint=args.checkpoint,
+            checkpoint_every=args.checkpoint_every,
+            restart=args.restart,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _DistributedUsageError(str(exc)) from exc
+
+
+def _do_run(args: argparse.Namespace) -> int:
+    options = _distributed_options_from_args(args)
+    seed_explicit = getattr(args, "_seed_explicit", None)
+    if (options is not None and options.restart is not None
+            and seed_explicit is True):
+        raise _DistributedUsageError("--seed cannot be used with --restart")
+    run(
+        args.input,
+        options=options,
+        # A parser-produced namespace marks an omitted seed as False. Preserve
+        # the seed carried by older hand-built Namespace callers, which predate
+        # that marker and historically passed args.seed straight through.
+        seed=None if seed_explicit is False else args.seed,
+        steps_override=args.steps_override,
+        verbose=args.verbose,
+        print_config=args.print_config,
+        log_every=args.log_every,
+        write_every=args.write_every,
+    )
     return 0
 
 
 def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
               units: Units, dt: float, dt_si: float, out_path,
-              args: argparse.Namespace) -> None:
+              args: argparse.Namespace) -> tuple[int, float]:
     snapshots: list[dict] = []
     sim_time = 0.0
     series: dict[str, list] = {"step": [], "time_s": []}
@@ -824,6 +941,16 @@ def _run_loop(solver, deck: pic_io.PicDeck, species_indices: list[int],
     if log_every == 0 or step_done % log_every != 0:
         _record_scalars(step_done, sim_time)
     _flush(step_done, sim_time)
+    return step_done, sim_time
+
+
+class _SeedAction(argparse.Action):
+    """Store the seed while retaining whether the user wrote ``--seed``."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        del parser, option_string
+        setattr(namespace, self.dest, values)
+        setattr(namespace, "_seed_explicit", True)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -832,7 +959,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="Run a PIC simulation from a YAML deck.")
     run.add_argument("input", help="Path to the YAML deck.")
-    run.add_argument("--seed", type=int, default=0,
+    run.add_argument("--seed", type=int, default=0, action=_SeedAction,
                      help="RNG seed for initial-condition sampling.")
     run.add_argument("--verbose", action="store_true",
                      help="print informational output (default: quiet)")
@@ -844,13 +971,33 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="Print progress + record scalar diagnostics every N steps (0 = off).")
     run.add_argument("--write-every", type=int, default=0,
                      help="Write a self-contained per-step snapshot to <out>_<step>.npz every N steps (0 = end-of-run out.npz only).")
+    run.add_argument("--devices", default=None, metavar="auto|ID[,ID...]",
+                     help="Eligible node-local GPU pool (activates distributed execution).")
+    run.add_argument("--decomposition", default=None, metavar="auto|PXxPY",
+                     help="Virtual GPU tile decomposition.")
+    run.add_argument("--transport", choices=("auto", "staged", "direct"),
+                     default=None, help="Inter-process halo transport policy.")
+    run.add_argument("--diagnostics-layout", choices=("gathered", "sharded"),
+                     default=None, help="Distributed diagnostics file layout.")
+    run.add_argument("--checkpoint", default=None, metavar="PATH",
+                     help="Write the final collective HDF5 checkpoint to PATH.")
+    run.add_argument("--checkpoint-every", type=_positive_int, default=None,
+                     metavar="N", help="Replace --checkpoint at absolute step multiples of N.")
+    run.add_argument("--restart", default=None, metavar="PATH",
+                     help="Restart from a collective Quasar HDF5 checkpoint.")
+    run.set_defaults(_seed_explicit=False)
     run.set_defaults(func=_do_run)
     return p
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-    return args.func(args)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except (_DistributedUsageError,
+            _distributed.DistributedUnavailableError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

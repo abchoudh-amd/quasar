@@ -13,6 +13,7 @@ set(_quasar_pic_hip_sources
   boundary_specular_hip.hip
   boundary_absorb_hip.hip
   particle_compact_hip.hip
+  halo_hip.hip
   filter_hip.hip
   fdtd_b_cyl_hip.hip
   fdtd_e_cyl_hip.hip

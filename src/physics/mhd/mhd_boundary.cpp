@@ -48,6 +48,7 @@ constexpr int kAxis = 3;  // r=0: (vr,vphi,Br,Bphi) odd; axial/scalars even
 
 class PeriodicFluidBC final : public IMhdFluidBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kPeriodic; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kPeriodic, nullptr);
   }
@@ -55,6 +56,7 @@ class PeriodicFluidBC final : public IMhdFluidBoundary {
 
 class OutflowFluidBC final : public IMhdFluidBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kOutflow; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kOutflow, nullptr);
   }
@@ -62,6 +64,7 @@ class OutflowFluidBC final : public IMhdFluidBoundary {
 
 class WallFluidBC final : public IMhdFluidBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kWall; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kWall, nullptr);
   }
@@ -69,11 +72,21 @@ class WallFluidBC final : public IMhdFluidBoundary {
 
 class AxisFluidBC final : public IMhdFluidBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kAxis; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     if (side == Side::x_lo) {
       mhd::launch_mhd_fill_ghosts_fluid(f, static_cast<int>(side), kAxis, nullptr);
     }
   }
+};
+
+// Internal tile halos are supplied by the distributed coordinator.  Keeping
+// this closure a no-op is essential: applying either a periodic wrap or a
+// one-sided physical continuation here would overwrite neighbour-owned data.
+class InternalFluidBC final : public IMhdFluidBoundary {
+ public:
+  int ghost_continuation_mode() const noexcept override { return 4; }
+  void fill_ghosts(MhdField2D<Real>&, Side) const override {}
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +95,7 @@ class AxisFluidBC final : public IMhdFluidBoundary {
 
 class PeriodicFieldBC final : public IMhdFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kPeriodic; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kPeriodic, nullptr);
   }
@@ -89,6 +103,7 @@ class PeriodicFieldBC final : public IMhdFieldBoundary {
 
 class OutflowFieldBC final : public IMhdFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kOutflow; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kOutflow, nullptr);
   }
@@ -96,6 +111,7 @@ class OutflowFieldBC final : public IMhdFieldBoundary {
 
 class WallFieldBC final : public IMhdFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kWall; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kWall, nullptr);
   }
@@ -103,11 +119,18 @@ class WallFieldBC final : public IMhdFieldBoundary {
 
 class AxisMhdFieldBC final : public IMhdFieldBoundary {
  public:
+  int ghost_continuation_mode() const noexcept override { return kAxis; }
   void fill_ghosts(MhdField2D<Real>& f, Side side) const override {
     if (side == Side::x_lo) {
       mhd::launch_mhd_fill_ghosts_field(f, static_cast<int>(side), kAxis, nullptr);
     }
   }
+};
+
+class InternalMhdFieldBC final : public IMhdFieldBoundary {
+ public:
+  int ghost_continuation_mode() const noexcept override { return 4; }
+  void fill_ghosts(MhdField2D<Real>&, Side) const override {}
 };
 
 }  // namespace
@@ -116,12 +139,18 @@ QUASAR_REGISTER_MHD_FLUID_BOUNDARY("periodic", PeriodicFluidBC)
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("outflow", OutflowFluidBC)
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("wall", WallFluidBC)
 QUASAR_REGISTER_MHD_FLUID_BOUNDARY("axis", AxisFluidBC)
+QUASAR_REGISTER_MHD_FLUID_BOUNDARY("internal", InternalFluidBC)
 
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("periodic", PeriodicFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("outflow", OutflowFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("wall", WallFieldBC)
 QUASAR_REGISTER_MHD_FIELD_BOUNDARY("axis", AxisMhdFieldBC)
+QUASAR_REGISTER_MHD_FIELD_BOUNDARY("internal", InternalMhdFieldBC)
 
-bool mhd_boundary_is_periodic(const std::string& name) { return name == "periodic"; }
+bool mhd_boundary_is_periodic(const std::string& name) {
+  auto& registry = Registry<IMhdFluidBoundary>::instance();
+  return registry.contains(name)
+      && registry.create(name)->is_periodic();
+}
 
 }  // namespace quasar::boundary

@@ -23,6 +23,7 @@ import numpy as np
 
 from quasar.pic.io import load as load_pic_deck
 from quasar.pic.postprocess import yee_component_view
+from quasar.mhd.io import load as load_mhd_deck
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -61,6 +62,66 @@ def _run_cli(yaml_path: Path) -> None:
         raise RuntimeError(
             f"quasar.coil.cli failed (exit {res.returncode}):\n"
             f"stdout: {res.stdout}\nstderr: {res.stderr}")
+
+
+class DistributedLauncherExampleTest(unittest.TestCase):
+
+    def test_self_contained_decks_and_scheduler_cli_contract(self):
+        example = REPO_ROOT / "examples" / "distributed"
+        load_pic_deck(example / "input_pic.yaml")
+        load_mhd_deck(example / "input_mhd.yaml")
+
+        cases = (
+            ("run_pic_multinode.sbatch", "quasar.pic.cli", "input_pic.yaml"),
+            ("run_mhd_multinode.sbatch", "quasar.mhd.cli", "input_mhd.yaml"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_srun = fake_bin / "srun"
+            fake_srun.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\0' \"$@\" > \"$QUASAR_CAPTURE\"\n",
+                encoding="utf-8")
+            fake_srun.chmod(0o755)
+
+            for script_name, module, deck_name in cases:
+                with self.subTest(script=script_name):
+                    capture = root / f"{script_name}.args"
+                    environment = {
+                        **os.environ,
+                        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                        "QUASAR_BUILD_DIR": str(root / "build"),
+                        "QUASAR_CHECKPOINT_DIR": str(root / "checkpoints"),
+                        "QUASAR_CAPTURE": str(capture),
+                    }
+                    completed = subprocess.run(
+                        ["bash", str(example / script_name)],
+                        cwd=REPO_ROOT, env=environment,
+                        capture_output=True, text=True)
+                    self.assertEqual(
+                        completed.returncode, 0,
+                        msg=f"stdout={completed.stdout}\nstderr={completed.stderr}")
+                    arguments = capture.read_bytes().decode().rstrip("\0").split("\0")
+                    self.assertEqual(arguments[:6], [
+                        "--cpu-bind=cores", "--gpu-bind=closest", "python",
+                        "-m", module, "run",
+                    ])
+                    self.assertEqual(
+                        Path(arguments[6]),
+                        Path("examples/distributed") / deck_name)
+                    expected_pairs = {
+                        "--devices": "auto",
+                        "--decomposition": "2x2",
+                        "--transport": "staged",
+                        "--diagnostics-layout": "sharded",
+                    }
+                    for flag, value in expected_pairs.items():
+                        index = arguments.index(flag)
+                        self.assertEqual(arguments[index + 1], value)
+                    self.assertIn("--checkpoint", arguments)
+                    self.assertIn("--checkpoint-every", arguments)
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")

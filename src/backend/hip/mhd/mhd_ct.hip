@@ -118,35 +118,72 @@ __device__ inline int face_index(int q, int n, int lo_mode, int hi_mode) {
     if (w < 0) w += n;
     return w;
   }
-  return (q < 0) ? 0 : ((q > n) ? n : q);
+  // Internal sides (mode 4) retain the requested guard coordinate. Physical
+  // sides clamp to their one-sided closure. The widest actual MP7 interpolation
+  // asks for [-nghost, n+nghost-1], all of which is present in padded storage.
+  if (q < 0) return lo_mode == 4 ? q : 0;
+  if (q > n) return hi_mode == 4 ? q : n;
+  return q;
 }
 
-__device__ inline bool mapped_interface_is_equal_state(
-    const quasar::Grid2D& g, int i, int j,
-    const FaceInterfaceView& v, quasar::mhd::BoundaryFlags4 modes) {
-  const int ii = face_index(i, g.nx, modes.side[0], modes.side[1]);
-  const int jj = face_index(j, g.ny, modes.side[2], modes.side[3]);
-  const std::size_t k = g.index(ii, jj);
+__device__ inline bool interface_is_equal_state(
+    std::size_t k, const FaceInterfaceView& v) {
   return v.Lrho[k] == v.Rrho[k] && v.Lmx[k] == v.Rmx[k] &&
          v.Lmy[k] == v.Rmy[k] && v.Lmz[k] == v.Rmz[k] &&
          v.Lenergy[k] == v.Renergy[k] && v.Lbx[k] == v.Rbx[k] &&
          v.Lby[k] == v.Rby[k] && v.Lbz[k] == v.Rbz[k];
 }
 
-// Prove that every directional face problem feeding this corner has no jump.
-// The range includes both the face-average-to-edge stencil and the additional
-// transverse point-recovery halo used inside each MP face solve.
-__device__ inline bool directional_corner_stencil_has_no_jump(
+// Summarize the complete point-recovered Riemann problem at one directional
+// face.  MP5/MP7 recover each Gauss-point state from five/seven neighbouring
+// transverse face averages, respectively, so equality of only the central
+// average is not enough to prove that the point states have no jump.  The
+// distributed runtime exchanges this one-bit summary with the face EMF table;
+// consumers can therefore prove the corner's exact one-dimensional limit
+// without reaching through another tile's numerical halo.
+__device__ inline bool face_problem_has_no_jump(
     const quasar::Grid2D& g, int dir, int i, int j, int order,
     const FaceInterfaceView& v, quasar::mhd::BoundaryFlags4 modes) {
-  const int interpolation_lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
-  const int interpolation_hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
   const int recovery_half = order >= 7 ? 3 : order >= 5 ? 2 : 0;
-  for (int offset = interpolation_lo - recovery_half;
-       offset <= interpolation_hi + recovery_half; ++offset) {
+  for (int offset = -recovery_half; offset <= recovery_half; ++offset) {
     const int sample_i = dir == 0 ? i : i + offset;
     const int sample_j = dir == 0 ? j + offset : j;
-    if (!mapped_interface_is_equal_state(g, sample_i, sample_j, v, modes)) {
+    // Preserve the serial boundary proof: periodic coordinates wrap and
+    // physical coordinates clamp to their one-sided closure. Internal mode 4
+    // deliberately retains the exchanged guard coordinate.
+    const int mapped_i =
+        face_index(sample_i, g.nx, modes.side[0], modes.side[1]);
+    const int mapped_j =
+        face_index(sample_j, g.ny, modes.side[2], modes.side[3]);
+    if (mapped_i < -g.nghost || mapped_i >= g.nx + g.nghost ||
+        mapped_j < -g.nghost || mapped_j >= g.ny + g.nghost ||
+        !interface_is_equal_state(g.index(mapped_i, mapped_j), v)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Prove that every directional face problem feeding this corner has no jump.
+// Each table entry already summarizes the complete point-recovered face solve,
+// so the proof reads only the actual face-average-to-edge interpolation range.
+// In a distributed run those entries are exchanged with the face EMF table;
+// no interface-state read reaches beyond the numerical 2/3/4-cell halo.
+__device__ inline bool directional_corner_stencil_has_no_jump(
+    const quasar::Grid2D& g, int dir, int i, int j, int order,
+    const int* no_jump, quasar::mhd::BoundaryFlags4 modes) {
+  const int interpolation_lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
+  const int interpolation_hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
+  for (int offset = interpolation_lo; offset <= interpolation_hi; ++offset) {
+    const int sample_i = dir == 0 ? i : i + offset;
+    const int sample_j = dir == 0 ? j + offset : j;
+    const int ii = face_index(
+        sample_i, g.nx, modes.side[0], modes.side[1]);
+    const int jj = face_index(
+        sample_j, g.ny, modes.side[2], modes.side[3]);
+    if (ii < -g.nghost || ii >= g.nx + g.nghost ||
+        jj < -g.nghost || jj >= g.ny + g.nghost ||
+        no_jump[g.index(ii, jj)] == 0) {
       return false;
     }
   }
@@ -231,19 +268,39 @@ __device__ inline Real interp_y_to_corner(
       yface_ez(g, i, j, y_table, modes));
 }
 
-// Fill the directional face-EMF tables over [0,nx] x [0,ny], the exact index
-// range face_index can map into. Each entry is the value the previous
-// compute-on-demand xface_ez/yface_ez would have produced at that mapped index.
+// Fill canonical directional face-EMF entries only.  The normal coordinate
+// spans [0,n]; the transverse coordinate spans owned cells plus the true
+// physical high closure.  Internal/periodic guards are populated from the
+// derived-table exchange (or mapped locally by the serial corner kernel).
+// Avoiding padded transverse face solves is essential: MP7 face quadrature at
+// an outer guard would recursively request interface state seven cells deep.
 __global__ void QUASAR_LAUNCH_BOUNDS_256 face_emf_kernel(
     quasar::Grid2D g, int scheme_order, int hll_only, Real gamma,
+    quasar::mhd::BoundaryFlags4 modes,
     FaceInterfaceView ifx, FaceInterfaceView ify, FaceBackgroundView bg,
-    double* __restrict__ xface_table, double* __restrict__ yface_table) {
+    double* __restrict__ xface_table, double* __restrict__ yface_table,
+    int* __restrict__ xface_no_jump,
+    int* __restrict__ yface_no_jump) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
   if (i > g.nx || j > g.ny) return;
   const std::size_t k = g.index(i, j);
-  xface_table[k] = face_ez(g, 0, i, j, scheme_order, hll_only, gamma, ifx, bg);
-  yface_table[k] = face_ez(g, 1, i, j, scheme_order, hll_only, gamma, ify, bg);
+  const bool physical_y_high =
+      modes.side[3] != 0 && modes.side[3] != 4;
+  const bool physical_x_high =
+      modes.side[1] != 0 && modes.side[1] != 4;
+  if (j < g.ny || (j == g.ny && physical_y_high)) {
+    xface_table[k] = face_ez(
+        g, 0, i, j, scheme_order, hll_only, gamma, ifx, bg);
+    xface_no_jump[k] =
+        face_problem_has_no_jump(g, 0, i, j, scheme_order, ifx, modes) ? 1 : 0;
+  }
+  if (i < g.nx || (i == g.nx && physical_x_high)) {
+    yface_table[k] = face_ez(
+        g, 1, i, j, scheme_order, hll_only, gamma, ify, bg);
+    yface_no_jump[k] =
+        face_problem_has_no_jump(g, 1, i, j, scheme_order, ify, modes) ? 1 : 0;
+  }
 }
 
 struct CellStateView {
@@ -489,11 +546,10 @@ __device__ inline Real cell_average_ez(
 
 __global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
     quasar::Grid2D g, int scheme_order, Real gamma, CellStateView u,
-    FaceBackgroundView bg, double* __restrict__ cell_ez) {
-  const int launch_i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int launch_j = blockIdx.y * blockDim.y + threadIdx.y;
-  const int i = launch_i - g.nghost;
-  const int j = launch_j - g.nghost;
+    FaceBackgroundView bg, quasar::mhd::BoundaryFlags4 modes,
+    double* __restrict__ cell_ez) {
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  const int j = blockIdx.y * blockDim.y + threadIdx.y;
 
   // Cooperatively derive this block's cell-centred Bx/By tile before any thread
   // uses it. Only the MP paths read the tile; the others skip the fill so the
@@ -502,10 +558,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
   __shared__ CellBTile tile;
   const bool tiled_order = (scheme_order == 5 || scheme_order == 7);
   if (tiled_order) {
-    const int origin_i =
-        static_cast<int>(blockIdx.x * blockDim.x) - g.nghost;
-    const int origin_j =
-        static_cast<int>(blockIdx.y * blockDim.y) - g.nghost;
+    const int origin_i = static_cast<int>(blockIdx.x * blockDim.x);
+    const int origin_j = static_cast<int>(blockIdx.y * blockDim.y);
     if (threadIdx.x == 0 && threadIdx.y == 0) {
       tile.origin_i = origin_i;
       tile.origin_j = origin_j;
@@ -546,8 +600,13 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
     __syncthreads();
   }
 
-  if (launch_i >= g.nx + 2 * g.nghost ||
-      launch_j >= g.ny + 2 * g.nghost) return;
+  if (i > g.nx || j > g.ny) return;
+  const bool physical_x_high =
+      modes.side[1] != 0 && modes.side[1] != 4;
+  const bool physical_y_high =
+      modes.side[3] != 0 && modes.side[3] != 4;
+  if ((i == g.nx && !physical_x_high) ||
+      (j == g.ny && !physical_y_high)) return;
   cell_ez[g.index(i, j)] = cell_average_ez(
       g, i, j, scheme_order, gamma, u, bg, tiled_order ? &tile : nullptr);
 }
@@ -620,11 +679,12 @@ __device__ inline bool cell_emf_is_constant_along_axis(
 
 __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 modes, int scheme_order,
-    int cylindrical, int hll_only, Real gamma, FaceInterfaceView ifx,
-    FaceInterfaceView ify, FaceBackgroundView bg,
+    int cylindrical,
     const double* __restrict__ cell_ez,
     const double* __restrict__ xface_table,
     const double* __restrict__ yface_table,
+    const int* __restrict__ xface_no_jump,
+    const int* __restrict__ yface_no_jump,
     double* __restrict__ ez_edge, double* __restrict__ ex_edge,
     double* __restrict__ ey_edge) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -663,12 +723,12 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
     // potentially dominant ex+ey partial sum.
     const bool x_only =
         directional_corner_stencil_has_no_jump(
-            g, 1, i, j, scheme_order, ify, modes) &&
+            g, 1, i, j, scheme_order, yface_no_jump, modes) &&
         cell_emf_is_constant_along_axis(
             g, i, j, scheme_order, cell_ez, modes, /*axis=*/1);
     const bool y_only =
         directional_corner_stencil_has_no_jump(
-            g, 0, i, j, scheme_order, ifx, modes) &&
+            g, 0, i, j, scheme_order, xface_no_jump, modes) &&
         cell_emf_is_constant_along_axis(
             g, i, j, scheme_order, cell_ez, modes, /*axis=*/0);
     if (x_only && !y_only) {
@@ -788,17 +848,14 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 emf_curl_rate_kernel(
 
 namespace quasar::mhd {
 
-void launch_mhd_ct_emf(const MhdField2D<Real>& u,
-                       const MhdBackgroundField<Real>& b0,
-                       const quasar::numerics::MhdInterfaceStates<Real>& ifx,
-                       const quasar::numerics::MhdInterfaceStates<Real>& ify,
-                       BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
-                       stream_t stream, int scheme_order, bool cylindrical,
-                       bool hll_only) {
+void launch_mhd_ct_emf_prepare(
+    const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
+    const quasar::numerics::MhdInterfaceStates<Real>& ifx,
+    const quasar::numerics::MhdInterfaceStates<Real>& ify,
+    BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
+    stream_t stream, int scheme_order, bool hll_only) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
-  // Launch over nx+1 x ny+1 so the high-edge corner EMF (index nx/ny) read by
-  // the face-B curl-rate stencil at the last interior cell is produced too.
   const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
                   (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   // When the background is inactive pass null device pointers; the kernel takes
@@ -826,31 +883,55 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u,
       u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(), u.mz.device_ptr(),
       u.energy.device_ptr(), u.bx_face.device_ptr(), u.by_face.device_ptr(),
       u.bz_cell.device_ptr()};
-  const dim3 cell_grid(
-      (static_cast<unsigned>(g.nx + 2 * g.nghost) + block.x - 1) / block.x,
-      (static_cast<unsigned>(g.ny + 2 * g.nghost) + block.y - 1) / block.y);
-  hipLaunchKernelGGL(cell_emf_kernel, cell_grid, block, 0,
+  // Compute only canonical cell values plus true physical high closures.
+  // Distributed internal/periodic guards are installed by the coordinator
+  // before launch_mhd_ct_emf_finish; the serial finish maps them locally.
+  hipLaunchKernelGGL(cell_emf_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), g, scheme_order, gamma,
-                     state, bg, emf.cell_ez_average.device_ptr());
+                     state, bg, flags, emf.cell_ez_average.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
-  // Evaluate each directional face EMF once, over the same [0,nx] x [0,ny]
-  // range the corner interpolation can index after face_index mapping. The
-  // corner kernel then reads these tables instead of re-solving the same face
-  // Riemann problem for every corner whose stencil covers it. Same stream, so
-  // the tables are complete before ct_emf_kernel starts.
+  // Evaluate each canonical directional face EMF and its exact equality proof
+  // once.  The corner kernel consumes the exchanged tables rather than
+  // re-solving faces or recursively extending the state stencil.
   hipLaunchKernelGGL(face_emf_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), g, scheme_order,
-                     hll_only ? 1 : 0, gamma, xv, yv, bg,
-                     emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr());
+                     hll_only ? 1 : 0, gamma, flags, xv, yv, bg,
+                     emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr(),
+                     emf.xface_no_jump.device_ptr(),
+                     emf.yface_no_jump.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+void launch_mhd_ct_emf_finish(BoundaryFlags4 flags, EmfField2D<Real>& emf,
+                              stream_t stream, int scheme_order,
+                              bool cylindrical) {
+  const Grid2D g = emf.grid;
+  const dim3 block(kBlock2D, kBlock2D);
+  // Launch over nx+1 x ny+1 so the high-edge corner EMF (index nx/ny) read by
+  // the face-B curl-rate stencil at the last interior cell is produced too.
+  const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
+                  (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   hipLaunchKernelGGL(ct_emf_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, flags, scheme_order, cylindrical ? 1 : 0,
-                     hll_only ? 1 : 0, gamma,
-                     xv, yv, bg, emf.cell_ez_average.device_ptr(),
+                     emf.cell_ez_average.device_ptr(),
                      emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr(),
+                     emf.xface_no_jump.device_ptr(),
+                     emf.yface_no_jump.device_ptr(),
                      emf.ez_edge.device_ptr(), emf.ex_edge.device_ptr(),
                      emf.ey_edge.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+void launch_mhd_ct_emf(const MhdField2D<Real>& u,
+                       const MhdBackgroundField<Real>& b0,
+                       const quasar::numerics::MhdInterfaceStates<Real>& ifx,
+                       const quasar::numerics::MhdInterfaceStates<Real>& ify,
+                       BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
+                       stream_t stream, int scheme_order, bool cylindrical,
+                       bool hll_only) {
+  launch_mhd_ct_emf_prepare(u, b0, ifx, ify, flags, emf, gamma, stream,
+                            scheme_order, hll_only);
+  launch_mhd_ct_emf_finish(flags, emf, stream, scheme_order, cylindrical);
 }
 
 void launch_mhd_face_b_update(MhdField2D<Real>& u, const EmfField2D<Real>& emf,

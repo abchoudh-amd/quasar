@@ -40,6 +40,16 @@ void device_free(void* ptr) noexcept {
   (void)::hipFree(ptr);
 }
 
+void device_free_on(void* ptr, int owner_device) noexcept {
+  if (ptr == nullptr) return;
+  int previous_device = -1;
+  const bool have_previous = (::hipGetDevice(&previous_device) == ::hipSuccess);
+  const bool changed = have_previous && previous_device != owner_device
+                    && ::hipSetDevice(owner_device) == ::hipSuccess;
+  (void)::hipFree(ptr);
+  if (changed) (void)::hipSetDevice(previous_device);
+}
+
 void device_memset(void* ptr, int value, std::size_t bytes) {
   if (bytes == 0) return;
   QUASAR_HIP_CHECK(::hipMemset(ptr, value, bytes));
@@ -72,6 +82,25 @@ void device_memcpy_h2d_async(void* dst, const void* src, std::size_t bytes, stre
 void device_memcpy_d2h_async(void* dst, const void* src, std::size_t bytes, stream_t stream) {
   if (bytes == 0) return;
   QUASAR_HIP_CHECK(::hipMemcpyAsync(dst, src, bytes, ::hipMemcpyDeviceToHost, as_hip(stream)));
+}
+
+void device_memcpy_peer_async(void* dst, int dst_device,
+                              const void* src, int src_device,
+                              std::size_t bytes, stream_t stream) {
+  if (bytes == 0) return;
+  QUASAR_HIP_CHECK(::hipMemcpyPeerAsync(
+      dst, dst_device, src, src_device, bytes, as_hip(stream)));
+}
+
+void* pinned_host_alloc(std::size_t bytes) {
+  if (bytes == 0) return nullptr;
+  void* ptr = nullptr;
+  QUASAR_HIP_CHECK(::hipHostMalloc(&ptr, bytes, hipHostMallocPortable));
+  return ptr;
+}
+
+void pinned_host_free(void* ptr) noexcept {
+  if (ptr != nullptr) (void)::hipHostFree(ptr);
 }
 
 }  // namespace quasar::backend
