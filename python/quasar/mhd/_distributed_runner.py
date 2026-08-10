@@ -698,6 +698,12 @@ def _prepare_mhd_run(
             dt_s=deck.time.dt_s, steps=steps_override,
             t_end=deck.time.t_end)
         deck.validate()
+    if (deck.background.enabled
+            and deck.background.conductors is not None):
+        raise ValueError(
+            "distributed MHD does not yet support "
+            "background_field.conductors because it cannot preserve the "
+            "solver-derived padded conductor halo; use the serial MHD runner")
     nghost = _RECONSTRUCTION_HALO[deck.numerics.reconstruction]
     state = _canonical_state(deck, nghost)
     background = _canonical_explicit_background(deck, nghost)

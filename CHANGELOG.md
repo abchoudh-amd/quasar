@@ -21,9 +21,10 @@ interfaces may still change between entries.
   fixed, discretely divergence-free prescribed field `B0`, including a
   non-uniform current-carrying field, while evolving the perturbation `b`.
   Enabled via a `background_field:` deck block (`enabled`, `profile`, uniform
-  `bx0/by0/bz0`, `file:`, or a coil `a_file:`). `B0` comes from the pluggable
-  `IMhdBackgroundProfile` registry (built-ins `"uniform"` and
-  `"linear_vacuum"`) or an `.npz` file. Setup validates solenoidality with a
+  `bx0/by0/bz0`, inline `conductors:`, `file:`, or a coil `a_file:`). `B0` comes
+  from the pluggable `IMhdBackgroundProfile` registry (built-ins `"uniform"`
+  and `"linear_vacuum"`), inline Biot-Savart conductors, or an `.npz` file.
+  Setup validates solenoidality with a
   scale-free predicate: the discrete divergence residual is normalized by the
   magnitudes of the directional derivative terms that form it (not by the raw
   field values, so a large DC offset cannot mask a real derivative) and must
@@ -42,6 +43,10 @@ interfaces may still change between entries.
   `MhdSolver2D.seed_background`/`has_background`,
   `registered_mhd_background_profiles`), and a new `examples/mhd_guide_field`
   guide-field case.
+- MHD: inline Biot-Savart `background_field.conductors` in SI decks, with
+  solver-derived padded sampling and Cartesian or cylindrical discrete curls,
+  so coil-seeded runs no longer require a synchronized coil deck or intermediate
+  `A_xyz_grid` file.
 - MHD: one-sided non-periodic boundary stencils for the order-2 MUSCL path — at
   `outflow`/`wall` boundaries the `muscl_minmod` boundary-face reconstruction
   uses an interior-biased one-sided slope (dropping dependence on the ghost

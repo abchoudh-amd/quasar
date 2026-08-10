@@ -154,6 +154,48 @@ class MhdNativeBackgroundConfigTests(unittest.TestCase):
         # inherit that analytic profile's proof.
         self.assertIs(cfg.background.curl_free, False)
 
+    def test_projected_conductors_are_curl_free_only_without_toroidal_bz0(self):
+        data = _small_deck()
+        data["units"] = "SI"
+        data["geometry"] = "cylindrical"
+        data["domain"]["origin_x_m"] = 0.5
+        data["numerics"]["reconstruction"] = "muscl_minmod"
+        data["boundary"] = {
+            "fluid": ["outflow"] * 4,
+            "field": ["outflow"] * 4,
+        }
+        data["background_field"] = {
+            "enabled": True,
+            "profile": "stale-profile-that-is-ignored",
+            "conductors": [{
+                "name": "loop",
+                "current_A": 1.0,
+                "geometry": {
+                    "type": "circular_loop",
+                    "center_xyz": [0.0, 0.0, 0.0],
+                    "axis_xyz": [0.0, 0.0, 1.0],
+                    "radius_m": 0.1,
+                    "n_segments": 32,
+                },
+            }],
+            "bz0": 0.2,
+            "params": {"b_scale": 1.5, "vacuum_project": True},
+        }
+
+        cfg = mhd_cli._make_config(parse_mhd_deck(data))
+
+        self.assertEqual(cfg.background.profile, "uniform")
+        self.assertEqual(cfg.background.bz0, 0.0)
+        self.assertEqual(cfg.background.params, {})
+        self.assertEqual(cfg.background.profile_scale, 1.0)
+        # vacuum_project proves only the in-plane poloidal field curl-free.
+        # A constant cylindrical B_phi=bz0 remains current-carrying.
+        self.assertIs(cfg.background.curl_free, False)
+
+        data["background_field"]["bz0"] = 0.0
+        cfg = mhd_cli._make_config(parse_mhd_deck(data))
+        self.assertIs(cfg.background.curl_free, True)
+
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class MhdCliRunTests(unittest.TestCase):

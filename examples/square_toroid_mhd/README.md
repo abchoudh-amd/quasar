@@ -61,11 +61,12 @@ restriction of the split equations.
 
 ## Divergence-free coil background
 
-1. `coil.yaml` evaluates the magnetic vector potential `A` (with `B = curl A`,
-   provided by `BiotSavartEvaluator::evaluate_A`) on the lab `Y = 0` plane at the
-   cell-corner grid of the **full padded** MHD domain (interior + `nghost`
-   ghosts), writing `A_xyz_grid` (shape `(Ny+1, 1, Nx+1, 3)`,
-   `Nx = nx + 2·nghost`).
+1. `background_field.conductors` supplies the square-toroid geometry directly
+   in the MHD deck. The loader derives the **full padded** cell-corner grid from
+   the domain and the solver's actual `nghost`, evaluates the magnetic vector
+   potential `A` on the lab `Y = 0` plane in-process (with `B = curl A`), and
+   keeps its lab-`Y` component. There is no separately maintained observation
+   grid or intermediate `.npz` file.
 2. With `params.vacuum_project: true`, the loader holds `A_phi` fixed on the
    outer boundary of the padded grid and solves the discrete annular vacuum
    equation for `psi = R A_phi` at every interior corner. This turns the sampled
@@ -113,7 +114,7 @@ check.
 
 ## Magnet
 
-`coil.yaml` contains only the axisymmetric square-cross-section current sheets
+`input.yaml` contains the axisymmetric square-cross-section current sheets
 (top/bottom at `Z = ±a/2`, inner/outer cylinders at `R = R0 ± a/2`, `150 kA`
 per sheet group over 64 filaments), which generate the poloidal background.
 Eight conceptual TF windings at `25 kA` give
@@ -123,17 +124,13 @@ directly by the evolved `initial.bz` instead of incorrectly treating a discrete
 
 ## Running
 
-The MHD background reads the coil output, so run the coil deck **first**:
+The conductors are part of the MHD deck, so the example is a single command:
 
 ```bash
-# (re)generate both decks
+# (re)generate the deck
 python examples/square_toroid_mhd/build_yaml.py
 
-# 1. coil vector potential -> examples/square_toroid_mhd/coil.npz
-PYTHONPATH=build/hip-gfx942-release/python \
-  python -m quasar.coil.cli run examples/square_toroid_mhd/coil.yaml
-
-# 2. MHD run -> examples/square_toroid_mhd/out.npz
+# MHD run -> examples/square_toroid_mhd/out.npz
 PYTHONPATH=build/hip-gfx942-release/python \
   python -m quasar.mhd.cli run examples/square_toroid_mhd/input.yaml --log-every 50
 ```
@@ -141,9 +138,9 @@ PYTHONPATH=build/hip-gfx942-release/python \
 The cylindrical run uses `muscl_minmod` and is second-order in space. MP5/MP7
 currently use Cartesian finite-volume moments and are rejected for radial
 ring-volume averages until radius-weighted high-order moments are implemented.
-The coil grid spans the **padded** domain, so it depends on the reconstruction
-halo: MUSCL needs `nghost = 2`. `build_yaml.py`'s `NGHOST` constant must stay in
-sync with `numerics.reconstruction`.
+The background loader constructs the padded corner grid after the solver has
+selected its reconstruction halo, so changes to the domain or reconstruction do
+not require a matching coil-grid edit.
 
 ## Output
 

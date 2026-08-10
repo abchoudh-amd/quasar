@@ -4,7 +4,7 @@ Pins the OBSERVABLE contract of the ``background_field:`` top-level deck block a
 the new ``quasar.mhd.io`` API it drives:
 
 * ``BackgroundConfig`` dataclass (``enabled``/``profile``/``bx0``/``by0``/``bz0``/
-  ``params``/``file``) with a disabled default,
+  ``params``/``file``/``a_file``/``conductors``) with a disabled default,
 * ``parse(data)`` sets ``deck.background`` from ``data["background_field"]`` (an
   absent block => default, disabled),
 * ``build_background_field(deck, nghost)`` returns ``None`` when disabled, else
@@ -17,13 +17,17 @@ through ``_core.mhd.registered_mhd_background_profiles()`` and
 ``sample_mhd_background_profile()``.
 """
 
+import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
 from quasar import _core
+from quasar.coil import cli as coil_cli
+from quasar.coil import io as coil_io
 from quasar.mhd.io import (
     BackgroundConfig,
     BoundaryConfig,
@@ -34,6 +38,7 @@ from quasar.mhd.io import (
     Time,
     _padded_grids,
     build_background_field,
+    load as load_mhd_deck,
     parse,
 )
 from quasar.mhd.numerics import (
@@ -49,6 +54,39 @@ from quasar.mhd.numerics import (
 # real nghost is an implementation detail; the contract only requires that
 # build_background_field's buffers match (nx + 2g) * (ny + 2g) for the g passed.
 NGHOST = 3
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _has_hip_runtime() -> bool:
+    return os.environ.get("QUASAR_HAS_HIP_RUNTIME", "0") == "1"
+
+
+def _circular_loop(
+    name: str,
+    *,
+    center_z_m: float = 0.0,
+    current_A: float = 1.0,
+    radius_m: float = 0.1,
+    n_segments: int = 64,
+) -> dict:
+    return {
+        "name": name,
+        "current_A": current_A,
+        "geometry": {
+            "type": "circular_loop",
+            "center_xyz": [0.0, 0.0, center_z_m],
+            "axis_xyz": [0.0, 0.0, 1.0],
+            "radius_m": radius_m,
+            "n_segments": n_segments,
+        },
+    }
+
+
+def _helmholtz_pair() -> list[dict]:
+    return [
+        _circular_loop("lower_loop", center_z_m=-0.05, current_A=1000.0),
+        _circular_loop("upper_loop", center_z_m=+0.05, current_A=1000.0),
+    ]
 
 
 def _domain(**overrides) -> Domain:
@@ -129,6 +167,7 @@ class BackgroundConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(cfg.bz0, 0.0)
         self.assertEqual(cfg.params, {})
         self.assertIsNone(cfg.file)
+        self.assertIsNone(cfg.conductors)
 
 
 class UniformBackgroundParseTests(unittest.TestCase):
@@ -222,6 +261,63 @@ class BackgroundValidationTests(unittest.TestCase):
                 "enabled": True,
                 "a_file": "relative-vector-potential.npz",
                 "params": {"b_sclae": 2.0},
+            }))
+
+    def test_conductors_and_file_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "at most one|mutually exclusive"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "conductors": [_circular_loop("loop")],
+                "file": "relative-background.npz",
+            }))
+
+    def test_conductors_and_a_file_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "at most one|mutually exclusive"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "conductors": [_circular_loop("loop")],
+                "a_file": "relative-vector-potential.npz",
+            }))
+
+    def test_conductors_must_be_nonempty(self):
+        with self.assertRaisesRegex(ValueError, "conductors.*non-empty"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "conductors": [],
+            }))
+
+    def test_conductors_reject_in_plane_uniform_components(self):
+        for component in ("bx0", "by0"):
+            with self.subTest(component=component):
+                with self.assertRaisesRegex(ValueError, "not used with conductors"):
+                    parse(_base_data(units="SI", background_field={
+                        "enabled": True,
+                        "conductors": [_circular_loop("loop")],
+                        component: 1.0,
+                    }))
+
+    def test_conductors_reject_unknown_params(self):
+        with self.assertRaisesRegex(ValueError, "unknown.*conductors"):
+            parse(_base_data(units="SI", background_field={
+                "enabled": True,
+                "conductors": [_circular_loop("loop")],
+                "params": {"b_sclae": 2.0},
+            }))
+
+    def test_conductors_require_si_units(self):
+        with self.assertRaisesRegex(ValueError, "conductors requires units: SI"):
+            parse(_base_data(background_field={
+                "enabled": True,
+                "conductors": [_circular_loop("loop")],
+            }))
+
+    def test_malformed_conductor_geometry_is_rejected_during_parse(self):
+        malformed = _circular_loop("missing_radius")
+        del malformed["geometry"]["radius_m"]
+        with self.assertRaisesRegex(ValueError, "radius_m"):
+            parse(_base_data(units="SI", background_field={
+                "enabled": True,
+                "conductors": [malformed],
             }))
 
     def test_nonfinite_uniform_component_rejected(self):
@@ -657,6 +753,184 @@ class BackgroundFileModeTests(unittest.TestCase):
                 enabled=True, file=str(npz)))
             with self.assertRaises(ValueError):
                 build_background_field(deck, g)
+
+
+@unittest.skipUnless(_has_hip_runtime(), "no HIP runtime visible")
+class InlineConductorBackgroundTests(unittest.TestCase):
+
+    @staticmethod
+    def _write_a_file_via_coil_cli(
+            path: Path, deck: MhdDeck, nghost: int) -> None:
+        domain = deck.domain
+        dx = domain.lx_m / domain.nx
+        dy = domain.ly_m / domain.ny
+        pitch = domain.nx + 2 * nghost
+        height = domain.ny + 2 * nghost
+        x_lo = domain.origin_x_m - nghost * dx
+        x_hi = domain.origin_x_m + domain.lx_m + nghost * dx
+        z_lo = domain.origin_y_m - nghost * dy
+        z_hi = domain.origin_y_m + domain.ly_m + nghost * dy
+
+        # Build the independent reference through the public coil-deck parser
+        # and the CLI payload shaper. In particular, the coil path derives its
+        # ObservationGrid spacing from exact bounds rather than reusing the MHD
+        # loader's origin/spacing construction.
+        coil_deck = coil_io.parse({
+            "units": "SI",
+            "conductors": deck.background.conductors,
+            "observation": {
+                "type": "grid",
+                "bounds_m": [[x_lo, x_hi], [0.0, 0.0], [z_lo, z_hi]],
+                "resolution": [pitch + 1, 1, height + 1],
+            },
+            "output": {
+                "format": "npz",
+                "path": path.name,
+                "fields": ["A_xyz_grid"],
+            },
+        })
+        evaluator = _core.magnetostatics.create_field_evaluator("biot_savart")
+        evaluator.configure({})
+        magnetic_field = np.asarray(evaluator.evaluate_B(
+            coil_deck.conductors, coil_deck.observation.points))
+        vector_potential = np.asarray(
+            evaluator.evaluate_A(
+                coil_deck.conductors, coil_deck.observation.points))
+        payload, _ = coil_cli._build_payload(
+            coil_deck, magnetic_field, vector_potential)
+        np.savez(path, **payload)
+
+    @staticmethod
+    def _cartesian_deck() -> MhdDeck:
+        domain = _domain(
+            nx=10,
+            ny=8,
+            lx_m=0.04,
+            ly_m=0.04,
+            origin_x_m=-0.02,
+            origin_y_m=-0.02,
+        )
+        boundary = BoundaryConfig(
+            fluid=("outflow",) * 4,
+            field=("outflow",) * 4,
+        )
+        return _deck(
+            units="SI",
+            domain=domain,
+            boundary=boundary,
+            background=BackgroundConfig(
+                enabled=True,
+                conductors=_helmholtz_pair(),
+                bz0=0.02,
+                params={"b_scale": 1.25},
+            ),
+        )
+
+    def test_square_toroid_inline_matches_exact_padded_a_file_bitwise(self):
+        example = REPO_ROOT / "examples" / "square_toroid_mhd" / "input.yaml"
+        deck = load_mhd_deck(example)
+        self.assertIsNotNone(deck.background.conductors)
+
+        background = replace(
+            deck.background,
+            params={"b_scale": 1.0, "vacuum_project": False},
+        )
+        inline_deck = replace(deck, background=background)
+        nghost = 2
+
+        dx = inline_deck.domain.lx_m / inline_deck.domain.nx
+        dy = inline_deck.domain.ly_m / inline_deck.domain.ny
+        # The removed hand-written coil deck rounded these bounds to six
+        # decimals, which slightly changed its pitch. The bitwise reference
+        # below deliberately uses the exact domain-derived bounds specified by
+        # the feature contract and feeds them through the independent coil path.
+        self.assertAlmostEqual(
+            inline_deck.domain.origin_x_m - nghost * dx,
+            0.86078125,
+            places=15,
+        )
+        self.assertAlmostEqual(
+            inline_deck.domain.origin_y_m - nghost * dy,
+            -0.13921875,
+            places=15,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            a_path = Path(temporary_directory) / "coil.npz"
+            self._write_a_file_via_coil_cli(a_path, inline_deck, nghost)
+            a_file_deck = replace(
+                inline_deck,
+                background=replace(
+                    background,
+                    conductors=None,
+                    a_file=str(a_path),
+                ),
+            )
+            from_inline = build_background_field(inline_deck, nghost)
+            from_a_file = build_background_field(a_file_deck, nghost)
+
+        for component in ("b0x", "b0y", "b0z"):
+            with self.subTest(component=component):
+                np.testing.assert_array_equal(
+                    from_inline[component],
+                    from_a_file[component],
+                )
+
+    def test_cartesian_conductor_background_is_discretely_solenoidal(self):
+        deck = self._cartesian_deck()
+        deck.validate()
+        nghost = 2
+        background = build_background_field(deck, nghost)
+        domain = deck.domain
+
+        defect = background_divergence_relative_linf(
+            background["b0x"],
+            background["b0y"],
+            domain.nx,
+            domain.ny,
+            nghost,
+            domain.lx_m / domain.nx,
+            domain.ly_m / domain.ny,
+            geometry="cartesian",
+        )
+        self.assertLessEqual(defect, DISCRETE_SOLENOIDAL_TOLERANCE)
+        self.assertGreater(float(np.max(np.abs(background["b0x"]))), 0.0)
+        self.assertGreater(float(np.max(np.abs(background["b0y"]))), 0.0)
+
+    def test_nghost_expands_halo_without_changing_overlapping_values(self):
+        deck = self._cartesian_deck()
+        deck.validate()
+        backgrounds = {
+            nghost: build_background_field(deck, nghost)
+            for nghost in (2, 3)
+        }
+        domain = deck.domain
+
+        for nghost, background in backgrounds.items():
+            expected_size = ((domain.nx + 2 * nghost)
+                             * (domain.ny + 2 * nghost))
+            for component in ("b0x", "b0y", "b0z"):
+                with self.subTest(nghost=nghost, component=component):
+                    self.assertEqual(
+                        np.asarray(background[component]).size,
+                        expected_size,
+                    )
+
+        small_shape = (domain.ny + 4, domain.nx + 4)
+        large_shape = (domain.ny + 6, domain.nx + 6)
+        for component in ("b0x", "b0y", "b0z"):
+            with self.subTest(component=component):
+                smaller = np.asarray(backgrounds[2][component]).reshape(small_shape)
+                larger = np.asarray(backgrounds[3][component]).reshape(large_shape)
+                # The two ObservationGrids have different padded origins, so
+                # shared coordinates can differ by a few evaluation ULPs; SI
+                # conversion then scales that harmless roundoff uniformly.
+                np.testing.assert_allclose(
+                    larger[1:-1, 1:-1],
+                    smaller,
+                    rtol=5.0e-12,
+                    atol=1.0e-14,
+                )
 
 
 class CylindricalVectorPotentialTests(unittest.TestCase):

@@ -33,19 +33,40 @@ Deck block
 
 .. code-block:: yaml
 
+   units: SI
+
+   background_field:
+     enabled: true
+     conductors:             # same geometry schema as quasar.coil and PIC
+       - name: upper_loop
+         current_A: 1000.0
+         geometry:
+           type: circular_loop
+           center_xyz: [0.0, 0.0, 0.05]
+           axis_xyz: [0.0, 0.0, 1.0]
+           radius_m: 0.1
+           n_segments: 256
+     bz0: 0.0                # optional uniform out-of-plane component
+     params:
+       b_scale: 1.0          # optional multiplier for the generated A
+       # vacuum_project: true  # optional, cylindrical geometry only
+
+For an analytic profile or a precomputed field, replace ``conductors`` with
+one of these mutually exclusive sources:
+
+.. code-block:: yaml
+
    background_field:
      enabled: true
      profile: uniform        # registry name; default "uniform"
-     bx0: 0.0                # uniform-vector components (profile == uniform)
+     bx0: 0.0
      by0: 0.0
      bz0: 1.0
-     params: {}              # parameters for a registered analytic profile
-     # ... OR load B0 from a file instead of an analytic spec:
-     # file: b0.npz          # npz with arrays b0x, b0y, b0z, each
-                             # (ny+2g, nx+2g) or flat (storage,)
-     # ... OR construct a non-uniform field from corner A_phi:
-     # a_file: coil.npz      # npz with padded-corner A_xyz_grid
-     # For a_file mode, params may contain b_scale and vacuum_project.
+     params: {}
+     # ... OR load staggered B0 arrays:
+     # file: b0.npz
+     # ... OR load an offline padded-corner vector-potential map:
+     # a_file: coil.npz
 
 Keys
 ~~~~
@@ -59,25 +80,67 @@ Key              Meaning
 ``profile``      Registry name of the background-field profile. Validated
                  against the live registry; ``uniform`` is built in and is the
                  default. An unknown analytic profile is rejected. Ignored in
-                 ``file``/``a_file`` modes, which supply all spatial samples.
+                 ``conductors``/``file``/``a_file`` modes, which supply all
+                 spatial samples.
 ``bx0`` ``by0``  Components of the uniform vector :math:`\mathbf{B}_0` when
-``bz0``          ``profile == uniform``. Default ``0`` each. In ``a_file`` mode
-                 only ``bz0`` is used, as a uniform out-of-plane component.
+``bz0``          ``profile == uniform``. Default ``0`` each. In ``conductors``
+                 and ``a_file`` modes only ``bz0`` is used, as a uniform
+                 out-of-plane component.
 ``params``       Mapping forwarded to the selected analytic profile. In
-                 ``a_file`` mode, ``b_scale`` scales the potential and
-                 ``vacuum_project`` requests the annular harmonic projection.
+                 ``conductors`` and ``a_file`` modes, ``b_scale`` scales the
+                 potential and ``vacuum_project`` requests the annular harmonic
+                 projection.
+``conductors``   Non-empty list of Biot--Savart conductors using the
+                 :doc:`coil-design schema <coil_design>`. The loader evaluates
+                 their vector potential directly on the solver-derived padded
+                 corner grid. Requires deck ``units: SI`` and is mutually
+                 exclusive with ``file`` and ``a_file``.
 ``file``         Path to an ``.npz`` holding a precomputed :math:`\mathbf{B}_0`
                  (arrays ``b0x``, ``b0y``, ``b0z``). Use this **instead of**
                  the analytic spec above.
 ``a_file``       Path to coil output containing ``A_xyz_grid`` on the full
                  padded corner grid. In cylindrical geometry, lab-``Y`` is
                  interpreted as :math:`A_\phi` and differenced with the annular
-                 curl. Mutually exclusive with ``file``.
+                 curl. This is the offline/precomputed alternative to inline
+                 ``conductors`` and is mutually exclusive with both other file
+                 and conductor sources.
 ================ ==============================================================
 
-You supply an analytic profile, ``file:``, or ``a_file:``. Relative paths
-are resolved against and confined to the deck directory; absolute paths are
-honored as-is.
+You supply an analytic profile, ``conductors:``, ``file:``, or ``a_file:``.
+Relative file paths are resolved against and confined to the deck directory;
+absolute paths are honored as-is.
+
+Inline conductor backgrounds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Inline ``conductors`` are the primary path when the magnet geometry is known.
+They use the same ``name`` / ``current_A`` / ``geometry`` records as the
+:doc:`coil-design workflow <coil_design>` and PIC prescribed fields in
+:doc:`pic_simulation`. Geometry is validated while the deck is parsed. Because
+the Biot--Savart evaluator consumes amperes and meters and returns SI vector
+potential, inline conductors require the MHD deck to select ``units: SI``.
+
+The magnet is defined in lab XYZ. The two-dimensional MHD plane is the lab
+``Y = 0`` meridional cut, with MHD ``x = X``, MHD ``y = Z``, and the MHD
+out-of-plane direction equal to lab ``Y``. After the solver selects its actual
+ghost width ``g``, the loader constructs ``nx + 2g + 1`` by ``ny + 2g + 1``
+corner coordinates from the domain origin and spacing, evaluates the
+Biot--Savart vector potential there, and differences its lab-``Y`` component
+with the Cartesian or annular cylindrical curl. Consequently, changing the
+domain or reconstruction does not require a separately synchronized coil grid.
+
+Use ``a_file`` when the vector potential must be generated or archived offline.
+Its ``A_xyz_grid`` must already use that exact padded-corner layout; unlike the
+inline path, the file producer is responsible for matching the MHD domain and
+halo. Both sources feed the same scaling, optional cylindrical vacuum
+projection, discrete curl, solenoidality checks, and boundary-compatibility
+checks.
+
+Inline conductors are currently supported by the serial MHD runner. The
+distributed runner rejects them because its canonical background interchange
+does not yet preserve the solver-derived physical conductor halo; this avoids
+silently replacing known exterior coil samples with generic boundary
+continuations.
 
 The built-in ``linear_vacuum`` profile accepts ``gradient`` and ``shear`` and
 samples
@@ -120,7 +183,8 @@ the grid's storage layout: either the 2-D ghost-padded shape
    larger background terms cancel and avoids relying on a continuum product
    rule that need not hold for the discrete flux and CT operators.
 
-   ``params.vacuum_project: true`` is an explicit cylindrical-annulus operation.
+   For ``conductors`` or ``a_file``, ``params.vacuum_project: true`` is an
+   explicit cylindrical-annulus operation.
    It fixes :math:`A_\phi` on the outer boundary of the **padded** corner grid and
    solves the discrete vacuum equation for :math:`\psi=rA_\phi` at interior
    corners. The padded interval must satisfy :math:`r>0`. A
@@ -157,9 +221,10 @@ Divergence-free requirement
 ---------------------------
 
 :math:`\mathbf{B}_0` must also be **discretely divergence-free**. A compatible
-uniform vector is trivially solenoidal. Every file-loaded or analytically
-sampled :math:`\mathbf{B}_0` is checked against the same discrete face-divergence
-operator constrained transport uses, and is **rejected with a clear error**
+uniform vector is trivially solenoidal. Every file-loaded,
+conductor-generated, or analytically sampled :math:`\mathbf{B}_0` is checked
+against the same discrete face-divergence operator constrained transport uses,
+and is **rejected with a clear error**
 unless every interior cell satisfies the scale-free stencil test
 
 .. math::
@@ -247,8 +312,8 @@ field, add the background back:
 
    \mathbf{B}_\text{total} = \mathbf{B}_0 + \mathbf{b}.
 
-Worked example
---------------
+Worked examples
+---------------
 
 ``examples/mhd_guide_field/`` seeds a small-amplitude, circularly-polarized
 Alfvén wave traveling along ``x`` in a fully periodic box, on top of a
@@ -270,3 +335,10 @@ Run it with:
 
 See ``examples/mhd_guide_field/README.md`` for the physics rationale and the
 reference numbers the integration test checks against.
+
+For coil-generated backgrounds, ``examples/mhd_coil_cartesian/`` embeds a
+Helmholtz pair and exercises the Cartesian curl, while
+``examples/square_toroid_mhd/`` embeds the current sheets of a
+square-cross-section toroid and exercises the cylindrical annular curl plus
+``vacuum_project``. Both are one-deck workflows: run their ``input.yaml``
+directly with ``quasar.mhd.cli``; no coil-CLI preprocessing step is required.

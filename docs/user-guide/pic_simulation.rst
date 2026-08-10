@@ -111,6 +111,22 @@ through ``quasar.coil.io._build_geometry`` and therefore accept any
 geometry the coil pipeline supports (``circular_loop``, ``helix``,
 ``solenoid``, ``polygon``, ``polyline``, ``racetrack``).
 
+Shared conductor geometry
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The list is intentionally the same as the top-level ``conductors`` list in a
+:doc:`coil-design deck <coil_design>`. Copy a validated magnet geometry under
+``external_field.evaluator.conductors`` to use it as PIC's prescribed field;
+PIC samples the evaluator directly at its component locations, so no standalone
+coil-CLI run or field-map file is required. The ``examples/coil_confinement/``
+and ``examples/square_toroid_pic/`` decks demonstrate this inline workflow.
+
+MHD reuses the same records under ``background_field.conductors``. Its loader
+evaluates vector potential on a solver-derived padded corner grid and takes a
+discrete curl, because a static MHD background must be represented on the
+face-staggered constrained-transport lattice. See
+:doc:`mhd_background_field` and ``examples/mhd_coil_cartesian/``.
+
 Registered evaluator plugins
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

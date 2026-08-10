@@ -1,0 +1,50 @@
+# Cartesian coil-seeded MHD in the central bore of a Helmholtz pair.
+#
+# The MHD plane is the lab Y=0 meridional cut:
+#   MHD x = lab X, MHD y = lab Z, out-of-plane = lab Y.
+# `background_field.conductors` is evaluated on the solver-derived padded
+# corner grid. The Cartesian curl of lab-Y A supplies a static, discretely
+# divergence-free in-plane B0; the evolved in-plane perturbation starts at zero.
+
+units: SI
+domain: {nx: 24, ny: 24, lx_m: 0.04, ly_m: 0.04,
+         origin_x_m: -0.02, origin_y_m: -0.02}
+geometry: cartesian
+numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld,
+           integrator: ssprk3, ct: fd_ct_christlieb,
+           positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9,
+           cfl: 0.3}
+initial:
+  type: confined_blob
+  params:
+    bz: 0.0
+    rho_in: 2.0
+    rho_out: 1.0
+    p_in: 200.0
+    p_out: 100.0
+    blob_half: 0.01
+background_field:
+  enabled: true
+  conductors:
+    - name: lower_loop
+      current_A: 1000.0
+      geometry:
+        type: circular_loop
+        center_xyz: [0.0, 0.0, -0.05]
+        axis_xyz:   [0.0, 0.0, 1.0]
+        radius_m: 0.1
+        n_segments: 256
+    - name: upper_loop
+      current_A: 1000.0
+      geometry:
+        type: circular_loop
+        center_xyz: [0.0, 0.0, +0.05]
+        axis_xyz:   [0.0, 0.0, 1.0]
+        radius_m: 0.1
+        n_segments: 256
+  bz0: 0.0
+time: {dt_s: auto, steps: 5}
+diagnostics: {output_path: out.npz, cadence: 0,
+              fields: [rho, mx, my, mz, energy, bx, by, bz], divb: true}
+boundary: {fluid: [outflow, outflow, outflow, outflow],
+           field: [outflow, outflow, outflow, outflow]}

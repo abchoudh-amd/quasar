@@ -73,6 +73,7 @@ from .._deck import (
     require_positive_finite as _require_positive_finite,
     parse_side_map as _parse_side_map,
 )
+from ..coil.io import build_conductor_system
 from . import numerics as mhd_num
 from . import _units as mhd_units
 
@@ -191,6 +192,7 @@ def _alfven_reference_bx(deck: "MhdDeck") -> float:
     # have one global axial value, so the analytic IC can only use its own b0.
     if (isinstance(bg.enabled, (bool, np.bool_)) and bool(bg.enabled)
             and bg.file is None and bg.a_file is None
+            and bg.conductors is None
             and bg.profile == "uniform"):
         bx0 = _as_finite(bg.bx0, "background_field.bx0")
         with np.errstate(over="ignore", invalid="ignore"):
@@ -360,6 +362,8 @@ class BackgroundConfig:
     ``file`` is given. ``params`` configures any other registered analytic
     profile.
     ``file`` (optional) names an npz holding the staggered B0 arrays directly.
+    ``conductors`` (optional) holds the coil/PIC conductor schema and samples
+    its vector potential directly on the padded MHD corner grid.
     """
     enabled: bool = False
     profile: str = "uniform"
@@ -375,6 +379,7 @@ class BackgroundConfig:
     # paths. Its curl may be nonzero: the exact split-energy rate transformation
     # supports current-carrying backgrounds as long as B0 is discretely solenoidal.
     a_file: Union[str, None] = None
+    conductors: Union[list[dict], None] = None
 
 
 @dataclass
@@ -563,8 +568,9 @@ class MhdDeck:
         _as_bool(bg.enabled, "background_field.enabled")
         if not bg.enabled:
             return
-        analytic_mode = bg.file is None and bg.a_file is None
-        # A profile is consumed only in analytic mode. Explicit file modes
+        analytic_mode = (bg.file is None and bg.a_file is None
+                         and bg.conductors is None)
+        # A profile is consumed only in analytic mode. Explicit source modes
         # replace all native placeholder samples, so a stale profile name must
         # not make otherwise valid file input fail.
         if analytic_mode:
@@ -585,10 +591,10 @@ class MhdDeck:
             if not isinstance(project, (bool, np.bool_)):
                 raise ValueError(
                     "background_field.params.vacuum_project must be a boolean")
-            if bg.a_file is None:
+            if bg.a_file is None and bg.conductors is None:
                 raise ValueError(
                     "background_field.params.vacuum_project requires "
-                    "background_field.a_file")
+                    "background_field.a_file or background_field.conductors")
             if project and self.geometry != "cylindrical":
                 raise ValueError(
                     "background_field.params.vacuum_project is currently "
@@ -603,19 +609,47 @@ class MhdDeck:
             raise ValueError("background_field.file must be a non-empty path")
         if bg.a_file is not None and not str(bg.a_file).strip():
             raise ValueError("background_field.a_file must be a non-empty path")
-        if bg.file is not None and bg.a_file is not None:
+        if bg.conductors is not None:
+            if not isinstance(bg.conductors, list):
+                raise ValueError("background_field.conductors must be a list")
+            if not bg.conductors:
+                raise ValueError(
+                    "background_field.conductors must be a non-empty list")
+        source_count = sum(source is not None for source in (
+            bg.file, bg.a_file, bg.conductors))
+        if source_count > 1 and bg.conductors is None:
+            # Preserve the established file/a_file diagnostic verbatim.
             raise ValueError(
                 "background_field: set at most one of 'file' (staggered B0 arrays) "
                 "or 'a_file' (coil vector-potential A); they are mutually exclusive")
+        if source_count > 1:
+            raise ValueError(
+                "background_field: set at most one of 'conductors' (inline coil "
+                "geometry), 'file' (staggered B0 arrays), or 'a_file' (coil "
+                "vector-potential A); they are mutually exclusive")
+        if bg.conductors is not None:
+            if self.units != "SI":
+                raise ValueError(
+                    "background_field.conductors requires units: SI because "
+                    "conductor currents and geometry are evaluated in amperes "
+                    "and meters")
+            # Reuse the coil/PIC schema implementation so malformed geometry
+            # fails while loading the deck, before the MHD solver is built.
+            build_conductor_system(bg.conductors)
         if bg.file is not None and bg.params:
             raise ValueError(
                 "background_field.params is not used with background_field.file")
-        if bg.a_file is not None:
+        if bg.a_file is not None or bg.conductors is not None:
             unknown = set(bg.params) - {"b_scale", "vacuum_project"}
             if unknown:
                 names = ", ".join(sorted(unknown))
+                if bg.a_file is not None:
+                    raise ValueError(
+                        "unknown background_field.params key(s) for a_file: "
+                        + names)
                 raise ValueError(
-                    "unknown background_field.params key(s) for a_file: " + names)
+                    "unknown background_field.params key(s) for conductors: "
+                    + names)
         if analytic_mode and bg.profile != "uniform" and any(
                 value != 0.0 for value in (bg.bx0, bg.by0, bg.bz0)):
             raise ValueError(
@@ -628,6 +662,10 @@ class MhdDeck:
         if bg.a_file is not None and (bg.bx0 != 0.0 or bg.by0 != 0.0):
             raise ValueError(
                 "background_field.bx0/by0 are not used with a_file input; "
+                "bz0 is the supported uniform out-of-plane component")
+        if bg.conductors is not None and (bg.bx0 != 0.0 or bg.by0 != 0.0):
+            raise ValueError(
+                "background_field.bx0/by0 are not used with conductors input; "
                 "bz0 is the supported uniform out-of-plane component")
         # An ABSOLUTE file path's existence is knowable now (independent of the
         # deck directory), so reject an enabled background whose only source is a
@@ -796,7 +834,7 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
     d = _mapping(d, "background_field")
     _reject_unknown(
         d, {"enabled", "profile", "bx0", "by0", "bz0", "params", "file",
-            "a_file"}, "background_field")
+            "a_file", "conductors"}, "background_field")
     enabled = _as_bool(d.get("enabled", False), "background_field.enabled")
     # `enabled` is a true master switch: ignored values in a disabled block do
     # not participate in parsing, registry lookup, unit conversion, or native
@@ -805,6 +843,9 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
         return BackgroundConfig()
     file_raw = d.get("file")
     a_file_raw = d.get("a_file")
+    conductors_raw = d.get("conductors")
+    if conductors_raw is not None and not isinstance(conductors_raw, list):
+        raise ValueError("background_field.conductors must be a list")
     params = _mapping(d.get("params", {}), "background_field.params")
     return BackgroundConfig(
         enabled=enabled,
@@ -815,6 +856,8 @@ def _parse_background(d: dict | None) -> BackgroundConfig:
         params=dict(params),
         file=None if file_raw is None else str(file_raw),
         a_file=None if a_file_raw is None else str(a_file_raw),
+        conductors=(None if conductors_raw is None
+                    else list(conductors_raw)),
     )
 
 
@@ -1009,17 +1052,22 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     for ``solver.seed_background(component, buf)``; or ``None`` when the
     background is disabled (the solver then runs its zero-B0 fast path).
 
-    Three construction modes (mutually selected by the deck):
+    Five construction modes (mutually selected by the deck):
 
-    * **uniform** (``profile == "uniform"``, no ``file``): constant components
-      ``b0x == bx0``, ``b0y == by0``, ``b0z == bz0`` everywhere.
-    * **profile** (named ``profile``, no ``file``): sample the analytic profile
-      over the padded staggered meshes from :func:`_padded_grids` (b0x at the
-      left face ``xf``, b0y at the bottom face ``yf``, b0z at cell centers).
-      Registered profile parameters are forwarded to the native sampler.
+    * **uniform** (``profile == "uniform"``, no explicit source): constant
+      components ``b0x == bx0``, ``b0y == by0``, ``b0z == bz0`` everywhere.
+    * **profile** (named ``profile``, no explicit source): sample the analytic
+      profile over the padded staggered meshes from :func:`_padded_grids` (b0x
+      at the left face ``xf``, b0y at the bottom face ``yf``, b0z at cell
+      centers). Registered profile parameters are forwarded to the native
+      sampler.
     * **file** (``file:`` given): ``np.load`` the npz and read arrays ``b0x``,
       ``b0y``, ``b0z`` each shaped ``(ny+2g, nx+2g)`` or flat ``(storage,)``;
       reshape/flatten to the 1-D storage layout.
+    * **a_file** (``a_file:`` given): load a coil-CLI ``A_xyz_grid`` corner
+      sample and take its discrete curl.
+    * **conductors** (``conductors:`` given): evaluate the inline coil geometry
+      on the derived padded corner grid and take the same discrete curl.
 
     In ALL modes the interior discrete face-divergence of the assembled field is
     checked and a non-divergence-free background raises ``ValueError``.
@@ -1038,7 +1086,11 @@ def build_background_field(deck: MhdDeck, nghost: int) -> Union[dict, None]:
     dx = deck.domain.lx_m / nx
     dy = deck.domain.ly_m / ny
 
-    if bg.a_file is not None:
+    if bg.conductors is not None:
+        a_ji = _a_corners_from_conductors(deck, nghost, shape)
+        b0x, b0y, b0z = _background_from_a_corners(
+            deck, nghost, shape, a_ji)
+    elif bg.a_file is not None:
         b0x, b0y, b0z = _background_from_a_file(deck, nghost, shape)
     elif bg.file is not None:
         b0x, b0y, b0z = _background_from_file(bg.file, deck.source_dir, shape,
@@ -1205,36 +1257,10 @@ def _project_cylindrical_vacuum_a(a_ji, r_face, dx, dy):
     return projected_psi / radii[None, :]
 
 
-def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
-    """Build a non-uniform, divergence-free B0 from a coil vector-potential npz.
-
-    The coil CLI writes ``A_xyz_grid`` on the cell-corner grid of the FULL padded
-    domain (so B0 is defined in the ghost layers too -- B0 is static and never
-    ghost-refilled, and the reconstruction stencil reaches `nghost` cells past the
-    interior). With the lab Y=0 slice and the mapping MHD-x = lab-X, MHD-y = lab-Z,
-    out-of-plane = lab-Y, the saved array has shape ``(Ny+1, 1, Nx+1, 3)`` where
-    ``Nx = nx + 2g``, ``Ny = ny + 2g`` are the padded cell counts. The in-plane B0
-    is the discrete curl of the corner lab-Y component A[j, i]. In Cartesian
-    geometry this is
-
-        b0x_face(i,j) = -(A[j+1,i] - A[j,i]) / dy      # B_R on the left face
-        b0y_face(i,j) =  (A[j,i+1] - A[j,i]) / dx      # B_z on the bottom face
-
-    while cylindrical (R,Z) geometry uses the annular form
-
-        b0y_face(i,j) = (R_hi A[j,i+1] - R_lo A[j,i])
-                         / (0.5 (R_hi^2-R_lo^2)).
-
-    spanning the full padded face layout, so the cell-centered discrete divergence
-    telescopes to zero everywhere. The uniform out-of-plane ``bz0`` is added as the
-    toroidal component. ``params.b_scale`` (default 1) scales the loaded A.
-    """
+def _a_corners_from_file(deck: MhdDeck, shape):
+    """Load the lab-Y corner potential from a coil-CLI ``A_xyz_grid`` npz."""
     bg = deck.background
-    nx, ny = deck.domain.nx, deck.domain.ny
-    g = nghost
     height, pitch = shape                     # (ny+2g, nx+2g)
-    dx = deck.domain.lx_m / nx
-    dy = deck.domain.ly_m / ny
 
     file_rel = str(bg.a_file)
     base = (Path(deck.source_dir).resolve()
@@ -1275,6 +1301,67 @@ def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
     if not np.all(np.isfinite(a_ji)):
         raise ValueError(
             f"background_field.a_file {file_rel!r} A_xyz_grid has non-finite values")
+    return a_ji
+
+
+def _a_corners_from_conductors(deck: MhdDeck, nghost: int, shape):
+    """Evaluate inline conductors on the full padded lab-Y=0 corner grid."""
+    bg = deck.background
+    nx, ny = deck.domain.nx, deck.domain.ny
+    g = _as_exact_int(nghost, "nghost")
+    height, pitch = shape                     # (ny+2g, nx+2g)
+    dx = deck.domain.lx_m / nx
+    dy = deck.domain.ly_m / ny
+
+    grid = _core.magnetostatics.ObservationGrid()
+    grid.origin = _core.Vec3(
+        deck.domain.origin_x_m - g * dx,
+        0.0,
+        deck.domain.origin_y_m - g * dy,
+    )
+    grid.spacing = _core.Vec3(dx, 0.0, dy)
+    grid.dims = [pitch + 1, 1, height + 1]
+
+    conductors = build_conductor_system(bg.conductors)
+    evaluator = _core.magnetostatics.create_field_evaluator("biot_savart")
+    evaluator.configure({})
+    potential = np.asarray(
+        evaluator.evaluate_A(conductors, grid.to_point_cloud()),
+        dtype=np.float64,
+    )
+    expected = ((height + 1) * (pitch + 1), 3)
+    if potential.shape != expected:
+        raise ValueError(
+            "background_field.conductors evaluator returned vector potential "
+            f"shape {potential.shape}; expected {expected}")
+    a_ji = potential.reshape(height + 1, pitch + 1, 3)[:, :, 1]
+    if not np.all(np.isfinite(a_ji)):
+        raise ValueError(
+            "background_field.conductors produced non-finite vector potential")
+    return a_ji
+
+
+def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
+    """Build B0 from a coil-CLI vector-potential archive."""
+    return _background_from_a_corners(
+        deck, nghost, shape, _a_corners_from_file(deck, shape))
+
+
+def _background_from_a_corners(deck: MhdDeck, nghost: int, shape, a_ji):
+    """Scale, optionally project, and curl a lab-Y corner potential into B0.
+
+    With MHD-x=lab-X and MHD-y=lab-Z, the corner lab-Y component is the
+    out-of-plane potential. Its staggered Cartesian curl telescopes in the
+    discrete divergence; cylindrical geometry uses the corresponding annular
+    radial curl. ``bz0`` supplies the uniform out-of-plane field component.
+    """
+    bg = deck.background
+    nx, ny = deck.domain.nx, deck.domain.ny
+    g = nghost
+    height, pitch = shape                     # (ny+2g, nx+2g)
+    dx = deck.domain.lx_m / nx
+    dy = deck.domain.ly_m / ny
+
     b_scale = float(bg.params.get("b_scale", 1.0))
     if not math.isfinite(b_scale):
         raise ValueError("background_field.params.b_scale must be finite")
@@ -1308,9 +1395,10 @@ def _background_from_a_file(deck: MhdDeck, nghost: int, shape):
         ring = dr * r_mid
         if (not np.all(np.isfinite(ring)) or np.any(ring == 0.0)
                 or np.any(dr <= 0.0)):
+            source = "a_file" if bg.a_file is not None else "conductors"
             raise ValueError(
-                "background_field.a_file cylindrical curl encountered an invalid "
-                "annular cell measure")
+                f"background_field.{source} cylindrical curl encountered an "
+                "invalid annular cell measure")
         b0y = ((a_ji[:, 1:] - a_ji[:, :-1]) / dr[None, :]
                + (0.5 * a_ji[:, 1:] + 0.5 * a_ji[:, :-1]) /
                r_mid[None, :])

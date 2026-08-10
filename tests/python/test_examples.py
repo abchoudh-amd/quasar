@@ -2111,16 +2111,14 @@ class MhdGuideFieldExampleTest(unittest.TestCase):
 
 
 class SquareToroidMhdDeckTest(unittest.TestCase):
-    """The shipped annular deck and its padded coil grid stay synchronized."""
+    """The shipped annular example is a self-contained inline-coil deck."""
 
-    def test_cylindrical_example_uses_supported_muscl_halo(self):
+    def test_cylindrical_example_uses_inline_conductors(self):
         import yaml
 
         example = REPO_ROOT / "examples" / "square_toroid_mhd"
         with (example / "input.yaml").open() as fh:
             mhd_deck = yaml.safe_load(fh)
-        with (example / "coil.yaml").open() as fh:
-            coil_deck = yaml.safe_load(fh)
 
         self.assertEqual(mhd_deck["geometry"], "cylindrical")
         self.assertEqual(
@@ -2132,12 +2130,12 @@ class SquareToroidMhdDeckTest(unittest.TestCase):
         # Keep the fluid and perturbation-field models consistently open.
         self.assertEqual(mhd_deck["boundary"]["fluid"], ["outflow"] * 4)
         self.assertEqual(mhd_deck["boundary"]["field"], ["outflow"] * 4)
-        nx = int(mhd_deck["domain"]["nx"])
-        ny = int(mhd_deck["domain"]["ny"])
-        # MUSCL requires two ghost cells on each side; the vector-potential
-        # observation is the corresponding corner grid (one extra node).
-        self.assertEqual(
-            coil_deck["observation"]["resolution"], [nx + 5, 1, ny + 5])
+        background = mhd_deck["background_field"]
+        self.assertGreater(len(background["conductors"]), 0)
+        self.assertNotIn("a_file", background)
+        self.assertNotIn("file", background)
+        self.assertFalse((example / "coil.yaml").exists())
+        load_mhd_deck(example / "input.yaml")
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
@@ -2145,11 +2143,11 @@ class SquareToroidMhdExampleTest(unittest.TestCase):
     """Coil-seeded ideal-MHD in a square-toroid bore, ``examples/square_toroid_mhd``
     (initial.type ``confined_blob`` + field-split coil background).
 
-    Two-stage run: the coil CLI evaluates the vector potential A on the PADDED
-    cell-corner grid (``coil.npz``); the MHD ``background_field.a_file`` loader
-    differences A into a discretely divergence-free, static, NON-UNIFORM poloidal
-    background B0, and the evolving perturbation b starts at zero. A confined
-    plasma blob sits on a uniform toroidal guide field bz carried in the state.
+    The MHD loader evaluates the inline conductors on its derived padded corner
+    grid and differences A into a discretely divergence-free, static,
+    NON-UNIFORM poloidal background B0. The evolving perturbation b starts at
+    zero, and a confined plasma blob sits on a uniform toroidal guide field bz
+    carried in the state.
 
     Assertions:
       * The SEEDED div(B) (``divb_linf[0]``, the perturbation b at t=0) is exactly
@@ -2165,11 +2163,6 @@ class SquareToroidMhdExampleTest(unittest.TestCase):
     def test_end_to_end_field_split_coil_background(self):
         with tempfile.TemporaryDirectory() as tmp:
             workdir = _copy_example("square_toroid_mhd", Path(tmp))
-            # Stage 1: coil vector potential A -> coil.npz (sibling of the decks).
-            _run_cli(workdir / "coil.yaml")
-            self.assertTrue((workdir / "coil.npz").is_file(),
-                            msg="coil CLI did not produce coil.npz")
-            # Stage 2: MHD run (reads coil.npz via background_field.a_file).
             _run_mhd_cli(workdir / "input.yaml")
 
             data = _load_npz(self, workdir / "out.npz")
@@ -2224,6 +2217,80 @@ class SquareToroidMhdExampleTest(unittest.TestCase):
             divb_final = _mhd_scalar(data, "divb_linf_final")
             self.assertLess(divb_final, _DIVB_EPS,
                             msg=f"final div(B) {divb_final} not at round-off")
+
+
+class MhdCoilCartesianDeckTest(unittest.TestCase):
+
+    def test_cartesian_example_uses_inline_helmholtz_pair(self):
+        import yaml
+
+        example = REPO_ROOT / "examples" / "mhd_coil_cartesian"
+        with (example / "input.yaml").open() as input_file:
+            deck_data = yaml.safe_load(input_file)
+
+        self.assertEqual(deck_data["geometry"], "cartesian")
+        self.assertEqual(deck_data["domain"]["nx"], 24)
+        self.assertEqual(deck_data["domain"]["ny"], 24)
+        self.assertEqual(deck_data["numerics"]["reconstruction"], "mp7")
+        self.assertEqual(deck_data["boundary"]["fluid"], ["outflow"] * 4)
+        self.assertEqual(deck_data["boundary"]["field"], ["outflow"] * 4)
+
+        background = deck_data["background_field"]
+        self.assertEqual(
+            [conductor["name"] for conductor in background["conductors"]],
+            ["lower_loop", "upper_loop"],
+        )
+        self.assertNotIn("a_file", background)
+        self.assertNotIn("file", background)
+        load_mhd_deck(example / "input.yaml")
+
+
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
+class MhdCoilCartesianExampleTest(unittest.TestCase):
+
+    def test_inline_helmholtz_background_runs_finite_and_divergence_safe(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workdir = _copy_example(
+                "mhd_coil_cartesian", Path(temporary_directory))
+            _run_mhd_cli(workdir / "input.yaml")
+
+            data = _load_npz(self, workdir / "out.npz")
+            _mhd_no_nans(self, data)
+            self.assertEqual(
+                str(np.asarray(data["geometry"]).reshape(-1)[0]),
+                "cartesian",
+            )
+            self.assertEqual(
+                str(np.asarray(data["units"]).reshape(-1)[0]),
+                "SI",
+            )
+
+            divb_seed = float(np.asarray(data["divb_linf"]).reshape(-1)[0])
+            divb_final = _mhd_scalar(data, "divb_linf_final")
+            self.assertTrue(np.isfinite(divb_seed))
+            self.assertTrue(np.isfinite(divb_final))
+            self.assertLess(divb_seed, _DIVB_EPS)
+            self.assertLess(divb_final, _DIVB_EPS)
+
+            nx = int(_mhd_scalar(data, "nx"))
+            ny = int(_mhd_scalar(data, "ny"))
+            density = _mhd_field(data, "state_rho", nx, ny)
+            self.assertTrue(np.all(np.isfinite(density)))
+            self.assertTrue(
+                np.all(density > 0.0),
+                msg=f"density not strictly positive: min={density.min()}",
+            )
+
+            # The initial in-plane perturbation is exactly zero. A nonzero
+            # final perturbation therefore proves that the inline Helmholtz
+            # background reached the solver and participated in induction.
+            bx = _mhd_field(data, "state_bx", nx, ny)
+            by = _mhd_field(data, "state_by", nx, ny)
+            response = float(np.max(np.hypot(bx, by)))
+            self.assertGreater(
+                response, 0.0,
+                msg="inline Helmholtz background produced no magnetic response",
+            )
 
 
 if __name__ == "__main__":

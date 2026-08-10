@@ -236,6 +236,39 @@ class RunPolicyTests(unittest.TestCase):
             runner._timestep_signature(original),
             runner._timestep_signature(extended))
 
+    def test_inline_conductors_rejected_before_distributed_seed_building(self):
+        deck = _runner_deck()
+        deck.units = "SI"
+        deck.background = mhd_io.BackgroundConfig(
+            enabled=True,
+            conductors=[{
+                "name": "loop",
+                "current_A": 1.0,
+                "geometry": {
+                    "type": "circular_loop",
+                    "center_xyz": [0.0, 0.0, 0.0],
+                    "axis_xyz": [0.0, 0.0, 1.0],
+                    "radius_m": 0.1,
+                    "n_segments": 32,
+                },
+            }],
+        )
+        deck.validate()
+        options = distributed.RunOptions(
+            devices=(0,), decomposition=(1, 1))
+
+        with (mock.patch.object(runner, "_canonical_state") as state,
+              mock.patch.object(
+                  runner, "_canonical_explicit_background") as background):
+            with self.assertRaisesRegex(
+                    ValueError, "cannot preserve the solver-derived padded"):
+                runner._prepare_mhd_run(
+                    deck, options, steps_override=None, verbose=False,
+                    print_config=False, log_every=0)
+
+        state.assert_not_called()
+        background.assert_not_called()
+
     def test_policy_mismatch_stops_before_device_or_topology_collectives(self):
         deck = _runner_deck()
         session = _RejectingPolicySession()

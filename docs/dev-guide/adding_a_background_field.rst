@@ -142,8 +142,9 @@ the deep interior from injecting a seam or boundary divergence.
 
 This contract is enforced at both public construction paths. The native solver
 samples analytic profiles and validates their padded staggered field. For
-``file`` and ``a_file`` input, the Python loader assembles and checks the buffers
-at build/seed time (``background_divergence_linf`` in
+``file``, ``a_file``, and inline ``conductors`` input, the Python loader
+assembles and checks the buffers at build/seed time
+(``background_divergence_linf`` in
 ``python/quasar/mhd/numerics.py``, called from ``build_background_field`` in
 ``python/quasar/mhd/io.py``), and the native solver validates them again. A
 later ``seed_background`` call invalidates the prior validation, and the
@@ -172,13 +173,16 @@ to the non-split solver).
      # file: b0.npz          # alternatively, load B0 from an npz (resolved
                              # relative to the deck directory)
      # a_file: coil.npz      # alternatively, padded-corner A_xyz_grid
+     # conductors: [...]      # alternatively, inline SI coil geometry
      # params: {b_scale: 1.0, vacuum_project: true}
 
 The ``profile`` name is validated against the live registry
 (``_core.mhd.registered_mhd_background_profiles()``), so a typo or an
 unregistered profile fails fast at deck validation. Use ``bx0/by0/bz0`` for the
 ``uniform`` profile, a ``params`` mapping for a named analytic profile, or a
-``file:`` npz to load a precomputed ``B0`` directly.
+``file:`` npz to load a precomputed ``B0`` directly. Inline ``conductors`` use
+the shared coil/PIC geometry schema, require ``units: SI``, and are mutually
+exclusive with ``file`` and ``a_file``.
 
 How the profile reaches the device
 ----------------------------------
@@ -199,8 +203,10 @@ depends on the profile class and a new profile is a pure host/numerics addition.
    destroying registry capability metadata. The standalone
    ``build_background_field`` helper can still sample any registered profile
    through ``_core.mhd.sample_mhd_background_profile`` for validation and tests.
-   The CLI uses that helper to assemble explicit ``file``/``a_file`` buffers
-   before calling ``seed_background``.
+   The serial CLI uses that helper to assemble explicit ``file``/``a_file`` or
+   inline-conductor buffers before calling ``seed_background``. Distributed MHD
+   currently rejects inline conductors because its canonical background
+   interchange cannot preserve their solver-derived physical halo.
 
 .. important::
 
@@ -238,9 +244,11 @@ depends on the profile class and a new profile is a pure host/numerics addition.
    A trusted domain-wide curl-free construction proof enables one additional
    well-balanced path; it is never inferred from sampled tolerances.
    Analytic Cartesian profiles may return ``true`` from
-   ``globally_curl_free()``. The cylindrical ``a_file`` vacuum projection sets
-   the equivalent native ``MhdBackgroundSpec::curl_free`` assertion after its
-   solve. ``MhdBackgroundSpec::profile_scale`` applies a uniform unit conversion
+   ``globally_curl_free()``. The cylindrical ``a_file`` or inline-conductor
+   vacuum projection sets the equivalent native
+   ``MhdBackgroundSpec::curl_free`` assertion after its solve, provided the
+   uniform toroidal ``bz0`` is zero. ``MhdBackgroundSpec::profile_scale`` applies
+   a uniform unit conversion
    inside native sampling, preserving an analytic profile's registry proof
    without component-wise overrides. Explicit samples carrying an
    assertion are checked against all staggered curl components as defense in
@@ -260,18 +268,19 @@ depends on the profile class and a new profile is a pure host/numerics addition.
    profile merely to remove that force: doing so violates the trusted-proof
    contract even if the defense-in-depth sample check does not expose the lie.
 
-An ``a_file`` is one convenient non-uniform input: the loader constructs the
-in-plane field as a discrete curl of the padded-corner vector potential, making
-its staggered divergence telescope. For cylindrical annuli, continuum vacuum
-data sampled at corners generally has a nonzero discrete vacuum-operator
-residual. ``params.vacuum_project: true`` optionally fixes ``A_phi`` on the outer
-boundary of the padded corner grid and solves for ``psi = r A_phi`` with the
-same annular differences used to form ``B0``. This is field preparation for a
-discrete vacuum background, not a requirement of the split equations. The
-entire padded interval must have ``r > 0``, and conjugate-gradient
-non-convergence is a hard ``ValueError``. Without the flag, the supplied
-potential is differenced directly; the resulting current-carrying background is
-valid when it passes the divergence check.
+Inline ``conductors`` and an ``a_file`` are the two vector-potential inputs. The
+loader constructs their in-plane field as a discrete curl of padded-corner
+samples, making its staggered divergence telescope; inline mode derives that
+corner grid from the solver halo and evaluates Biot--Savart in-process. For
+cylindrical annuli, continuum vacuum data sampled at corners generally has a
+nonzero discrete vacuum-operator residual. ``params.vacuum_project: true``
+optionally fixes ``A_phi`` on the outer boundary of the padded corner grid and
+solves for ``psi = r A_phi`` with the same annular differences used to form
+``B0``. This is field preparation for a discrete vacuum background, not a
+requirement of the split equations. The entire padded interval must have
+``r > 0``, and conjugate-gradient non-convergence is a hard ``ValueError``.
+Without the flag, the supplied potential is differenced directly; the resulting
+current-carrying background is valid when it passes the divergence check.
 
 Energy, CFL, and CT consequences
 --------------------------------

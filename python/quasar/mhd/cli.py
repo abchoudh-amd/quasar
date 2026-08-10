@@ -66,6 +66,7 @@ def _make_config(deck: mhd_io.MhdDeck):
         return cfg
     analytic_profile = (
         deck.background.file is None and deck.background.a_file is None
+        and deck.background.conductors is None
     )
     # Explicit modes need the native buffers allocated, but their deck profile
     # is intentionally irrelevant. Construct a harmless zero placeholder until
@@ -89,14 +90,17 @@ def _make_config(deck: mhd_io.MhdDeck):
     # defense-in-depth contradiction check, not the source of that proof.
     cfg.background.curl_free = bool(
         deck.background.enabled
-        and deck.background.a_file is not None
+        and (deck.background.a_file is not None
+             or deck.background.conductors is not None)
         and deck.background.params.get("vacuum_project", False)
+        and deck.background.bz0 == 0.0
     )
     # Only analytic mode configures the native registry profile. File and
     # vector-potential modes override all three buffers immediately after
     # construction; their params (for example b_scale/vacuum_project) belong to
     # the Python loaders and are not analytic-profile parameters.
-    if deck.background.file is None and deck.background.a_file is None:
+    if (deck.background.file is None and deck.background.a_file is None
+            and deck.background.conductors is None):
         cfg.background.params = {
             key: float(value) for key, value in deck.background.params.items()
         }
@@ -122,13 +126,14 @@ def prepare_run(deck: mhd_io.MhdDeck):
         solver.seed_state(component, buf)
 
     # Static background field B0 (field-split B = B0 + b). Analytic profiles
-    # were already sampled by the native constructor; only file/vector-potential
-    # modes replace those buffers here. Do this BEFORE cfl_limit() so the fast
-    # magnetosonic speed sees the final total field B0+b.
+    # were already sampled by the native constructor; only explicit file or
+    # vector-potential modes replace those buffers here. Do this BEFORE
+    # cfl_limit() so the fast magnetosonic speed sees the final total field B0+b.
     explicit_background = (
         deck.background.enabled
         and (deck.background.file is not None
-             or deck.background.a_file is not None)
+             or deck.background.a_file is not None
+             or deck.background.conductors is not None)
     )
     if explicit_background:
         background = mhd_io.build_background_field(deck, nghost)

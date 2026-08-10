@@ -60,6 +60,57 @@ subcommand shape and the ``--print-config`` / ``--verbose`` flags; see
 :doc:`pic_simulation` for its additional ``--seed`` / ``--log-every`` /
 ``--write-every`` / ``--steps-override`` options.)
 
+Reusing a magnet in plasma simulations
+---------------------------------------
+
+The conductor record under ``conductors:`` is shared by the coil, MHD, and PIC
+deck loaders. For a serial MHD deck with ``units: SI``, place the same non-empty
+list directly under ``background_field``:
+
+.. code-block:: yaml
+
+   background_field:
+     enabled: true
+     conductors:
+       - name: single_loop
+         current_A: 1.0
+         geometry:
+           type: circular_loop
+           center_xyz: [0.0, 0.0, 0.0]
+           axis_xyz: [0.0, 0.0, 1.0]
+           radius_m: 0.1
+           n_segments: 256
+
+The MHD loader derives its padded corner grid from the domain and the solver's
+actual reconstruction halo, evaluates ``A`` in-process, and takes the matching
+Cartesian or cylindrical discrete curl. This is the preferred coil-to-MHD
+workflow because there is no observation grid or intermediate file to keep in
+sync. See :doc:`mhd_background_field` and the one-deck
+``examples/mhd_coil_cartesian/`` and ``examples/square_toroid_mhd/`` cases.
+Use ``background_field.a_file`` only when a precomputed ``A_xyz_grid`` archive
+is specifically required.
+
+For PIC, put the list under the Biot--Savart external evaluator:
+
+.. code-block:: yaml
+
+   external_field:
+     evaluator:
+       type: biot_savart
+       conductors:
+         - name: single_loop
+           current_A: 1.0
+           geometry:
+             type: circular_loop
+             center_xyz: [0.0, 0.0, 0.0]
+             axis_xyz: [0.0, 0.0, 1.0]
+             radius_m: 0.1
+             n_segments: 256
+
+PIC samples the prescribed field on its own component lattices; see
+:doc:`pic_simulation`. The standalone coil CLI remains useful for line, plane,
+or grid surveys and for exporting reusable field maps.
+
 Schema reference
 ----------------
 
