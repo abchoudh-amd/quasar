@@ -59,6 +59,20 @@ __device__ __attribute__((noinline)) Real scaled_face_average(Real e0, Real e1) 
   return finish_scaled_ct_terms(sum, Real{2});
 }
 
+__device__ __attribute__((noinline)) Real scaled_face_average_to_edge3(
+    Real e0, Real e1, Real e2, Real e3) {
+  if (e0 == e1 && e0 == e2 && e0 == e3) return e0;
+  if (!(isfinite(e0) && isfinite(e1) && isfinite(e2) && isfinite(e3))) {
+    return (-e0 + Real{7} * e1 + Real{7} * e2 - e3) / Real{12};
+  }
+  quasar::numerics::ScaledProductQuotientAccumulator<8> sum;
+  quasar::numerics::append_scaled_exact_product(sum, Real{-1}, e0);
+  quasar::numerics::append_scaled_exact_product(sum, Real{7}, e1);
+  quasar::numerics::append_scaled_exact_product(sum, Real{7}, e2);
+  quasar::numerics::append_scaled_exact_product(sum, Real{-1}, e3);
+  return finish_scaled_ct_terms(sum, Real{12});
+}
+
 __device__ __attribute__((noinline)) Real scaled_face_average_to_edge5(
     Real e0, Real e1, Real e2, Real e3, Real e4, Real e5) {
   if (e0 == e1 && e0 == e2 && e0 == e3 && e0 == e4 && e0 == e5) return e0;
@@ -100,15 +114,45 @@ __device__ __attribute__((noinline)) Real scaled_face_average_to_edge7(
   return finish_scaled_ct_terms(sum, Real{840});
 }
 
+template <class Sample>
+__device__ __attribute__((noinline)) Real scaled_face_average_to_edge_weighted(
+    const Real* coefficients, int width, const Sample& sample) {
+  const Real reference = sample(width / 2);
+  bool constant = true;
+  bool finite = true;
+  for (int k = 0; k < width; ++k) {
+    const Real value = sample(k);
+    constant = constant && value == reference;
+    finite = finite && isfinite(value);
+  }
+  if (constant) return reference;
+  if (!finite) {
+    Real fallback = Real{0};
+    for (int k = 0; k < width; ++k) {
+      fallback += coefficients[k] * sample(k);
+    }
+    return fallback;
+  }
+  quasar::numerics::ScaledProductQuotientAccumulator<16> sum;
+  for (int k = 0; k < width; ++k) {
+    quasar::numerics::append_scaled_exact_product(
+        sum, coefficients[k], sample(k));
+  }
+  return quasar::numerics::scaled_value_divide(
+      quasar::numerics::finish_scaled_exact_product_sum_to_value(sum),
+      Real{1});
+}
+
 // Directional Godunov electric field.  For an x-face F_x(By)=-Ez; for a
 // y-face F_y(Bx)=+Ez.  Reusing HLLD here gives CT the same upwind wave fan as
 // the fluid flux instead of a disconnected centred cell-EMF average.
 __device__ inline Real face_ez(const quasar::Grid2D& g, int dir, int i, int j,
                                int order, int hll_only, Real gamma,
                                const FaceInterfaceView& v,
-                               const FaceBackgroundView& bgv) {
+                               const FaceBackgroundView& bgv,
+                               quasar::numerics::RadialTablesView radial_tables) {
   const MhdFlux f = quasar::mhd::detail::average_face_flux(
-      g, dir, i, j, order, hll_only, gamma, v, bgv);
+      g, dir, i, j, order, hll_only, gamma, v, bgv, radial_tables);
   return (dir == 0) ? -f.by : f.bx;
 }
 
@@ -171,9 +215,22 @@ __device__ inline bool face_problem_has_no_jump(
 // no interface-state read reaches beyond the numerical 2/3/4-cell halo.
 __device__ inline bool directional_corner_stencil_has_no_jump(
     const quasar::Grid2D& g, int dir, int i, int j, int order,
-    const int* no_jump, quasar::mhd::BoundaryFlags4 modes) {
-  const int interpolation_lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
-  const int interpolation_hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
+    const int* no_jump, quasar::mhd::BoundaryFlags4 modes,
+    quasar::numerics::RadialTablesView radial_tables) {
+  // The y-face table varies in i, so an active cylindrical R5 row defines its
+  // complete interpolation stencil.  In particular MUSCL owns a four-point
+  // collocation row even though its Cartesian corner interpolation has only
+  // two taps; checking the shorter range could falsely prove a 1-D limit while
+  // an unseen R5 tap still contains a jump.
+  const bool radial_stencil =
+      dir == 1 && radial_tables.active != 0 &&
+      radial_tables.scheme_order == order && radial_tables.contains(i);
+  const int interpolation_lo = radial_stencil
+      ? -radial_tables.collocation_width / 2
+      : order >= 7 ? -4 : order >= 5 ? -3 : -1;
+  const int interpolation_hi = radial_stencil
+      ? interpolation_lo + radial_tables.collocation_width - 1
+      : order >= 7 ? 3 : order >= 5 ? 2 : 0;
   for (int offset = interpolation_lo; offset <= interpolation_hi; ++offset) {
     const int sample_i = dir == 0 ? i : i + offset;
     const int sample_j = dir == 0 ? j + offset : j;
@@ -242,7 +299,17 @@ __device__ inline Real interp_x_to_corner(
 
 __device__ inline Real interp_y_to_corner(
     const quasar::Grid2D& g, int i, int j, int order,
-    const double* __restrict__ y_table, quasar::mhd::BoundaryFlags4 modes) {
+    const double* __restrict__ y_table, quasar::mhd::BoundaryFlags4 modes,
+    quasar::numerics::RadialTablesView radial_tables) {
+  if (radial_tables.active != 0 && radial_tables.scheme_order == order &&
+      radial_tables.contains(i)) {
+    const int width = radial_tables.collocation_width;
+    const int start = i - width / 2;
+    return scaled_face_average_to_edge_weighted(
+        radial_tables.r5_row(i), width, [&](int k) {
+          return yface_ez(g, start + k, j, y_table, modes);
+        });
+  }
   if (order >= 7) {
     return scaled_face_average_to_edge7(
         yface_ez(g, i - 4, j, y_table, modes),
@@ -275,7 +342,9 @@ __device__ inline Real interp_y_to_corner(
 // Avoiding padded transverse face solves is essential: MP7 face quadrature at
 // an outer guard would recursively request interface state seven cells deep.
 __global__ void QUASAR_LAUNCH_BOUNDS_256 face_emf_kernel(
-    quasar::Grid2D g, int scheme_order, int hll_only, Real gamma,
+    quasar::Grid2D g, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables,
+    int hll_only, Real gamma,
     quasar::mhd::BoundaryFlags4 modes,
     FaceInterfaceView ifx, FaceInterfaceView ify, FaceBackgroundView bg,
     double* __restrict__ xface_table, double* __restrict__ yface_table,
@@ -291,13 +360,13 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 face_emf_kernel(
       modes.side[1] != 0 && modes.side[1] != 4;
   if (j < g.ny || (j == g.ny && physical_y_high)) {
     xface_table[k] = face_ez(
-        g, 0, i, j, scheme_order, hll_only, gamma, ifx, bg);
+        g, 0, i, j, scheme_order, hll_only, gamma, ifx, bg, radial_tables);
     xface_no_jump[k] =
         face_problem_has_no_jump(g, 0, i, j, scheme_order, ifx, modes) ? 1 : 0;
   }
   if (i < g.nx || (i == g.nx && physical_x_high)) {
     yface_table[k] = face_ez(
-        g, 1, i, j, scheme_order, hll_only, gamma, ify, bg);
+        g, 1, i, j, scheme_order, hll_only, gamma, ify, bg, radial_tables);
     yface_no_jump[k] =
         face_problem_has_no_jump(g, 1, i, j, scheme_order, ify, modes) ? 1 : 0;
   }
@@ -328,13 +397,16 @@ inline constexpr int kMaxCellTaps = 7;
 // offset k-half, for k in [0, taps).
 template <class Sample>
 __device__ inline void cell_point_rows(int order, int node_x,
+                                       int radial_index,
+                                       quasar::numerics::RadialTablesView radial_tables,
                                        const Sample& sample, Real* rows) {
   const int half = order >= 7 ? 3 : 2;
   const int taps = order >= 7 ? 7 : 5;
   for (int k = 0; k < taps; ++k) {
     const int oy = k - half;
     rows[k] = quasar::mhd::detail::point_value(
-        order, node_x, [&](int ox) { return sample(ox, oy); });
+        order, node_x, /*dir=*/1, radial_index, radial_tables,
+        [&](int ox) { return sample(ox, oy); });
   }
 }
 
@@ -359,13 +431,14 @@ __device__ inline Real physical_ez(
 
 __device__ inline Real direct_cell_ez(
     const quasar::Grid2D& g, int i, int j, int collocation_order,
-    const CellStateView& u, const FaceBackgroundView& bg) {
+    const CellStateView& u, const FaceBackgroundView& bg,
+    quasar::numerics::RadialTablesView radial_tables) {
   const MhdState state = quasar::mhd::load_cell_state(
       g, u.rho, u.mx, u.my, u.mz, u.energy, u.bx, u.by, u.bz,
-      i, j, collocation_order);
+      i, j, radial_tables, collocation_order);
   const auto background = bg.active != 0
       ? quasar::mhd::load_cell_background(
-            g, bg.bx, bg.by, bg.bz, i, j, collocation_order)
+            g, bg.bx, bg.by, bg.bz, i, j, radial_tables, collocation_order)
       : quasar::numerics::MhdBackground{};
   return physical_ez(state, background);
 }
@@ -396,10 +469,11 @@ struct CellBTile {
 __device__ inline Real cell_average_ez(
     const quasar::Grid2D& g, int i, int j, int order, Real gamma,
     const CellStateView& u, const FaceBackgroundView& bg,
-    const CellBTile* tile) {
+    const CellBTile* tile,
+    quasar::numerics::RadialTablesView radial_tables) {
   const int collocation_order = order <= 1 ? 1 : 0;
   const Real fallback = direct_cell_ez(
-      g, i, j, collocation_order, u, bg);
+      g, i, j, collocation_order, u, bg, radial_tables);
   if (order != 5 && order != 7) return fallback;
 
   const int half = order == 5 ? 2 : 3;
@@ -453,12 +527,14 @@ __device__ inline Real cell_average_ez(
         bx_block[a][b] = tile->bx[ti][tj];
         by_block[a][b] = tile->by[ti][tj];
       } else {
-        bx_block[a][b] = quasar::mhd::cell_bx(g, u.bx, ii, jj);
-        by_block[a][b] = quasar::mhd::cell_by(g, u.by, ii, jj);
+        bx_block[a][b] = quasar::mhd::cell_bx(
+            g, u.bx, ii, jj, radial_tables);
+        by_block[a][b] = quasar::mhd::cell_by(
+            g, u.by, ii, jj, radial_tables);
       }
       if (bg.active != 0) {
         const auto value = quasar::mhd::load_cell_background(
-            g, bg.bx, bg.by, bg.bz, ii, jj);
+            g, bg.bx, bg.by, bg.bz, ii, jj, radial_tables);
         bg_block[0][a][b] = value.b0x;
         bg_block[1][a][b] = value.b0y;
         bg_block[2][a][b] = value.b0z;
@@ -480,19 +556,19 @@ __device__ inline Real cell_average_ez(
   for (int qx = 0; qx < count; ++qx) {
     for (int c = 0; c < 6; ++c) {
       const double* values = raw_components[c];
-      cell_point_rows(order, qx, [&](int ox, int oy) {
+      cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
         return static_cast<Real>(values[g.index(i + ox, j + oy)]);
       }, raw_rows[c]);
     }
-    cell_point_rows(order, qx, [&](int ox, int oy) {
+    cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
       return bx_block[ox + half][oy + half];
     }, bx_rows);
-    cell_point_rows(order, qx, [&](int ox, int oy) {
+    cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
       return by_block[ox + half][oy + half];
     }, by_rows);
     if (bg.active != 0) {
       for (int which = 0; which < 3; ++which) {
-        cell_point_rows(order, qx, [&](int ox, int oy) {
+        cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
           return bg_block[which][ox + half][oy + half];
         }, bg_rows[which]);
       }
@@ -523,8 +599,14 @@ __device__ inline Real cell_average_ez(
   }
 
   Real row[4]{};
+  const Real* radial_weights = radial_tables.active != 0 &&
+          radial_tables.contains(i)
+      ? radial_tables.r3_row(i) : nullptr;
   for (int qy = 0; qy < count; ++qy) {
-    if (order == 5) {
+    if (radial_weights != nullptr) {
+      row[qy] = quasar::mhd::detail::weighted_value(
+          radial_weights, count, [&](int qx) { return point[qy][qx]; });
+    } else if (order == 5) {
       row[qy] = quasar::mhd::detail::weighted_value(
           quasar::mhd::detail::kMp5TransverseGaussWeights,
           [&](int qx) { return point[qy][qx]; });
@@ -545,7 +627,9 @@ __device__ inline Real cell_average_ez(
 }
 
 __global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
-    quasar::Grid2D g, int scheme_order, Real gamma, CellStateView u,
+    quasar::Grid2D g, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables,
+    Real gamma, CellStateView u,
     FaceBackgroundView bg, quasar::mhd::BoundaryFlags4 modes,
     double* __restrict__ cell_ez) {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -593,8 +677,10 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
           tile.by[a][b] = Real{0};
           continue;
         }
-        tile.bx[a][b] = quasar::mhd::cell_bx(g, u.bx, ii, jj);
-        tile.by[a][b] = quasar::mhd::cell_by(g, u.by, ii, jj);
+        tile.bx[a][b] = quasar::mhd::cell_bx(
+            g, u.bx, ii, jj, radial_tables);
+        tile.by[a][b] = quasar::mhd::cell_by(
+            g, u.by, ii, jj, radial_tables);
       }
     }
     __syncthreads();
@@ -608,17 +694,43 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cell_emf_kernel(
   if ((i == g.nx && !physical_x_high) ||
       (j == g.ny && !physical_y_high)) return;
   cell_ez[g.index(i, j)] = cell_average_ez(
-      g, i, j, scheme_order, gamma, u, bg, tiled_order ? &tile : nullptr);
+      g, i, j, scheme_order, gamma, u, bg, tiled_order ? &tile : nullptr,
+      radial_tables);
 }
 
 __device__ inline Real cell_emf_to_corner(
     const quasar::Grid2D& g, int i, int j, int order,
-    const double* cell_ez, quasar::mhd::BoundaryFlags4 modes) {
+    const double* cell_ez, quasar::mhd::BoundaryFlags4 modes,
+    quasar::numerics::RadialTablesView radial_tables) {
   const auto value = [&](int ii, int jj) {
     const int mapped_i = face_index(ii, g.nx, modes.side[0], modes.side[1]);
     const int mapped_j = face_index(jj, g.ny, modes.side[2], modes.side[3]);
     return cell_ez[g.index(mapped_i, mapped_j)];
   };
+  if (radial_tables.active != 0 && radial_tables.scheme_order == order &&
+      radial_tables.contains(i)) {
+    const int radial_width = radial_tables.collocation_width;
+    const int axial_width = order >= 7 ? 8 : order >= 5 ? 6 : 2;
+    const int start_i = i - radial_width / 2;
+    const int start_j = j - axial_width / 2;
+    Real line[8]{};
+    for (int q = 0; q < axial_width; ++q) {
+      const int jj = start_j + q;
+      line[q] = scaled_face_average_to_edge_weighted(
+          radial_tables.r5_row(i), radial_width,
+          [&](int k) { return value(start_i + k, jj); });
+    }
+    if (axial_width == 8) {
+      return scaled_face_average_to_edge7(
+          line[0], line[1], line[2], line[3],
+          line[4], line[5], line[6], line[7]);
+    }
+    if (axial_width == 6) {
+      return scaled_face_average_to_edge5(
+          line[0], line[1], line[2], line[3], line[4], line[5]);
+    }
+    return scaled_face_average(line[0], line[1]);
+  }
   if (order >= 7) {
     Real line[8];
     for (int q = 0; q < 8; ++q) {
@@ -655,19 +767,36 @@ __device__ inline Real cell_emf_to_corner(
 // values along `axis` across the complete tensor edge-recovery stencil.
 __device__ inline bool cell_emf_is_constant_along_axis(
     const quasar::Grid2D& g, int i, int j, int order,
-    const double* cell_ez, quasar::mhd::BoundaryFlags4 modes, int axis) {
-  const int lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
-  const int hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
+    const double* cell_ez, quasar::mhd::BoundaryFlags4 modes, int axis,
+    quasar::numerics::RadialTablesView radial_tables) {
+  // The radial pass uses the active R5 width; the axial pass remains the
+  // Cartesian order-selected stencil. Match that mixed tensor footprint here,
+  // including cylindrical MUSCL's four radial taps but two axial taps.
+  const bool weighted =
+      radial_tables.active != 0 && radial_tables.scheme_order == order &&
+      radial_tables.contains(i);
+  const int radial_lo = weighted ? -radial_tables.collocation_width / 2
+                                 : order >= 7 ? -4 : order >= 5 ? -3 : -1;
+  const int radial_hi = weighted
+      ? radial_lo + radial_tables.collocation_width - 1
+      : order >= 7 ? 3 : order >= 5 ? 2 : 0;
+  const int axial_lo = order >= 7 ? -4 : order >= 5 ? -3 : -1;
+  const int axial_hi = order >= 7 ? 3 : order >= 5 ? 2 : 0;
   const auto value = [&](int ii, int jj) {
     const int mapped_i = face_index(ii, g.nx, modes.side[0], modes.side[1]);
     const int mapped_j = face_index(jj, g.ny, modes.side[2], modes.side[3]);
     return cell_ez[g.index(mapped_i, mapped_j)];
   };
-  for (int varying = lo; varying <= hi; ++varying) {
+  const int varying_lo = axis == 0 ? axial_lo : radial_lo;
+  const int varying_hi = axis == 0 ? axial_hi : radial_hi;
+  const int invariant_lo = axis == 0 ? radial_lo : axial_lo;
+  const int invariant_hi = axis == 0 ? radial_hi : axial_hi;
+  for (int varying = varying_lo; varying <= varying_hi; ++varying) {
     const Real reference = axis == 0
-        ? value(i + lo, j + varying)
-        : value(i + varying, j + lo);
-    for (int invariant = lo + 1; invariant <= hi; ++invariant) {
+        ? value(i + invariant_lo, j + varying)
+        : value(i + varying, j + invariant_lo);
+    for (int invariant = invariant_lo + 1;
+         invariant <= invariant_hi; ++invariant) {
       const Real candidate = axis == 0
           ? value(i + invariant, j + varying)
           : value(i + varying, j + invariant);
@@ -679,7 +808,7 @@ __device__ inline bool cell_emf_is_constant_along_axis(
 
 __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 modes, int scheme_order,
-    int cylindrical,
+    int cylindrical, quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ cell_ez,
     const double* __restrict__ xface_table,
     const double* __restrict__ yface_table,
@@ -712,9 +841,9 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
     const Real ex = interp_x_to_corner(
         g, i, j, scheme_order, xface_table, modes);
     const Real ey = interp_y_to_corner(
-        g, i, j, scheme_order, yface_table, modes);
+        g, i, j, scheme_order, yface_table, modes, radial_tables);
     const Real centered = cell_emf_to_corner(
-        g, i, j, scheme_order, cell_ez, modes);
+        g, i, j, scheme_order, cell_ez, modes, radial_tables);
     // Upwind CT: the cell-centred transport is present once in each directional
     // Godunov EMF.  Remove one copy while retaining BOTH directional dissipation
     // terms.  In x-only data ey==centered, hence this reduces exactly to ex; the
@@ -723,14 +852,14 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
     // potentially dominant ex+ey partial sum.
     const bool x_only =
         directional_corner_stencil_has_no_jump(
-            g, 1, i, j, scheme_order, yface_no_jump, modes) &&
+            g, 1, i, j, scheme_order, yface_no_jump, modes, radial_tables) &&
         cell_emf_is_constant_along_axis(
-            g, i, j, scheme_order, cell_ez, modes, /*axis=*/1);
+            g, i, j, scheme_order, cell_ez, modes, /*axis=*/1, radial_tables);
     const bool y_only =
         directional_corner_stencil_has_no_jump(
-            g, 0, i, j, scheme_order, xface_no_jump, modes) &&
+            g, 0, i, j, scheme_order, xface_no_jump, modes, radial_tables) &&
         cell_emf_is_constant_along_axis(
-            g, i, j, scheme_order, cell_ez, modes, /*axis=*/0);
+            g, i, j, scheme_order, cell_ez, modes, /*axis=*/0, radial_tables);
     if (x_only && !y_only) {
       ez_edge[k] = ex;
     } else if (y_only && !x_only) {
@@ -853,7 +982,8 @@ void launch_mhd_ct_emf_prepare(
     const quasar::numerics::MhdInterfaceStates<Real>& ifx,
     const quasar::numerics::MhdInterfaceStates<Real>& ify,
     BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
-    stream_t stream, int scheme_order, bool hll_only) {
+    stream_t stream, int scheme_order, bool hll_only,
+    quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
@@ -887,7 +1017,8 @@ void launch_mhd_ct_emf_prepare(
   // Distributed internal/periodic guards are installed by the coordinator
   // before launch_mhd_ct_emf_finish; the serial finish maps them locally.
   hipLaunchKernelGGL(cell_emf_kernel, grid, block, 0,
-                     static_cast<hipStream_t>(stream), g, scheme_order, gamma,
+                     static_cast<hipStream_t>(stream), g, scheme_order,
+                     radial_tables, gamma,
                      state, bg, flags, emf.cell_ez_average.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
   // Evaluate each canonical directional face EMF and its exact equality proof
@@ -895,7 +1026,7 @@ void launch_mhd_ct_emf_prepare(
   // re-solving faces or recursively extending the state stencil.
   hipLaunchKernelGGL(face_emf_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), g, scheme_order,
-                     hll_only ? 1 : 0, gamma, flags, xv, yv, bg,
+                     radial_tables, hll_only ? 1 : 0, gamma, flags, xv, yv, bg,
                      emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr(),
                      emf.xface_no_jump.device_ptr(),
                      emf.yface_no_jump.device_ptr());
@@ -904,7 +1035,8 @@ void launch_mhd_ct_emf_prepare(
 
 void launch_mhd_ct_emf_finish(BoundaryFlags4 flags, EmfField2D<Real>& emf,
                               stream_t stream, int scheme_order,
-                              bool cylindrical) {
+                              bool cylindrical,
+                              quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = emf.grid;
   const dim3 block(kBlock2D, kBlock2D);
   // Launch over nx+1 x ny+1 so the high-edge corner EMF (index nx/ny) read by
@@ -913,6 +1045,7 @@ void launch_mhd_ct_emf_finish(BoundaryFlags4 flags, EmfField2D<Real>& emf,
                   (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
   hipLaunchKernelGGL(ct_emf_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, flags, scheme_order, cylindrical ? 1 : 0,
+                     radial_tables,
                      emf.cell_ez_average.device_ptr(),
                      emf.xface_ez.device_ptr(), emf.yface_ez.device_ptr(),
                      emf.xface_no_jump.device_ptr(),
@@ -928,10 +1061,12 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u,
                        const quasar::numerics::MhdInterfaceStates<Real>& ify,
                        BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
                        stream_t stream, int scheme_order, bool cylindrical,
-                       bool hll_only) {
+                       bool hll_only,
+                       quasar::numerics::RadialTablesView radial_tables) {
   launch_mhd_ct_emf_prepare(u, b0, ifx, ify, flags, emf, gamma, stream,
-                            scheme_order, hll_only);
-  launch_mhd_ct_emf_finish(flags, emf, stream, scheme_order, cylindrical);
+                            scheme_order, hll_only, radial_tables);
+  launch_mhd_ct_emf_finish(flags, emf, stream, scheme_order, cylindrical,
+                           radial_tables);
 }
 
 void launch_mhd_face_b_update(MhdField2D<Real>& u, const EmfField2D<Real>& emf,

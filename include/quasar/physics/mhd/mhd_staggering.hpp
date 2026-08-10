@@ -6,9 +6,12 @@
 // y-low face average, and bz_cell(i,j) is a cell average. Thermodynamic
 // operations need a volume-average magnetic field collocated with the other
 // conserved cell averages. A two-face arithmetic mean is only second-order:
-// MP5/MP7 grids therefore use the polynomial-exact 6th/8th-order quadrature
-// implied by their ghost width. A Riemann problem still uses the single CT
-// normal face shared by its two cells; only tangential background components
+// MP5/MP7 grids therefore use polynomial-exact 6th/8th-order quadrature. In
+// Cartesian geometry that width is inferred from the working halo. In the
+// cylindrical radial direction it is selected explicitly by RadialTables so
+// an overpadded MP5 grid still uses its native six-point row; axial stencils
+// remain halo-selected Cartesian rows. A Riemann problem still uses the single
+// CT normal face shared by its two cells; only tangential background components
 // require the matching cell-average-to-face interpolation.
 //
 // The padded storage has no separate upper face for its outermost high ghost
@@ -21,6 +24,7 @@
 
 #include "quasar/core/grid.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 
 namespace quasar::mhd {
 
@@ -64,6 +68,25 @@ QUASAR_HOST_DEVICE inline Real scaled_rational_weighted_sum(
   return numerics::scaled_value_divide(numerator, denominator);
 }
 
+// Radius-dependent rows are stored directly as binary64 coefficients instead
+// of small integer rationals.  Retain the same range-safe reduction and exact
+// constant-field short circuit used by the transverse quadrature kernels.
+template <class Sample>
+QUASAR_HOST_DEVICE inline Real scaled_radial_weighted_sum(
+    const Real* weights, int count, const Sample& sample) {
+  const Real reference = sample(count / 2);
+  bool constant = true;
+  numerics::ScaledProductQuotientAccumulator<8> sum;
+  for (int k = 0; k < count; ++k) {
+    const Real value = sample(k);
+    constant = constant && value == reference;
+    numerics::append_scaled_product_quotient(
+        sum, weights[k], value, Real{1}, Real{1});
+  }
+  return constant ? reference
+                  : numerics::finish_scaled_product_quotient_sum(sum);
+}
+
 QUASAR_HOST_DEVICE inline int collocation_width(int extent, int nghost) {
   const int requested = (nghost >= 4) ? 8 : (nghost >= 3) ? 6 :
                         (nghost >= 2) ? 4 : 2;
@@ -104,7 +127,8 @@ QUASAR_HOST_DEVICE inline Real axis_sample(const Grid2D& g, const T* face,
 template <class T>
 QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real one_sided_face_integral(
     const Grid2D& g, const T* face, int axis, int fixed, int start,
-    int width, int cell) {
+    int width, int cell, bool radial_weighted = false,
+    bool preserve_constant = false) {
   constexpr Real xq[4] = {
       Real{0.0694318442029737124}, Real{0.3300094782075718676},
       Real{0.6699905217924281324}, Real{0.9305681557970262876}};
@@ -112,6 +136,25 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real one_sided_face_integr
       Real{0.1739274225687269287}, Real{0.3260725774312730713},
       Real{0.3260725774312730713}, Real{0.1739274225687269287}};
   const int relative_cell = cell - start;
+  if (preserve_constant) {
+    const Real reference = axis_sample(g, face, axis, start, fixed);
+    bool constant = true;
+    for (int k = 1; k < width; ++k) {
+      constant = constant &&
+          axis_sample(g, face, axis, start + k, fixed) == reference;
+    }
+    if (constant) return reference;
+  }
+  Real radial_normalization = Real{1};
+  Real radial_weight[4] = {wq[0], wq[1], wq[2], wq[3]};
+  if (radial_weighted) {
+    radial_normalization = Real{0};
+    const Real edge_rho = g.r_at_edge(cell) / g.dx();
+    for (int q = 0; q < 4; ++q) {
+      radial_weight[q] = wq[q] * fabs(edge_rho + xq[q]);
+      radial_normalization += radial_weight[q];
+    }
+  }
   // Flatten all four barycentric interpolants and Gauss weights into one
   // reduction.  Computing numerator/denominator at each point first can
   // overflow the numerator, while summing the four already-rounded point
@@ -129,7 +172,9 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real one_sided_face_integr
     const Real denominator =
         numerics::finish_scaled_product_quotient_sum(denominator_sum);
     for (int k = 0; k < width; ++k) {
-      const Real weighted_basis = wq[q] * barycentric_weight(width, k);
+      const Real weighted_basis =
+          (radial_weight[q] / radial_normalization) *
+          barycentric_weight(width, k);
       numerics::append_scaled_product_quotient(
           integral, weighted_basis,
           axis_sample(g, face, axis, start + k, fixed),
@@ -141,10 +186,14 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real one_sided_face_integr
 
 template <class T>
 QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real face_samples_to_cell_average(
-    const Grid2D& g, const T* face, int axis, int cell, int fixed) {
+    const Grid2D& g, const T* face, int axis, int cell, int fixed,
+    numerics::RadialTablesView radial_tables = {}) {
   const int n = axis == 0 ? g.nx : g.ny;
   const int extent = n + 2 * g.nghost;
-  const int width = collocation_width(extent, g.nghost);
+  const bool radial_weighted = axis == 0 && radial_tables.active != 0;
+  const int width = radial_weighted
+      ? radial_tables.collocation_width
+      : collocation_width(extent, g.nghost);
   const int lo = -g.nghost;
   const int hi = n + g.nghost - 1;
   if (width == 1) return axis_sample(g, face, axis, cell, fixed);
@@ -152,6 +201,14 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real face_samples_to_cell_
   const int left = width / 2 - 1;
   const int centered_start = cell - left;
   if (centered_start >= lo && centered_start + width - 1 <= hi) {
+    if (axis == 0 && radial_tables.active != 0 &&
+        radial_tables.contains(cell) &&
+        radial_tables.collocation_width == width) {
+      return scaled_radial_weighted_sum(
+          radial_tables.r4_row(cell), width, [&](int k) {
+            return axis_sample(g, face, axis, centered_start + k, fixed);
+          });
+    }
     if (width == 8) {
       // Exact through degree seven. The third coefficient is -9531/120960;
       // -9504 would not even preserve constants.
@@ -181,7 +238,9 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real face_samples_to_cell_
   int start = centered_start;
   if (start < lo) start = lo;
   if (start + width - 1 > hi) start = hi - width + 1;
-  return one_sided_face_integral(g, face, axis, fixed, start, width, cell);
+  return one_sided_face_integral(
+      g, face, axis, fixed, start, width, cell,
+      radial_weighted, radial_tables.active != 0);
 }
 
 // Bounded first-order Godunov collocation used only by the low-order positivity
@@ -209,11 +268,39 @@ template <class T>
 QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real cell_bx(
                                        const Grid2D& g, const T* bx_face,
                                        int i, int j,
+                                       numerics::RadialTablesView radial_tables,
                                        int collocation_order = 0) {
+  (void)radial_tables;
   if (collocation_order == 1) {
     return detail::low_order_face_to_cell_average(g, bx_face, 0, i, j);
   }
-  return detail::face_samples_to_cell_average(g, bx_face, 0, i, j);
+  return detail::face_samples_to_cell_average(
+      g, bx_face, 0, i, j, radial_tables);
+}
+
+template <class T>
+QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real cell_by(
+                                       const Grid2D& g, const T* by_face,
+                                       int i, int j,
+                                       numerics::RadialTablesView radial_tables,
+                                       int collocation_order = 0) {
+  if (collocation_order == 1) {
+    return detail::low_order_face_to_cell_average(g, by_face, 1, j, i);
+  }
+  return detail::face_samples_to_cell_average(
+      g, by_face, 1, j, i, radial_tables);
+}
+
+// Compatibility overloads deliberately select an inactive view.  Cartesian
+// callers therefore retain the exact pre-table arithmetic until they opt into
+// the cylindrical overload above.
+template <class T>
+QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real cell_bx(
+                                       const Grid2D& g, const T* bx_face,
+                                       int i, int j,
+                                       int collocation_order = 0) {
+  return cell_bx(g, bx_face, i, j, numerics::RadialTablesView{},
+                 collocation_order);
 }
 
 template <class T>
@@ -221,10 +308,8 @@ QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline Real cell_by(
                                        const Grid2D& g, const T* by_face,
                                        int i, int j,
                                        int collocation_order = 0) {
-  if (collocation_order == 1) {
-    return detail::low_order_face_to_cell_average(g, by_face, 1, j, i);
-  }
-  return detail::face_samples_to_cell_average(g, by_face, 1, j, i);
+  return cell_by(g, by_face, i, j, numerics::RadialTablesView{},
+                 collocation_order);
 }
 
 template <class T>
@@ -240,7 +325,8 @@ template <class T>
 QUASAR_HOST_DEVICE inline numerics::MhdState load_cell_state(
     const Grid2D& g, const T* rho, const T* mx, const T* my, const T* mz,
     const T* energy, const T* bx_face, const T* by_face, const T* bz_cell,
-    int i, int j, int collocation_order = 0) {
+    int i, int j, numerics::RadialTablesView radial_tables,
+    int collocation_order = 0) {
   const std::size_t k = g.index(i, j);
   numerics::MhdState s;
   s.rho = static_cast<Real>(rho[k]);
@@ -248,22 +334,43 @@ QUASAR_HOST_DEVICE inline numerics::MhdState load_cell_state(
   s.my = static_cast<Real>(my[k]);
   s.mz = static_cast<Real>(mz[k]);
   s.energy = static_cast<Real>(energy[k]);
-  s.bx = cell_bx(g, bx_face, i, j, collocation_order);
-  s.by = cell_by(g, by_face, i, j, collocation_order);
+  s.bx = cell_bx(g, bx_face, i, j, radial_tables, collocation_order);
+  s.by = cell_by(g, by_face, i, j, radial_tables, collocation_order);
   s.bz = static_cast<Real>(bz_cell[k]);
   return s;
+}
+
+template <class T>
+QUASAR_HOST_DEVICE inline numerics::MhdState load_cell_state(
+    const Grid2D& g, const T* rho, const T* mx, const T* my, const T* mz,
+    const T* energy, const T* bx_face, const T* by_face, const T* bz_cell,
+    int i, int j, int collocation_order = 0) {
+  return load_cell_state(
+      g, rho, mx, my, mz, energy, bx_face, by_face, bz_cell, i, j,
+      numerics::RadialTablesView{}, collocation_order);
 }
 
 // Cell-centred B0 for the split formulation.
 template <class T>
 QUASAR_HOST_DEVICE inline numerics::MhdBackground load_cell_background(
     const Grid2D& g, const T* b0x_face, const T* b0y_face,
-    const T* b0z_cell, int i, int j, int collocation_order = 0) {
+    const T* b0z_cell, int i, int j,
+    numerics::RadialTablesView radial_tables,
+    int collocation_order = 0) {
   numerics::MhdBackground b0;
-  b0.b0x = cell_bx(g, b0x_face, i, j, collocation_order);
-  b0.b0y = cell_by(g, b0y_face, i, j, collocation_order);
+  b0.b0x = cell_bx(g, b0x_face, i, j, radial_tables, collocation_order);
+  b0.b0y = cell_by(g, b0y_face, i, j, radial_tables, collocation_order);
   b0.b0z = static_cast<Real>(b0z_cell[g.index(i, j)]);
   return b0;
+}
+
+template <class T>
+QUASAR_HOST_DEVICE inline numerics::MhdBackground load_cell_background(
+    const Grid2D& g, const T* b0x_face, const T* b0y_face,
+    const T* b0z_cell, int i, int j, int collocation_order = 0) {
+  return load_cell_background(
+      g, b0x_face, b0y_face, b0z_cell, i, j,
+      numerics::RadialTablesView{}, collocation_order);
 }
 
 // Interpolate cell averages to the face between cells face-1 and face. The
@@ -271,7 +378,9 @@ QUASAR_HOST_DEVICE inline numerics::MhdBackground load_cell_background(
 template <class CellSample>
 QUASAR_HOST_DEVICE inline Real cell_averages_to_face(
     const Grid2D& g, int axis, int face, CellSample sample,
+    numerics::RadialTablesView radial_tables,
     int collocation_order = 0) {
+  (void)radial_tables;
   const int n = axis == 0 ? g.nx : g.ny;
   const int lo = -g.nghost;
   const int hi = n + g.nghost - 1;
@@ -285,8 +394,18 @@ QUASAR_HOST_DEVICE inline Real cell_averages_to_face(
           return sample(k == 0 ? left : right);
         });
   }
-  const int width = detail::collocation_width(n + 2 * g.nghost, g.nghost);
+  const int width = axis == 0 && radial_tables.active != 0
+      ? radial_tables.collocation_width
+      : detail::collocation_width(n + 2 * g.nghost, g.nghost);
   const int start = face - width / 2;
+  if (axis == 0 && radial_tables.active != 0 &&
+      radial_tables.contains(face) &&
+      radial_tables.collocation_width == width &&
+      start >= lo && start + width - 1 <= hi) {
+    return detail::scaled_radial_weighted_sum(
+        radial_tables.r5_row(face), width,
+        [&](int k) { return sample(start + k); });
+  }
   if (width == 8 && start >= lo && start + 7 <= hi) {
     return detail::scaled_rational_weighted_sum(
         detail::kCellToFace8, Real{840}, [&](int k) {
@@ -317,6 +436,14 @@ QUASAR_HOST_DEVICE inline Real cell_averages_to_face(
       });
 }
 
+template <class CellSample>
+QUASAR_HOST_DEVICE inline Real cell_averages_to_face(
+    const Grid2D& g, int axis, int face, CellSample sample,
+    int collocation_order = 0) {
+  return cell_averages_to_face(
+      g, axis, face, sample, numerics::RadialTablesView{}, collocation_order);
+}
+
 // B0 collocated with a directional Riemann face. The normal component is the
 // exact single staggered CT face. Tangential components use the order-matched
 // cell-average-to-face interpolation above.
@@ -324,26 +451,38 @@ template <class T>
 QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline numerics::MhdBackground
 load_interface_background(
     const Grid2D& g, int dir, const T* b0x_face, const T* b0y_face,
-    const T* b0z_cell, int i, int j, int collocation_order = 0) {
+    const T* b0z_cell, int i, int j,
+    numerics::RadialTablesView radial_tables,
+    int collocation_order = 0) {
   numerics::MhdBackground b0;
   if (dir == 0) {
     b0.b0x = static_cast<Real>(b0x_face[g.index(i, j)]);
     b0.b0y = cell_averages_to_face(g, 0, i, [&](int ii) {
-      return cell_by(g, b0y_face, ii, j, collocation_order);
-    }, collocation_order);
+      return cell_by(g, b0y_face, ii, j, radial_tables, collocation_order);
+    }, radial_tables, collocation_order);
     b0.b0z = cell_averages_to_face(g, 0, i, [&](int ii) {
       return static_cast<Real>(b0z_cell[g.index(ii, j)]);
-    }, collocation_order);
+    }, radial_tables, collocation_order);
   } else {
     b0.b0x = cell_averages_to_face(g, 1, j, [&](int jj) {
-      return cell_bx(g, b0x_face, i, jj, collocation_order);
-    }, collocation_order);
+      return cell_bx(g, b0x_face, i, jj, radial_tables, collocation_order);
+    }, radial_tables, collocation_order);
     b0.b0y = static_cast<Real>(b0y_face[g.index(i, j)]);
     b0.b0z = cell_averages_to_face(g, 1, j, [&](int jj) {
       return static_cast<Real>(b0z_cell[g.index(i, jj)]);
-    }, collocation_order);
+    }, radial_tables, collocation_order);
   }
   return b0;
+}
+
+template <class T>
+QUASAR_HOST_DEVICE QUASAR_MHD_STAGGER_NOINLINE inline numerics::MhdBackground
+load_interface_background(
+    const Grid2D& g, int dir, const T* b0x_face, const T* b0y_face,
+    const T* b0z_cell, int i, int j, int collocation_order = 0) {
+  return load_interface_background(
+      g, dir, b0x_face, b0y_face, b0z_cell, i, j,
+      numerics::RadialTablesView{}, collocation_order);
 }
 
 #undef QUASAR_MHD_STAGGER_NOINLINE

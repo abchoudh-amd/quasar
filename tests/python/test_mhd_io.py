@@ -177,18 +177,16 @@ class MhdDeckLoadTests(unittest.TestCase):
         _deck(geometry="cylindrical", boundary=axis,
               numerics=_numerics(reconstruction="muscl_minmod")).validate()
 
-    def test_cylindrical_high_order_reconstruction_rejected(self):
+    def test_cylindrical_high_order_reconstruction_accepted(self):
         axis = BoundaryConfig(
             fluid=("axis", "outflow", "periodic", "periodic"),
             field=("axis", "outflow", "periodic", "periodic"))
         for reconstruction in ("mp5", "mp7"):
             with self.subTest(reconstruction=reconstruction):
-                with self.assertRaisesRegex(
-                        ValueError, r"only.*muscl_minmod.*r-weighted"):
-                    _deck(
-                        geometry="cylindrical", boundary=axis,
-                        numerics=_numerics(
-                            reconstruction=reconstruction)).validate()
+                _deck(
+                    geometry="cylindrical", boundary=axis,
+                    numerics=_numerics(
+                        reconstruction=reconstruction)).validate()
 
     def test_annular_cylindrical_geometry_accepted(self):
         annular = BoundaryConfig(

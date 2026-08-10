@@ -30,6 +30,22 @@ _FACE_TO_CELL_CENTERED = {
                 dtype=np.float64) / 120960.0,
 }
 
+# The radius-dependent face-to-ring-average rows are affine in 1/rho, where
+# rho is the target cell-center radius in units of dr.  The first term is the
+# Cartesian row above; the antisymmetric correction integrates one additional
+# factor of the local coordinate from the r dr measure.  These exact rational
+# constants mirror R4 rows built by C++ solve_radial_row(width, -width/2,
+# RadialMomentTarget::cell_average, 0.5).
+_RADIAL_FACE_TO_CELL_CORRECTION = {
+    2: np.array([-1.0, 1.0], dtype=np.float64) / 12.0,
+    4: np.array([1.0, -63.0, 63.0, -1.0], dtype=np.float64) / 720.0,
+    6: np.array([-3.0, 43.0, -1794.0, 1794.0, -43.0, 3.0],
+                dtype=np.float64) / 20160.0,
+    8: np.array([79.0, -1093.0, 9399.0, -325685.0,
+                 325685.0, -9399.0, 1093.0, -79.0],
+                dtype=np.float64) / 3628800.0,
+}
+
 
 def _collocation_width(extent, nghost):
     requested = 8 if nghost >= 4 else 6 if nghost >= 3 else 4 if nghost >= 2 else 2
@@ -39,8 +55,14 @@ def _collocation_width(extent, nghost):
     return 1
 
 
-def _one_sided_face_integral_weights(width, relative_cell):
-    """Weights for an outer-ghost polynomial integral over one logical cell."""
+def _one_sided_face_integral_weights(
+        width, relative_cell, radial_edge_rho=None):
+    """Weights for an outer-ghost polynomial integral over one logical cell.
+
+    ``radial_edge_rho`` is the target cell's low-face radius in units of the
+    radial spacing. When supplied, the Gauss weights include ``abs(r)`` and are
+    renormalized to a ring average, matching the native one-sided closure.
+    """
     xq = np.array([0.0694318442029737124, 0.3300094782075718676,
                    0.6699905217924281324, 0.9305681557970262876])
     wq = np.array([0.1739274225687269287, 0.3260725774312730713,
@@ -52,11 +74,39 @@ def _one_sided_face_integral_weights(width, relative_cell):
         8: np.array([1.0, -7.0, 21.0, -35.0, 35.0, -21.0, 7.0, -1.0]),
     }[width]
     nodes = np.arange(width, dtype=np.float64)
+    if radial_edge_rho is not None:
+        radial_edge_rho = float(radial_edge_rho)
+        if not np.isfinite(radial_edge_rho):
+            raise ValueError("radial face coordinate must be finite")
+        wq = wq * np.abs(radial_edge_rho + xq)
+        normalization = np.sum(wq)
+        if not np.isfinite(normalization) or normalization <= 0.0:
+            raise ValueError("radial cell has invalid ring volume")
+        wq = wq / normalization
+
     result = np.zeros(width, dtype=np.float64)
     for point, weight in zip(xq, wq):
         terms = barycentric / (float(relative_cell) + point - nodes)
         result += weight * terms / np.sum(terms)
     return result
+
+
+def _radial_face_to_cell_centered_weights(width, rho):
+    """Return the centered R4 row for a target cell-center radius ``rho``."""
+    rho = float(rho)
+    if not np.isfinite(rho) or rho == 0.0:
+        raise ValueError("radial cell-center coordinate must be finite and nonzero")
+    try:
+        weights = (_FACE_TO_CELL_CENTERED[width]
+                   + _RADIAL_FACE_TO_CELL_CORRECTION[width] / rho)
+    except KeyError:
+        raise ValueError("radial collocation width must be 2, 4, 6, or 8") \
+            from None
+    weights = np.asarray(weights, dtype=np.float64).copy()
+    # Match the native coefficient engine's binary64 partition-of-unity
+    # invariant under an in-order reduction.
+    weights[-1] = 1.0 - np.sum(weights[:-1])
+    return weights
 
 
 def face_samples_to_cell_average(values, axis, nghost):
@@ -99,6 +149,83 @@ def face_samples_to_cell_average(values, axis, nghost):
             weights, np.moveaxis(slab, axis, 0), axes=(0, 0))
     if not np.all(np.isfinite(out)):
         raise ValueError("face-to-cell magnetic collocation is not representable")
+    return out
+
+
+def radial_face_samples_to_cell_average(
+        values, nghost, origin_x, dr, scheme_order=None):
+    """Collocate radial-face samples into cylindrical ring averages.
+
+    ``values`` uses the solver's padded two-dimensional storage layout, with
+    radial faces along array axis 1. ``origin_x`` is the physical low radial
+    face of interior cell ``i=0`` and ``dr`` is the uniform radial spacing.
+    ``scheme_order`` may be 2, 5, or 7 and selects the native R4 width (4, 6,
+    or 8) independently of an overpadded halo; when omitted, the width is
+    inferred from ``nghost`` for compatibility. Centered rows use the
+    radius-dependent R4 finite-volume moments; outer ghost cells use the same
+    one-sided polynomial closure with ``abs(r)`` folded into its Gauss weights.
+    An axis at ``origin_x == 0`` is supported because the padded negative-radius
+    parity cells use the ``abs(r)`` measure.
+    """
+    arr = _finite_array(values, "radial face samples")
+    if arr.ndim != 2:
+        raise ValueError("radial face samples must be a two-dimensional array")
+    if isinstance(nghost, (bool, np.bool_)) or int(nghost) != nghost:
+        raise ValueError("nghost must be an integer")
+    g = int(nghost)
+    if g < 0:
+        raise ValueError("nghost must be non-negative")
+    origin_x = float(origin_x)
+    dr = float(dr)
+    if not np.isfinite(origin_x) or origin_x < 0.0:
+        raise ValueError("origin_x must be finite and non-negative")
+    if not np.isfinite(dr) or dr <= 0.0:
+        raise ValueError("dr must be finite and positive")
+    origin_rho = origin_x / dr
+    if not np.isfinite(origin_rho):
+        raise ValueError("dimensionless radial origin is not representable")
+
+    extent = arr.shape[1]
+    if scheme_order is None:
+        width = _collocation_width(extent, g)
+    else:
+        if isinstance(scheme_order, (bool, np.bool_)):
+            raise ValueError("scheme_order must be 2, 5, or 7")
+        try:
+            order = int(scheme_order)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("scheme_order must be 2, 5, or 7") from None
+        if order != scheme_order or order not in (2, 5, 7):
+            raise ValueError("scheme_order must be 2, 5, or 7")
+        width = {2: 4, 5: 6, 7: 8}[order]
+        if extent < width:
+            raise ValueError(
+                "radial sample extent is smaller than the scheme stencil")
+    if width == 1:
+        return arr.copy()
+    out = np.empty_like(arr)
+    for q in range(extent):
+        radial_edge_rho = origin_rho + float(q - g)
+        radial_high_rho = radial_edge_rho + 1.0
+        if radial_edge_rho < 0.0 < radial_high_rho:
+            raise ValueError(
+                "a cylindrical cell may not straddle the radial axis")
+        rho = radial_edge_rho + 0.5
+        if rho == 0.0:
+            raise ValueError(
+                "a cylindrical cell may not be centered on the radial axis")
+
+        start = q - (width // 2 - 1)
+        if 0 <= start and start + width <= extent:
+            weights = _radial_face_to_cell_centered_weights(width, rho)
+        else:
+            start = min(max(start, 0), extent - width)
+            weights = _one_sided_face_integral_weights(
+                width, q - start, radial_edge_rho)
+        slab = arr[:, start:start + width]
+        out[:, q] = np.tensordot(weights, slab, axes=(0, 1))
+    if not np.all(np.isfinite(out)):
+        raise ValueError("radial face-to-cell collocation is not representable")
     return out
 
 

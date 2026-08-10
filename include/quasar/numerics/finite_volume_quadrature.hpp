@@ -74,6 +74,31 @@ QUASAR_HOST_DEVICE inline ScaledValue transverse_product_correction_scaled(
   return finish_scaled_quaternary_sum_to_value(sum);
 }
 
+// Runtime-count counterpart for radius-dependent Gauss rows stored in a
+// RadialTablesView.  MP5/MP7 use at most four nodes.  The constant-factor
+// invariant is identical to the compile-time Cartesian overload above.
+template <class ASample, class BSample>
+QUASAR_HOST_DEVICE inline ScaledValue transverse_product_correction_scaled(
+    const Real* weights, int count, Real a_mean, Real b_mean,
+    const ASample& a, const BSample& b) {
+  const Real a_reference = a(count / 2);
+  const Real b_reference = b(count / 2);
+  bool a_constant = true;
+  bool b_constant = true;
+  ScaledQuaternaryAccumulator sum;
+  for (int q = 0; q < count; ++q) {
+    const Real aq = a(q);
+    const Real bq = b(q);
+    a_constant = a_constant && aq == a_reference;
+    b_constant = b_constant && bq == b_reference;
+    append_scaled_quaternary_product(sum, weights[q], aq, bq, Real{1});
+  }
+  if (a_constant || b_constant) return {};
+  append_scaled_quaternary_product(
+      sum, Real{-1}, a_mean, b_mean, Real{1});
+  return finish_scaled_quaternary_sum_to_value(sum);
+}
+
 template <int Count, class ASample, class BSample>
 QUASAR_HOST_DEVICE inline Real transverse_product_correction(
     const Real (&weights)[Count], Real a_mean, Real b_mean,

@@ -783,6 +783,67 @@ TEST(MhdBackgroundField,
 }
 
 TEST(MhdBackgroundField,
+     AcceptsCanonicalCurlFreeToroidalFieldOnMappedAnnularGrid) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // This mapping is deliberately hostile to reassociating the canonical
+  // global FMA as a tile-origin FMA followed by a local FMA. At i=0 the two
+  // paths differ by one ulp, even though both describe the same global cell.
+  constexpr Real global_origin = 0x1.c407c7e648000p+36;
+  constexpr Real dr = Real{974626385};
+  constexpr int global_offset = 7231404;
+  const Real local_origin = std::fma(
+      static_cast<Real>(global_offset), dr, global_origin);
+
+  auto cfg = make_config();
+  cfg.geometry = "cylindrical";
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid = quasar::Grid2D::from_cell_spacing(
+      1, 4, dr, Real{1}, local_origin, Real{-2}, /*nghost=*/2);
+  cfg.grid.global_origin_x = global_origin;
+  cfg.grid.global_cell_offset_x = global_offset;
+  cfg.grid.has_global_x_mapping = 1;
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.curl_free = true;
+
+  const auto& g = cfg.grid;
+  ASSERT_NE(g.x_at_cell_center(0), g.r_at_cell_center(0));
+
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_split_state(
+      solver, g, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0phi(n);
+  // This representable C makes every canonical r*(C/r) product exactly the
+  // same dyadic value over the two checked radial faces. The one-ulp local
+  // coordinate drift above changes that product and therefore reproduces the
+  // historical false curl rejection without relying on a tolerance.
+  constexpr Real toroidal_flux = 0x1.29bbfebdabd46p+94;
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      b0phi[g.index(i, j)] =
+          toroidal_flux / g.r_at_cell_center(i);
+    }
+  }
+  ASSERT_EQ(g.r_at_cell_center(0) * b0phi[g.index(0, 0)], toroidal_flux);
+  ASSERT_NE(g.x_at_cell_center(0) * b0phi[g.index(0, 0)], toroidal_flux);
+
+  solver.seed_background("b0x", zero);
+  solver.seed_background("b0y", zero);
+  solver.seed_background("b0z", b0phi);
+
+  Real dt = Real{0};
+  EXPECT_NO_THROW(dt = solver.cfl_limit());
+  EXPECT_TRUE(std::isfinite(dt));
+  EXPECT_GT(dt, Real{0});
+}
+
+TEST(MhdBackgroundField,
      CylindricalExplicitVacuumBackgroundHasNoSpuriousSelfForce) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 

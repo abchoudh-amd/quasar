@@ -1,16 +1,17 @@
-// RED-phase tests for the positivity (troubled-cell) limiter.
+// Regression tests for the positivity (troubled-cell) limiter.
 //
-// Post-port contract: "troubled_cell" is a thin launcher over the device floors
-// kernel (quasar::mhd::launch_mhd_apply_floors). The OBSERVABLE floor semantics
-// are unchanged from the host implementation, so these tests re-pin the floor
-// behavior at the field level after apply() and guard the port.
+// "troubled_cell" launches the explicit device-floor utility from apply() and
+// evaluates conservative retry bounds through admissible_fraction(). These
+// tests pin both contracts, including geometry-matched magnetic collocation.
 //
 // Targets the contract in include/quasar/numerics/positivity_limiter.hpp:
 //
 //   class IPositivityLimiter {
 //    public: virtual ~IPositivityLimiter() = default;
 //     virtual void apply(quasar::mhd::MhdField2D<Real>& u, Real rho_floor,
-//                        Real p_floor, Real gamma) const = 0;
+//                        Real p_floor, Real gamma,
+//                        int collocation_order = 0,
+//                        RadialTablesView radial_tables = {}) const = 0;
 //   };
 //
 // Registry name "troubled_cell", obtained via
@@ -36,6 +37,7 @@
 
 #include "quasar/numerics/positivity_limiter.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/registry.hpp"
@@ -174,6 +176,85 @@ TEST(MhdPositivityLimiter, AdmissibleFractionAcceptsExtremeRepresentableField) {
   const Real theta = make_limiter()->admissible_fraction(
       base, candidate, Real{0}, Real{0}, gamma);
   EXPECT_EQ(theta, Real{1});
+}
+
+TEST(MhdPositivityLimiter,
+     AdmissibleFractionUsesActiveCylindricalRadialCollocation) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  constexpr Real gamma = Real{5} / Real{3};
+  const Grid2D grid = Grid2D::from_cell_spacing(
+      8, 8, Real{1}, Real{1}, Real{4}, Real{0}, /*halo=*/4);
+  const std::size_t storage_size = grid.storage_size();
+  constexpr int target_radial_cell = 2;
+  constexpr int target_axial_cell = 3;
+  const std::size_t target =
+      grid.index(target_radial_cell, target_axial_cell);
+
+  std::vector<Real> density(storage_size, Real{1});
+  std::vector<Real> zero(storage_size, Real{0});
+  std::vector<Real> radial_face_field(storage_size, Real{0});
+  std::vector<Real> base_energy(storage_size, Real{1e3});
+  std::vector<Real> candidate_energy(storage_size, Real{1e3});
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int face = -grid.nghost; face < grid.nx + grid.nghost; ++face) {
+      radial_face_field[grid.index(face, j)] = grid.r_at_edge(face);
+    }
+  }
+
+  const Real cell_center_radius = grid.r_at_cell_center(target_radial_cell);
+  const Real half_width = Real{0.5} * grid.dx();
+  const Real cartesian_cell_field = cell_center_radius;
+  const Real cylindrical_cell_field =
+      cell_center_radius +
+      half_width * half_width / (Real{3} * cell_center_radius);
+  const Real cartesian_magnetic_energy =
+      Real{0.5} * cartesian_cell_field * cartesian_cell_field;
+  const Real cylindrical_magnetic_energy =
+      Real{0.5} * cylindrical_cell_field * cylindrical_cell_field;
+  candidate_energy[target] =
+      Real{0.5} * (cartesian_magnetic_energy +
+                   cylindrical_magnetic_energy);
+  base_energy[target] = cylindrical_magnetic_energy + Real{1};
+
+  ASSERT_NEAR(
+      quasar::mhd::cell_bx(grid, radial_face_field.data(),
+                           target_radial_cell, target_axial_cell),
+      cartesian_cell_field, Real{1e-14});
+  ASSERT_LT(cartesian_magnetic_energy, candidate_energy[target]);
+  ASSERT_LT(candidate_energy[target], cylindrical_magnetic_energy);
+
+  quasar::mhd::MhdField2D<Real> base{grid};
+  quasar::mhd::MhdField2D<Real> candidate{grid};
+  auto seed = [&](quasar::mhd::MhdField2D<Real>& field,
+                  const std::vector<Real>& energy) {
+    field.rho.copy_from_host(density.data(), storage_size);
+    field.mx.copy_from_host(zero.data(), storage_size);
+    field.my.copy_from_host(zero.data(), storage_size);
+    field.mz.copy_from_host(zero.data(), storage_size);
+    field.energy.copy_from_host(energy.data(), storage_size);
+    field.bx_face.copy_from_host(radial_face_field.data(), storage_size);
+    field.by_face.copy_from_host(zero.data(), storage_size);
+    field.bz_cell.copy_from_host(zero.data(), storage_size);
+  };
+  seed(base, base_energy);
+  seed(candidate, candidate_energy);
+
+  auto limiter = make_limiter();
+  const Real inactive_fraction = limiter->admissible_fraction(
+      base, candidate, Real{0}, Real{0}, gamma,
+      /*collocation_order=*/7, quasar::numerics::RadialTablesView{});
+  const quasar::numerics::RadialTables radial_tables{grid, /*scheme_order=*/7};
+  const Real active_fraction = limiter->admissible_fraction(
+      base, candidate, Real{0}, Real{0}, gamma,
+      /*collocation_order=*/7, radial_tables.view());
+
+  const Real expected_active_fraction =
+      (base_energy[target] - cylindrical_magnetic_energy) /
+      (base_energy[target] - candidate_energy[target]);
+  EXPECT_EQ(inactive_fraction, Real{1});
+  EXPECT_GT(active_fraction, Real{0});
+  EXPECT_LT(active_fraction, Real{1});
+  EXPECT_NEAR(active_fraction, expected_active_fraction, Real{1e-13});
 }
 
 // A cell with sub-floor density has its density raised to EXACTLY rho_floor, and

@@ -19,12 +19,16 @@
 // field, the interface/flux scratch, the EMF, the dudt accumulator, the output
 // field) is owned by the solver and passed in by reference; the launch wrappers
 // extract the device pointers (DeviceBuffer::device_ptr()) on the host before
-// dispatch, mirroring the PIC backend convention.
+// dispatch, mirroring the PIC backend convention. A trailing inactive
+// RadialTablesView selects Cartesian coefficients. An active view must match
+// the launch grid and scheme/collocation order, and its owning RadialTables must
+// remain alive until the asynchronous kernel has completed.
 
 #include "quasar/backend/device.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/interface_states.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 
@@ -156,7 +160,8 @@ void launch_mhd_device_halo_unpack(
 void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                             int dir, quasar::numerics::MhdInterfaceStates<Real>& out,
                             int scheme_order, BoundaryFlags4 flags, Real gamma,
-                            stream_t stream, bool rate_only = false);
+                            stream_t stream, bool rate_only = false,
+                            quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- Riemann flux ------------------------------------------------------------
 // Numerical face flux at every interface normal to `dir` from the L/R
@@ -183,7 +188,8 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
                           bool hll_only = false,
                           MhdMomentumFluxParts2D<Real>* momentum_parts = nullptr,
                           int scheme_order = 2,
-                          FaceOwnershipFlags4 ownership = {});
+                          FaceOwnershipFlags4 ownership = {},
+                          quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- Conservative flux difference --------------------------------------------
 // Accumulate the conservative finite-volume face-flux divergence into `dudt`:
@@ -202,7 +208,8 @@ void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
 void launch_mhd_background_stress_correction(
     const MhdBackgroundField<Real>& b0, MhdField2D<Real>& dudt,
     BoundaryFlags4 flags, stream_t stream, bool cylindrical = false,
-    int collocation_order = 0, int scheme_order = 2);
+    int collocation_order = 0, int scheme_order = 2,
+    quasar::numerics::RadialTablesView radial_tables = {});
 
 // Active-background momentum residual.  The two directional face fluxes carry
 // material stress in their momentum slots, while `parts_*` carry a factored
@@ -219,24 +226,30 @@ void launch_mhd_split_momentum_residual(
     const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
     bool cylindrical = false, int collocation_order = 0,
-    int scheme_order = 2);
+    int scheme_order = 2,
+    quasar::numerics::RadialTablesView radial_tables = {});
 
 // Overwrite the cylindrical radial-momentum rate with the pressure-free tensor
 // form in one common-exponent reduction:
 //   -d_r(F_rr) - d_z(F_zr) + (T_phiphi - T_rr)/r.
+// For MP5/MP7 the ring-volume average additionally includes the exact metric
+// defect [<T_rr>_uniform-(F_rr,hi+F_rr,lo)/2]/r. Both uniform-cell tensors are
+// evaluated at recovered tensor Gauss points; inadmissible point states retain
+// the established cell-centred fallback for that cell.
 // The split/static tensor difference is expanded before rounding, so gas
 // pressure and axial-field terms cancel symbolically instead of being
 // reintroduced after they may already have rounded out of an aggregate face
-// flux. The quadrature-expanded active path has at most 64 terms. This launcher
-// is solver-only;
+// flux. The quadrature-expanded active path uses a 192-term conditioned
+// accumulator. This launcher is solver-only;
 // launch_mhd_geometric_source remains the standalone source-term API.
 void launch_mhd_cylindrical_radial_momentum_residual(
     const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
     const MhdField2D<Real>& flux_r, const MhdField2D<Real>& flux_z,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    int collocation_order = 0, int scheme_order = 2,
+    Real gamma, int collocation_order = 0, int scheme_order = 2,
     const MhdMomentumFluxParts2D<Real>* parts_r = nullptr,
-    const MhdMomentumFluxParts2D<Real>* parts_z = nullptr);
+    const MhdMomentumFluxParts2D<Real>* parts_z = nullptr,
+    quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- Constrained-transport EMF -----------------------------------------------
 // Build the corner-staggered EMF (emf.ez_edge at the lower-left corner of cell
@@ -261,16 +274,19 @@ void launch_mhd_ct_emf_prepare(
     const quasar::numerics::MhdInterfaceStates<Real>& ifx,
     const quasar::numerics::MhdInterfaceStates<Real>& ify,
     BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
-    stream_t stream, int scheme_order = 2, bool hll_only = false);
+    stream_t stream, int scheme_order = 2, bool hll_only = false,
+    quasar::numerics::RadialTablesView radial_tables = {});
 void launch_mhd_ct_emf_finish(BoundaryFlags4 flags, EmfField2D<Real>& emf,
                               stream_t stream, int scheme_order = 2,
-                              bool cylindrical = false);
+                              bool cylindrical = false,
+                              quasar::numerics::RadialTablesView radial_tables = {});
 void launch_mhd_ct_emf(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                        const quasar::numerics::MhdInterfaceStates<Real>& ifx,
                        const quasar::numerics::MhdInterfaceStates<Real>& ify,
                        BoundaryFlags4 flags, EmfField2D<Real>& emf, Real gamma,
                        stream_t stream, int scheme_order = 2,
-                       bool cylindrical = false, bool hll_only = false);
+                       bool cylindrical = false, bool hll_only = false,
+                       quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- Face-B update -----------------------------------------------------------
 // Advance the face-staggered in-plane B from the corner Ez by the discrete curl
@@ -320,7 +336,8 @@ void launch_mhd_split_energy_residual(
     const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& actual_rate, BoundaryFlags4 flags, stream_t stream,
     bool cylindrical = false, int collocation_order = 0,
-    int scheme_order = 2);
+    int scheme_order = 2,
+    quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- SSP-RK stage combine ----------------------------------------------------
 // Pointwise Shu-Osher stage combine over all 8 conserved components:
@@ -340,7 +357,9 @@ void launch_mhd_rk_stage(MhdField2D<Real>& out, const MhdField2D<Real>& un,
 // magnetic energy is the perturbation-only 0.5|b|^2, so the floor re-derivation
 // is consistent with the field-split EOS.
 void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                             Real rho_floor, Real p_floor, Real gamma, stream_t stream);
+                             Real rho_floor, Real p_floor, Real gamma,
+                             stream_t stream, int collocation_order = 0,
+                             quasar::numerics::RadialTablesView radial_tables = {});
 
 // Compute the largest global convex fraction theta in [0,1] for which every
 // cell on the segment base + theta*(candidate-base) has rho > rho_floor and
@@ -354,14 +373,15 @@ void launch_mhd_admissible_fraction(
     const MhdField2D<Real>& base, const MhdField2D<Real>& candidate,
     Real rho_floor, Real p_floor, Real gamma,
     backend::DeviceBuffer<Real>& scratch, Real* host_theta, stream_t stream,
-    int collocation_order = 0);
+    int collocation_order = 0,
+    quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- Cylindrical geometric source --------------------------------------------
 // Accumulate the axisymmetric (r,z) geometric source into `dudt`:
 //   dudt += S(u, r)
-// with the radius read from grid.r_at_cell_center(i) = (i+0.5)*dr, which is > 0
-// at every cell center (the innermost cell i=0 is at r = 0.5*dr), so the source
-// is applied at every column including the axis column; only a non-positive /
+// with the radius read from grid.r_at_cell_center(i). On an axis-starting grid
+// this is (i+0.5)*dr, so the innermost cell i=0 is at r = 0.5*dr and the source
+// is applied there like every other column. Only a non-positive /
 // non-finite cell-center radius (which a valid grid never produces) is skipped.
 // The only nonzero component is radial-momentum curvature. Azimuthal momentum
 // is already conservative under its exact int(r^2 dr) flux operator and has no
@@ -372,7 +392,8 @@ void launch_mhd_admissible_fraction(
 void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                                  const MhdBackgroundField<Real>& b0,
                                  Grid2D grid, Real gamma, stream_t stream,
-                                 int collocation_order = 0);
+                                 int collocation_order = 0,
+                                 quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- CFL maximum signal rate -------------------------------------------------
 // Reduce the maximum finite-volume Courant coefficient from the four incident
@@ -431,7 +452,8 @@ void launch_mhd_cfl_max_rate(
     const MhdBackgroundField<Real>& b0, Real gamma,
     backend::DeviceBuffer<Real>& scratch, ScaledCflRate* host_rate,
     stream_t stream, int scheme_order = 2, bool cylindrical = false,
-    BoundaryFlags4 flags = BoundaryFlags4{});
+    BoundaryFlags4 flags = BoundaryFlags4{},
+    quasar::numerics::RadialTablesView radial_tables = {});
 
 // -- Constrained-transport div(B) L-infinity ---------------------------------
 // Reduce the maximum interior |div B| -- the cell-centered divergence of the

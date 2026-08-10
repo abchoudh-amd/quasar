@@ -68,8 +68,11 @@ QUASAR_HOST_DEVICE inline Real median3(Real a, Real b, Real c) {
 // neighbours. We pass the five-point window {vm2,vm1,v0,vp1,vp2} since both MP5
 // and MP7 use the same MP machinery on the central five points.
 // Suresh-Huynh 1997, Section 2.2.
-QUASAR_HOST_DEVICE inline Real mp_limit(Real vl, Real vm2, Real vm1, Real v0,
-                                        Real vp1, Real vp2) {
+QUASAR_HOST_DEVICE inline Real mp_limit(
+    Real vl, Real vm2, Real vm1, Real v0, Real vp1, Real vp2,
+    Real face_pair_left = Real{0.5},
+    Real face_pair_right = Real{0.5},
+    Real face_extrapolation = Real{0.5}) {
   constexpr Real alpha = Real{4};
   constexpr Real eps   = static_cast<Real>(1e-10);
 
@@ -123,9 +126,16 @@ QUASAR_HOST_DEVICE inline Real mp_limit(Real vl, Real vm2, Real vm1, Real v0,
 
   // Candidate bounds (Eqs. 2.24-2.26).
   const Real v_ul = v0 + alpha * d_minus;                          // upper-limit
-  const Real v_av = Real{0.5} * v0 + Real{0.5} * vp1;              // average
+  // The Cartesian midpoint uses (1/2,1/2).  Ring-volume cell averages are not
+  // point samples at the geometric cell centres, so a cylindrical radial face
+  // supplies the two-cell, linear-exact pair from RadialTables instead.
+  const Real v_av = face_pair_left * v0 + face_pair_right * vp1;   // average
   const Real v_md = v_av - Real{0.5} * d_m4_jph;                   // median
-  const Real v_lc = v0 + Real{0.5} * d_minus + (Real{4} / Real{3}) * d_m4_jmh;  // large-curv.
+  // `v_lc` extrapolates the (vm1,v0) slope to this same face.  Its half-cell
+  // factor is a second, orientation-dependent linear moment under |r| dr; R6
+  // supplies it separately from the bracketing pair used by v_av.
+  const Real v_lc = v0 + face_extrapolation * d_minus
+                  + (Real{4} / Real{3}) * d_m4_jmh;  // large-curv.
 
   // Allowed interval [vmin, vmax] (Eqs. 2.24a/b).
   Real vmin = fmax(fmin(fmin(v0, vp1), v_md),
@@ -135,6 +145,35 @@ QUASAR_HOST_DEVICE inline Real mp_limit(Real vl, Real vm2, Real vm1, Real v0,
 
   // Clamp the candidate into the interval via the median construction (Eq. 2.23).
   return median3(vl, vmin, vmax);
+}
+
+// Apply an arbitrary finite-volume cell-average-to-point row while retaining
+// the MP interpolants' range-safe evaluation order: normalize every sample by
+// the largest magnitude, form the short weighted sum, then restore the scale.
+// Cylindrical radial rows vary with radius, so they cannot be encoded as the
+// integer-rational constants used by mp5_interp/mp7_interp below.
+QUASAR_HOST_DEVICE inline Real mp_interp_weighted(
+    const Real* coefficients, const Real* values, int width) {
+  if (coefficients == nullptr || values == nullptr || width <= 0) {
+    return Real{0};
+  }
+  const Real reference = values[width / 2];
+  bool constant = true;
+  Real scale = Real{0};
+  for (int k = 0; k < width; ++k) {
+    constant = constant && values[k] == reference;
+    scale = fmax(scale, fabs(values[k]));
+  }
+  // Besides avoiding needless cancellation, this makes cylindrical free
+  // streams bit-exact even though their binary64 coefficient rows are not
+  // small integer rationals.
+  if (constant) return reference;
+  if (scale == Real{0}) return Real{0};
+  Real sum = Real{0};
+  for (int k = 0; k < width; ++k) {
+    sum += coefficients[k] * (values[k] / scale);
+  }
+  return sum * scale;
 }
 
 // 5th-order LEFT-biased interface reconstruction at the right face of cell v0

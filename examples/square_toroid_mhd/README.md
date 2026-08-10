@@ -105,8 +105,8 @@ and energy density are Pa, velocity is m/s, and magnetic input/output is tesla.
 The shipped pressures are `p_in = 1000 Pa` and `p_out = 100 Pa`.  The projected
 coil reaches about 0.6 T (magnetic pressure of order 10⁵ Pa), so this remains a
 strongly magnetized, low-beta case.  The earlier 1/0.1 Pa values put a
-discontinuous blob at beta of order 10⁻⁶—below the truncation scale
-of the supported cylindrical MUSCL grid—and its discrete evolution exhausted
+discontinuous blob at beta of order 10⁻⁶—below the truncation scale of the
+earlier second-order cylindrical grid—and its discrete evolution exhausted
 positive internal energy at a blob corner.  The current values are the lowest
 tested decade with a comfortable positive-pressure margin through all 400
 steps; they do not weaken the magnet or relax the conservative positivity
@@ -135,12 +135,12 @@ PYTHONPATH=build/hip-gfx942-release/python \
   python -m quasar.mhd.cli run examples/square_toroid_mhd/input.yaml --log-every 50
 ```
 
-The cylindrical run uses `muscl_minmod` and is second-order in space. MP5/MP7
-currently use Cartesian finite-volume moments and are rejected for radial
-ring-volume averages until radius-weighted high-order moments are implemented.
-The background loader constructs the padded corner grid after the solver has
-selected its reconstruction halo, so changes to the domain or reconstruction do
-not require a matching coil-grid edit.
+The cylindrical run uses MP7. Its radial stencils use finite-volume moments
+weighted by the annular `R dR` measure, while its vertical stencils retain the
+Cartesian coefficients. MP7 selects a four-cell reconstruction halo
+automatically. The background loader constructs the padded corner grid only
+after the solver has selected that actual halo, so the switch from MUSCL's two
+ghost cells to MP7's four requires no matching coil-grid edit.
 
 ## Output
 

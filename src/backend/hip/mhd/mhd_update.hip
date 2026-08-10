@@ -125,7 +125,8 @@ __device__ inline Real background_component(const MhdBackground& bg, int q) {
 __device__ inline MhdBackground mapped_face_background(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
     const double* b0x, const double* b0y, const double* b0z,
-    int i, int j, int collocation_order) {
+    int i, int j, int collocation_order,
+    quasar::numerics::RadialTablesView radial_tables = {}) {
   if (dir == 0 && i == g.nx && flags.side[0] == 0 && flags.side[1] == 0) {
     i = 0;
   }
@@ -133,7 +134,7 @@ __device__ inline MhdBackground mapped_face_background(
     j = 0;
   }
   return quasar::mhd::load_interface_background(
-      g, dir, b0x, b0y, b0z, i, j, collocation_order);
+      g, dir, b0x, b0y, b0z, i, j, radial_tables, collocation_order);
 }
 
 template <int Capacity>
@@ -185,6 +186,7 @@ struct CrossStressFace {
   MhdBackground average_cross_b{};
   MhdBackground point_background[4]{};
   MhdBackground point_cross_b[4]{};
+  Real point_weight[4]{};
   int point_count{};
 };
 
@@ -196,7 +198,8 @@ __device__ inline MhdBackground load_cross_b_point(
 __device__ inline MhdBackground mapped_point_face_background(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
     const double* b0x, const double* b0y, const double* b0z,
-    int i, int j, int scheme_order, int node) {
+    int i, int j, int scheme_order, int node,
+    quasar::numerics::RadialTablesView radial_tables = {}) {
   if (dir == 0 && i == g.nx && flags.side[0] == 0 && flags.side[1] == 0) {
     i = 0;
   }
@@ -204,13 +207,36 @@ __device__ inline MhdBackground mapped_point_face_background(
     j = 0;
   }
   const auto component = [&](int component_index) {
+    if (dir == 1 && radial_tables.active != 0 &&
+        radial_tables.contains(i)) {
+      const int width = scheme_order >= 7 ? 7 : 5;
+      const Real* weights = radial_tables.r2_row(i, node);
+      const MhdBackground centre = mapped_face_background(
+          g, flags, dir, b0x, b0y, b0z, i, j,
+          /*collocation_order=*/0, radial_tables);
+      const Real reference = background_component(centre, component_index);
+      bool constant = true;
+      quasar::numerics::ScaledProductQuotientAccumulator<8> sum;
+      for (int k = 0; k < width; ++k) {
+        const int offset = k - width / 2;
+        const MhdBackground value = mapped_face_background(
+            g, flags, dir, b0x, b0y, b0z, i + offset, j,
+            /*collocation_order=*/0, radial_tables);
+        const Real sample = background_component(value, component_index);
+        constant = constant && sample == reference;
+        quasar::numerics::append_scaled_product_quotient(
+            sum, weights[k], sample, Real{1}, Real{1});
+      }
+      return constant ? reference
+          : quasar::numerics::finish_scaled_product_quotient_sum(sum);
+    }
     return quasar::mhd::detail::cell_quadrature_point_value(
         scheme_order, node, [&](int offset) {
           const int is = dir == 0 ? i : i + offset;
           const int js = dir == 0 ? j + offset : j;
           const MhdBackground value = quasar::mhd::load_interface_background(
               g, dir, b0x, b0y, b0z, is, js,
-              /*collocation_order=*/0);
+              radial_tables, /*collocation_order=*/0);
           return background_component(value, component_index);
         });
   };
@@ -221,10 +247,12 @@ __device__ inline CrossStressFace load_cross_stress_face(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
     const double* b0x, const double* b0y, const double* b0z,
     int i, int j, int collocation_order, int scheme_order,
-    const CrossBPointView& cross_b, std::size_t k) {
+    const CrossBPointView& cross_b, std::size_t k,
+    quasar::numerics::RadialTablesView radial_tables = {}) {
   CrossStressFace face;
   face.average_background = mapped_face_background(
-      g, flags, dir, b0x, b0y, b0z, i, j, collocation_order);
+      g, flags, dir, b0x, b0y, b0z, i, j, collocation_order,
+      radial_tables);
   face.average_cross_b = load_cross_b_point(cross_b, 0, k);
   if ((scheme_order != 5 && scheme_order != 7) ||
       cross_b.quadrature_valid[k] == 0) {
@@ -233,8 +261,15 @@ __device__ inline CrossStressFace load_cross_stress_face(
   face.point_count = scheme_order == 5 ? 3 : 4;
   for (int q = 0; q < face.point_count; ++q) {
     face.point_background[q] = mapped_point_face_background(
-        g, flags, dir, b0x, b0y, b0z, i, j, scheme_order, q);
+        g, flags, dir, b0x, b0y, b0z, i, j, scheme_order, q,
+        radial_tables);
     face.point_cross_b[q] = load_cross_b_point(cross_b, q, k);
+    face.point_weight[q] = dir == 1 && radial_tables.active != 0 &&
+            radial_tables.contains(i)
+        ? radial_tables.r3_row(i)[q]
+        : face.point_count == 3
+              ? quasar::numerics::kMp5TransverseGaussWeights[q]
+              : quasar::numerics::kMp7TransverseGaussWeights[q];
   }
   return face;
 }
@@ -259,9 +294,7 @@ __device__ inline void append_cross_momentum_stress(
     int normal, int momentum, Real coefficient, Real d0, Real d1) {
   if (face.point_count != 0) {
     for (int q = 0; q < face.point_count; ++q) {
-      const Real weight = face.point_count == 3
-          ? quasar::numerics::kMp5TransverseGaussWeights[q]
-          : quasar::numerics::kMp7TransverseGaussWeights[q];
+      const Real weight = face.point_weight[q];
       if (normal == momentum) {
         for (int component = 0; component < 3; ++component) {
           const Real sign = component == normal ? Real{-1} : Real{1};
@@ -308,21 +341,31 @@ __device__ inline void append_cross_momentum_stress(
 struct BackgroundStressFace {
   MhdBackground average{};
   MhdBackground point[4]{};
+  Real point_weight[4]{};
   int point_count{};
 };
 
 __device__ inline BackgroundStressFace load_background_stress_face(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int dir,
     const double* b0x, const double* b0y, const double* b0z,
-    int i, int j, int collocation_order, int scheme_order) {
+    int i, int j, int collocation_order, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables = {}) {
   BackgroundStressFace face;
   face.average = mapped_face_background(
-      g, flags, dir, b0x, b0y, b0z, i, j, collocation_order);
+      g, flags, dir, b0x, b0y, b0z, i, j, collocation_order,
+      radial_tables);
   if (scheme_order != 5 && scheme_order != 7) return face;
   face.point_count = scheme_order == 5 ? 3 : 4;
   for (int q = 0; q < face.point_count; ++q) {
     face.point[q] = mapped_point_face_background(
-        g, flags, dir, b0x, b0y, b0z, i, j, scheme_order, q);
+        g, flags, dir, b0x, b0y, b0z, i, j, scheme_order, q,
+        radial_tables);
+    face.point_weight[q] = dir == 1 && radial_tables.active != 0 &&
+            radial_tables.contains(i)
+        ? radial_tables.r3_row(i)[q]
+        : face.point_count == 3
+              ? quasar::numerics::kMp5TransverseGaussWeights[q]
+              : quasar::numerics::kMp7TransverseGaussWeights[q];
   }
   return face;
 }
@@ -339,9 +382,7 @@ __device__ inline void append_background_momentum_stress(
     Real coefficient, Real d0, Real d1) {
   if (face.point_count != 0) {
     for (int q = 0; q < face.point_count; ++q) {
-      const Real weight = face.point_count == 3
-          ? quasar::numerics::kMp5TransverseGaussWeights[q]
-          : quasar::numerics::kMp7TransverseGaussWeights[q];
+      const Real weight = face.point_weight[q];
       if (normal == momentum) {
         for (int component = 0; component < 3; ++component) {
           const Real sign = component == normal ? Real{-0.5} : Real{0.5};
@@ -372,6 +413,74 @@ __device__ inline void append_background_momentum_stress(
       -coefficient * background_component(face.average, momentum), d0, d1);
 }
 
+// Return <value^2>_dr,dz - mean^2 over the tensor Gauss rule. The point
+// recovery still uses the active radial R2 rows, but the radial integration is
+// deliberately uniform: the cylindrical curvature source carries a 1/r that
+// cancels the ring measure. A constant field returns bit-zero so adding the
+// correction preserves the existing free-stream arithmetic exactly.
+template <class Sample>
+__device__ inline quasar::numerics::ScaledValue
+cell_uniform_square_correction_scaled(
+    int order, Real mean, const Sample& sample) {
+  const int count = order == 5 ? 3 : 4;
+  const Real reference = sample(count / 2, count / 2);
+  bool constant = reference == mean;
+  quasar::numerics::ScaledQuaternaryAccumulator sum;
+  for (int qy = 0; qy < count; ++qy) {
+    const Real wy = order == 5
+        ? quasar::numerics::kMp5TransverseGaussWeights[qy]
+        : quasar::numerics::kMp7TransverseGaussWeights[qy];
+    for (int qx = 0; qx < count; ++qx) {
+      const Real wx = order == 5
+          ? quasar::numerics::kMp5TransverseGaussWeights[qx]
+          : quasar::numerics::kMp7TransverseGaussWeights[qx];
+      const Real value = sample(qx, qy);
+      constant = constant && value == reference;
+      quasar::numerics::append_scaled_quaternary_product(
+          sum, value, value, wx, wy);
+    }
+  }
+  if (constant) return {};
+  quasar::numerics::append_scaled_quaternary_product(
+      sum, Real{-1}, mean, mean, Real{1});
+  return quasar::numerics::finish_scaled_quaternary_sum_to_value(sum);
+}
+
+// Append <M0_phiphi>_dr,dz/r_center, where
+// M0_phiphi = 0.5*(B0_r^2+B0_z^2-B0_phi^2).  The 1/r source cancels the ring
+// measure, so both tensor integration weights are Cartesian even though point
+// recovery along r still uses R2.  Mean-square terms plus conditioned
+// corrections preserve the constant-field path exactly.
+template <int Capacity>
+__device__ inline void append_background_azimuthal_stress(
+    quasar::numerics::ScaledProductQuotientAccumulator<Capacity>& sum,
+    quasar::Grid2D g, int i, int j,
+    const double* b0x, const double* b0y, const double* b0z,
+    const MhdBackground& mean, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables, Real radius) {
+  const Real coefficient[3] = {Real{0.5}, Real{0.5}, Real{-0.5}};
+  for (int component = 0; component < 3; ++component) {
+    const Real mean_value = background_component(mean, component);
+    quasar::numerics::append_scaled_product_quotient(
+        sum, mean_value, coefficient[component] * mean_value,
+        radius, Real{1});
+    if (scheme_order == 5 || scheme_order == 7) {
+      const auto point_value = [&](int qx, int qy) {
+        return quasar::mhd::detail::point_cell_background_component(
+            g, i, j, scheme_order, qx, qy, b0x, b0y, b0z,
+            [&](const MhdBackground& value) {
+              return background_component(value, component);
+            }, radial_tables);
+      };
+      const quasar::numerics::ScaledValue correction =
+          cell_uniform_square_correction_scaled(
+              scheme_order, mean_value, point_value);
+      quasar::numerics::append_scaled_value_quotient(
+          sum, correction, coefficient[component], radius, Real{1});
+    }
+  }
+}
+
 // Add -div(F_m(B0)) once per cell.  Both directions, and in cylindrical
 // geometry the radial curvature source, enter the same common-exponent sum for
 // each momentum component.  This prevents a curl-free dominant B0 from leaving
@@ -379,6 +488,7 @@ __device__ inline void append_background_momentum_stress(
 __global__ void QUASAR_LAUNCH_BOUNDS_256 background_stress_correction_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
     int collocation_order, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ b0x,
     const double* __restrict__ b0y, const double* __restrict__ b0z,
     double* __restrict__ dmx, double* __restrict__ dmy,
@@ -387,28 +497,24 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 background_stress_correction_kernel(
   const int j = blockIdx.y * blockDim.y + threadIdx.y;
   if (i >= g.nx || j >= g.ny) return;
   const std::size_t k = g.index(i, j);
-  const MhdBackground xlo = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground xhi = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order);
-  const MhdBackground ylo = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order);
-  const MhdBackground yhi = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order);
+  const BackgroundStressFace xface_lo = load_background_stress_face(
+      g, flags, 0, b0x, b0y, b0z, i, j,
+      collocation_order, scheme_order, radial_tables);
+  const BackgroundStressFace xface_hi = load_background_stress_face(
+      g, flags, 0, b0x, b0y, b0z, i + 1, j,
+      collocation_order, scheme_order, radial_tables);
+  const BackgroundStressFace yface_lo = load_background_stress_face(
+      g, flags, 1, b0x, b0y, b0z, i, j,
+      collocation_order, scheme_order, radial_tables);
+  const BackgroundStressFace yface_hi = load_background_stress_face(
+      g, flags, 1, b0x, b0y, b0z, i, j + 1,
+      collocation_order, scheme_order, radial_tables);
+  const MhdBackground& xlo = xface_lo.average;
+  const MhdBackground& xhi = xface_hi.average;
+  const MhdBackground& ylo = yface_lo.average;
+  const MhdBackground& yhi = yface_hi.average;
 
   if (cylindrical == 0) {
-    const BackgroundStressFace xface_lo = load_background_stress_face(
-        g, flags, 0, b0x, b0y, b0z, i, j,
-        collocation_order, scheme_order);
-    const BackgroundStressFace xface_hi = load_background_stress_face(
-        g, flags, 0, b0x, b0y, b0z, i + 1, j,
-        collocation_order, scheme_order);
-    const BackgroundStressFace yface_lo = load_background_stress_face(
-        g, flags, 1, b0x, b0y, b0z, i, j,
-        collocation_order, scheme_order);
-    const BackgroundStressFace yface_hi = load_background_stress_face(
-        g, flags, 1, b0x, b0y, b0z, i, j + 1,
-        collocation_order, scheme_order);
     const auto component = [&](int momentum) {
       quasar::numerics::ScaledProductQuotientAccumulator<32> sum;
       append_background_momentum_stress(
@@ -430,16 +536,31 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 background_stress_correction_kernel(
   // Radial momentum is completed by the fused dynamic/background kernel. Keep
   // this launch responsible only for the axial and azimuthal static stresses.
   const Real r = g.r_at_cell_center(i);
-  quasar::numerics::ScaledProductQuotientAccumulator<10> axial_sum;
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xhi.b0x, xhi.b0y, g.dx(), Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xlo.b0x, -xlo.b0y, g.dx(), Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xhi.b0x, xhi.b0y, r, Real{2});
-  quasar::numerics::append_scaled_product_quotient(
-      axial_sum, xlo.b0x, xlo.b0y, r, Real{2});
-  append_normal_background_stress(axial_sum, ylo, yhi, 1, g.dy());
+  quasar::numerics::ScaledProductQuotientAccumulator<48> axial_sum;
+  if (scheme_order == 5 || scheme_order == 7) {
+    append_background_momentum_stress(
+        axial_sum, xface_hi, 0, 1, Real{-1}, g.dx(), Real{1});
+    append_background_momentum_stress(
+        axial_sum, xface_lo, 0, 1, Real{1}, g.dx(), Real{1});
+    append_background_momentum_stress(
+        axial_sum, xface_hi, 0, 1, Real{-1}, r, Real{2});
+    append_background_momentum_stress(
+        axial_sum, xface_lo, 0, 1, Real{-1}, r, Real{2});
+    append_background_momentum_stress(
+        axial_sum, yface_hi, 1, 1, Real{-1}, g.dy(), Real{1});
+    append_background_momentum_stress(
+        axial_sum, yface_lo, 1, 1, Real{1}, g.dy(), Real{1});
+  } else {
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xhi.b0x, xhi.b0y, g.dx(), Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xlo.b0x, -xlo.b0y, g.dx(), Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xhi.b0x, xhi.b0y, r, Real{2});
+    quasar::numerics::append_scaled_product_quotient(
+        axial_sum, xlo.b0x, xlo.b0y, r, Real{2});
+    append_normal_background_stress(axial_sum, ylo, yhi, 1, g.dy());
+  }
   dmy[k] += quasar::numerics::finish_scaled_product_quotient_sum(axial_sum);
 
   Real qmetric = Real{0.5} * (g.dx() / r);
@@ -447,22 +568,38 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 background_stress_correction_kernel(
   const Real lo_ratio = Real{1} - qmetric;
   const Real hi_ratio = Real{1} + qmetric;
   const Real moment_norm = Real{1} + qmetric * qmetric / Real{3};
-  quasar::numerics::ScaledProductQuotientAccumulator<4> phi_sum;
-  quasar::numerics::append_scaled_product_quotient(
-      phi_sum, xhi.b0x, xhi.b0z, g.dx(),
-      moment_norm / (hi_ratio * hi_ratio));
-  if (lo_ratio != Real{0}) {
-    quasar::numerics::append_scaled_product_quotient(
-        phi_sum, xlo.b0x, -xlo.b0z, g.dx(),
-        moment_norm / (lo_ratio * lo_ratio));
+  quasar::numerics::ScaledProductQuotientAccumulator<16> phi_sum;
+  if (scheme_order == 5 || scheme_order == 7) {
+    append_background_momentum_stress(
+        phi_sum, xface_hi, 0, 2, -hi_ratio * hi_ratio,
+        g.dx(), moment_norm);
+    if (lo_ratio != Real{0}) {
+      append_background_momentum_stress(
+          phi_sum, xface_lo, 0, 2, lo_ratio * lo_ratio,
+          g.dx(), moment_norm);
+    }
+    append_background_momentum_stress(
+        phi_sum, yface_hi, 1, 2, Real{-1}, g.dy(), Real{1});
+    append_background_momentum_stress(
+        phi_sum, yface_lo, 1, 2, Real{1}, g.dy(), Real{1});
   } else {
-    // Preserve the four-term accumulator shape at the axis without evaluating
-    // moment_norm/0; this face has exactly zero angular-momentum weight.
     quasar::numerics::append_scaled_product_quotient(
-        phi_sum, Real{0}, Real{0}, Real{1}, Real{1});
+        phi_sum, xhi.b0x, xhi.b0z, g.dx(),
+        moment_norm / (hi_ratio * hi_ratio));
+    if (lo_ratio != Real{0}) {
+      quasar::numerics::append_scaled_product_quotient(
+          phi_sum, xlo.b0x, -xlo.b0z, g.dx(),
+          moment_norm / (lo_ratio * lo_ratio));
+    } else {
+      // Preserve the four-term accumulator shape at the axis without
+      // evaluating moment_norm/0; this face has exactly zero
+      // angular-momentum weight.
+      quasar::numerics::append_scaled_product_quotient(
+          phi_sum, Real{0}, Real{0}, Real{1}, Real{1});
+    }
+    append_tangential_background_stress(
+        phi_sum, ylo, yhi, 1, 2, g.dy());
   }
-  append_tangential_background_stress(
-      phi_sum, ylo, yhi, 1, 2, g.dy());
   dmz[k] += quasar::numerics::finish_scaled_product_quotient_sum(phi_sum);
 }
 
@@ -474,6 +611,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 background_stress_correction_kernel(
 __global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
     int collocation_order, int scheme_order, int globally_curl_free,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ b0x, const double* __restrict__ b0y,
     const double* __restrict__ b0z,
     const double* __restrict__ x_hx, const double* __restrict__ x_hy,
@@ -497,38 +635,38 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
 
   const CrossStressFace xface_lo = load_cross_stress_face(
       g, flags, 0, b0x, b0y, b0z, i, j, collocation_order,
-      scheme_order, x_cross, k);
+      scheme_order, x_cross, k, radial_tables);
   const CrossStressFace xface_hi = load_cross_stress_face(
       g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order,
-      scheme_order, x_cross, kx);
+      scheme_order, x_cross, kx, radial_tables);
   const CrossStressFace yface_lo = load_cross_stress_face(
       g, flags, 1, b0x, b0y, b0z, i, j, collocation_order,
-      scheme_order, y_cross, k);
+      scheme_order, y_cross, k, radial_tables);
   const CrossStressFace yface_hi = load_cross_stress_face(
       g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order,
-      scheme_order, y_cross, ky);
+      scheme_order, y_cross, ky, radial_tables);
   const MhdBackground& xlo = xface_lo.average_background;
   const MhdBackground& xhi = xface_hi.average_background;
   const MhdBackground& ylo = yface_lo.average_background;
   const MhdBackground& yhi = yface_hi.average_background;
+  const BackgroundStressFace xbackground_lo =
+      load_background_stress_face(
+          g, flags, 0, b0x, b0y, b0z, i, j,
+          collocation_order, scheme_order, radial_tables);
+  const BackgroundStressFace xbackground_hi =
+      load_background_stress_face(
+          g, flags, 0, b0x, b0y, b0z, i + 1, j,
+          collocation_order, scheme_order, radial_tables);
+  const BackgroundStressFace ybackground_lo =
+      load_background_stress_face(
+          g, flags, 1, b0x, b0y, b0z, i, j,
+          collocation_order, scheme_order, radial_tables);
+  const BackgroundStressFace ybackground_hi =
+      load_background_stress_face(
+          g, flags, 1, b0x, b0y, b0z, i, j + 1,
+          collocation_order, scheme_order, radial_tables);
 
   if (cylindrical == 0) {
-    const BackgroundStressFace xbackground_lo =
-        load_background_stress_face(
-            g, flags, 0, b0x, b0y, b0z, i, j,
-            collocation_order, scheme_order);
-    const BackgroundStressFace xbackground_hi =
-        load_background_stress_face(
-            g, flags, 0, b0x, b0y, b0z, i + 1, j,
-            collocation_order, scheme_order);
-    const BackgroundStressFace ybackground_lo =
-        load_background_stress_face(
-            g, flags, 1, b0x, b0y, b0z, i, j,
-            collocation_order, scheme_order);
-    const BackgroundStressFace ybackground_hi =
-        load_background_stress_face(
-            g, flags, 1, b0x, b0y, b0z, i, j + 1,
-            collocation_order, scheme_order);
     const auto cartesian_component = [&](int momentum,
                                          const double* x_h,
                                          const double* x_w,
@@ -582,7 +720,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
   // Cylindrical axial momentum: annular radial divergence plus ordinary axial
   // divergence, with the matching static stresses in the same reduction.
   const Real r = g.r_at_cell_center(i);
-  quasar::numerics::ScaledProductQuotientAccumulator<96> axial_sum;
+  quasar::numerics::ScaledProductQuotientAccumulator<128> axial_sum;
   for (int channel = 0; channel < 2; ++channel) {
     const double* radial = channel == 0 ? x_hy : x_wy;
     append_flux_part(axial_sum, radial[kx], Real{-1}, g.dx(), Real{1});
@@ -612,15 +750,36 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
       axial_sum, yface_lo, 1, 1, Real{1},
       g.dy(), Real{1});
   if (globally_curl_free == 0) {
-    quasar::numerics::append_scaled_product_quotient(
-        axial_sum, xhi.b0x, xhi.b0y, g.dx(), Real{1});
-    quasar::numerics::append_scaled_product_quotient(
-        axial_sum, xlo.b0x, -xlo.b0y, g.dx(), Real{1});
-    quasar::numerics::append_scaled_product_quotient(
-        axial_sum, xhi.b0x, xhi.b0y, r, Real{2});
-    quasar::numerics::append_scaled_product_quotient(
-        axial_sum, xlo.b0x, xlo.b0y, r, Real{2});
-    append_normal_background_stress(axial_sum, ylo, yhi, 1, g.dy());
+    if (scheme_order == 5 || scheme_order == 7) {
+      append_background_momentum_stress(
+          axial_sum, xbackground_hi, 0, 1, Real{-1},
+          g.dx(), Real{1});
+      append_background_momentum_stress(
+          axial_sum, xbackground_lo, 0, 1, Real{1},
+          g.dx(), Real{1});
+      append_background_momentum_stress(
+          axial_sum, xbackground_hi, 0, 1, Real{-1},
+          r, Real{2});
+      append_background_momentum_stress(
+          axial_sum, xbackground_lo, 0, 1, Real{-1},
+          r, Real{2});
+      append_background_momentum_stress(
+          axial_sum, ybackground_hi, 1, 1, Real{-1},
+          g.dy(), Real{1});
+      append_background_momentum_stress(
+          axial_sum, ybackground_lo, 1, 1, Real{1},
+          g.dy(), Real{1});
+    } else {
+      quasar::numerics::append_scaled_product_quotient(
+          axial_sum, xhi.b0x, xhi.b0y, g.dx(), Real{1});
+      quasar::numerics::append_scaled_product_quotient(
+          axial_sum, xlo.b0x, -xlo.b0y, g.dx(), Real{1});
+      quasar::numerics::append_scaled_product_quotient(
+          axial_sum, xhi.b0x, xhi.b0y, r, Real{2});
+      quasar::numerics::append_scaled_product_quotient(
+          axial_sum, xlo.b0x, xlo.b0y, r, Real{2});
+      append_normal_background_stress(axial_sum, ylo, yhi, 1, g.dy());
+    }
   }
   dmy[k] = quasar::numerics::finish_scaled_product_quotient_sum(axial_sum);
 
@@ -659,16 +818,535 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
       phi_sum, yface_lo, 1, 2, Real{1},
       g.dy(), Real{1});
   if (globally_curl_free == 0) {
-    quasar::numerics::append_scaled_product_quotient(
-        phi_sum, xhi.b0x, xhi.b0z, g.dx(), moment_norm / hi_weight);
-    if (lo_weight != Real{0}) {
+    if (scheme_order == 5 || scheme_order == 7) {
+      append_background_momentum_stress(
+          phi_sum, xbackground_hi, 0, 2, -hi_weight,
+          g.dx(), moment_norm);
+      if (lo_weight != Real{0}) {
+        append_background_momentum_stress(
+            phi_sum, xbackground_lo, 0, 2, lo_weight,
+            g.dx(), moment_norm);
+      }
+      append_background_momentum_stress(
+          phi_sum, ybackground_hi, 1, 2, Real{-1},
+          g.dy(), Real{1});
+      append_background_momentum_stress(
+          phi_sum, ybackground_lo, 1, 2, Real{1},
+          g.dy(), Real{1});
+    } else {
       quasar::numerics::append_scaled_product_quotient(
-          phi_sum, xlo.b0x, -xlo.b0z, g.dx(), moment_norm / lo_weight);
+          phi_sum, xhi.b0x, xhi.b0z, g.dx(), moment_norm / hi_weight);
+      if (lo_weight != Real{0}) {
+        quasar::numerics::append_scaled_product_quotient(
+            phi_sum, xlo.b0x, -xlo.b0z, g.dx(),
+            moment_norm / lo_weight);
+      }
+      append_tangential_background_stress(
+          phi_sum, ylo, yhi, 1, 2, g.dy());
     }
-    append_tangential_background_stress(
-        phi_sum, ylo, yhi, 1, 2, g.dy());
   }
   dmz[k] = quasar::numerics::finish_scaled_product_quotient_sum(phi_sum);
+}
+
+__device__ inline Real uniform_tensor_weight(int order, int qx, int qy) {
+  const Real wx = order == 5
+      ? quasar::numerics::kMp5TransverseGaussWeights[qx]
+      : quasar::numerics::kMp7TransverseGaussWeights[qx];
+  const Real wy = order == 5
+      ? quasar::numerics::kMp5TransverseGaussWeights[qy]
+      : quasar::numerics::kMp7TransverseGaussWeights[qy];
+  return wx * wy;
+}
+
+template <class Sample>
+__device__ inline quasar::numerics::ScaledValue
+cell_uniform_scalar_correction_scaled(
+    int order, Real mean, const Sample& sample) {
+  const int count = order == 5 ? 3 : 4;
+  const Real reference = sample(count / 2, count / 2);
+  bool constant = reference == mean;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real value = sample(qx, qy);
+      constant = constant && value == reference;
+    }
+  }
+  if (constant) return {};
+  quasar::numerics::ScaledQuaternaryAccumulator sum;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real value = sample(qx, qy);
+      quasar::numerics::append_scaled_quaternary_product(
+          sum, value, uniform_tensor_weight(order, qx, qy),
+          Real{1}, Real{1});
+    }
+  }
+  quasar::numerics::append_scaled_quaternary_product(
+      sum, Real{-1}, mean, Real{1}, Real{1});
+  return quasar::numerics::finish_scaled_quaternary_sum_to_value(sum);
+}
+
+template <class Sample>
+__device__ inline quasar::numerics::ScaledValue
+cell_uniform_cached_square_correction_scaled(
+    int order, Real mean, const Sample& sample) {
+  const int count = order == 5 ? 3 : 4;
+  const Real reference = sample(count / 2, count / 2);
+  bool constant = reference == mean;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      constant = constant && sample(qx, qy) == reference;
+    }
+  }
+  if (constant) return {};
+  quasar::numerics::ScaledQuaternaryAccumulator sum;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real value = sample(qx, qy);
+      quasar::numerics::append_scaled_quaternary_product(
+          sum, value, value, uniform_tensor_weight(order, qx, qy),
+          Real{1});
+    }
+  }
+  quasar::numerics::append_scaled_quaternary_product(
+      sum, Real{-1}, mean, mean, Real{1});
+  return quasar::numerics::finish_scaled_quaternary_sum_to_value(sum);
+}
+
+template <class ASample, class BSample>
+__device__ inline quasar::numerics::ScaledValue
+cell_uniform_product_correction_scaled(
+    int order, Real a_mean, Real b_mean,
+    const ASample& a, const BSample& b) {
+  const int count = order == 5 ? 3 : 4;
+  const Real a_reference = a(count / 2, count / 2);
+  const Real b_reference = b(count / 2, count / 2);
+  bool a_constant = a_reference == a_mean;
+  bool b_constant = b_reference == b_mean;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real aq = a(qx, qy);
+      const Real bq = b(qx, qy);
+      a_constant = a_constant && aq == a_reference;
+      b_constant = b_constant && bq == b_reference;
+    }
+  }
+  if ((a_constant && b_constant) ||
+      (a_constant && a_reference == Real{0}) ||
+      (b_constant && b_reference == Real{0})) {
+    return {};
+  }
+  quasar::numerics::ScaledQuaternaryAccumulator sum;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      quasar::numerics::append_scaled_quaternary_product(
+          sum, a(qx, qy), b(qx, qy),
+          uniform_tensor_weight(order, qx, qy), Real{1});
+    }
+  }
+  quasar::numerics::append_scaled_quaternary_product(
+      sum, Real{-1}, a_mean, b_mean, Real{1});
+  return quasar::numerics::finish_scaled_quaternary_sum_to_value(sum);
+}
+
+template <class NumeratorSample, class DenominatorSample>
+__device__ inline quasar::numerics::ScaledValue
+cell_uniform_square_ratio_correction_scaled(
+    int order, Real numerator_mean, Real denominator_mean,
+    const NumeratorSample& numerator,
+    const DenominatorSample& denominator) {
+  const int count = order == 5 ? 3 : 4;
+  const Real numerator_reference = numerator(count / 2, count / 2);
+  const Real denominator_reference = denominator(count / 2, count / 2);
+  bool numerator_constant = numerator_reference == numerator_mean;
+  bool denominator_constant = denominator_reference == denominator_mean;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real numerator_value = numerator(qx, qy);
+      const Real denominator_value = denominator(qx, qy);
+      numerator_constant =
+          numerator_constant && numerator_value == numerator_reference;
+      denominator_constant =
+          denominator_constant && denominator_value == denominator_reference;
+    }
+  }
+  if ((numerator_constant && denominator_constant) ||
+      (numerator_constant && numerator_reference == Real{0})) {
+    return {};
+  }
+  quasar::numerics::ScaledProductQuotientAccumulator<17> sum;
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real numerator_value = numerator(qx, qy);
+      quasar::numerics::append_scaled_triple_product_quotient(
+          sum, numerator_value, numerator_value,
+          uniform_tensor_weight(order, qx, qy), denominator(qx, qy),
+          Real{1});
+    }
+  }
+  quasar::numerics::append_scaled_triple_product_quotient(
+      sum, numerator_mean, numerator_mean, Real{-1},
+      denominator_mean, Real{1});
+  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(sum);
+}
+
+__device__ inline bool finite_admissible_state(
+    const MhdState& state, Real gamma) {
+  if (!(isfinite(state.rho) && state.rho > Real{0} &&
+        isfinite(state.mx) && isfinite(state.my) && isfinite(state.mz) &&
+        isfinite(state.energy) && isfinite(state.bx) &&
+        isfinite(state.by) && isfinite(state.bz))) {
+    return false;
+  }
+  const Real gas_pressure = pressure(state, gamma);
+  return isfinite(gas_pressure) && gas_pressure > Real{0};
+}
+
+__device__ inline bool finite_background(const MhdBackground& background) {
+  return isfinite(background.b0x) && isfinite(background.b0y) &&
+         isfinite(background.b0z);
+}
+
+struct DynamicTensorPointCache {
+  MhdState state[16];
+  MhdBackground background[16];
+};
+
+__device__ inline int dynamic_tensor_point_index(int qx, int qy) {
+  return qy * 4 + qx;
+}
+
+// Recover every tensor point for one cell-average component with a separable
+// transform. The generic one-point helper is convenient elsewhere, but using
+// it independently at all 16 points repeats the same face collocation and
+// stencil loads. Here each 5x5/7x7 cell sample is formed once, all radial Gauss
+// nodes are recovered in one pass, and the axial point rows reuse those
+// intermediates. The reductions intentionally mirror cell_tensor_point_value:
+// radial first, axial second, with the same constant short circuits.
+template <class Sample, class Store>
+__device__ inline void load_dynamic_tensor_component(
+    quasar::Grid2D g, int i, int j, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables,
+    const Sample& sample, const Store& store) {
+  const int count = scheme_order == 5 ? 3 : 4;
+  const int width = scheme_order == 5 ? 5 : 7;
+  const int half_width = width / 2;
+  Real stencil[7 * 7];
+  Real radial_point[7 * 4];
+
+  for (int sy = 0; sy < width; ++sy) {
+    for (int sx = 0; sx < width; ++sx) {
+      stencil[sy * 7 + sx] =
+          sample(sx - half_width, sy - half_width);
+    }
+  }
+  const Real reference = stencil[half_width * 7 + half_width];
+  bool constant = true;
+  for (int sy = 0; sy < width; ++sy) {
+    for (int sx = 0; sx < width; ++sx) {
+      constant = constant && stencil[sy * 7 + sx] == reference;
+    }
+  }
+  if (constant) {
+    for (int qy = 0; qy < count; ++qy) {
+      for (int qx = 0; qx < count; ++qx) {
+        store(dynamic_tensor_point_index(qx, qy), reference);
+      }
+    }
+    return;
+  }
+
+  const bool radial_active =
+      radial_tables.active != 0 && radial_tables.contains(i);
+  for (int sy = 0; sy < width; ++sy) {
+    const Real row_reference = stencil[sy * 7 + half_width];
+    bool row_constant = true;
+    for (int sx = 0; sx < width; ++sx) {
+      row_constant =
+          row_constant && stencil[sy * 7 + sx] == row_reference;
+    }
+    if (row_constant) {
+      for (int qx = 0; qx < count; ++qx) {
+        radial_point[sy * 4 + qx] = row_reference;
+      }
+      continue;
+    }
+    for (int qx = 0; qx < count; ++qx) {
+      if (radial_active) {
+        const Real* weights = radial_tables.r2_row(i, qx);
+        quasar::numerics::ScaledProductQuotientAccumulator<8> sum;
+        for (int sx = 0; sx < width; ++sx) {
+          const Real value = stencil[sy * 7 + sx];
+          quasar::numerics::append_scaled_product_quotient(
+              sum, weights[sx], value, Real{1}, Real{1});
+        }
+        radial_point[sy * 4 + qx] =
+            quasar::numerics::finish_scaled_product_quotient_sum(sum);
+      } else {
+        radial_point[sy * 4 + qx] =
+            quasar::mhd::detail::cell_quadrature_point_value(
+                scheme_order, qx, [&](int ox) {
+                  return stencil[sy * 7 + ox + half_width];
+                });
+      }
+    }
+  }
+
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const Real value = quasar::mhd::detail::cell_quadrature_point_value(
+          scheme_order, qy, [&](int oy) {
+            return radial_point[(oy + half_width) * 4 + qx];
+          });
+      store(dynamic_tensor_point_index(qx, qy), value);
+    }
+  }
+}
+
+// A tensor polynomial has no invariant-domain guarantee. Match the transverse
+// HLLD policy: use the MP volume rule only when every recovered point state is
+// admissible, otherwise retain the established cell-centred tensor-difference
+// operator for this cell. Recover each point only once: the two uniform-cell
+// corrections below reuse this cache instead of repeating every component's
+// nested R2/collocation stencil. The global order-1 positivity retry never
+// enters this path because its scheme_order is one.
+__device__ __attribute__((noinline)) bool load_dynamic_tensor_points(
+    quasar::Grid2D g, int i, int j, int scheme_order,
+    int collocation_order, Real gamma,
+    const quasar::mhd::detail::CellStateView& state,
+    int background_active, const double* b0r, const double* b0z,
+    const double* b0phi,
+    quasar::numerics::RadialTablesView radial_tables,
+    DynamicTensorPointCache& cache) {
+  const int count = scheme_order == 5 ? 3 : 4;
+  const auto cell_component = [&](const double* values, const auto& store) {
+    load_dynamic_tensor_component(
+        g, i, j, scheme_order, radial_tables,
+        [&](int ox, int oy) {
+          return static_cast<Real>(values[g.index(i + ox, j + oy)]);
+        }, store);
+  };
+  cell_component(state.rho, [&](int point, Real value) {
+    cache.state[point].rho = value;
+  });
+  cell_component(state.mx, [&](int point, Real value) {
+    cache.state[point].mx = value;
+  });
+  cell_component(state.my, [&](int point, Real value) {
+    cache.state[point].my = value;
+  });
+  cell_component(state.mz, [&](int point, Real value) {
+    cache.state[point].mz = value;
+  });
+  cell_component(state.energy, [&](int point, Real value) {
+    cache.state[point].energy = value;
+  });
+  load_dynamic_tensor_component(
+      g, i, j, scheme_order, radial_tables,
+      [&](int ox, int oy) {
+        return quasar::mhd::cell_bx(
+            g, state.bx, i + ox, j + oy, radial_tables,
+            collocation_order);
+      }, [&](int point, Real value) { cache.state[point].bx = value; });
+  load_dynamic_tensor_component(
+      g, i, j, scheme_order, radial_tables,
+      [&](int ox, int oy) {
+        return quasar::mhd::cell_by(
+            g, state.by, i + ox, j + oy, radial_tables,
+            collocation_order);
+      }, [&](int point, Real value) { cache.state[point].by = value; });
+  cell_component(state.bz, [&](int point, Real value) {
+    cache.state[point].bz = value;
+  });
+
+  if (background_active != 0) {
+    load_dynamic_tensor_component(
+        g, i, j, scheme_order, radial_tables,
+        [&](int ox, int oy) {
+          return quasar::mhd::cell_bx(
+              g, b0r, i + ox, j + oy, radial_tables,
+              collocation_order);
+        }, [&](int point, Real value) {
+          cache.background[point].b0x = value;
+        });
+    load_dynamic_tensor_component(
+        g, i, j, scheme_order, radial_tables,
+        [&](int ox, int oy) {
+          return quasar::mhd::cell_by(
+              g, b0z, i + ox, j + oy, radial_tables,
+              collocation_order);
+        }, [&](int point, Real value) {
+          cache.background[point].b0y = value;
+        });
+    cell_component(b0phi, [&](int point, Real value) {
+      cache.background[point].b0z = value;
+    });
+  }
+
+  for (int qy = 0; qy < count; ++qy) {
+    for (int qx = 0; qx < count; ++qx) {
+      const int point_index = dynamic_tensor_point_index(qx, qy);
+      const MhdState& point = cache.state[point_index];
+      if (!finite_admissible_state(point, gamma)) return false;
+      if (background_active != 0) {
+        const MhdBackground& point_background =
+            cache.background[point_index];
+        if (!finite_background(point_background)) return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Return <T_phiphi-T_rr>_uniform - (T_phiphi-T_rr)_cell for the dynamic
+// material and background-linear stresses. The uniform radial measure is
+// intentional: the curvature 1/r cancels the ring measure. Keeping the
+// dominant cell factors outside this correction lets them cancel the metric
+// face stresses only in the final common-exponent residual.
+__device__ __attribute__((noinline)) quasar::numerics::ScaledValue
+dynamic_tensor_difference_correction_scaled(
+    int scheme_order, const DynamicTensorPointCache& points,
+    const MhdState& centre, int background_active,
+    const MhdBackground& centre_background) {
+  const auto point_state = [&](int qx, int qy) {
+    return points.state[dynamic_tensor_point_index(qx, qy)];
+  };
+  const auto rho_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).rho;
+  };
+  const auto mr_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).mx;
+  };
+  const auto mphi_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).mz;
+  };
+  const auto br_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).bx;
+  };
+  const auto bphi_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).bz;
+  };
+  quasar::numerics::ScaledQuaternaryAccumulator correction;
+  const auto append = [&](const quasar::numerics::ScaledValue& value,
+                          Real coefficient) {
+    quasar::numerics::append_scaled_value_product(
+        correction, value, coefficient, Real{1}, Real{1});
+  };
+  append(cell_uniform_square_ratio_correction_scaled(
+             scheme_order, centre.mz, centre.rho,
+             mphi_sample, rho_sample),
+         Real{1});
+  append(cell_uniform_square_ratio_correction_scaled(
+             scheme_order, centre.mx, centre.rho,
+             mr_sample, rho_sample),
+         Real{-1});
+  append(cell_uniform_cached_square_correction_scaled(
+             scheme_order, centre.bx, br_sample),
+         Real{1});
+  append(cell_uniform_cached_square_correction_scaled(
+             scheme_order, centre.bz, bphi_sample),
+         Real{-1});
+  if (background_active != 0) {
+    const auto point_background = [&](int qx, int qy) {
+      return points.background[dynamic_tensor_point_index(qx, qy)];
+    };
+    const auto b0r_sample = [&](int qx, int qy) {
+      return point_background(qx, qy).b0x;
+    };
+    const auto b0phi_sample = [&](int qx, int qy) {
+      return point_background(qx, qy).b0z;
+    };
+    append(cell_uniform_product_correction_scaled(
+               scheme_order, centre_background.b0x, centre.bx,
+               b0r_sample, br_sample),
+           Real{2});
+    append(cell_uniform_product_correction_scaled(
+               scheme_order, centre_background.b0z, centre.bz,
+               b0phi_sample, bphi_sample),
+           Real{-2});
+  }
+  return quasar::numerics::finish_scaled_quaternary_sum_to_value(correction);
+}
+
+// Return <T_rr>_uniform - T_rr,cell for the material and background-linear
+// stresses. Together with the face metric term this is the finite-volume
+// correction missing from a pointwise tensor-difference discretization under
+// r dr. Pure-background T0 remains in its separately conditioned branch below.
+__device__ __attribute__((noinline)) quasar::numerics::ScaledValue
+dynamic_radial_tensor_correction_scaled(
+    int scheme_order, Real gamma, const DynamicTensorPointCache& points,
+    const MhdState& centre, int background_active,
+    const MhdBackground& centre_background) {
+  const auto point_state = [&](int qx, int qy) {
+    return points.state[dynamic_tensor_point_index(qx, qy)];
+  };
+  const auto rho_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).rho;
+  };
+  const auto mr_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).mx;
+  };
+  const auto pressure_sample = [&](int qx, int qy) {
+    return pressure(point_state(qx, qy), gamma);
+  };
+  const auto br_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).bx;
+  };
+  const auto bz_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).by;
+  };
+  const auto bphi_sample = [&](int qx, int qy) {
+    return point_state(qx, qy).bz;
+  };
+  quasar::numerics::ScaledQuaternaryAccumulator correction;
+  const auto append = [&](const quasar::numerics::ScaledValue& value,
+                          Real coefficient) {
+    quasar::numerics::append_scaled_value_product(
+        correction, value, coefficient, Real{1}, Real{1});
+  };
+  append(cell_uniform_square_ratio_correction_scaled(
+             scheme_order, centre.mx, centre.rho,
+             mr_sample, rho_sample),
+         Real{1});
+  append(cell_uniform_scalar_correction_scaled(
+             scheme_order, pressure(centre, gamma), pressure_sample),
+         Real{1});
+  append(cell_uniform_cached_square_correction_scaled(
+             scheme_order, centre.bx, br_sample),
+         Real{-0.5});
+  append(cell_uniform_cached_square_correction_scaled(
+             scheme_order, centre.by, bz_sample),
+         Real{0.5});
+  append(cell_uniform_cached_square_correction_scaled(
+             scheme_order, centre.bz, bphi_sample),
+         Real{0.5});
+  if (background_active != 0) {
+    const auto point_background = [&](int qx, int qy) {
+      return points.background[dynamic_tensor_point_index(qx, qy)];
+    };
+    const auto b0r_sample = [&](int qx, int qy) {
+      return point_background(qx, qy).b0x;
+    };
+    const auto b0z_sample = [&](int qx, int qy) {
+      return point_background(qx, qy).b0y;
+    };
+    const auto b0phi_sample = [&](int qx, int qy) {
+      return point_background(qx, qy).b0z;
+    };
+    append(cell_uniform_product_correction_scaled(
+               scheme_order, centre_background.b0x, centre.bx,
+               b0r_sample, br_sample),
+           Real{-1});
+    append(cell_uniform_product_correction_scaled(
+               scheme_order, centre_background.b0y, centre.by,
+               b0z_sample, bz_sample),
+           Real{1});
+    append(cell_uniform_product_correction_scaled(
+               scheme_order, centre_background.b0z, centre.bz,
+               b0phi_sample, bphi_sample),
+           Real{1});
+  }
+  return quasar::numerics::finish_scaled_quaternary_sum_to_value(correction);
 }
 
 // Complete cylindrical radial-momentum residual in the tensor-difference form
@@ -683,15 +1361,21 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_momentum_residual_kernel(
 //   rho(vphi^2-vr^2) + 2 B0r br + br^2
 //                         - 2 B0phi bphi - bphi^2,
 //
-// and the static curvature is B0r^2-B0phi^2. The maximum active path is
-// 2 radial flux + 2 axial flux + 6 reduced curvature + 6 radial static stress
-// + 2 axial static stress + 2 static curvature = 20 terms.
+// and the low-order static curvature is B0r^2-B0phi^2. MP5/MP7 evaluate the
+// static part in its equivalent annular form: metric-weighted radial face
+// stresses plus a uniform-cell M0_phiphi tensor quadrature. The dynamic MP path
+// adds the matching radial metric faces, a factored T_rr cell reference, and
+// two retained uniform-cell tensor corrections. The fused active MP7 path fits
+// in the 192-term accumulator below.
 __global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
     int background_active, int globally_curl_free, int decomposed_flux,
-    int collocation_order, int scheme_order,
+    int collocation_order, int scheme_order, Real gamma,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ rho, const double* __restrict__ mr,
-    const double* __restrict__ mphi, const double* __restrict__ br,
+    const double* __restrict__ mz, const double* __restrict__ mphi,
+    const double* __restrict__ energy,
+    const double* __restrict__ br, const double* __restrict__ bz,
     const double* __restrict__ bphi,
     const double* __restrict__ b0r, const double* __restrict__ b0z,
     const double* __restrict__ b0phi,
@@ -711,7 +1395,40 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_ke
   const std::size_t kz = g.index(i, j + 1);
   const Real r = g.r_at_cell_center(i);
 
-  quasar::numerics::ScaledProductQuotientAccumulator<64> sum;
+  const quasar::mhd::detail::CellStateView state_view{
+      rho, mr, mz, mphi, energy, br, bz, bphi};
+  const bool mp_candidate = scheme_order == 5 || scheme_order == 7;
+  MhdState centre{};
+  if (mp_candidate) {
+    centre = quasar::mhd::load_cell_state(
+        g, rho, mr, mz, mphi, energy, br, bz, bphi, i, j,
+        radial_tables, collocation_order);
+  } else {
+    // Preserve the order-1/2 API's historical read set: standalone low-order
+    // callers need not initialize components absent from the pressure-free
+    // tensor difference.
+    centre.rho = rho[k];
+    centre.mx = mr[k];
+    centre.mz = mphi[k];
+    centre.bx = quasar::mhd::cell_bx(
+        g, br, i, j, radial_tables, collocation_order);
+    centre.bz = bphi[k];
+  }
+  MhdBackground centre_background{};
+  if (background_active != 0) {
+    centre_background = quasar::mhd::load_cell_background(
+        g, b0r, b0z, b0phi, i, j, radial_tables, collocation_order);
+  }
+  DynamicTensorPointCache tensor_points;
+  const bool high_order_dynamic =
+      mp_candidate &&
+      finite_admissible_state(centre, gamma) &&
+      (background_active == 0 || finite_background(centre_background)) &&
+      load_dynamic_tensor_points(
+          g, i, j, scheme_order, collocation_order, gamma, state_view,
+          background_active, b0r, b0z, b0phi, radial_tables, tensor_points);
+
+  quasar::numerics::ScaledProductQuotientAccumulator<192> sum;
 
   // Ordinary radial tensor derivative. Curvature is supplied explicitly by
   // T_phiphi-T_rr below; using the annular derivative here would double-count
@@ -720,6 +1437,15 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_ke
       sum, Real{1}, -radial_momentum_flux[kr], g.dx(), Real{1});
   quasar::numerics::append_scaled_product_quotient(
       sum, Real{1}, radial_momentum_flux[k], g.dx(), Real{1});
+  if (high_order_dynamic) {
+    // Convert the ordinary radial difference to the annular face divergence.
+    // The matching uniform-cell T_rr term is appended below, retaining the
+    // pressure-free tensor difference as the other half of the identity.
+    quasar::numerics::append_scaled_product_quotient(
+        sum, Real{1}, -radial_momentum_flux[kr], r, Real{2});
+    quasar::numerics::append_scaled_product_quotient(
+        sum, Real{1}, -radial_momentum_flux[k], r, Real{2});
+  }
 
   // -d_z F_{z,mr}.
   quasar::numerics::append_scaled_product_quotient(
@@ -730,27 +1456,37 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_ke
   if (decomposed_flux != 0) {
     append_flux_part(sum, radial_wave[kr], Real{-1}, g.dx(), Real{1});
     append_flux_part(sum, radial_wave[k], Real{1}, g.dx(), Real{1});
+    if (high_order_dynamic) {
+      append_flux_part(sum, radial_wave[kr], Real{-1}, r, Real{2});
+      append_flux_part(sum, radial_wave[k], Real{-1}, r, Real{2});
+    }
     append_flux_part(sum, axial_wave[kz], Real{-1}, g.dy(), Real{1});
     append_flux_part(sum, axial_wave[k], Real{1}, g.dy(), Real{1});
 
     const CrossStressFace radial_face_lo = load_cross_stress_face(
         g, flags, 0, b0r, b0z, b0phi, i, j, collocation_order,
-        scheme_order, radial_cross, k);
+        scheme_order, radial_cross, k, radial_tables);
     const CrossStressFace radial_face_hi = load_cross_stress_face(
         g, flags, 0, b0r, b0z, b0phi, i + 1, j, collocation_order,
-        scheme_order, radial_cross, kr);
+        scheme_order, radial_cross, kr, radial_tables);
     const CrossStressFace axial_face_lo = load_cross_stress_face(
         g, flags, 1, b0r, b0z, b0phi, i, j, collocation_order,
-        scheme_order, axial_cross, k);
+        scheme_order, axial_cross, k, radial_tables);
     const CrossStressFace axial_face_hi = load_cross_stress_face(
         g, flags, 1, b0r, b0z, b0phi, i, j + 1, collocation_order,
-        scheme_order, axial_cross, kz);
+        scheme_order, axial_cross, kz, radial_tables);
     append_cross_momentum_stress(
         sum, radial_face_hi, 0, 0, Real{-1},
         g.dx(), Real{1});
     append_cross_momentum_stress(
         sum, radial_face_lo, 0, 0, Real{1},
         g.dx(), Real{1});
+    if (high_order_dynamic) {
+      append_cross_momentum_stress(
+          sum, radial_face_hi, 0, 0, Real{-1}, r, Real{2});
+      append_cross_momentum_stress(
+          sum, radial_face_lo, 0, 0, Real{-1}, r, Real{2});
+    }
     append_cross_momentum_stress(
         sum, axial_face_hi, 1, 0, Real{-1},
         g.dy(), Real{1});
@@ -759,14 +1495,9 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_ke
         g.dy(), Real{1});
   }
 
-  const Real br_pert = quasar::mhd::cell_bx(
-      g, br, i, j, collocation_order);
-  const Real bphi_pert = bphi[k];
-  MhdBackground centre_background{};
-  if (background_active != 0) {
-    centre_background = quasar::mhd::load_cell_background(
-        g, b0r, b0z, b0phi, i, j, collocation_order);
-  }
+  const Real br_pert = centre.bx;
+  const Real bz_pert = centre.by;
+  const Real bphi_pert = centre.bz;
   // Reduced tensor difference. Keep each quotient/product separate so
   // individually overflowing rotation and toroidal terms can cancel before a
   // much smaller radial-field survivor is rounded.
@@ -783,31 +1514,93 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cylindrical_radial_momentum_residual_ke
   quasar::numerics::append_scaled_product_quotient(
       sum, bphi_pert, -bphi_pert, Real{1}, r);
 
-  if (background_active != 0 && globally_curl_free == 0) {
-    const MhdBackground radial_lo = mapped_face_background(
-        g, flags, 0, b0r, b0z, b0phi, i, j, collocation_order);
-    const MhdBackground radial_hi = mapped_face_background(
-        g, flags, 0, b0r, b0z, b0phi, i + 1, j,
-        collocation_order);
-    const MhdBackground axial_lo = mapped_face_background(
-        g, flags, 1, b0r, b0z, b0phi, i, j, collocation_order);
-    const MhdBackground axial_hi = mapped_face_background(
-        g, flags, 1, b0r, b0z, b0phi, i, j + 1,
-        collocation_order);
+  if (high_order_dynamic) {
+    // Ring averaging the ordinary derivative contributes
+    //
+    //   [<T_rr>_uniform - (F_rr,hi+F_rr,lo)/2] / r_c.
+    //
+    // Add the cell reference in factored form so it cancels the metric face
+    // stress only in this final exponent-scaled reduction; append the genuinely
+    // high-order uniform-cell correction as retained scaled values.
+    quasar::numerics::append_scaled_product_quotient(
+        sum, mr[k], mr[k], rho[k], r);
+    quasar::numerics::append_scaled_product_quotient(
+        sum, pressure(centre, gamma), Real{1}, r, Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        sum, br_pert, Real{-0.5} * br_pert, r, Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        sum, bz_pert, Real{0.5} * bz_pert, r, Real{1});
+    quasar::numerics::append_scaled_product_quotient(
+        sum, bphi_pert, Real{0.5} * bphi_pert, r, Real{1});
+    if (background_active != 0) {
+      quasar::numerics::append_scaled_product_quotient(
+          sum, centre_background.b0x, -br_pert, r, Real{1});
+      quasar::numerics::append_scaled_product_quotient(
+          sum, centre_background.b0y, bz_pert, r, Real{1});
+      quasar::numerics::append_scaled_product_quotient(
+          sum, centre_background.b0z, bphi_pert, r, Real{1});
+    }
+    const quasar::numerics::ScaledValue difference_correction =
+        dynamic_tensor_difference_correction_scaled(
+            scheme_order, tensor_points, centre, background_active,
+            centre_background);
+    const quasar::numerics::ScaledValue radial_tensor_correction =
+        dynamic_radial_tensor_correction_scaled(
+            scheme_order, gamma, tensor_points, centre, background_active,
+            centre_background);
+    quasar::numerics::append_scaled_value_quotient(
+        sum, difference_correction, Real{1}, r, Real{1});
+    quasar::numerics::append_scaled_value_quotient(
+        sum, radial_tensor_correction, Real{1}, r, Real{1});
+  }
 
-    // -d_r(T0_rr) and -d_z(T0_zr), followed by
-    // (T0_phiphi-T0_rr)/r = (B0r^2-B0phi^2)/r.
-    append_normal_background_stress(
-        sum, radial_lo, radial_hi, /*normal=*/0, g.dx());
-    append_tangential_background_stress(
-        sum, axial_lo, axial_hi, /*normal=*/1, /*tangent=*/0,
-        g.dy());
-    quasar::numerics::append_scaled_product_quotient(
-        sum, centre_background.b0x, centre_background.b0x,
-        Real{1}, r);
-    quasar::numerics::append_scaled_product_quotient(
-        sum, centre_background.b0z, -centre_background.b0z,
-        Real{1}, r);
+  if (background_active != 0 && globally_curl_free == 0) {
+    const BackgroundStressFace radial_lo = load_background_stress_face(
+        g, flags, 0, b0r, b0z, b0phi, i, j,
+        collocation_order, scheme_order, radial_tables);
+    const BackgroundStressFace radial_hi = load_background_stress_face(
+        g, flags, 0, b0r, b0z, b0phi, i + 1, j,
+        collocation_order, scheme_order, radial_tables);
+    const BackgroundStressFace axial_lo = load_background_stress_face(
+        g, flags, 1, b0r, b0z, b0phi, i, j,
+        collocation_order, scheme_order, radial_tables);
+    const BackgroundStressFace axial_hi = load_background_stress_face(
+        g, flags, 1, b0r, b0z, b0phi, i, j + 1,
+        collocation_order, scheme_order, radial_tables);
+
+    if (scheme_order == 5 || scheme_order == 7) {
+      // -[r_hi M0_rr(hi)-r_lo M0_rr(lo)]/(r_c dr)
+      // - d_z M0_zr + <M0_phiphi>_uniform/r_c.
+      append_background_momentum_stress(
+          sum, radial_hi, 0, 0, Real{-1}, g.dx(), Real{1});
+      append_background_momentum_stress(
+          sum, radial_lo, 0, 0, Real{1}, g.dx(), Real{1});
+      append_background_momentum_stress(
+          sum, radial_hi, 0, 0, Real{-1}, r, Real{2});
+      append_background_momentum_stress(
+          sum, radial_lo, 0, 0, Real{-1}, r, Real{2});
+      append_background_momentum_stress(
+          sum, axial_hi, 1, 0, Real{-1}, g.dy(), Real{1});
+      append_background_momentum_stress(
+          sum, axial_lo, 1, 0, Real{1}, g.dy(), Real{1});
+      append_background_azimuthal_stress(
+          sum, g, i, j, b0r, b0z, b0phi, centre_background,
+          scheme_order, radial_tables, r);
+    } else {
+      // Pressure-free low-order tensor difference.
+      append_normal_background_stress(
+          sum, radial_lo.average, radial_hi.average,
+          /*normal=*/0, g.dx());
+      append_tangential_background_stress(
+          sum, axial_lo.average, axial_hi.average,
+          /*normal=*/1, /*tangent=*/0, g.dy());
+      quasar::numerics::append_scaled_product_quotient(
+          sum, centre_background.b0x, centre_background.b0x,
+          Real{1}, r);
+      quasar::numerics::append_scaled_product_quotient(
+          sum, centre_background.b0z, -centre_background.b0z,
+          Real{1}, r);
+    }
   }
 
   radial_momentum_rate[k] =
@@ -855,6 +1648,7 @@ __device__ inline void append_conditioned_induction_flux(
 __global__ void QUASAR_LAUNCH_BOUNDS_256 split_energy_residual_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags, int cylindrical,
     int collocation_order, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ b0x,
     const double* __restrict__ b0y, const double* __restrict__ b0z,
     const double* __restrict__ x_energy,
@@ -875,23 +1669,25 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_energy_residual_kernel(
   const std::size_t kx = g.index(i + 1, j);
   const std::size_t ky = g.index(i, j + 1);
   const MhdBackground cell_background = quasar::mhd::load_cell_background(
-      g, b0x, b0y, b0z, i, j, collocation_order);
+      g, b0x, b0y, b0z, i, j, radial_tables, collocation_order);
   const MhdBackground x_background_lo = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order);
+      g, flags, 0, b0x, b0y, b0z, i, j, collocation_order, radial_tables);
   const MhdBackground x_background_hi = mapped_face_background(
-      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order);
+      g, flags, 0, b0x, b0y, b0z, i + 1, j, collocation_order,
+      radial_tables);
   const MhdBackground y_background_lo = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order);
+      g, flags, 1, b0x, b0y, b0z, i, j, collocation_order, radial_tables);
   const MhdBackground y_background_hi = mapped_face_background(
-      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order);
+      g, flags, 1, b0x, b0y, b0z, i, j + 1, collocation_order,
+      radial_tables);
   const MhdBackground x_flux_lo{x_bx[k], x_by[k], x_bz[k]};
   const MhdBackground x_flux_hi{x_bx[kx], x_by[kx], x_bz[kx]};
   const MhdBackground y_flux_lo{y_bx[k], y_by[k], y_bz[k]};
   const MhdBackground y_flux_hi{y_bx[ky], y_by[ky], y_bz[ky]};
 
-  // The conditioned MP paths use at most 33 entries: 6 F_E terms, 24
-  // cylindrical face terms, and 3 rate-difference products. Cartesian MP7
-  // additionally uses three volume covariances but only four face occurrences.
+  // The conditioned MP paths use at most 36 entries: 6 F_E terms, 24
+  // cylindrical face terms, 3 rate-difference products, and 3 volume
+  // covariances. Cartesian paths have only four face occurrences.
   quasar::numerics::ScaledProductQuotientAccumulator<40> sum;
   const auto append_flux = [&](Real flux, Real sign, Real spacing) {
     quasar::numerics::append_scaled_product_quotient(
@@ -937,8 +1733,9 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_energy_residual_kernel(
 
   const quasar::mhd::detail::CellMagneticRateView rate{dbx, dby, dbz};
   const MhdBackground rate_mean{
-      quasar::mhd::cell_bx(g, dbx, i, j, collocation_order),
-      quasar::mhd::cell_by(g, dby, i, j, collocation_order), dbz[k]};
+      quasar::mhd::cell_bx(g, dbx, i, j, radial_tables, collocation_order),
+      quasar::mhd::cell_by(g, dby, i, j, radial_tables, collocation_order),
+      dbz[k]};
   const double* x_flux_component[3] = {x_bx, x_by, x_bz};
   const double* y_flux_component[3] = {y_bx, y_by, y_bz};
   for (int component = 0; component < 3; ++component) {
@@ -974,7 +1771,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_energy_residual_kernel(
         Real{1}, Real{1});
   }
 
-  if (cylindrical == 0 && (scheme_order == 5 || scheme_order == 7)) {
+  if (scheme_order == 5 || scheme_order == 7) {
     for (int component = 0; component < 3; ++component) {
       const Real background_mean =
           background_component(cell_background, component);
@@ -982,18 +1779,20 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 split_energy_residual_kernel(
           background_component(rate_mean, component);
       const quasar::numerics::ScaledValue covariance =
           quasar::mhd::detail::cell_tensor_product_correction_scaled(
-              scheme_order, background_mean, component_rate_mean,
+              scheme_order, i, radial_tables,
+              background_mean, component_rate_mean,
               [&](int qx, int qy) {
                 const MhdBackground background =
                     quasar::mhd::detail::point_cell_background(
                         g, i, j, scheme_order, qx, qy,
-                        b0x, b0y, b0z);
+                        b0x, b0y, b0z, radial_tables);
                 return background_component(background, component);
               },
               [&](int qx, int qy) {
                 return quasar::mhd::detail::
                     point_cell_magnetic_rate_component(
-                        g, i, j, scheme_order, qx, qy, rate, component);
+                        g, i, j, scheme_order, qx, qy, rate, component,
+                        radial_tables);
               });
       quasar::numerics::append_scaled_value_quotient(
           sum, covariance, Real{-1}, Real{1}, Real{1});
@@ -1119,6 +1918,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 rk_stage_kernel(
 // re-derivation does not depend on it.
 __global__ void QUASAR_LAUNCH_BOUNDS_256 apply_floors_kernel(
     quasar::Grid2D g, int /*b0_active*/, Real rho_floor, Real p_floor, Real gamma,
+    int collocation_order,
+    quasar::numerics::RadialTablesView radial_tables,
     double* __restrict__ rho, double* __restrict__ mx, double* __restrict__ my,
     double* __restrict__ mz, double* __restrict__ energy, double* __restrict__ bx,
     double* __restrict__ by, double* __restrict__ bz) {
@@ -1131,7 +1932,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 apply_floors_kernel(
   if (!isfinite(my[k])) my[k] = Real{0};
   if (!isfinite(mz[k])) mz[k] = Real{0};
   MhdState s = quasar::mhd::load_cell_state(
-      g, rho, mx, my, mz, energy, bx, by, bz, i, j);
+      g, rho, mx, my, mz, energy, bx, by, bz, i, j, radial_tables,
+      collocation_order);
   // Perturbation-only gas pressure via the background-aware overload (B0 is
   // unread under the field-split EOS, so this equals pressure(s, gamma)).
   const Real p = pressure(s, MhdBackground{}, gamma);
@@ -1171,6 +1973,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 apply_floors_kernel(
 // a division by zero.
 __global__ void QUASAR_LAUNCH_BOUNDS_256 geometric_source_kernel(
     quasar::Grid2D g, int b0_active, Real gamma, int collocation_order,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ rho, const double* __restrict__ mx,
     const double* __restrict__ my, const double* __restrict__ mz,
     const double* __restrict__ energy, const double* __restrict__ bx,
@@ -1189,14 +1992,14 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 geometric_source_kernel(
   // Slot mapping: mx = m_r, my = m_z (axial), mz = m_phi (azimuthal);
   // bx = B_r, by = B_z, bz = B_phi.
   const Real br_pert = quasar::mhd::cell_bx(
-      g, bx, i, j, collocation_order);
+      g, bx, i, j, radial_tables, collocation_order);
   const Real bz_pert = quasar::mhd::cell_by(
-      g, by, i, j, collocation_order);
+      g, by, i, j, radial_tables, collocation_order);
   const Real bphi_pert = bz[k];
   MhdBackground background{};
   if (b0_active != 0) {
     background = quasar::mhd::load_cell_background(
-        g, b0x, b0y, b0z, i, j, collocation_order);
+        g, b0x, b0y, b0z, i, j, radial_tables, collocation_order);
   }
   MhdState s;
   s.rho = rho[k]; s.mx = mx[k]; s.my = my[k]; s.mz = mz[k];
@@ -1267,7 +2070,8 @@ void launch_mhd_flux_difference(const MhdField2D<Real>& flux, int dir,
 void launch_mhd_background_stress_correction(
     const MhdBackgroundField<Real>& b0, MhdField2D<Real>& dudt,
     BoundaryFlags4 flags, stream_t stream, bool cylindrical,
-    int collocation_order, int scheme_order) {
+    int collocation_order, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables) {
   if (!b0.active) return;
   if (b0.globally_curl_free) return;
   const Grid2D g = dudt.grid;
@@ -1276,7 +2080,7 @@ void launch_mhd_background_stress_correction(
   hipLaunchKernelGGL(
       background_stress_correction_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags,
-      cylindrical ? 1 : 0, collocation_order, scheme_order,
+      cylindrical ? 1 : 0, collocation_order, scheme_order, radial_tables,
       b0.b0x_face.device_ptr(), b0.b0y_face.device_ptr(),
       b0.b0z_cell.device_ptr(), dudt.mx.device_ptr(),
       dudt.my.device_ptr(), dudt.mz.device_ptr());
@@ -1290,7 +2094,8 @@ void launch_mhd_split_momentum_residual(
     const MhdField2D<Real>& flux_y,
     const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    bool cylindrical, int collocation_order, int scheme_order) {
+    bool cylindrical, int collocation_order, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables) {
   if (!b0.active) return;
   const Grid2D g = dudt.grid;
   const dim3 block(kBlock2D, kBlock2D);
@@ -1311,6 +2116,7 @@ void launch_mhd_split_momentum_residual(
       split_momentum_residual_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags, cylindrical ? 1 : 0,
       collocation_order, scheme_order, b0.globally_curl_free ? 1 : 0,
+      radial_tables,
       b0.b0x_face.device_ptr(),
       b0.b0y_face.device_ptr(), b0.b0z_cell.device_ptr(),
       flux_x.mx.device_ptr(), flux_x.my.device_ptr(), flux_x.mz.device_ptr(),
@@ -1327,9 +2133,10 @@ void launch_mhd_cylindrical_radial_momentum_residual(
     const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
     const MhdField2D<Real>& flux_r, const MhdField2D<Real>& flux_z,
     MhdField2D<Real>& dudt, BoundaryFlags4 flags, stream_t stream,
-    int collocation_order, int scheme_order,
+    Real gamma, int collocation_order, int scheme_order,
     const MhdMomentumFluxParts2D<Real>* parts_r,
-    const MhdMomentumFluxParts2D<Real>* parts_z) {
+    const MhdMomentumFluxParts2D<Real>* parts_z,
+    quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
@@ -1352,9 +2159,10 @@ void launch_mhd_cylindrical_radial_momentum_residual(
       cylindrical_radial_momentum_residual_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags, b0.active ? 1 : 0,
       b0.globally_curl_free ? 1 : 0, decomposed_flux, collocation_order,
-      scheme_order,
-      u.rho.device_ptr(), u.mx.device_ptr(),
-      u.mz.device_ptr(), u.bx_face.device_ptr(), u.bz_cell.device_ptr(),
+      scheme_order, gamma, radial_tables,
+      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
+      u.mz.device_ptr(), u.energy.device_ptr(),
+      u.bx_face.device_ptr(), u.by_face.device_ptr(), u.bz_cell.device_ptr(),
       b0.active ? b0.b0x_face.device_ptr() : nullptr,
       b0.active ? b0.b0y_face.device_ptr() : nullptr,
       b0.active ? b0.b0z_cell.device_ptr() : nullptr,
@@ -1397,7 +2205,8 @@ void launch_mhd_split_energy_residual(
     const MhdField2D<Real>& flux_y,
     const MhdMomentumFluxParts2D<Real>& parts_y,
     MhdField2D<Real>& actual_rate, BoundaryFlags4 flags, stream_t stream,
-    bool cylindrical, int collocation_order, int scheme_order) {
+    bool cylindrical, int collocation_order, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables) {
   if (!b0.active) return;
   const Grid2D g = actual_rate.grid;
   const dim3 block(kBlock2D, kBlock2D);
@@ -1405,7 +2214,7 @@ void launch_mhd_split_energy_residual(
   hipLaunchKernelGGL(
       split_energy_residual_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, flags, cylindrical ? 1 : 0,
-      collocation_order, scheme_order, b0.b0x_face.device_ptr(),
+      collocation_order, scheme_order, radial_tables, b0.b0x_face.device_ptr(),
       b0.b0y_face.device_ptr(), b0.b0z_cell.device_ptr(),
       flux_x.energy.device_ptr(), flux_y.energy.device_ptr(),
       flux_x.bx_face.device_ptr(), flux_x.by_face.device_ptr(),
@@ -1420,7 +2229,9 @@ void launch_mhd_split_energy_residual(
 }
 
 void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
-                             Real rho_floor, Real p_floor, Real gamma, stream_t stream) {
+                             Real rho_floor, Real p_floor, Real gamma,
+                             stream_t stream, int collocation_order,
+                             quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
@@ -1430,6 +2241,7 @@ void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>
   const int b0_active = b0.active ? 1 : 0;
   hipLaunchKernelGGL(apply_floors_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, b0_active, rho_floor, p_floor, gamma,
+                     collocation_order, radial_tables,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr());
@@ -1439,12 +2251,13 @@ void launch_mhd_apply_floors(MhdField2D<Real>& u, const MhdBackgroundField<Real>
 void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                                  const MhdBackgroundField<Real>& b0,
                                  Grid2D grid, Real gamma, stream_t stream,
-                                 int collocation_order) {
+                                 int collocation_order,
+                                 quasar::numerics::RadialTablesView radial_tables) {
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 launch_grid = mhd_grid_2d(grid, block);
   hipLaunchKernelGGL(geometric_source_kernel, launch_grid, block, 0,
                      static_cast<hipStream_t>(stream), grid, b0.active ? 1 : 0,
-                     gamma, collocation_order,
+                     gamma, collocation_order, radial_tables,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),

@@ -121,6 +121,12 @@ class MhdTileRuntime {
   [[nodiscard]] const MhdRuntimeTelemetry& telemetry() const noexcept;
   [[nodiscard]] const TransportResolution& transport_resolution() const noexcept;
 
+  // Read-only test introspection of the grids retained by the local solver
+  // workers, in local-endpoint order. Running the read on those workers proves
+  // the resolved solver grids themselves carry partition metadata rather than
+  // merely rebuilding the expected tile configuration on the caller thread.
+  [[nodiscard]] std::vector<Grid2D> local_tile_grids_for_testing();
+
   // All ranks supply the same canonical global seed.  This is intentionally a
   // host interchange boundary: Python deck construction and checkpoint restart
   // can both feed it without exposing padded tile storage.

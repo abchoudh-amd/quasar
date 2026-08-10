@@ -691,6 +691,73 @@ void test_cylindrical_axis_step(MpiRuntime& mpi) {
   }
 }
 
+void test_cylindrical_tile_grids_use_canonical_global_radius(MpiRuntime& mpi) {
+  constexpr std::size_t nx = 10;
+  constexpr std::size_t ny = 8;
+  const Real dr = std::ldexp(Real{1.1}, -20);
+  auto config = make_cylindrical_axis_config(nx, ny);
+  config.reconstruction = "mp7";
+  config.grid = quasar::Grid2D::from_cell_spacing(
+      static_cast<int>(nx), static_cast<int>(ny), dr, Real{0.125},
+      Real{0}, Real{0}, /*halo=*/4);
+  const quasar::Grid2D global_grid = config.grid;
+
+  auto topology = VirtualTopology::create(
+      nx, ny, /*endpoint_count=*/2, {2, 1},
+      /*minimum_tile_width=*/4);
+  MhdTileRuntime runtime{
+      mpi, make_mapping(/*device_count=*/2), std::move(topology),
+      std::move(config)};
+  try {
+    const std::vector<quasar::Grid2D> tile_grids =
+        runtime.local_tile_grids_for_testing();
+    require(tile_grids.size() == 2,
+            "canonical-radius fixture did not create two local tile grids");
+
+    bool exposed_nested_fma = false;
+    for (std::size_t endpoint = 0; endpoint < tile_grids.size(); ++endpoint) {
+      const auto& tile = runtime.topology().tile(endpoint);
+      const auto& tile_grid = tile_grids[endpoint];
+      require(tile_grid.has_global_x_mapping == 1,
+              "runtime-created tile grid lacks canonical global-x mapping");
+      require(tile_grid.global_origin_x == global_grid.origin_x,
+              "runtime-created tile grid changed the canonical x origin");
+      require(tile_grid.global_cell_offset_x ==
+                  static_cast<int>(tile.x.begin),
+              "runtime-created tile grid has the wrong global cell offset");
+
+      for (int local = -tile_grid.nghost;
+           local < tile_grid.nx + tile_grid.nghost; ++local) {
+        const int global = static_cast<int>(tile.x.begin) + local;
+        require(tile_grid.r_at_cell_center(local) ==
+                    global_grid.r_at_cell_center(global),
+                "tile/global cell-centre radii differ bit-for-bit");
+        require(tile_grid.r_at_edge(local) == global_grid.r_at_edge(global),
+                "tile/global face radii differ bit-for-bit");
+      }
+
+      if (endpoint == 1) {
+        quasar::Grid2D rounded_tile = tile_grid;
+        rounded_tile.has_global_x_mapping = 0;
+        const int local = -tile_grid.nghost;
+        const int global = static_cast<int>(tile.x.begin) + local;
+        exposed_nested_fma =
+            rounded_tile.r_at_cell_center(local) !=
+            global_grid.r_at_cell_center(global);
+      }
+    }
+    require(exposed_nested_fma,
+            "canonical-radius fixture did not expose the nested-FMA mismatch");
+    runtime.close();
+  } catch (...) {
+    try {
+      if (!runtime.closed()) runtime.close();
+    } catch (...) {
+    }
+    throw;
+  }
+}
+
 void test_physical_y_high_ct_corner(MpiRuntime& mpi) {
   constexpr std::size_t nx = 13;
   constexpr std::size_t ny = 9;
@@ -900,12 +967,15 @@ void test_multi_gpu(MpiRuntime& mpi) {
   run_seed_gather(mpi, /*device_count=*/2, {2, 1}, make_config(nx, ny), seed);
   run_seed_gather(mpi, /*device_count=*/2, {1, 2}, make_config(nx, ny), seed);
 
+  test_cylindrical_tile_grids_use_canonical_global_radius(mpi);
+
   // Explicit decompositions are accepted by the physics-neutral topology
-  // layer, so the runtime must reject a tile narrower than the selected
-  // reconstruction stencil before constructing any solver workers.
+  // layer, so the runtime must reject a cylindrical tile narrower than MP7's
+  // four-cell radial reconstruction reach before constructing solver workers.
   {
-    auto config = make_config(/*nx=*/6, /*ny=*/8);
+    auto config = make_cylindrical_axis_config(/*nx=*/6, /*ny=*/8);
     config.reconstruction = "mp7";
+    config.grid.nghost = 4;
     bool rejected = false;
     std::string rejection_message;
     try {

@@ -688,17 +688,6 @@ class MhdDeck:
                         f"background_field.{_key} {_val!r} does not exist")
 
     def _validate_cylindrical(self) -> None:
-        # Radial finite-volume averages use the ring measure r dr, whereas the
-        # current MP5/MP7 reconstruction and magnetic collocation coefficients
-        # are uniform Cartesian moments. Accepting either MP scheme here would
-        # advertise its Cartesian design order while retaining only second-order
-        # radial consistency. Keep the supported scheme explicit until native
-        # reconstruction owns radius-dependent weighted moments.
-        if self.numerics.reconstruction != "muscl_minmod":
-            raise ValueError(
-                "geometry 'cylindrical' currently supports only "
-                "numerics.reconstruction='muscl_minmod'; MP5/MP7 require "
-                "r-weighted radial finite-volume moments")
         # A cylindrical radial coordinate cannot be negative. At r_min=0 the
         # low side is the coordinate axis and needs the parity closure. For a
         # finite-inner-radius annulus it is an ordinary physical boundary and
@@ -1005,7 +994,15 @@ def build_initial_state(deck: MhdDeck, nghost: int) -> dict:
     # Face data are finite-volume face averages, not point values. Match the
     # native order-aware face-to-cell quadrature (including its outer-ghost
     # closure) so the seeded energy and the solver EOS use exactly the same B.
-    bx_c = mhd_num.face_samples_to_cell_average(bx, axis=1, nghost=nghost)
+    if deck.geometry == "cylindrical":
+        bx_c = mhd_num.radial_face_samples_to_cell_average(
+            bx, nghost=nghost, origin_x=deck.domain.origin_x_m,
+            dr=deck.domain.lx_m / deck.domain.nx,
+            scheme_order={"muscl_minmod": 2, "mp5": 5, "mp7": 7}[
+                deck.numerics.reconstruction])
+    else:
+        bx_c = mhd_num.face_samples_to_cell_average(
+            bx, axis=1, nghost=nghost)
     by_c = mhd_num.face_samples_to_cell_average(by, axis=0, nghost=nghost)
     new_magnetic = mhd_num.half_squared_norm3(bx_c, by_c, bz)
 

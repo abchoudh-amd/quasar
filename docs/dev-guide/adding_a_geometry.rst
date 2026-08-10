@@ -58,6 +58,11 @@ no new type:
   dr * dz`` used by the deposit's radius-weighted current.
 
 These are harmless (but meaningless) on a Cartesian run, which never calls them.
+On a distributed grid, ``global_origin_x`` and ``global_cell_offset_x`` make
+the two radius accessors evaluate the corresponding global-index formulas
+directly. Geometry-sensitive MHD code must use these accessors instead of
+reconstructing a radius from the rounded tile-local ``origin_x``; otherwise
+overlapping halo coordinates can differ by an ulp between neighboring tiles.
 
 The stability bound also belongs here. ``cyl_cfl_dt(g, fdtd_order, c)`` is
 phrased separately from ``cfl_dt(g, fdtd_order, c)`` so callers select it

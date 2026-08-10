@@ -107,7 +107,9 @@ seam
                                const MhdBackgroundField<Real>& b0,
                                int dir, MhdInterfaceStates<Real>& out,
                                int scheme_order, BoundaryFlags4 flags,
-                               Real gamma, stream_t stream);
+                               Real gamma, stream_t stream,
+                               bool rate_only = false,
+                               RadialTablesView radial_tables = {});
 
 which honors ``scheme_order``. To make the characteristic path callable from the
 device kernel, the eigensystem (``include/quasar/numerics/mhd_eigensystem.hpp``)
@@ -135,9 +137,12 @@ launch ABI in ``include/quasar/physics/mhd/kernels.hpp``.
 
 .. important::
 
-   The MP5/MP7 coefficients above are finite-volume moments for a uniform
-   Cartesian measure. Cylindrical radial cells instead store averages under
-   :math:`r\,dr`; until a reconstruction supplies radius-dependent weighted
-   moments, ``MhdSolver2D`` accepts only ``muscl_minmod`` in cylindrical
-   geometry. A future high-order cylindrical scheme must update both fluid
-   reconstruction and staggered magnetic face-to-cell collocation together.
+   MP5/MP7 use uniform finite-volume moments on Cartesian grids and along the
+   axial direction of a cylindrical grid. Radial cylindrical stencils instead
+   obtain radius-dependent :math:`r\,dr` rows from
+   ``include/quasar/numerics/radial_moments.hpp``. ``MhdSolver2D`` owns their
+   device storage through ``RadialTables`` and threads a non-owning
+   ``RadialTablesView`` through every affected launch; the inactive default is
+   the Cartesian path. Fluid reconstruction and staggered magnetic face-to-cell
+   collocation must always use matching moment families and order when this
+   device seam is extended.

@@ -3,9 +3,11 @@ Ideal-MHD simulation
 
 Quasar's ideal-MHD slice solves the 2D conservative ideal-MHD equations with a
 finite-volume scheme and constrained transport (CT) that keeps the magnetic
-field divergence-free. On Cartesian grids, MP5/MP7 reconstruct high-order face
-states from conserved cell averages before HLLD fluxes are differenced over each
-control volume. It is driven from the ``quasar.mhd`` Python front-end.
+field divergence-free. MP5/MP7 reconstruct high-order face states from
+conserved cell averages before HLLD fluxes are differenced over each control
+volume. Cartesian grids use uniform-measure coefficients; cylindrical grids use
+radius-weighted coefficients along ``r``. It is driven from the ``quasar.mhd``
+Python front-end.
 
 Running a deck
 --------------
@@ -37,7 +39,7 @@ Deck structure
    numerics:
      gamma: 1.6666666667        # adiabatic index
      cfl: 0.4                   # CFL safety factor
-     reconstruction: mp7        # Cartesian; cylindrical requires muscl_minmod
+     reconstruction: mp7        # high order in Cartesian or cylindrical geometry
      riemann: hlld
      integrator: ssprk3
      ct: fd_ct_christlieb
@@ -131,7 +133,8 @@ The evolved in-plane magnetic components are staggered CT face averages:
 cell. ``state_bx`` and ``state_by`` are not raw face dumps. They use the same
 finite-volume face-to-cell quadrature as the equation of state and split-energy
 update (fourth-, sixth-, or eighth-order on the automatically sized
-MUSCL/MP5/MP7 Cartesian halos). ``state_bz`` is already cell-centred. The C++
+MUSCL/MP5/MP7 halos, with radial weighting in cylindrical geometry).
+``state_bz`` is already cell-centred. The C++
 readback aliases ``bx_face`` and ``by_face`` remain available when the raw
 staggered arrays are required.
 
@@ -152,12 +155,14 @@ the ``axis`` parity boundary.
 
 .. important::
 
-   Cylindrical runs currently require
-   ``numerics.reconstruction: muscl_minmod`` and are second-order in space. The
-   Cartesian MP5/MP7 coefficients assume the uniform measure :math:`dr\,dz`,
-   which the radial metric does not provide, so both the C++ constructor and the
-   Python deck validator reject MP5/MP7 in cylindrical geometry instead of
-   silently reporting a design order the radial treatment does not attain.
+   Cylindrical MP5/MP7 apply radius-dependent finite-volume moments to every
+   stencil that runs along :math:`r`; stencils along :math:`z` retain the
+   Cartesian coefficients because the volume measure factors as
+   :math:`r\,dr\,dz`. This includes fluid reconstruction, magnetic collocation,
+   transverse quadrature, and constrained-transport corner interpolation. The
+   ``r=0`` axis uses the same weighted rows with the parity-filled ghost cells.
+   Selecting MP5 or MP7 automatically expands the reconstruction halo to three
+   or four cells, respectively.
 
 Discrete radial measures
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -190,10 +195,10 @@ exactly (``src/backend/hip/mhd/mhd_update.hip``):
   :math:`\partial_t B_\phi + \partial_r F_{B_\phi} = 0` and so uses an ordinary
   radial face difference with no :math:`r` weighting at all.
 
-These component-specific measures are internally consistent, and the second-order
-cylindrical path is conservative in each variable's own invariant. Do not assume
-a single uniform :math:`r\,dr\,dz` average when post-processing or when adding a
-cylindrical source term.
+These component-specific measures are internally consistent, and each
+cylindrical reconstruction order is conservative in every variable's own
+invariant. Do not assume a single uniform :math:`r\,dr\,dz` average when
+post-processing or when adding a cylindrical source term.
 
 For a static background ("guide") field ``B = B0 + b``, see
 :doc:`mhd_background_field`.

@@ -24,6 +24,7 @@
 #include "quasar/numerics/flux_reconstruction.hpp"
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/positivity_limiter.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/numerics/riemann_solver.hpp"
 #include "quasar/numerics/ssprk_integrator.hpp"
 #include "quasar/physics/mhd/kernels.hpp"  // BoundaryFlags4
@@ -138,8 +139,9 @@ class MhdSolver2D {
   Real divergence_b_max() const;
 
   // Read a state component back to host (sized grid.storage_size()). The "bx"/
-  // "by" spellings use the same working-halo-selected face-to-cell collocation
-  // as the EOS (the automatic halo matches the reconstruction scheme);
+  // "by" spellings use the same face-to-cell collocation as the EOS: Cartesian
+  // and axial rows are selected from the working halo, while cylindrical
+  // radial bx uses the reconstruction-order row in radial_tables_.
   // "bx_face"/"by_face" return the raw CT arrays and "bz" is already
   // cell-centred.
   std::vector<Real> state_component_to_host(std::string_view component) const;
@@ -210,6 +212,10 @@ class MhdSolver2D {
   // initializes members in declaration order, so this must precede grid_.
   std::unique_ptr<numerics::IFluxReconstruction> reconstruction_{};
   Grid2D grid_{};
+  // Radius-dependent coefficient ownership is created only for cylindrical
+  // geometry and only after grid_ carries the reconstruction-resolved halo.
+  // Its view is immutable for the lifetime of the solver.
+  numerics::RadialTables radial_tables_{};
   // rk_[0] is the live state U; rk_[1], rk_[2] are the SSP-RK3 stage registers.
   std::array<MhdField2D<Real>, kNumRkRegisters> rk_{};
   // Snapshot of U^n for conservative positivity retries. A rejected SSP-RK

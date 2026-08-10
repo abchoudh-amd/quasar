@@ -62,16 +62,16 @@ constexpr Real kB0 = 0.2;  // uniform axial B_z
 constexpr Real kGamma = 5.0 / 3.0;
 
 // (r,z) grid with the axis on the i=0 left edge: origin_x = 0 ⇒ r_at_edge(0)=0.
-quasar::mhd::MhdConfig make_cyl_config() {
+quasar::mhd::MhdConfig make_cyl_config(
+    const std::string& reconstruction = "muscl_minmod") {
+  const int nghost = reconstruction == "mp7" ? 4
+      : reconstruction == "mp5" ? 3 : 2;
   quasar::Grid2D g{32, 32, /*lx=lr=*/1.0, /*ly=lz=*/1.0,
-                   /*origin_x=r_min=*/0.0, /*origin_y=*/0.0, /*nghost=*/2};
+                   /*origin_x=r_min=*/0.0, /*origin_y=*/0.0, nghost};
   quasar::mhd::MhdConfig cfg;
   cfg.grid = g;
   cfg.geometry = "cylindrical";
-  // Cylindrical ring averages require r-weighted moments. Until those are
-  // available for MP5/MP7, the native validator intentionally supports only
-  // the second-order MUSCL finite-volume path.
-  cfg.reconstruction = "muscl_minmod";
+  cfg.reconstruction = reconstruction;
   cfg.riemann = "hlld";
   cfg.integrator = "ssprk3";
   cfg.ct = "fd_ct_christlieb";
@@ -204,6 +204,12 @@ void seed_uniform_radial_outflow(quasar::mhd::MhdSolver2D& solver,
 // not throw — this is a pure-host construction probe.
 TEST(MhdCylindricalSource, ConstructsOnAxisWithoutThrowing) {
   const auto cfg = make_cyl_config();
+  EXPECT_NO_THROW({ quasar::mhd::MhdSolver2D solver{cfg}; });
+}
+
+TEST(MhdCylindricalSource, ConstructsOnAxisWithMp7WithoutThrowing) {
+  const auto cfg = make_cyl_config("mp7");
+  EXPECT_EQ(cfg.grid.nghost, 4);
   EXPECT_NO_THROW({ quasar::mhd::MhdSolver2D solver{cfg}; });
 }
 
@@ -446,7 +452,7 @@ TEST(MhdCylindricalSource,
   quasar::mhd::BoundaryFlags4 flags{{1, 1, 1, 1}};
   quasar::mhd::launch_mhd_cylindrical_radial_momentum_residual(
       state, inactive_background, radial_flux, axial_flux, residual,
-      flags, nullptr, /*collocation_order=*/1);
+      flags, nullptr, kGamma, /*collocation_order=*/1);
   quasar::backend::device_synchronize(nullptr);
 
   std::vector<Real> radial_rate(n);

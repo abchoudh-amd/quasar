@@ -44,13 +44,15 @@ namespace quasar::numerics {
 class TroubledCellLimiter : public IPositivityLimiter {
  public:
   void apply(quasar::mhd::MhdField2D<Real>& u, Real rho_floor, Real p_floor,
-             Real gamma) const override {
+             Real gamma, int collocation_order = 0,
+             RadialTablesView radial_tables = {}) const override {
     // Default-inactive background: B0 identically zero, so the device floor takes
     // the zero-background fast path (bit-identical to the original host floor) and
     // reads no B0 buffers.
     quasar::mhd::MhdBackgroundField<Real> b0{};
     quasar::mhd::launch_mhd_apply_floors(u, b0, rho_floor, p_floor, gamma,
-                                         /*stream=*/nullptr);
+                                         /*stream=*/nullptr, collocation_order,
+                                         radial_tables);
     // The kernel is launched on the default stream; synchronize so apply() is a
     // completed in-place floor on return (host callers may read u immediately).
     backend::device_synchronize(nullptr);
@@ -60,11 +62,12 @@ class TroubledCellLimiter : public IPositivityLimiter {
       const quasar::mhd::MhdField2D<Real>& base,
       const quasar::mhd::MhdField2D<Real>& candidate,
       Real rho_floor, Real p_floor, Real gamma,
-      int collocation_order = 0) const override {
+      int collocation_order = 0,
+      RadialTablesView radial_tables = {}) const override {
     Real theta = Real{0};
     quasar::mhd::launch_mhd_admissible_fraction(
         base, candidate, rho_floor, p_floor, gamma, fraction_scratch_,
-        &theta, /*stream=*/nullptr, collocation_order);
+        &theta, /*stream=*/nullptr, collocation_order, radial_tables);
     return theta;
   }
 

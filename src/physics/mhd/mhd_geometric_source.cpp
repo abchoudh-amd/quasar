@@ -20,13 +20,14 @@ namespace quasar::mhd {
 void MhdGeometricSource::add(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                              const MhdBackgroundField<Real>& b0,
                              const Grid2D& grid, Real gamma,
-                             int collocation_order) {
+                             int collocation_order,
+                             numerics::RadialTablesView radial_tables) {
   // Accumulate S(u) into dudt on the default stream. The kernel reads the radius
   // from the passed grid (r = grid.r_at_cell_center(i)) and applies the on-axis
   // guard internally. Like the other launch wrappers this is asynchronous; a
   // standalone caller synchronizes before reading the accumulated result.
   launch_mhd_geometric_source(u, dudt, b0, grid, gamma, /*stream=*/nullptr,
-                              collocation_order);
+                              collocation_order, radial_tables);
 }
 
 }  // namespace quasar::mhd

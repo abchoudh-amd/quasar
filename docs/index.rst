@@ -12,9 +12,9 @@ ships three physics vertical slices:
   charge-conserving current deposition, Boris push) driven from the
   ``quasar.pic`` front-end.
 * **ideal MHD** - a finite-volume + constrained-transport module (high-order
-  Cartesian MP5/MP7 or second-order axisymmetric cylindrical ``(r, z)`` MUSCL
-  reconstruction, HLLD Riemann solver, and SSP-RK3) driven from the
-  ``quasar.mhd`` front-end.
+  MP5/MP7 reconstruction on Cartesian and axisymmetric cylindrical ``(r, z)``
+  grids, HLLD Riemann solver, and SSP-RK3) driven from the ``quasar.mhd``
+  front-end.
 
 .. toctree::
    :maxdepth: 2

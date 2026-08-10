@@ -66,7 +66,7 @@ B_SCALE = 1.0
 # Confined plasma blob (denser/higher-p inside a centered square).  The sampled
 # coil reaches roughly 0.6 T, or O(1e5 Pa) magnetic pressure.  Pressures of
 # 1/0.1 Pa make the discontinuous blob beta O(1e-6), below the truncation scale
-# of the supported cylindrical MUSCL update; the conservative positivity
+# of the supported cylindrical high-order update; the conservative positivity
 # controller then correctly refuses to cross zero internal energy.  These
 # values retain a strongly magnetized beta O(1e-3--1e-2) case while remaining
 # resolved for the shipped grid and full 400-step run.
@@ -151,7 +151,7 @@ def build_mhd_yaml() -> str:
         f"ly_m: {MHD_LY_M:.6f}, origin_x_m: {MHD_ORIGIN_X_M:.6f}, "
         f"origin_y_m: {MHD_ORIGIN_Y_M:.6f}}}",
         "geometry: cylindrical",
-        "numerics: {gamma: 1.6666667, reconstruction: muscl_minmod, riemann: hlld, "
+        "numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, "
         "integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, "
         "rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}",
         "initial:",

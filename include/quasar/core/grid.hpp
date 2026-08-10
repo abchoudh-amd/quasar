@@ -95,6 +95,14 @@ struct Grid2D {
   // drifting by an ulp.  Zero keeps the legacy length-derived representation.
   Real cell_dx{0};
   Real cell_dy{0};
+  // Optional canonical x mapping for a partitioned grid.  A tile origin is a
+  // rounded FMA of the global origin and tile offset; applying a second local
+  // FMA does not in general reproduce the corresponding global coordinate.
+  // Cylindrical radius accessors use this mapping when active so overlapping
+  // radial moment rows and geometric factors are bit-identical across tiles.
+  Real global_origin_x{0};
+  int global_cell_offset_x{0};
+  int has_global_x_mapping{0};
 
   constexpr Grid2D() = default;
 
@@ -170,15 +178,30 @@ struct Grid2D {
   // x_at_* helpers so device kernels read the radius with no new type; they are
   // meaningless (but harmless) on a Cartesian run, which never calls them.
 
-  // Radius at the cell center of column i: r = origin_x + (i + 0.5)*dr.
+  // Radius at the cell center of column i. An ordinary grid uses
+  // origin_x + (i + 0.5)*dr. A partitioned grid instead evaluates the same
+  // coordinate canonically as global_origin_x +
+  // (global_cell_offset_x + i + 0.5)*dr, avoiding a second tile-local FMA.
   QUASAR_HOST_DEVICE Real r_at_cell_center(int i) const noexcept {
-    return fma(static_cast<Real>(i) + Real{0.5}, dx(), origin_x);
+    const Real logical = has_global_x_mapping != 0
+        ? static_cast<Real>(global_cell_offset_x) + static_cast<Real>(i)
+        : static_cast<Real>(i);
+    const Real origin =
+        has_global_x_mapping != 0 ? global_origin_x : origin_x;
+    return fma(logical + Real{0.5}, dx(), origin);
   }
 
-  // Radius at the cell edge (left face) of column i: r = origin_x + i*dr. The
-  // i=0 edge sits at origin_x, i.e. r=0 when the domain starts on the axis.
+  // Radius at the cell edge (left face) of column i. An ordinary grid uses
+  // origin_x + i*dr; a partitioned grid uses global_origin_x +
+  // (global_cell_offset_x + i)*dr. Thus the local i=0 edge is the axis only
+  // for an axis-starting grid (or its first tile).
   QUASAR_HOST_DEVICE Real r_at_edge(int i) const noexcept {
-    return fma(static_cast<Real>(i), dx(), origin_x);
+    const Real logical = has_global_x_mapping != 0
+        ? static_cast<Real>(global_cell_offset_x) + static_cast<Real>(i)
+        : static_cast<Real>(i);
+    const Real origin =
+        has_global_x_mapping != 0 ? global_origin_x : origin_x;
+    return fma(logical, dx(), origin);
   }
 
   // Cell volume for column i under the azimuthal 2*pi convention (the axisymmetric
@@ -197,6 +220,12 @@ struct Grid2D {
     }
     if (!(std::isfinite(origin_x) && std::isfinite(origin_y))) {
       throw std::invalid_argument{"Grid2D: origin must be finite"};
+    }
+    if ((has_global_x_mapping != 0 && has_global_x_mapping != 1) ||
+        (has_global_x_mapping != 0 &&
+         (!(std::isfinite(global_origin_x)) || global_cell_offset_x < 0))) {
+      throw std::invalid_argument{
+          "Grid2D: invalid canonical global x mapping"};
     }
     if ((cell_dx != Real{0}
          && (!(std::isfinite(cell_dx) && cell_dx > Real{0})

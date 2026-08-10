@@ -21,7 +21,7 @@
 units: SI
 domain: {nx: 128, ny: 128, lx_m: 0.270000, ly_m: 0.270000, origin_x_m: 0.865000, origin_y_m: -0.135000}
 geometry: cylindrical
-numerics: {gamma: 1.6666667, reconstruction: muscl_minmod, riemann: hlld, integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}
+numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssprk3, ct: fd_ct_christlieb, positivity: troubled_cell, rho_floor: 1e-8, p_floor: 1e-9, cfl: 0.2}
 initial:
   type: confined_blob
   params:

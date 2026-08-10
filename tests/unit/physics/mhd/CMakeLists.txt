@@ -8,6 +8,7 @@ set(_quasar_mhd_tests
   test_mhd_boundary
   test_mhd_device_compute
   test_mhd_positivity_preservation
+  test_mhd_cylindrical_high_order
 )
 
 foreach(_test_name IN LISTS _quasar_mhd_tests)

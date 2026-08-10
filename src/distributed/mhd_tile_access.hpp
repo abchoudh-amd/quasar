@@ -99,7 +99,7 @@ class MhdTileAccess final {
   static Real low_order_anchor(mhd::MhdSolver2D& solver) {
     return solver.positivity_->admissible_fraction(
         solver.rk_[0], solver.rk_[0], Real{0}, Real{0}, solver.cfg_.gamma,
-        /*collocation_order=*/1);
+        /*collocation_order=*/1, solver.radial_tables_.view());
   }
 
   static void snapshot_substep(mhd::MhdSolver2D& solver,

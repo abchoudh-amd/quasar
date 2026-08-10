@@ -122,6 +122,7 @@ __device__ inline Real convex_internal_energy(
 // the conservative solver passes zero to enforce rho>0 and q>0.
 __global__ void QUASAR_LAUNCH_BOUNDS_256 admissible_fraction_kernel(
     quasar::Grid2D g, Real rho_floor, Real q_floor, int collocation_order,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ a_rho, const double* __restrict__ a_mx,
     const double* __restrict__ a_my, const double* __restrict__ a_mz,
     const double* __restrict__ a_energy, const double* __restrict__ a_bx,
@@ -140,10 +141,10 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 admissible_fraction_kernel(
   if (i < g.nx && j < g.ny) {
     const MhdState a = quasar::mhd::load_cell_state(
         g, a_rho, a_mx, a_my, a_mz, a_energy, a_bx, a_by, a_bz, i, j,
-        collocation_order);
+        radial_tables, collocation_order);
     const MhdState b = quasar::mhd::load_cell_state(
         g, b_rho, b_mx, b_my, b_mz, b_energy, b_bx, b_by, b_bz, i, j,
-        collocation_order);
+        radial_tables, collocation_order);
     const Real qa = convex_internal_energy(a, b, Real{0});
     if (!(a.rho > rho_floor) || !(qa > q_floor) ||
         !std::isfinite(a.rho) || !std::isfinite(qa)) {
@@ -333,7 +334,8 @@ __device__ inline Real reconstructed_face_rate(
     int b0_active, Real gamma, int scheme_order, int dir,
     int face_i, int face_j, Real face_weight, Real spacing,
     const quasar::mhd::detail::FaceInterfaceView& iface,
-    const double* b0x, const double* b0y, const double* b0z) {
+    const double* b0x, const double* b0y, const double* b0z,
+    quasar::numerics::RadialTablesView radial_tables) {
   if (face_weight == Real{0}) return Real{0};
   if (dir == 0 && face_i == g.nx &&
       flags.side[0] == 0 && flags.side[1] == 0) {
@@ -351,7 +353,8 @@ __device__ inline Real reconstructed_face_rate(
   const quasar::mhd::detail::FaceBackgroundView background{
       b0_active, b0x, b0y, b0z};
   const MhdBackground base_bg = quasar::mhd::detail::average_background(
-      g, dir, face_i, face_j, background, scheme_order <= 1 ? 1 : 0);
+      g, dir, face_i, face_j, background, scheme_order <= 1 ? 1 : 0,
+      radial_tables);
   const FaceSpeedParts base_left_speed = face_state_speed_parts(
       base_left, base_bg, dir, gamma);
   const FaceSpeedParts base_right_speed = face_state_speed_parts(
@@ -364,9 +367,9 @@ __device__ inline Real reconstructed_face_rate(
   const int count = scheme_order == 5 ? 3 : 4;
   for (int q = 0; q < count; ++q) {
     const MhdState left = quasar::mhd::detail::point_interface_state(
-        g, dir, face_i, face_j, scheme_order, q, iface, true);
+        g, dir, face_i, face_j, scheme_order, q, iface, true, radial_tables);
     const MhdState right = quasar::mhd::detail::point_interface_state(
-        g, dir, face_i, face_j, scheme_order, q, iface, false);
+        g, dir, face_i, face_j, scheme_order, q, iface, false, radial_tables);
     // Production quadrature falls back to the admissible face-average solve if
     // any recovered point is inadmissible, so its base rate is the matching
     // bound rather than an unrelated infinite rejection.
@@ -375,7 +378,7 @@ __device__ inline Real reconstructed_face_rate(
       return maximum;
     }
     const MhdBackground point_bg = quasar::mhd::detail::point_background(
-        g, dir, face_i, face_j, scheme_order, q, background);
+        g, dir, face_i, face_j, scheme_order, q, background, radial_tables);
     const FaceSpeedParts left_speed = face_state_speed_parts(
         left, point_bg, dir, gamma);
     const FaceSpeedParts right_speed = face_state_speed_parts(
@@ -395,6 +398,7 @@ __device__ inline Real reconstructed_face_rate(
 __global__ void QUASAR_LAUNCH_BOUNDS_256 cfl_max_rate_kernel(
     quasar::Grid2D g, int b0_active, Real gamma, Real dx, Real dy,
     Real rate_scale, int scheme_order, int cylindrical,
+    quasar::numerics::RadialTablesView radial_tables,
     quasar::mhd::BoundaryFlags4 flags,
     quasar::mhd::detail::FaceInterfaceView ifx,
     quasar::mhd::detail::FaceInterfaceView ify,
@@ -415,16 +419,16 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 cfl_max_rate_kernel(
     const Real half_weight = Real{0.5} * rate_scale;
     const Real ax_lo = reconstructed_face_rate(
         g, flags, b0_active, gamma, scheme_order, 0, i, j,
-        half_weight, dx, ifx, b0x, b0y, b0z);
+        half_weight, dx, ifx, b0x, b0y, b0z, radial_tables);
     const Real ax_hi = reconstructed_face_rate(
         g, flags, b0_active, gamma, scheme_order, 0, i + 1, j,
-        half_weight, dx, ifx, b0x, b0y, b0z);
+        half_weight, dx, ifx, b0x, b0y, b0z, radial_tables);
     const Real ay_lo = reconstructed_face_rate(
         g, flags, b0_active, gamma, scheme_order, 1, i, j,
-        half_weight, dy, ify, b0x, b0y, b0z);
+        half_weight, dy, ify, b0x, b0y, b0z, radial_tables);
     const Real ay_hi = reconstructed_face_rate(
         g, flags, b0_active, gamma, scheme_order, 1, i, j + 1,
-        half_weight, dy, ify, b0x, b0y, b0z);
+        half_weight, dy, ify, b0x, b0y, b0z, radial_tables);
 
     const Real radial_bphi = ax_lo + ax_hi;
     Real radial = radial_bphi;
@@ -848,7 +852,8 @@ void launch_mhd_cfl_max_rate(
     const MhdBackgroundField<Real>& b0, Real gamma,
     backend::DeviceBuffer<Real>& scratch, ScaledCflRate* host_rate,
     stream_t stream, int scheme_order, bool cylindrical,
-    BoundaryFlags4 flags) {
+    BoundaryFlags4 flags,
+    quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = ifx.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
@@ -890,7 +895,7 @@ void launch_mhd_cfl_max_rate(
 
   hipLaunchKernelGGL(cfl_max_rate_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, b0_active, gamma, dx, dy, Real{1},
-                     scheme_order, cylindrical ? 1 : 0, flags,
+                     scheme_order, cylindrical ? 1 : 0, radial_tables, flags,
                      x_view, y_view,
                      b0x, b0y, b0z, scratch.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
@@ -909,7 +914,7 @@ void launch_mhd_cfl_max_rate(
     hipLaunchKernelGGL(
         cfl_max_rate_kernel, grid, block, 0,
         static_cast<hipStream_t>(stream), g, b0_active, gamma, dx, dy,
-        rate_scale, scheme_order, cylindrical ? 1 : 0, flags,
+        rate_scale, scheme_order, cylindrical ? 1 : 0, radial_tables, flags,
         x_view, y_view, b0x, b0y, b0z, scratch.device_ptr());
     QUASAR_HIP_CHECK(::hipGetLastError());
     backend::device_synchronize(stream);
@@ -966,7 +971,8 @@ void launch_mhd_admissible_fraction(
     const MhdField2D<Real>& base, const MhdField2D<Real>& candidate,
     Real rho_floor, Real p_floor, Real gamma,
     backend::DeviceBuffer<Real>& scratch, Real* host_theta, stream_t stream,
-    int collocation_order) {
+    int collocation_order,
+    quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = base.grid;
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
@@ -977,7 +983,7 @@ void launch_mhd_admissible_fraction(
   hipLaunchKernelGGL(
       admissible_fraction_kernel, grid, block, 0,
       static_cast<hipStream_t>(stream), g, rho_floor, q_floor,
-      collocation_order,
+      collocation_order, radial_tables,
       base.rho.device_ptr(), base.mx.device_ptr(), base.my.device_ptr(),
       base.mz.device_ptr(), base.energy.device_ptr(), base.bx_face.device_ptr(),
       base.by_face.device_ptr(), base.bz_cell.device_ptr(),

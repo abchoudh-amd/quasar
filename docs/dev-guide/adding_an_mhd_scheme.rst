@@ -56,6 +56,12 @@ Steps
    its ``launch_mhd_*`` wrapper in ``kernels.hpp`` and define it under
    ``src/backend/hip/mhd/`` so the signature is checked at both ends.
 
+   A positivity implementation must preserve the trailing
+   ``collocation_order`` and ``RadialTablesView`` parameters on both ``apply``
+   and ``admissible_fraction`` and forward them to its device launches. The
+   solver passes an active, order-matched view in cylindrical runs; the inactive
+   default preserves Cartesian collocation for standalone callers.
+
 #. **Register it** under a deck-facing name with the macro from the table, in the
    same translation unit as the implementation, e.g.::
 
@@ -116,8 +122,8 @@ SSP-RK integrator              **Sequencing only.** ``integrator_->advance()`` *
 Because a silently ignored scheme is worse than a rejected one, ``validate_config``
 rejects any name outside the supported set **by name**, before construction:
 
-* ``numerics.reconstruction`` must be ``muscl_minmod``, ``mp5``, or ``mp7``
-  (and ``muscl_minmod`` only, in cylindrical geometry);
+* ``numerics.reconstruction`` must be ``muscl_minmod``, ``mp5``, or ``mp7`` in
+  both Cartesian and cylindrical geometry;
 * ``numerics.riemann`` must be ``hlld``;
 * ``numerics.ct`` must be ``fd_ct_christlieb``.
 

@@ -8,8 +8,8 @@ interfaces may still change between entries.
 
 ### Added
 - MHD: new ideal-MHD vertical slice — MP5/MP7 monotonicity-preserving
-  characteristic reconstruction on Cartesian grids, second-order MUSCL on
-  axisymmetric cylindrical `(r, z)` grids, an HLLD Riemann solver,
+  characteristic reconstruction on Cartesian and axisymmetric cylindrical
+  `(r, z)` grids, an HLLD Riemann solver,
   finite-difference constrained transport (FD-CT) for `div(B) = 0`, an SSP-RK3
   integrator, and a conservative troubled-cell positivity control. Driven from a
   new `quasar.mhd` CLI
@@ -210,8 +210,7 @@ interfaces may still change between entries.
   face-to-cell magnetic collocation is used by the EOS and diagnostics. The
   Cartesian spatial residual reaches the selected MP design order on smooth
   data; complete time-dependent convergence remains capped at third order by
-  SSP-RK3. Cylindrical grids use ring-volume averages and therefore reject these
-  Cartesian MP coefficients until radius-weighted radial moments are available.
+  SSP-RK3.
 - MHD: the CFL stable-timestep guard now enforces the additive multidimensional
   Courant condition `dt * ((|v_x|+c_f,x)/dx + (|v_y|+c_f,y)/dy) <= cfl`. The
   unsplit residual sums both directional flux differences into one stage update,
@@ -336,10 +335,12 @@ interfaces may still change between entries.
   ``(1/r)d(r B_r)/dr + dB_z/dz`` telescopes with the CT curl. Finite-inner-radius
   annular domains and total-field cylindrical curvature sources (including a
   static ``B0``) are supported.
-- MHD: cylindrical decks now explicitly require `muscl_minmod`. MP5/MP7 use
-  uniform-measure Cartesian finite-volume moments, while radial conserved values
-  are averaged with the `r dr` measure; both native and Python validation reject
-  that combination instead of silently degrading its advertised design order.
+- MHD: cylindrical MP5/MP7 now use radius-weighted finite-volume moments
+  along the radial direction while retaining the Cartesian coefficients axially.
+  High-order reconstruction, magnetic collocation, transverse quadrature, and
+  constrained transport are supported on both annular domains and grids that
+  include the `r=0` axis; native and Python deck validation now accept `mp5` and
+  `mp7` for cylindrical geometry.
 - PIC field boundaries are now imposed by one-sided / characteristic node
   corrections after each curl rather than by filling a ghost halo. `pec` keeps
   its reflecting, energy-conserving behavior (tangential E / normal B pinned;

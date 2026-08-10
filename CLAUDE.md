@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Quasar is a HIP-accelerated AMD ROCm numerical simulation framework with `gfx942` and `gfx950` presets, a C++20 core, pybind11 bindings, and a pure-Python user-facing layer. Current vertical slices are **magnetostatics** (Biot–Savart for coil design), **electromagnetic PIC**, and **ideal MHD** (high-order Cartesian MP5/MP7 or second-order cylindrical MUSCL reconstruction, HLLD, and FD-CT).
+Quasar is a HIP-accelerated AMD ROCm numerical simulation framework with `gfx942` and `gfx950` presets, a C++20 core, pybind11 bindings, and a pure-Python user-facing layer. Current vertical slices are **magnetostatics** (Biot–Savart for coil design), **electromagnetic PIC**, and **ideal MHD** (high-order MP5/MP7 reconstruction on Cartesian and axisymmetric cylindrical grids, HLLD, and FD-CT).
 
 The build supports only the HIP backend; configuring with
 `-DQUASAR_ENABLE_HIP=OFF` is a hard error (see the top-level `CMakeLists.txt`).
@@ -89,7 +89,7 @@ Concrete physics modules currently present:
 
 - `physics/magnetostatics` — Biot–Savart field evaluator over conductor geometries with observation point sets. Exposed to Python as `quasar.coil` with a CLI at `python -m quasar.coil.cli run <input.yaml>` that writes `out.npz`.
 - `physics/pic` — EM-PIC vertical slice (`EmPicConfig`, Cartesian and axisymmetric-cylindrical FDTD, particle shapes, charge-conserving deposition, particle and field boundaries, and diagnostics). Driven from Python at `python -m quasar.pic.cli run <input.yaml>`; no C++ app exists. Deck I/O is under `quasar.pic`.
-- `physics/mhd` — high-order ideal-MHD vertical slice (MP5/MP7 characteristic reconstruction, HLLD Riemann solver, FD constrained transport, SSP-RK3, troubled-cell positivity floor; Cartesian and axisymmetric cylindrical `(r,z)`). Driven from Python at `python -m quasar.mhd.cli run <input.yaml>`. The numerics live under `numerics/` (the second consumer of that axis after PIC); deck I/O is under `quasar.mhd`.
+- `physics/mhd` — high-order ideal-MHD vertical slice (MP5/MP7 characteristic reconstruction with Cartesian or radius-weighted cylindrical finite-volume moments, HLLD Riemann solver, FD constrained transport, SSP-RK3, conservative troubled-cell positivity control). Driven from Python at `python -m quasar.mhd.cli run <input.yaml>`. The numerics live under `numerics/` (the second consumer of that axis after PIC); deck I/O is under `quasar.mhd`.
 - `physics/analytic_fields` — analytic and rectilinear file-backed fields used
   by simulations, tests, and examples.
 

@@ -38,6 +38,7 @@ set(_quasar_python_tests
   test_mhd_bindings
   test_mhd_cli
   test_mhd_io
+  test_mhd_numerics
   test_pic_io
   test_pic_io_cylindrical
   test_pic_initial_conditions

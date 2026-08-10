@@ -1348,6 +1348,27 @@ const TransportResolution& MhdTileRuntime::transport_resolution() const noexcept
   return transport_->resolution();
 }
 
+std::vector<Grid2D> MhdTileRuntime::local_tile_grids_for_testing() {
+  runtime_->require_orchestration_thread();
+  if (lifecycle_.closed) {
+    throw std::logic_error{"distributed MHD runtime is closed"};
+  }
+  if (lifecycle_.poisoned) {
+    throw std::logic_error{
+        "distributed MHD runtime is poisoned after a failed collective mutation"};
+  }
+
+  std::vector<Grid2D> grids(solvers_.size());
+  auto tasks = mhd_worker_tasks(
+      *runtime_, worker_epoch_, solvers_.size(),
+      [this, &grids](std::size_t local, WorkerContext&) {
+        grids[local] = solvers_[local]->grid();
+      });
+  require_worker_success(*workers_, *runtime_, worker_epoch_,
+                         "mhd-test-tile-grids", tasks);
+  return grids;
+}
+
 mhd::MhdConfig MhdTileRuntime::tile_config(std::size_t endpoint) const {
   mhd::MhdConfig config = global_config_;
   const TileExtent& tile = topology_.tile(endpoint);
@@ -1363,6 +1384,13 @@ mhd::MhdConfig MhdTileRuntime::tile_config(std::size_t endpoint) const {
       std::fma(static_cast<Real>(tile.y.begin), dy,
                global_config_.grid.origin_y),
       std::max(global_config_.grid.nghost, communication_halo));
+  config.grid.global_origin_x = global_config_.grid.has_global_x_mapping != 0
+      ? global_config_.grid.global_origin_x
+      : global_config_.grid.origin_x;
+  config.grid.global_cell_offset_x =
+      global_config_.grid.global_cell_offset_x +
+      static_cast<int>(tile.x.begin);
+  config.grid.has_global_x_mapping = 1;
 
   const bool px = periodic_x(global_config_);
   const bool py = periodic_y(global_config_);

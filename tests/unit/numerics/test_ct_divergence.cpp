@@ -47,6 +47,7 @@
 #include "quasar/numerics/ct_scheme.hpp"
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 #include "quasar/core/grid.hpp"
@@ -140,6 +141,157 @@ Real host_cylindrical_divergence_b_linf(
     }
   }
   return m;
+}
+
+// Exact ring average of sin(k r) over radial cell i.  The long-double
+// antiderivative keeps the analytic seed substantially more accurate than the
+// MP7 interpolation being measured below.
+Real ring_average_sine(const Grid2D& g, int i, Real wavenumber) {
+  const long double a = static_cast<long double>(g.r_at_edge(i));
+  const long double b = static_cast<long double>(g.r_at_edge(i + 1));
+  const long double k = static_cast<long double>(wavenumber);
+  const auto primitive = [k](long double r) {
+    return std::sin(k * r) / (k * k) - r * std::cos(k * r) / k;
+  };
+  const long double measure = (b * b - a * a) / 2.0L;
+  return static_cast<Real>((primitive(b) - primitive(a)) / measure);
+}
+
+// Isolate the CT finish phase's radial face-average-to-corner interpolation.
+// x-face and cell-centred contributions are exactly zero, while y-face entries
+// are ring averages of a smooth radial profile.  With both one-dimensional
+// proof tables false, the corner result is therefore precisely the y pass.
+void seed_radial_face_emf(quasar::mhd::EmfField2D<Real>& emf,
+                          Real wavenumber) {
+  const Grid2D& g = emf.grid;
+  const std::size_t n = g.storage_size();
+  std::vector<Real> zero(n, Real{0});
+  std::vector<Real> yface(n, Real{0});
+  std::vector<int> no_jump(n, 0);
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      yface[g.index(i, j)] = ring_average_sine(g, i, wavenumber);
+    }
+  }
+  emf.cell_ez_average.copy_from_host(zero.data(), n);
+  emf.xface_ez.copy_from_host(zero.data(), n);
+  emf.yface_ez.copy_from_host(yface.data(), n);
+  emf.xface_no_jump.copy_from_host(no_jump.data(), n);
+  emf.yface_no_jump.copy_from_host(no_jump.data(), n);
+}
+
+void zero_field(quasar::mhd::MhdField2D<Real>& field) {
+  const std::size_t n = field.grid.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  field.rho.copy_from_host(zero.data(), n);
+  field.mx.copy_from_host(zero.data(), n);
+  field.my.copy_from_host(zero.data(), n);
+  field.mz.copy_from_host(zero.data(), n);
+  field.energy.copy_from_host(zero.data(), n);
+  field.bx_face.copy_from_host(zero.data(), n);
+  field.by_face.copy_from_host(zero.data(), n);
+  field.bz_cell.copy_from_host(zero.data(), n);
+}
+
+struct CylindricalCtRun {
+  Real worst_divb{0};
+  Real largest_b{0};
+  Real axis_emf{0};
+};
+
+CylindricalCtRun run_cylindrical_mp7_ct(Real origin_r) {
+  constexpr int kSteps = 20;
+  constexpr Real kDt = Real{2e-3};
+  constexpr Real kWavenumber = Real{4.25};
+  const Grid2D g{20, 14, Real{1}, Real{0.8}, origin_r, Real{-0.4},
+                 /*nghost=*/4};
+  quasar::numerics::RadialTables radial_tables{g, /*scheme_order=*/7};
+  EXPECT_EQ(radial_tables.view().active, 1);
+  EXPECT_EQ(radial_tables.view().scheme_order, 7);
+
+  quasar::mhd::EmfField2D<Real> emf{g};
+  seed_radial_face_emf(emf, kWavenumber);
+  quasar::mhd::MhdField2D<Real> state{g};
+  quasar::mhd::MhdField2D<Real> next{g};
+  quasar::mhd::MhdField2D<Real> rate{g};
+  zero_field(state);
+  zero_field(next);
+  zero_field(rate);
+
+  quasar::mhd::BoundaryFlags4 flags{{1, 1, 1, 1}};
+  if (origin_r == Real{0}) flags.side[0] = 3;
+
+  CylindricalCtRun result;
+  std::vector<Real> br(g.storage_size()), bz(g.storage_size());
+  for (int step = 0; step < kSteps; ++step) {
+    // This is the same CT path used by the assembled solver: MP7 corner EMF,
+    // annular curl rate, then a stage update.  Rebuilding the corner table on
+    // every step also keeps the active RadialTablesView in the exercised path.
+    quasar::mhd::launch_mhd_ct_emf_finish(
+        flags, emf, /*stream=*/nullptr, /*scheme_order=*/7,
+        /*cylindrical=*/true, radial_tables.view());
+    quasar::mhd::launch_mhd_emf_curl_rate(
+        emf, rate, g, /*stream=*/nullptr, /*cylindrical=*/true);
+    quasar::mhd::launch_mhd_rk_stage(
+        next, state, state, rate, Real{1}, Real{0}, kDt,
+        /*stream=*/nullptr);
+    quasar::backend::device_synchronize(nullptr);
+
+    next.bx_face.copy_to_host(br.data(), br.size());
+    next.by_face.copy_to_host(bz.data(), bz.size());
+    result.worst_divb = std::max(
+        result.worst_divb, host_cylindrical_divergence_b_linf(g, br, bz));
+    for (int j = 0; j < g.ny; ++j) {
+      for (int i = 0; i <= g.nx; ++i) {
+        result.largest_b = std::max(
+            result.largest_b, std::abs(br[g.index(i, j)]));
+      }
+    }
+    for (int j = 0; j <= g.ny; ++j) {
+      for (int i = 0; i < g.nx; ++i) {
+        result.largest_b = std::max(
+            result.largest_b, std::abs(bz[g.index(i, j)]));
+      }
+    }
+    std::swap(state, next);
+  }
+
+  std::vector<Real> edge(g.storage_size());
+  emf.ez_edge.copy_to_host(edge.data(), edge.size());
+  result.axis_emf = edge[g.index(0, g.ny / 2)];
+  return result;
+}
+
+struct CornerEmfErrors {
+  Real weighted{0};
+  Real cartesian_control{0};
+};
+
+CornerEmfErrors cylindrical_corner_emf_errors(int nx) {
+  constexpr Real kWavenumber = Real{7.4};
+  const Grid2D g{nx, 12, Real{1}, Real{1}, Real{0.7}, Real{0},
+                 /*nghost=*/4};
+  quasar::numerics::RadialTables radial_tables{g, /*scheme_order=*/7};
+  const int corner_i = nx / 2;
+  const int corner_j = g.ny / 2;
+  const Real exact = std::sin(kWavenumber * g.r_at_edge(corner_i));
+  const quasar::mhd::BoundaryFlags4 outflow{{1, 1, 1, 1}};
+
+  const auto error = [&](quasar::numerics::RadialTablesView view) {
+    quasar::mhd::EmfField2D<Real> emf{g};
+    seed_radial_face_emf(emf, kWavenumber);
+    quasar::mhd::launch_mhd_ct_emf_finish(
+        outflow, emf, /*stream=*/nullptr, /*scheme_order=*/7,
+        /*cylindrical=*/true, view);
+    quasar::backend::device_synchronize(nullptr);
+    std::vector<Real> edge(g.storage_size());
+    emf.ez_edge.copy_to_host(edge.data(), edge.size());
+    return std::abs(edge[g.index(corner_i, corner_j)] - exact);
+  };
+
+  return CornerEmfErrors{
+      error(radial_tables.view()),
+      error(quasar::numerics::RadialTablesView{})};
 }
 
 void seed_divergence_free_b(quasar::mhd::MhdField2D<Real>& u, const Grid2D& g) {
@@ -561,6 +713,57 @@ TEST(MhdCtScheme, CylindricalFaceUpdatePreservesAnnularDivergence) {
   }
   EXPECT_LT(host_cylindrical_divergence_b_linf(g, br, bz), Real{3e-13});
   EXPECT_GT(host_divergence_b_linf(g, br, bz), Real{1e-3});
+}
+
+// Exercise the production MP7 CT seam with an active radial coefficient table,
+// the annular emf_curl_rate kernel, and the RK stage update.  The corner EMF is
+// non-uniform, so the magnetic field changes substantially; nevertheless the
+// annular divergence must remain at round-off for every one of twenty updates.
+TEST(MhdCtScheme, CylindricalCtPreservesAnnularDivB) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  for (const Real origin_r : {Real{0}, Real{0.75}}) {
+    SCOPED_TRACE(::testing::Message{}
+                 << (origin_r == Real{0} ? "axis" : "annulus"));
+    const CylindricalCtRun run = run_cylindrical_mp7_ct(origin_r);
+    ASSERT_GT(run.largest_b, Real{1e-3})
+        << "the repeated CT updates did not produce a meaningful field";
+    const Real scale = std::max(Real{1}, run.largest_b);
+    const Real dr = Real{1} / Real{20};
+    const Real roundoff_bound =
+        Real{2e4} * std::numeric_limits<Real>::epsilon() * scale / dr;
+    EXPECT_LT(run.worst_divb, roundoff_bound);
+    if (origin_r == Real{0}) {
+      EXPECT_EQ(run.axis_emf, Real{0})
+          << "the coordinate-axis corner EMF must be pinned exactly";
+    }
+  }
+}
+
+// The y-face CT table varies in i, so it is the radial interpolation.  Isolate
+// that pass with smooth exact ring averages and verify MP7 convergence.  The
+// inactive-table run is a deliberate direction-swap control: radializing the
+// x pass instead cannot affect this data and therefore leaves this Cartesian
+// (uniform-measure) error in place.
+TEST(MhdCtScheme, CylindricalCornerEmfIsHighOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const CornerEmfErrors coarse = cylindrical_corner_emf_errors(/*nx=*/12);
+  const CornerEmfErrors fine = cylindrical_corner_emf_errors(/*nx=*/24);
+  ASSERT_GT(coarse.weighted, Real{0});
+  ASSERT_GT(fine.weighted, Real{0});
+  ASSERT_GT(coarse.cartesian_control, Real{0});
+  ASSERT_GT(fine.cartesian_control, Real{0});
+
+  const Real weighted_order = std::log2(coarse.weighted / fine.weighted);
+  const Real control_order =
+      std::log2(coarse.cartesian_control / fine.cartesian_control);
+  EXPECT_GT(weighted_order, Real{6.4})
+      << "coarse=" << coarse.weighted << " fine=" << fine.weighted;
+  EXPECT_LT(control_order, Real{3})
+      << "the Cartesian control unexpectedly behaves like radial MP7";
+  EXPECT_LT(fine.weighted, fine.cartesian_control * Real{1e-3})
+      << "active radial tables did not materially improve the corner EMF";
 }
 
 // The divergence diagnostic reports ~0 on an analytically divergence-free seed.

@@ -16,6 +16,7 @@
 // equations; automatic initial-state construction does not clamp to them.
 
 #include "quasar/core/types.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 
 namespace quasar::numerics {
@@ -31,8 +32,12 @@ class IPositivityLimiter {
   // becomes exactly p_floor (momentum and B unchanged). Already-positive cells
   // are left untouched to round-off. The evolution solver does not call this
   // nonconservative utility. `gamma` is the adiabatic index.
+  // `collocation_order` selects the staggered-field face-to-cell rule;
+  // cylindrical callers pass the matching solver-owned `radial_tables` view.
+  // The inactive default retains Cartesian collocation.
   virtual void apply(quasar::mhd::MhdField2D<Real>& u, Real rho_floor,
-                     Real p_floor, Real gamma) const = 0;
+                     Real p_floor, Real gamma, int collocation_order = 0,
+                     RadialTablesView radial_tables = {}) const = 0;
 
   // Return min_cell theta_cell in [0,1] such that the convex segment from an
   // admissible `base` state to `candidate` remains strictly above both bounds.
@@ -40,12 +45,15 @@ class IPositivityLimiter {
   // explicit caller may request positive bounds. A return of 1 accepts the
   // candidate unchanged. The solver uses theta<1 to retry the conservative
   // SSP-RK update with a smaller CFL-coupled substep; it never applies a
-  // cell-local mass/energy repair to an evolved state.
+  // cell-local mass/energy repair to an evolved state. Magnetic pressure uses
+  // the collocation selected by `collocation_order` and `radial_tables`, with
+  // the inactive default retaining the Cartesian rule.
   virtual Real admissible_fraction(
       const quasar::mhd::MhdField2D<Real>& base,
       const quasar::mhd::MhdField2D<Real>& candidate,
       Real rho_floor, Real p_floor, Real gamma,
-      int collocation_order = 0) const = 0;
+      int collocation_order = 0,
+      RadialTablesView radial_tables = {}) const = 0;
 };
 
 }  // namespace quasar::numerics

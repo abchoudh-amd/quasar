@@ -397,12 +397,17 @@ TEST(MhdConfigValidation, RejectsUnknownSchemesAndBoundaryTopology) {
     EXPECT_THROW(quasar::mhd::MhdSolver2D{cfg}, std::invalid_argument)
         << "fluid and field periodicity must agree per side";
   }
-  {
-    auto cfg = base_config();
-    cfg.geometry = "cylindrical";
-    EXPECT_THROW(quasar::mhd::MhdSolver2D{cfg}, std::invalid_argument)
-        << "cylindrical MP7 must be rejected before it can advertise Cartesian order";
-  }
+}
+
+TEST(MhdConfigValidation, AcceptsCylindricalMp7) {
+  auto cfg = base_config();
+  cfg.geometry = "cylindrical";
+  cfg.boundary.fluid[0] = "axis";
+  cfg.boundary.field[0] = "axis";
+  cfg.boundary.fluid[1] = "outflow";
+  cfg.boundary.field[1] = "outflow";
+  EXPECT_NO_THROW(quasar::mhd::MhdSolver2D{cfg})
+      << "cylindrical MP7 uses radius-weighted radial moments";
 }
 
 TEST(MhdConfigValidation, RejectsAnnulusWhoseReconstructionHaloCrossesAxis) {

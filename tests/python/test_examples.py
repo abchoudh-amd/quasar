@@ -2122,7 +2122,7 @@ class SquareToroidMhdDeckTest(unittest.TestCase):
 
         self.assertEqual(mhd_deck["geometry"], "cylindrical")
         self.assertEqual(
-            mhd_deck["numerics"]["reconstruction"], "muscl_minmod")
+            mhd_deck["numerics"]["reconstruction"], "mp7")
         self.assertEqual(mhd_deck["initial"]["params"]["p_in"], 1000.0)
         self.assertEqual(mhd_deck["initial"]["params"]["p_out"], 100.0)
         # This 90%-bore box is an artificial crop through a coil field with

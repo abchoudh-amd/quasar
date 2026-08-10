@@ -3,6 +3,7 @@
 #include "quasar/numerics/finite_volume_quadrature.hpp"
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
@@ -502,6 +503,158 @@ TEST(MhdMultidimensionalFlux, SmoothNonlinearFluxKeepsMpOrderInTwoDimensions) {
       << "errors " << mp5_coarse << " -> " << mp5_fine;
   EXPECT_GT(mp7_rate, Real{6.0})
       << "errors " << mp7_coarse << " -> " << mp7_fine;
+}
+
+long double radial_exponential_average(long double lo, long double hi,
+                                       long double rate) {
+  const auto antiderivative = [rate](long double radius) {
+    return std::exp(rate * (radius - 1.0L)) *
+           (radius / rate - 1.0L / (rate * rate));
+  };
+  const long double volume = (hi * hi - lo * lo) / 2.0L;
+  return (antiderivative(hi) - antiderivative(lo)) / volume;
+}
+
+Real cylindrical_face_flux_error(int order, int resolution,
+                                 bool radial_quadrature) {
+  // A z-normal face is averaged in the radial direction.  Supplying exact
+  // annular averages here isolates the production transverse recovery and
+  // HLLD face integration from the normal reconstruction kernel.
+  Grid2D g{resolution, 2, Real{1}, Real{1}, Real{1}, Real{0},
+           /*nghost=*/4};
+  MhdInterfaceStates<Real> iface{g, /*dir=*/1};
+  constexpr long double velocity_mean = 0.7L;
+  constexpr long double velocity_amplitude = 0.2L;
+  constexpr long double exponential_rate = 2.5L;
+  const std::size_t n = g.storage_size();
+  std::vector<MhdState> state(n);
+  for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+    const long double lo = static_cast<long double>(g.origin_x) +
+                           static_cast<long double>(i) *
+                               static_cast<long double>(g.dx());
+    const long double hi = lo + static_cast<long double>(g.dx());
+    const long double exponential_average =
+        radial_exponential_average(lo, hi, exponential_rate);
+    const long double exponential_squared_average =
+        radial_exponential_average(lo, hi, 2.0L * exponential_rate);
+    const Real velocity_average = static_cast<Real>(
+        velocity_mean + velocity_amplitude * exponential_average);
+    const Real velocity_squared_average = static_cast<Real>(
+        velocity_mean * velocity_mean +
+        2.0L * velocity_mean * velocity_amplitude * exponential_average +
+        velocity_amplitude * velocity_amplitude *
+            exponential_squared_average);
+    const MhdState face_average{
+        Real{1}, Real{0}, velocity_average, Real{0},
+        kPressure / (kGamma - Real{1}) +
+            Real{0.5} * velocity_squared_average,
+        Real{0}, Real{0}, Real{0}};
+    for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+      state[g.index(i, j)] = face_average;
+    }
+  }
+
+  std::vector<Real> values(n);
+  const auto copy = [&](auto& left, auto& right, Real MhdState::*member) {
+    for (std::size_t k = 0; k < n; ++k) values[k] = state[k].*member;
+    left.copy_from_host(values.data(), n);
+    right.copy_from_host(values.data(), n);
+  };
+  copy(iface.Lrho, iface.Rrho, &MhdState::rho);
+  copy(iface.Lmx, iface.Rmx, &MhdState::mx);
+  copy(iface.Lmy, iface.Rmy, &MhdState::my);
+  copy(iface.Lmz, iface.Rmz, &MhdState::mz);
+  copy(iface.Lenergy, iface.Renergy, &MhdState::energy);
+  copy(iface.Lbx, iface.Rbx, &MhdState::bx);
+  copy(iface.Lby, iface.Rby, &MhdState::by);
+  copy(iface.Lbz, iface.Rbz, &MhdState::bz);
+
+  quasar::numerics::RadialTables table_owner{g, order};
+  auto radial_tables = table_owner.view();
+  if (!radial_quadrature) radial_tables.active = 0;
+  quasar::mhd::MhdField2D<Real> flux{g};
+  const quasar::mhd::BoundaryFlags4 outflow{{1, 1, 1, 1}};
+  quasar::mhd::launch_mhd_hlld_flux(
+      iface, quasar::mhd::MhdBackgroundField<Real>{}, /*dir=*/1, flux,
+      outflow, kGamma, /*stream=*/nullptr, /*hll_only=*/false,
+      /*momentum_parts=*/nullptr, order,
+      quasar::mhd::FaceOwnershipFlags4{}, radial_tables);
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> momentum_flux(n);
+  flux.my.copy_to_host(momentum_flux.data(), n);
+  Real error = Real{0};
+  for (int i = 0; i < g.nx; ++i) {
+    const long double lo = static_cast<long double>(g.origin_x) +
+                           static_cast<long double>(i) *
+                               static_cast<long double>(g.dx());
+    const long double hi = lo + static_cast<long double>(g.dx());
+    const long double exponential_average =
+        radial_exponential_average(lo, hi, exponential_rate);
+    const long double exponential_squared_average =
+        radial_exponential_average(lo, hi, 2.0L * exponential_rate);
+    const Real exact = kPressure + static_cast<Real>(
+        velocity_mean * velocity_mean +
+        2.0L * velocity_mean * velocity_amplitude * exponential_average +
+        velocity_amplitude * velocity_amplitude *
+            exponential_squared_average);
+    error += std::abs(momentum_flux[g.index(i, 0)] - exact);
+  }
+  return error / static_cast<Real>(g.nx);
+}
+
+TEST(MhdMultidimensionalFlux,
+     CylindricalTransverseQuadratureUsesRadialMeasure) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Real mp5_coarse = cylindrical_face_flux_error(
+      /*order=*/5, /*resolution=*/10, /*radial_quadrature=*/true);
+  const Real mp5_fine = cylindrical_face_flux_error(
+      /*order=*/5, /*resolution=*/20, /*radial_quadrature=*/true);
+  const Real mp5_cartesian_coarse = cylindrical_face_flux_error(
+      /*order=*/5, /*resolution=*/10, /*radial_quadrature=*/false);
+  const Real mp5_cartesian_fine = cylindrical_face_flux_error(
+      /*order=*/5, /*resolution=*/20, /*radial_quadrature=*/false);
+  const Real mp7_coarse = cylindrical_face_flux_error(
+      /*order=*/7, /*resolution=*/8, /*radial_quadrature=*/true);
+  const Real mp7_fine = cylindrical_face_flux_error(
+      /*order=*/7, /*resolution=*/16, /*radial_quadrature=*/true);
+  const Real mp7_cartesian_coarse = cylindrical_face_flux_error(
+      /*order=*/7, /*resolution=*/8, /*radial_quadrature=*/false);
+  const Real mp7_cartesian_fine = cylindrical_face_flux_error(
+      /*order=*/7, /*resolution=*/16, /*radial_quadrature=*/false);
+
+  const auto slope = [](Real coarse, Real fine) {
+    EXPECT_GT(coarse, Real{0});
+    EXPECT_GT(fine, Real{0});
+    return std::log2(coarse / fine);
+  };
+  const Real mp5_rate = slope(mp5_coarse, mp5_fine);
+  const Real mp5_cartesian_rate =
+      slope(mp5_cartesian_coarse, mp5_cartesian_fine);
+  const Real mp7_rate = slope(mp7_coarse, mp7_fine);
+  const Real mp7_cartesian_rate =
+      slope(mp7_cartesian_coarse, mp7_cartesian_fine);
+  ::testing::Test::RecordProperty("mp5_radial_coarse_error", mp5_coarse);
+  ::testing::Test::RecordProperty("mp5_radial_fine_error", mp5_fine);
+  ::testing::Test::RecordProperty("mp5_radial_observed_order", mp5_rate);
+  ::testing::Test::RecordProperty(
+      "mp5_cartesian_observed_order", mp5_cartesian_rate);
+  ::testing::Test::RecordProperty("mp7_radial_coarse_error", mp7_coarse);
+  ::testing::Test::RecordProperty("mp7_radial_fine_error", mp7_fine);
+  ::testing::Test::RecordProperty("mp7_radial_observed_order", mp7_rate);
+  ::testing::Test::RecordProperty(
+      "mp7_cartesian_observed_order", mp7_cartesian_rate);
+  EXPECT_GT(mp5_rate, Real{4.6})
+      << "radial errors " << mp5_coarse << " -> " << mp5_fine;
+  EXPECT_LT(mp5_cartesian_rate, Real{4.2})
+      << "Cartesian negative-control errors " << mp5_cartesian_coarse
+      << " -> " << mp5_cartesian_fine;
+  EXPECT_GT(mp7_rate, Real{6.4})
+      << "radial errors " << mp7_coarse << " -> " << mp7_fine;
+  EXPECT_LT(mp7_cartesian_rate, Real{4.5})
+      << "Cartesian negative-control errors " << mp7_cartesian_coarse
+      << " -> " << mp7_cartesian_fine;
 }
 
 Real active_background_flux_error(int order, int resolution) {

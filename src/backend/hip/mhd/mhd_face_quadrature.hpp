@@ -88,8 +88,33 @@ __device__ inline Real weighted_value(const Real (&weights)[Count],
 }
 
 template <class Sample>
-__device__ inline Real point_value(int order, int node,
+__device__ inline Real weighted_value(const Real* weights, int count,
                                       const Sample& sample) {
+  const Real reference = sample(count / 2);
+  bool constant = true;
+  numerics::ScaledProductQuotientAccumulator<8> sum;
+  for (int k = 0; k < count; ++k) {
+    const Real value = sample(k);
+    constant = constant && value == reference;
+    numerics::append_scaled_product_quotient(
+        sum, weights[k], value, Real{1}, Real{1});
+  }
+  return constant ? reference
+                  : numerics::finish_scaled_product_quotient_sum(sum);
+}
+
+template <class Sample>
+__device__ inline Real point_value(
+    int order, int node, int dir, int radial_index,
+    numerics::RadialTablesView radial_tables, const Sample& sample) {
+  if (dir == 1 && radial_tables.active != 0 &&
+      radial_tables.contains(radial_index) &&
+      radial_tables.reconstruction_width == (order >= 7 ? 7 : 5)) {
+    const int width = radial_tables.reconstruction_width;
+    return weighted_value(
+        radial_tables.r2_row(radial_index, node), width,
+        [&](int k) { return sample(k - width / 2); });
+  }
   if (order >= 7) {
     return weighted_value(kMp7TransversePointWeights[node], [&](int k) {
       return sample(k - 3);
@@ -100,6 +125,14 @@ __device__ inline Real point_value(int order, int node,
   });
 }
 
+template <class Sample>
+__device__ inline Real point_value(int order, int node,
+                                   const Sample& sample) {
+  return point_value(
+      order, node, /*dir=*/0, /*radial_index=*/0,
+      numerics::RadialTablesView{}, sample);
+}
+
 __device__ inline std::size_t transverse_index(
     const Grid2D& g, int dir, int i, int j, int offset) {
   return dir == 0 ? g.index(i, j + offset) : g.index(i + offset, j);
@@ -107,7 +140,8 @@ __device__ inline std::size_t transverse_index(
 
 __device__ inline MhdState point_interface_state(
     const Grid2D& g, int dir, int i, int j, int order, int node,
-    const FaceInterfaceView& v, bool left) {
+    const FaceInterfaceView& v, bool left,
+    numerics::RadialTablesView radial_tables) {
   const double* rho = left ? v.Lrho : v.Rrho;
   const double* mx = left ? v.Lmx : v.Rmx;
   const double* my = left ? v.Lmy : v.Rmy;
@@ -117,7 +151,7 @@ __device__ inline MhdState point_interface_state(
   const double* by = left ? v.Lby : v.Rby;
   const double* bz = left ? v.Lbz : v.Rbz;
   const auto component = [&](const double* values) {
-    return point_value(order, node, [&](int offset) {
+    return point_value(order, node, dir, i, radial_tables, [&](int offset) {
       return static_cast<Real>(values[transverse_index(g, dir, i, j, offset)]);
     });
   };
@@ -127,22 +161,25 @@ __device__ inline MhdState point_interface_state(
 
 __device__ inline MhdBackground average_background(
     const Grid2D& g, int dir, int i, int j, const FaceBackgroundView& bg,
-    int collocation_order = 0) {
+    int collocation_order,
+    numerics::RadialTablesView radial_tables) {
   if (bg.active == 0) return {};
   return load_interface_background(g, dir, bg.bx, bg.by, bg.bz, i, j,
-                                   collocation_order);
+                                   radial_tables, collocation_order);
 }
 
 __device__ inline MhdBackground point_background(
     const Grid2D& g, int dir, int i, int j, int order, int node,
-    const FaceBackgroundView& bg) {
+    const FaceBackgroundView& bg,
+    numerics::RadialTablesView radial_tables) {
   if (bg.active == 0) return {};
   const auto component = [&](int component_index) {
-    return point_value(order, node, [&](int offset) {
+    return point_value(order, node, dir, i, radial_tables, [&](int offset) {
       const int is = dir == 0 ? i : i + offset;
       const int js = dir == 0 ? j + offset : j;
       const MhdBackground value =
-          average_background(g, dir, is, js, bg, /*collocation_order=*/0);
+          average_background(g, dir, is, js, bg, /*collocation_order=*/0,
+                             radial_tables);
       return component_index == 0 ? value.b0x
            : component_index == 1 ? value.b0y : value.b0z;
     });
@@ -188,12 +225,14 @@ __device__ inline MhdMomentumFluxParts riemann_flux_parts(
 
 __device__ inline MhdFlux average_face_flux(
     const Grid2D& g, int dir, int i, int j, int scheme_order, int hll_only,
-    Real gamma, const FaceInterfaceView& v, const FaceBackgroundView& bg) {
+    Real gamma, const FaceInterfaceView& v, const FaceBackgroundView& bg,
+    numerics::RadialTablesView radial_tables = {}) {
   const std::size_t k = g.index(i, j);
   const MhdState base_l = load_interface_side(v, k, true);
   const MhdState base_r = load_interface_side(v, k, false);
   const MhdBackground base_bg =
-      average_background(g, dir, i, j, bg, hll_only != 0 ? 1 : 0);
+      average_background(g, dir, i, j, bg, hll_only != 0 ? 1 : 0,
+                         radial_tables);
   if (scheme_order != 5 && scheme_order != 7) {
     return riemann_flux(base_l, base_r, base_bg, dir, hll_only, gamma);
   }
@@ -202,9 +241,9 @@ __device__ inline MhdFlux average_face_flux(
   const int count = scheme_order == 5 ? 3 : 4;
   for (int q = 0; q < count; ++q) {
     const MhdState l = point_interface_state(
-        g, dir, i, j, scheme_order, q, v, true);
+        g, dir, i, j, scheme_order, q, v, true, radial_tables);
     const MhdState r = point_interface_state(
-        g, dir, i, j, scheme_order, q, v, false);
+        g, dir, i, j, scheme_order, q, v, false, radial_tables);
     if (!state_is_admissible(l, gamma) || !state_is_admissible(r, gamma)) {
       // A transverse polynomial has no invariant-domain guarantee.  Falling
       // back to the already-admissible face-average problem is conservative and
@@ -212,11 +251,17 @@ __device__ inline MhdFlux average_face_flux(
       return riemann_flux(base_l, base_r, base_bg, dir, hll_only, gamma);
     }
     const MhdBackground point_bg =
-        point_background(g, dir, i, j, scheme_order, q, bg);
+        point_background(g, dir, i, j, scheme_order, q, bg, radial_tables);
     flux[q] = riemann_flux(l, r, point_bg, dir, hll_only, gamma);
   }
 
   const auto component = [&](Real MhdFlux::*member) {
+    if (dir == 1 && radial_tables.active != 0 &&
+        radial_tables.contains(i)) {
+      return weighted_value(radial_tables.r3_row(i), count, [&](int q) {
+        return flux[q].*member;
+      });
+    }
     if (scheme_order == 5) {
       return weighted_value(kMp5TransverseGaussWeights, [&](int q) {
         return flux[q].*member;
@@ -234,12 +279,14 @@ __device__ inline MhdFlux average_face_flux(
 
 __device__ inline FaceMomentumFluxParts average_face_flux_parts(
     const Grid2D& g, int dir, int i, int j, int scheme_order, int hll_only,
-    Real gamma, const FaceInterfaceView& v, const FaceBackgroundView& bg) {
+    Real gamma, const FaceInterfaceView& v, const FaceBackgroundView& bg,
+    numerics::RadialTablesView radial_tables = {}) {
   const std::size_t k = g.index(i, j);
   const MhdState base_l = load_interface_side(v, k, true);
   const MhdState base_r = load_interface_side(v, k, false);
   const MhdBackground base_bg =
-      average_background(g, dir, i, j, bg, hll_only != 0 ? 1 : 0);
+      average_background(g, dir, i, j, bg, hll_only != 0 ? 1 : 0,
+                         radial_tables);
   if (scheme_order != 5 && scheme_order != 7) {
     FaceMomentumFluxParts result;
     result.flux =
@@ -253,9 +300,9 @@ __device__ inline FaceMomentumFluxParts average_face_flux_parts(
   const int count = scheme_order == 5 ? 3 : 4;
   for (int q = 0; q < count; ++q) {
     const MhdState l = point_interface_state(
-        g, dir, i, j, scheme_order, q, v, true);
+        g, dir, i, j, scheme_order, q, v, true, radial_tables);
     const MhdState r = point_interface_state(
-        g, dir, i, j, scheme_order, q, v, false);
+        g, dir, i, j, scheme_order, q, v, false, radial_tables);
     if (!state_is_admissible(l, gamma) || !state_is_admissible(r, gamma)) {
       FaceMomentumFluxParts result;
       result.flux =
@@ -264,11 +311,15 @@ __device__ inline FaceMomentumFluxParts average_face_flux_parts(
       return result;
     }
     point_bg[q] =
-        point_background(g, dir, i, j, scheme_order, q, bg);
+        point_background(g, dir, i, j, scheme_order, q, bg, radial_tables);
     flux[q] = riemann_flux_parts(l, r, point_bg[q], dir, hll_only, gamma);
   }
 
   const auto average = [&](const auto& sample) {
+    if (dir == 1 && radial_tables.active != 0 &&
+        radial_tables.contains(i)) {
+      return weighted_value(radial_tables.r3_row(i), count, sample);
+    }
     if (scheme_order == 5) {
       return weighted_value(kMp5TransverseGaussWeights, sample);
     }
@@ -305,23 +356,27 @@ __device__ inline FaceMomentumFluxParts average_face_flux_parts(
         background_component(base_bg, component);
     const Real flux_mean =
         magnetic_flux_component(result.flux.material, component);
-    const numerics::ScaledValue covariance = scheme_order == 5
-        ? numerics::transverse_product_correction_scaled(
-              kMp5TransverseGaussWeights, background_mean, flux_mean,
-              [&](int q) {
-                return background_component(point_bg[q], component);
-              },
-              [&](int q) {
-                return magnetic_flux_component(flux[q].material, component);
-              })
-        : numerics::transverse_product_correction_scaled(
-              kMp7TransverseGaussWeights, background_mean, flux_mean,
-              [&](int q) {
-                return background_component(point_bg[q], component);
-              },
-              [&](int q) {
-                return magnetic_flux_component(flux[q].material, component);
-              });
+    const auto background_sample = [&](int q) {
+      return background_component(point_bg[q], component);
+    };
+    const auto flux_sample = [&](int q) {
+      return magnetic_flux_component(flux[q].material, component);
+    };
+    numerics::ScaledValue covariance;
+    if (dir == 1 && radial_tables.active != 0 &&
+        radial_tables.contains(i)) {
+      covariance = numerics::transverse_product_correction_scaled(
+          radial_tables.r3_row(i), count, background_mean, flux_mean,
+          background_sample, flux_sample);
+    } else if (scheme_order == 5) {
+      covariance = numerics::transverse_product_correction_scaled(
+          kMp5TransverseGaussWeights, background_mean, flux_mean,
+          background_sample, flux_sample);
+    } else {
+      covariance = numerics::transverse_product_correction_scaled(
+          kMp7TransverseGaussWeights, background_mean, flux_mean,
+          background_sample, flux_sample);
+    }
     numerics::append_scaled_value_product(
         covariance_sum, covariance, Real{1}, Real{1}, Real{1});
   }

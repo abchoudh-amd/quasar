@@ -70,6 +70,7 @@
 
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 
@@ -80,11 +81,15 @@ struct MhdGeometricSource {
   // dudt (does NOT overwrite). This is a source only; it does not supply the
   // radial tensor derivatives used by the solver's fused residual. Direction
   // convention: r = x (index i), z = y (index j). Delegates to the device
-  // kernel launch_mhd_geometric_source on the default stream.
+  // kernel launch_mhd_geometric_source on the default stream. Active
+  // `radial_tables` select the cylindrical R4 face-to-cell magnetic
+  // collocation for `collocation_order`; the inactive default retains the
+  // Cartesian-compatible rule.
   static void add(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                   const MhdBackgroundField<Real>& b0,
                   const Grid2D& grid, Real gamma,
-                  int collocation_order = 0);
+                  int collocation_order = 0,
+                  numerics::RadialTablesView radial_tables = {});
 };
 
 }  // namespace quasar::mhd

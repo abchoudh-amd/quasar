@@ -8,6 +8,8 @@ set(_quasar_numerics_sources
   ssprk_integrator.cpp
   positivity_limiter.cpp
   mhd_background_profile.cpp
+  radial_moments.cpp
+  radial_tables.cpp
 )
 
 set_source_files_properties(filter.cpp PROPERTIES LANGUAGE HIP)

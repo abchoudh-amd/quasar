@@ -81,19 +81,8 @@ MhdConfig validate_config(MhdConfig cfg) {
   require_registered_name<numerics::ICtScheme>(cfg.ct, "CT scheme");
   require_registered_name<numerics::IPositivityLimiter>(
       cfg.positivity, "positivity limiter");
-  // Cylindrical cells store ring-volume averages with measure r dr dz. The
-  // current MP5/MP7 coefficients (and their magnetic face-to-cell quadrature)
-  // are Cartesian uniform-measure moments, so using them radially would
-  // silently reduce the method to second order while advertising design order.
-  // Keep the supported second-order finite-volume path explicit until the
-  // reconstruction axis owns radius-dependent weighted moments.
-  if (cfg.geometry == "cylindrical" &&
-      cfg.reconstruction != "muscl_minmod") {
-    throw std::invalid_argument{
-        "MhdSolver2D: cylindrical geometry currently supports only "
-        "reconstruction='muscl_minmod'; MP5/MP7 require r-weighted radial "
-        "finite-volume moments"};
-  }
+  // Cylindrical MP5/MP7 use the radius-dependent finite-volume coefficients
+  // built by numerics/radial_moments.hpp; axial stencils remain Cartesian.
   // The device residual currently has one concrete algorithm per numerics axis.
   // A registry entry alone must not be accepted and then silently ignored.
   if (cfg.riemann != "hlld") {
@@ -719,9 +708,9 @@ void validate_background_curl_free_samples(
   for (int j = 0; j < grid.ny; ++j) {
     for (int i = 0; i <= grid.nx; ++i) {
       if (cylindrical) {
-        const Real r_face = grid.origin_x + static_cast<Real>(i) * grid.dx();
-        const Real r_hi = grid.x_at_cell_center(i);
-        const Real r_lo = grid.x_at_cell_center(i - 1);
+        const Real r_face = grid.r_at_edge(i);
+        const Real r_hi = grid.r_at_cell_center(i);
+        const Real r_lo = grid.r_at_cell_center(i - 1);
         if (r_face == Real{0}) continue;
         if (!(r_face > Real{0})) {
           throw std::invalid_argument{
@@ -792,6 +781,14 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
             cfg_.boundary.fluid[0], "fluid boundary") == 4 &&
             registered_boundary_mode<boundary::IMhdFieldBoundary>(
                 cfg_.boundary.field[0], "field boundary") == 4)},
+    radial_tables_{cfg_.geometry == "cylindrical"
+                       ? numerics::RadialTables{
+                             grid_, reconstruction_->required_nghost() == 3
+                                        ? 5
+                                        : reconstruction_->required_nghost() == 4
+                                              ? 7
+                                              : 2}
+                       : numerics::RadialTables{}},
     rk_{MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}},
     step_backup_{grid_},
     request_backup_{grid_},
@@ -833,13 +830,18 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
       }
     }
 
+    const bool cylindrical = is_cylindrical();
     const std::size_t n = grid_.storage_size();
     std::vector<Real> b0x(n), b0y(n), b0z(n);
     for (int j = -grid_.nghost; j < grid_.ny + grid_.nghost; ++j) {
       for (int i = -grid_.nghost; i < grid_.nx + grid_.nghost; ++i) {
-        const Real xc = grid_.x_at_cell_center(i);
+        const Real xc = cylindrical
+            ? grid_.r_at_cell_center(i)
+            : grid_.x_at_cell_center(i);
         const Real yc = grid_.y_at_cell_center(j);
-        const Real xf = grid_.origin_x + static_cast<Real>(i) * grid_.dx();
+        const Real xf = cylindrical
+            ? grid_.r_at_edge(i)
+            : grid_.origin_x + static_cast<Real>(i) * grid_.dx();
         const Real yf = grid_.origin_y + static_cast<Real>(j) * grid_.dy();
         if (!(std::isfinite(xc) && std::isfinite(yc) &&
               std::isfinite(xf) && std::isfinite(yf))) {
@@ -859,14 +861,14 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
     }
 
     validate_background_samples(
-        grid_, is_cylindrical(), cfg_.boundary, b0x, b0y, b0z);
+        grid_, cylindrical, cfg_.boundary, b0x, b0y, b0z);
     const bool profile_curl_free =
-        !is_cylindrical() && profile->globally_curl_free();
+        !cylindrical && profile->globally_curl_free();
     const bool globally_curl_free =
         cfg_.background.curl_free || profile_curl_free;
     if (globally_curl_free) {
       validate_background_curl_free_samples(
-          grid_, is_cylindrical(), b0x, b0y, b0z);
+          grid_, cylindrical, b0x, b0y, b0z);
     }
 
     seed_background("b0x", b0x);
@@ -1019,14 +1021,14 @@ std::vector<Real> MhdSolver2D::state_component_to_host(std::string_view componen
       for (int j = jlo; j < jhi; ++j) {
         for (int i = ilo; i < ihi; ++i) {
           out[grid_.index(i, j)] =
-              cell_bx(grid_, face.data(), i, j);
+              cell_bx(grid_, face.data(), i, j, radial_tables_.view());
         }
       }
     } else {
       for (int j = jlo; j < jhi; ++j) {
         for (int i = ilo; i < ihi; ++i) {
           out[grid_.index(i, j)] =
-              cell_by(grid_, face.data(), i, j);
+              cell_by(grid_, face.data(), i, j, radial_tables_.view());
         }
       }
     }
@@ -1141,19 +1143,23 @@ void MhdSolver2D::prepare_residual_face_records(
   // stepping pauses after this phase so a single canonical owner can broadcast
   // each shared record before either adjacent tile consumes its divergence.
   if (!interfaces_current) {
-    launch_mhd_reconstruct(u, b0_, 0, ifx_, order, flags, gamma, nullptr);
+    launch_mhd_reconstruct(u, b0_, 0, ifx_, order, flags, gamma, nullptr,
+                           false, radial_tables_.view());
   }
   const bool low_order = order <= 1;
   launch_mhd_hlld_flux(
       ifx_, b0_, 0, flux_x_, flags, gamma, nullptr, low_order,
-      b0_.active ? &momentum_flux_x_ : nullptr, order, ownership);
+      b0_.active ? &momentum_flux_x_ : nullptr, order, ownership,
+      radial_tables_.view());
 
   if (!interfaces_current) {
-    launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr);
+    launch_mhd_reconstruct(u, b0_, 1, ify_, order, flags, gamma, nullptr,
+                           false, radial_tables_.view());
   }
   launch_mhd_hlld_flux(
       ify_, b0_, 1, flux_y_, flags, gamma, nullptr, low_order,
-      b0_.active ? &momentum_flux_y_ : nullptr, order, ownership);
+      b0_.active ? &momentum_flux_y_ : nullptr, order, ownership,
+      radial_tables_.view());
 }
 
 void MhdSolver2D::consume_residual_face_records(
@@ -1178,14 +1184,16 @@ void MhdSolver2D::consume_residual_face_records(
   if (b0_.active) {
     launch_mhd_split_momentum_residual(
         b0_, flux_x_, momentum_flux_x_, flux_y_, momentum_flux_y_,
-        dudt, flags, nullptr, is_cylindrical(), collocation_order, order);
+        dudt, flags, nullptr, is_cylindrical(), collocation_order, order,
+        radial_tables_.view());
   }
   if (is_cylindrical()) {
     launch_mhd_cylindrical_radial_momentum_residual(
         u, b0_, flux_x_, flux_y_, dudt, flags, nullptr,
-        collocation_order, order,
+        gamma, collocation_order, order,
         b0_.active ? &momentum_flux_x_ : nullptr,
-        b0_.active ? &momentum_flux_y_ : nullptr);
+        b0_.active ? &momentum_flux_y_ : nullptr,
+        radial_tables_.view());
   }
 
   // Build the corner EMF from the two-direction interface states (kinematic
@@ -1200,7 +1208,7 @@ void MhdSolver2D::consume_residual_face_records(
   // bug: face B advanced by both the flux divergence and the CT curl).
   const bool low_order = order <= 1;
   launch_mhd_ct_emf_prepare(u, b0_, ifx_, ify_, flags, emf_, gamma, nullptr,
-                            order, low_order);
+                            order, low_order, radial_tables_.view());
 }
 
 void MhdSolver2D::finish_ct_emf() {
@@ -1208,7 +1216,7 @@ void MhdSolver2D::finish_ct_emf() {
                         ? positivity_reconstruction_order_
                         : reconstruction_order();
   launch_mhd_ct_emf_finish(boundary_flags(), emf_, nullptr, order,
-                           is_cylindrical());
+                           is_cylindrical(), radial_tables_.view());
 }
 
 void MhdSolver2D::compute_ct_rate_from_emf(MhdField2D<Real>& dudt) {
@@ -1230,7 +1238,8 @@ void MhdSolver2D::finish_split_energy(MhdField2D<Real>& dudt) {
   }
   launch_mhd_split_energy_residual(
       b0_, flux_x_, momentum_flux_x_, flux_y_, momentum_flux_y_, dudt,
-      flags, nullptr, is_cylindrical(), collocation_order, order);
+      flags, nullptr, is_cylindrical(), collocation_order, order,
+      radial_tables_.view());
 
   // The interface-state host accessors and the next stage's reads are correct
   // only after the queued kernels finish; block once here so the seam is
@@ -1340,7 +1349,7 @@ Real MhdSolver2D::stage_admissible_fraction(int stage) {
   if (positivity_control_active_) {
     theta = positivity_->admissible_fraction(
         step_backup_, out, Real{0}, Real{0}, cfg_.gamma,
-        positivity_reconstruction_order_);
+        positivity_reconstruction_order_, radial_tables_.view());
     if (stage == 2 && positivity_reconstruction_order_ == 0 &&
         positivity_low_order_anchor_available_) {
       // Preserve a usable low-order retry anchor across accepted configured-
@@ -1351,7 +1360,7 @@ Real MhdSolver2D::stage_admissible_fraction(int stage) {
       // because any rejection rolls all the way back to step_backup_.
       theta = std::min(theta, positivity_->admissible_fraction(
           step_backup_, out, Real{0}, Real{0}, cfg_.gamma,
-          /*collocation_order=*/1));
+          /*collocation_order=*/1, radial_tables_.view()));
     } else if (stage == 2 && positivity_reconstruction_order_ == 1) {
       // A completed fallback piece returns to the configured operator after the
       // requested interval. Keep its final state admissible under that operator;
@@ -1359,7 +1368,7 @@ Real MhdSolver2D::stage_admissible_fraction(int stage) {
       // adjacent-face EOS used to compute their residuals.
       theta = std::min(theta, positivity_->admissible_fraction(
           step_backup_, out, Real{0}, Real{0}, cfg_.gamma,
-          /*collocation_order=*/0));
+          /*collocation_order=*/0, radial_tables_.view()));
     }
   }
   return std::isfinite(theta) ? theta : Real{0};
@@ -1417,7 +1426,7 @@ void MhdSolver2D::advance_positive(Real dt) {
   positivity_low_order_anchor_available_ =
       positivity_->admissible_fraction(
           rk_[0], rk_[0], Real{0}, Real{0}, cfg_.gamma,
-          /*collocation_order=*/1) >= Real{1};
+          /*collocation_order=*/1, radial_tables_.view()) >= Real{1};
 
   const auto no_progress_error = [&](const char* context, Real theta) {
     std::ostringstream message;
@@ -1475,7 +1484,7 @@ void MhdSolver2D::advance_positive(Real dt) {
         // already outside its admissible set.
         const Real low_base_theta = positivity_->admissible_fraction(
             rk_[0], rk_[0], Real{0}, Real{0}, cfg_.gamma,
-            /*collocation_order=*/1);
+            /*collocation_order=*/1, radial_tables_.view());
         if (low_base_theta >= Real{1}) {
           positivity_low_order_anchor_available_ = true;
           low_order_interval = true;
@@ -1598,7 +1607,7 @@ void MhdSolver2D::ensure_live_state_admissible(int collocation_order) const {
   // state at any later time, without passing through an invalidation hook.
   const Real theta = positivity_->admissible_fraction(
       rk_[0], rk_[0], Real{0}, Real{0}, cfg_.gamma,
-      collocation_order);
+      collocation_order, radial_tables_.view());
   if (!(theta >= Real{1})) {
     throw std::invalid_argument{
         "MhdSolver2D: live state must have finite components, rho > 0, "
@@ -1667,10 +1676,10 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
   const BoundaryFlags4 flags = boundary_flags();
   launch_mhd_reconstruct(
       self.rk_[0], b0_, 0, self.ifx_, order, flags, cfg_.gamma, nullptr,
-      /*rate_only=*/true);
+      /*rate_only=*/true, radial_tables_.view());
   launch_mhd_reconstruct(
       self.rk_[0], b0_, 1, self.ify_, order, flags, cfg_.gamma, nullptr,
-      /*rate_only=*/true);
+      /*rate_only=*/true, radial_tables_.view());
   // ifx_/ify_ now hold the reconstruction of the live register at `order`. In
   // the auto-dt loop the very next thing that happens is compute_residual on
   // this same unchanged register, which would recompute exactly this. Record
@@ -1686,7 +1695,8 @@ Real MhdSolver2D::cfl_limit_for_collocation(int collocation_order) const {
   ScaledCflRate max_rate{};
   launch_mhd_cfl_max_rate(
       self.ifx_, self.ify_, b0_, cfg_.gamma, cfl_scratch_,
-      &max_rate, nullptr, order, is_cylindrical(), flags);
+      &max_rate, nullptr, order, is_cylindrical(), flags,
+      radial_tables_.view());
 
   // The Suresh-Huynh MP limiter uses alpha=4, whose forward-Euler
   // monotonicity bound is nu <= 1/(1+alpha)=0.2. SSP-RK3 inherits that

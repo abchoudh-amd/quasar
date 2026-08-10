@@ -53,7 +53,9 @@ struct CrossBPointOutputView {
 __global__ void QUASAR_LAUNCH_BOUNDS_256 hlld_kernel(
     quasar::Grid2D g, quasar::mhd::BoundaryFlags4 flags,
     quasar::mhd::FaceOwnershipFlags4 ownership,
-    int dir, int scheme_order, int hll_only, Real gamma,
+    int dir, int scheme_order,
+    quasar::numerics::RadialTablesView radial_tables,
+    int hll_only, Real gamma,
     // Field-split background B0 (perturbation-only state evolved; physics uses
     // total B = B0 + b). `bg_active`==0 takes the zero-background fast path and
     // ignores the (possibly null) b0* buffers.
@@ -110,7 +112,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 hlld_kernel(
     const FaceMomentumFluxParts parts =
         quasar::mhd::detail::average_face_flux_parts(
             g, dir, sample_i, sample_j, scheme_order, hll_only, gamma,
-            interface, background);
+            interface, background, radial_tables);
     f = parts.flux.material;
     Wmx[k] = parts.flux.wave.mx;
     Wmy[k] = parts.flux.wave.my;
@@ -126,7 +128,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 hlld_kernel(
   } else {
     f = quasar::mhd::detail::average_face_flux(
         g, dir, sample_i, sample_j, scheme_order, hll_only, gamma,
-        interface, background);
+        interface, background, radial_tables);
   }
 
   Frho[k] = f.rho; Fmx[k] = f.mx; Fmy[k] = f.my; Fmz[k] = f.mz;
@@ -144,7 +146,8 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
                           bool hll_only,
                           MhdMomentumFluxParts2D<Real>* momentum_parts,
                           int scheme_order,
-                          FaceOwnershipFlags4 ownership) {
+                          FaceOwnershipFlags4 ownership,
+                          quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = iface.grid;
   const dim3 block(kBlock2D, kBlock2D);
   // Launch over nx+1 x ny+1 so the high-edge face flux (index nx/ny) consumed by
@@ -172,7 +175,7 @@ void launch_mhd_hlld_flux(const quasar::numerics::MhdInterfaceStates<Real>& ifac
         momentum_parts->b0_induction_covariance.device_ptr();
   }
   hipLaunchKernelGGL(hlld_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, flags, ownership, dir, scheme_order,
+                     g, flags, ownership, dir, scheme_order, radial_tables,
                      hll_only ? 1 : 0, gamma,
                      bg_active, b0x, b0y, b0z,
                      iface.Lrho.device_ptr(), iface.Lmx.device_ptr(), iface.Lmy.device_ptr(),

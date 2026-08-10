@@ -91,9 +91,10 @@ __device__ inline MhdState load_state(const quasar::Grid2D& g,
                                       const double* energy, const double* bx,
                                       const double* by, const double* bz,
                                       int i, int j,
+                                      quasar::numerics::RadialTablesView radial_tables,
                                       int collocation_order = 0) {
   return quasar::mhd::load_cell_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                                      i, j, collocation_order);
+                                      i, j, radial_tables, collocation_order);
 }
 
 // One-sided slope selector. `drop` encodes which neighbor to discard at a
@@ -193,9 +194,10 @@ inline constexpr int kMaxWidth = 2 * kMaxHalf + 1;  // 7
 
 // Reconstruct ONE interface conserved state in characteristic variables, the
 // device mirror of the host CharacteristicMpRecon::recon_state. The stencil is
-// centered on cell (i,j) shifted by `center_off` along `dir`; if `mirror` is
-// true the stencil order is reversed so the right-face routine yields the
-// left-face value. `half` is the stencil half-width (2 for MP5, 3 for MP7).
+// centered on cell (i,j) shifted by `center_off` along `dir`. Cartesian right
+// states reverse their scalar stencil; cylindrical callers instead supply the
+// independently solved left- or right-biased coefficient row. `half` is the
+// stencil half-width (2 for MP5, 3 for MP7).
 // from_char zeroes the normal-B DOF; the caller overwrites it with the CT face
 // value. Reads inputs ONLY through the raw device pointers.
 // Union of the two per-face stencils. The L state centres on cell (i-1) and the
@@ -216,7 +218,7 @@ __device__ inline void project_union_stencil(
     const MhdEigensystem& eig, const MhdState& ref,
     const double* rho, const double* mx, const double* my, const double* mz,
     const double* energy, const double* bx, const double* by, const double* bz,
-    CharVec7* chars) {
+    CharVec7* chars, quasar::numerics::RadialTablesView radial_tables) {
   const int di = (dir == 0) ? 1 : 0;
   const int dj = (dir == 0) ? 0 : 1;
   const int union_lo = -1 - half;
@@ -229,7 +231,7 @@ __device__ inline void project_union_stencil(
     // background gradients are not reconstructed as evolved waves.
     MhdState delta = rotate_xy(
         load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                   i + off * di, j + off * dj), dir);
+                   i + off * di, j + off * dj, radial_tables), dir);
     delta.rho    -= ref.rho;
     delta.mx     -= ref.mx;
     delta.my     -= ref.my;
@@ -243,8 +245,9 @@ __device__ inline void project_union_stencil(
 }
 
 __device__ inline MhdState recon_char_state(
-    int dir, int center_off, bool mirror, int half,
-    const MhdEigensystem& eig, const MhdState& ref, const CharVec7* chars) {
+    int dir, int center_off, bool right_state, int half,
+    const MhdEigensystem& eig, const MhdState& ref, const CharVec7* chars,
+    const Real* coefficient_row, const Real* limiter_row) {
   const int width = 2 * half + 1;
   // This state's stencil cell s sits at offset center_off + (s - half); the
   // shared table is indexed from union_lo = -1 - half.
@@ -255,10 +258,28 @@ __device__ inline MhdState recon_char_state(
   Real scalar[kMaxWidth];
   for (int k = 0; k < 7; ++k) {
     for (int s = 0; s < width; ++s) {
-      const int src = mirror ? (width - 1 - s) : s;
+      // Cylindrical R1L/R1R rows are already tied to their physical cell
+      // radii, so both states consume an ascending radial stencil. Cartesian
+      // retains the historic reflected right-state path bit-for-bit.
+      const int src = coefficient_row == nullptr && right_state
+          ? (width - 1 - s) : s;
       scalar[s] = chars[base + src].w[k];
     }
-    if (half == 2) {
+    if (coefficient_row != nullptr) {
+      const Real candidate = quasar::numerics::mp_interp_weighted(
+          coefficient_row, scalar, width);
+      if (right_state) {
+        w_face.w[k] = quasar::numerics::mp_limit(
+            candidate, scalar[half + 2], scalar[half + 1], scalar[half],
+            scalar[half - 1], scalar[half - 2], limiter_row[1],
+            limiter_row[0], limiter_row[3]);
+      } else {
+        w_face.w[k] = quasar::numerics::mp_limit(
+            candidate, scalar[half - 2], scalar[half - 1], scalar[half],
+            scalar[half + 1], scalar[half + 2], limiter_row[0],
+            limiter_row[1], limiter_row[2]);
+      }
+    } else if (half == 2) {
       w_face.w[k] = quasar::numerics::mp5_reconstruct(
           scalar[0], scalar[1], scalar[2], scalar[3], scalar[4]);
     } else {
@@ -296,7 +317,8 @@ __device__ inline void muscl_reconstruct_face(
     int side_lo, int side_hi,
     const double* rho, const double* mx, const double* my, const double* mz,
     const double* energy, const double* bx, const double* by, const double* bz,
-    MhdState& ul, MhdState& ur) {
+    MhdState& ul, MhdState& ur,
+    quasar::numerics::RadialTablesView radial_tables) {
   const int di = (dir == 0) ? 1 : 0;
   const int dj = (dir == 0) ? 0 : 1;
   const int im = i - di, jm = j - dj;       // minus cell (owns the L state)
@@ -305,14 +327,14 @@ __device__ inline void muscl_reconstruct_face(
 
   // Minus-cell stencil: (imm) (im) (i)  -> face value at +side of (im).
   const MhdState sm_lo = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                                    imm, jmm);
+                                    imm, jmm, radial_tables);
   const MhdState sm_c  = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                                    im, jm);
+                                    im, jm, radial_tables);
   const MhdState sm_hi = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                                    i, j);
+                                    i, j, radial_tables);
   // Plus-cell stencil: (im) (i) (ip) -> face value at -side of (i).
   const MhdState sp_hi = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                                    ip, jp);
+                                    ip, jp, radial_tables);
 
   const MhdPrim wm_lo = to_primitive(sm_lo, gamma);
   const MhdPrim wm_c  = to_primitive(sm_c, gamma);
@@ -341,13 +363,14 @@ __device__ inline void piecewise_constant_reconstruct_face(
     const quasar::Grid2D& g, int dir, int i, int j, int collocation_order,
     const double* rho, const double* mx, const double* my, const double* mz,
     const double* energy, const double* bx, const double* by, const double* bz,
-    MhdState& ul, MhdState& ur) {
+    MhdState& ul, MhdState& ur,
+    quasar::numerics::RadialTablesView radial_tables) {
   const int di = (dir == 0) ? 1 : 0;
   const int dj = (dir == 0) ? 0 : 1;
   ul = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                  i - di, j - dj, collocation_order);
+                  i - di, j - dj, radial_tables, collocation_order);
   ur = load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                  i, j, collocation_order);
+                  i, j, radial_tables, collocation_order);
 }
 
 // Per-interface admissibility test for a reconstructed conserved state: density
@@ -398,6 +421,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     // Non-periodic boundary flags along this axis: lo/hi correspond to
     // (x_lo,x_hi) for dir==0 and (y_lo,y_hi) for dir==1.
     int side_lo, int side_hi,
+    quasar::numerics::RadialTablesView radial_tables,
     const double* __restrict__ rho, const double* __restrict__ mx,
     const double* __restrict__ my, const double* __restrict__ mz,
     const double* __restrict__ energy, const double* __restrict__ bx,
@@ -438,7 +462,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
   if (b0_active != 0) {
     bg = quasar::mhd::load_interface_background(
         g, dir, b0x, b0y, b0z, i, j,
-        scheme_order <= 1 ? 1 : 0);
+        radial_tables, scheme_order <= 1 ? 1 : 0);
   }
 
   if (scheme_order <= 1) {
@@ -447,15 +471,17 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     // preserves each cell's gas pressure.
     piecewise_constant_reconstruct_face(
         g, dir, i, j, /*collocation_order=*/1,
-        rho, mx, my, mz, energy, bx, by, bz, ul, ur);
+        rho, mx, my, mz, energy, bx, by, bz, ul, ur, radial_tables);
   } else if (scheme_order != 2) {
     // ---- MP5 / MP7 characteristic reconstruction --------------------------
     // Reference state = arithmetic mean of the two cells flanking the face
     // (cell i-1 and cell i for dir=0). Build the eigensystem about it.
     const MhdState cL =
-        load_state(g, rho, mx, my, mz, energy, bx, by, bz, i - di, j - dj);
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                   i - di, j - dj, radial_tables);
     const MhdState cR =
-        load_state(g, rho, mx, my, mz, energy, bx, by, bz, i, j);
+        load_state(g, rho, mx, my, mz, energy, bx, by, bz,
+                   i, j, radial_tables);
     MhdState ref;
     ref.rho    = Real{0.5} * cL.rho    + Real{0.5} * cR.rho;
     ref.mx     = Real{0.5} * cL.mx     + Real{0.5} * cR.mx;
@@ -477,14 +503,29 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     // of their two stencils once and let each pick its window out of it.
     CharVec7 chars[kMaxUnionWidth];
     project_union_stencil(g, dir, i, j, half, eig, canonical_ref,
-                          rho, mx, my, mz, energy, bx, by, bz, chars);
+                          rho, mx, my, mz, energy, bx, by, bz, chars,
+                          radial_tables);
+
+    const bool radial_reconstruction =
+        dir == 0 && radial_tables.active != 0 &&
+        radial_tables.contains(i) && radial_tables.contains(i - 1) &&
+        radial_tables.reconstruction_width == 2 * half + 1;
+    const Real* left_coefficients = radial_reconstruction
+        ? radial_tables.r1_left_row(i) : nullptr;
+    const Real* right_coefficients = radial_reconstruction
+        ? radial_tables.r1_right_row(i) : nullptr;
+    const Real* limiter_row = radial_reconstruction
+        ? radial_tables.r6_row(i - 1) : nullptr;
 
     // L state: stencil centered on cell (i-1), reconstruct its RIGHT face.
-    ul = recon_char_state(dir, /*center_off=*/-1, /*mirror=*/false,
-                          half, eig, canonical_ref, chars);
-    // R state: stencil centered on cell (i), reconstruct its LEFT face (mirror).
-    ur = recon_char_state(dir, /*center_off=*/0, /*mirror=*/true,
-                          half, eig, canonical_ref, chars);
+    ul = recon_char_state(dir, /*center_off=*/-1, /*right_state=*/false,
+                          half, eig, canonical_ref, chars,
+                          left_coefficients, limiter_row);
+    // R state: its own radial row targets the left face directly. Cartesian
+    // still reverses the scalar stencil inside recon_char_state.
+    ur = recon_char_state(dir, /*center_off=*/0, /*right_state=*/true,
+                          half, eig, canonical_ref, chars,
+                          right_coefficients, limiter_row);
 
     // ---- Per-interface robustness fallback (finiteness / positivity) ------
     // Characteristic MP reconstruction carries NO positivity guarantee: at a
@@ -504,7 +545,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     if (!reconstructed_state_admissible(ul, gamma)
         || !reconstructed_state_admissible(ur, gamma)) {
       muscl_reconstruct_face(g, dir, i, j, gamma, side_lo, side_hi,
-                             rho, mx, my, mz, energy, bx, by, bz, ul, ur);
+                             rho, mx, my, mz, energy, bx, by, bz, ul, ur,
+                             radial_tables);
     }
   } else {
     // ---- 2nd-order MUSCL-minmod (UNCHANGED, bit-identical) -----------------
@@ -512,7 +554,8 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     // (i,j). The LEFT state extrapolates from the minus cell to its +side; the
     // RIGHT state extrapolates from the plus cell to its -side.
     muscl_reconstruct_face(g, dir, i, j, gamma, side_lo, side_hi,
-                           rho, mx, my, mz, energy, bx, by, bz, ul, ur);
+                           rho, mx, my, mz, energy, bx, by, bz, ul, ur,
+                           radial_tables);
   }
 
   // Normal-B: continuous CT face value on both sides (same rule for all orders).
@@ -531,7 +574,7 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     const int fallback_collocation = (scheme_order <= 1) ? 1 : 0;
     piecewise_constant_reconstruct_face(
         g, dir, i, j, fallback_collocation,
-        rho, mx, my, mz, energy, bx, by, bz, ul, ur);
+        rho, mx, my, mz, energy, bx, by, bz, ul, ur, radial_tables);
     set_normal_b(ul, dir, bn);
     set_normal_b(ur, dir, bn);
   }
@@ -565,7 +608,8 @@ namespace quasar::mhd {
 void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
                             int dir, quasar::numerics::MhdInterfaceStates<Real>& out,
                             int scheme_order, BoundaryFlags4 flags, Real gamma,
-                            stream_t stream, bool rate_only) {
+                            stream_t stream, bool rate_only,
+                            quasar::numerics::RadialTablesView radial_tables) {
   const Grid2D g = u.grid;
   const dim3 block(kBlock2D, kBlock2D);
   // Include the complete transverse ghost range needed by the pointwise face
@@ -589,6 +633,7 @@ void launch_mhd_reconstruct(const MhdField2D<Real>& u, const MhdBackgroundField<
   hipLaunchKernelGGL(reconstruct_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), g, dir, scheme_order, gamma,
                      rate_only ? 1 : 0, side_lo, side_hi,
+                     radial_tables,
                      u.rho.device_ptr(), u.mx.device_ptr(), u.my.device_ptr(),
                      u.mz.device_ptr(), u.energy.device_ptr(), u.bx_face.device_ptr(),
                      u.by_face.device_ptr(), u.bz_cell.device_ptr(),
