@@ -45,6 +45,7 @@ using numerics::kMp5TransverseGaussWeights;
 using numerics::kMp5TransversePointWeights;
 using numerics::kMp7TransverseGaussWeights;
 using numerics::kMp7TransversePointWeights;
+using numerics::weighted_quadrature_value;
 
 __device__ inline MhdState load_interface_side(
     const FaceInterfaceView& v, std::size_t k, bool left) {
@@ -69,58 +70,30 @@ __device__ inline bool state_is_admissible(const MhdState& s, Real gamma) {
   return isfinite(p) && p > Real{0};
 }
 
-template <int Count, class Sample>
-__device__ inline Real weighted_value(const Real (&weights)[Count],
-                                         const Sample& sample) {
-  const Real reference = sample(Count / 2);
-  bool constant = true;
-  numerics::ScaledProductQuotientAccumulator<Count> sum;
-  for (int k = 0; k < Count; ++k) {
-    const Real value = sample(k);
-    constant = constant && value == reference;
-    numerics::append_scaled_product_quotient(
-        sum, weights[k], value, Real{1}, Real{1});
-  }
-  // Besides avoiding unnecessary cancellation, this branch makes a truly 1-D
-  // state pass through transverse quadrature bit-for-bit unchanged.
-  return constant ? reference
-                  : numerics::finish_scaled_product_quotient_sum(sum);
-}
-
-template <class Sample>
-__device__ inline Real weighted_value(const Real* weights, int count,
-                                      const Sample& sample) {
-  const Real reference = sample(count / 2);
-  bool constant = true;
-  numerics::ScaledProductQuotientAccumulator<8> sum;
-  for (int k = 0; k < count; ++k) {
-    const Real value = sample(k);
-    constant = constant && value == reference;
-    numerics::append_scaled_product_quotient(
-        sum, weights[k], value, Real{1}, Real{1});
-  }
-  return constant ? reference
-                  : numerics::finish_scaled_product_quotient_sum(sum);
-}
-
 template <class Sample>
 __device__ inline Real point_value(
     int order, int node, int dir, int radial_index,
-    numerics::RadialTablesView radial_tables, const Sample& sample) {
+    numerics::RadialTablesView radial_tables,
+    const Real* component_radial_row, const Sample& sample) {
   if (dir == 1 && radial_tables.active != 0 &&
       radial_tables.contains(radial_index) &&
       radial_tables.reconstruction_width == (order >= 7 ? 7 : 5)) {
     const int width = radial_tables.reconstruction_width;
-    return weighted_value(
-        radial_tables.r2_row(radial_index, node), width,
+    return weighted_quadrature_value(
+        component_radial_row != nullptr
+            ? component_radial_row
+            : radial_tables.r2_row(radial_index, node),
+        width,
         [&](int k) { return sample(k - width / 2); });
   }
   if (order >= 7) {
-    return weighted_value(kMp7TransversePointWeights[node], [&](int k) {
+    return weighted_quadrature_value(
+        kMp7TransversePointWeights[node], [&](int k) {
       return sample(k - 3);
     });
   }
-  return weighted_value(kMp5TransversePointWeights[node], [&](int k) {
+  return weighted_quadrature_value(
+      kMp5TransversePointWeights[node], [&](int k) {
     return sample(k - 2);
   });
 }
@@ -130,7 +103,7 @@ __device__ inline Real point_value(int order, int node,
                                    const Sample& sample) {
   return point_value(
       order, node, /*dir=*/0, /*radial_index=*/0,
-      numerics::RadialTablesView{}, sample);
+      numerics::RadialTablesView{}, /*component_radial_row=*/nullptr, sample);
 }
 
 __device__ inline std::size_t transverse_index(
@@ -150,13 +123,22 @@ __device__ inline MhdState point_interface_state(
   const double* bx = left ? v.Lbx : v.Rbx;
   const double* by = left ? v.Lby : v.Rby;
   const double* bz = left ? v.Lbz : v.Rbz;
-  const auto component = [&](const double* values) {
-    return point_value(order, node, dir, i, radial_tables, [&](int offset) {
+  const bool radial_recovery =
+      dir == 1 && radial_tables.active != 0 && radial_tables.contains(i);
+  const auto component = [&](const double* values, const Real* radial_row) {
+    return point_value(
+        order, node, dir, i, radial_tables, radial_row, [&](int offset) {
       return static_cast<Real>(values[transverse_index(g, dir, i, j, offset)]);
     });
   };
-  return MhdState{component(rho), component(mx), component(my), component(mz),
-                  component(energy), component(bx), component(by), component(bz)};
+  const Real* mphi_row = radial_recovery
+      ? radial_tables.r2_mphi_row(i, node) : nullptr;
+  const Real* bphi_row = radial_recovery
+      ? radial_tables.r2_bphi_row(i, node) : nullptr;
+  return MhdState{
+      component(rho, nullptr), component(mx, nullptr), component(my, nullptr),
+      component(mz, mphi_row), component(energy, nullptr),
+      component(bx, nullptr), component(by, nullptr), component(bz, bphi_row)};
 }
 
 __device__ inline MhdBackground average_background(
@@ -173,8 +155,13 @@ __device__ inline MhdBackground point_background(
     const FaceBackgroundView& bg,
     numerics::RadialTablesView radial_tables) {
   if (bg.active == 0) return {};
+  const bool radial_recovery =
+      dir == 1 && radial_tables.active != 0 && radial_tables.contains(i);
   const auto component = [&](int component_index) {
-    return point_value(order, node, dir, i, radial_tables, [&](int offset) {
+    const Real* radial_row = radial_recovery && component_index == 2
+        ? radial_tables.r2_bphi_row(i, node) : nullptr;
+    return point_value(
+        order, node, dir, i, radial_tables, radial_row, [&](int offset) {
       const int is = dir == 0 ? i : i + offset;
       const int js = dir == 0 ? j + offset : j;
       const MhdBackground value =
@@ -258,16 +245,24 @@ __device__ inline MhdFlux average_face_flux(
   const auto component = [&](Real MhdFlux::*member) {
     if (dir == 1 && radial_tables.active != 0 &&
         radial_tables.contains(i)) {
-      return weighted_value(radial_tables.r3_row(i), count, [&](int q) {
+      const Real* weights = member == &MhdFlux::mz
+          ? radial_tables.r3_mphi_row(i)
+          : member == &MhdFlux::bz
+                ? radial_tables.r3_bphi_row(i)
+                : radial_tables.r3_row(i);
+      return weighted_quadrature_value(
+          weights, count, [&](int q) {
         return flux[q].*member;
       });
     }
     if (scheme_order == 5) {
-      return weighted_value(kMp5TransverseGaussWeights, [&](int q) {
+      return weighted_quadrature_value(
+          kMp5TransverseGaussWeights, [&](int q) {
         return flux[q].*member;
       });
     }
-    return weighted_value(kMp7TransverseGaussWeights, [&](int q) {
+    return weighted_quadrature_value(
+        kMp7TransverseGaussWeights, [&](int q) {
       return flux[q].*member;
     });
   };
@@ -315,24 +310,44 @@ __device__ inline FaceMomentumFluxParts average_face_flux_parts(
     flux[q] = riemann_flux_parts(l, r, point_bg[q], dir, hll_only, gamma);
   }
 
-  const auto average = [&](const auto& sample) {
+  const auto average = [&](const Real* component_weights,
+                           const auto& sample) {
     if (dir == 1 && radial_tables.active != 0 &&
         radial_tables.contains(i)) {
-      return weighted_value(radial_tables.r3_row(i), count, sample);
+      return weighted_quadrature_value(
+          component_weights != nullptr
+              ? component_weights : radial_tables.r3_row(i),
+          count, sample);
     }
     if (scheme_order == 5) {
-      return weighted_value(kMp5TransverseGaussWeights, sample);
+      return weighted_quadrature_value(kMp5TransverseGaussWeights, sample);
     }
-    return weighted_value(kMp7TransverseGaussWeights, sample);
+    return weighted_quadrature_value(kMp7TransverseGaussWeights, sample);
   };
   const auto material = [&](Real MhdFlux::*member) {
-    return average([&](int q) { return flux[q].material.*member; });
+    const Real* weights = dir == 1 && radial_tables.active != 0 &&
+            radial_tables.contains(i)
+        ? member == &MhdFlux::mz
+              ? radial_tables.r3_mphi_row(i)
+              : member == &MhdFlux::bz
+                    ? radial_tables.r3_bphi_row(i) : nullptr
+        : nullptr;
+    return average(weights, [&](int q) { return flux[q].material.*member; });
   };
   const auto wave = [&](Real MhdFlux::*member) {
-    return average([&](int q) { return flux[q].wave.*member; });
+    const Real* weights = dir == 1 && radial_tables.active != 0 &&
+            radial_tables.contains(i)
+        ? member == &MhdFlux::mz
+              ? radial_tables.r3_mphi_row(i)
+              : member == &MhdFlux::bz
+                    ? radial_tables.r3_bphi_row(i) : nullptr
+        : nullptr;
+    return average(weights, [&](int q) { return flux[q].wave.*member; });
   };
   const auto cross = [&](Real MhdBackground::*member) {
-    return average([&](int q) { return flux[q].cross_b.*member; });
+    return average(
+        /*component_weights=*/nullptr,
+        [&](int q) { return flux[q].cross_b.*member; });
   };
   FaceMomentumFluxParts result;
   result.flux.material = MhdFlux{
@@ -352,22 +367,30 @@ __device__ inline FaceMomentumFluxParts average_face_flux_parts(
   }
   numerics::ScaledQuaternaryAccumulator covariance_sum;
   for (int component = 0; component < 3; ++component) {
-    const Real background_mean =
-        background_component(base_bg, component);
-    const Real flux_mean =
-        magnetic_flux_component(result.flux.material, component);
     const auto background_sample = [&](int q) {
       return background_component(point_bg[q], component);
     };
     const auto flux_sample = [&](int q) {
       return magnetic_flux_component(flux[q].material, component);
     };
+    // This correction contributes to the annular energy equation even when
+    // B0_phi and the B_phi induction flux are stored/integrated under the
+    // uniform measure.  In that case it is a cross-measure product difference
+    // <B0_phi F_Bphi>_annular-B0_phi,flat F_Bphi,flat, not an ordinary
+    // covariance; a constant factor therefore does not generally imply zero.
+    const Real background_mean = background_component(base_bg, component);
+    const Real flux_mean =
+        magnetic_flux_component(result.flux.material, component);
     numerics::ScaledValue covariance;
     if (dir == 1 && radial_tables.active != 0 &&
         radial_tables.contains(i)) {
-      covariance = numerics::transverse_product_correction_scaled(
-          radial_tables.r3_row(i), count, background_mean, flux_mean,
-          background_sample, flux_sample);
+      covariance = component == 2
+          ? numerics::transverse_product_difference_scaled(
+                radial_tables.r3_row(i), count, background_mean, flux_mean,
+                background_sample, flux_sample)
+          : numerics::transverse_product_correction_scaled(
+                radial_tables.r3_row(i), count, background_mean, flux_mean,
+                background_sample, flux_sample);
     } else if (scheme_order == 5) {
       covariance = numerics::transverse_product_correction_scaled(
           kMp5TransverseGaussWeights, background_mean, flux_mean,

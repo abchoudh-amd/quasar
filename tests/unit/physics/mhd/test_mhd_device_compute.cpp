@@ -22,6 +22,7 @@
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/finite_volume_quadrature.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 #include "quasar/physics/mhd/mhd_staggering.hpp"
@@ -407,7 +408,7 @@ TEST(MhdConfigValidation, AcceptsCylindricalMp7) {
   cfg.boundary.fluid[1] = "outflow";
   cfg.boundary.field[1] = "outflow";
   EXPECT_NO_THROW(quasar::mhd::MhdSolver2D{cfg})
-      << "cylindrical MP7 uses radius-weighted radial moments";
+      << "cylindrical MP7 uses equation-native radial moments";
 }
 
 TEST(MhdConfigValidation, RejectsAnnulusWhoseReconstructionHaloCrossesAxis) {
@@ -454,6 +455,52 @@ TEST(MhdDeviceCompute, MagneticReadbackUsesOrderMatchedCellCollocation) {
                        quasar::mhd::cell_bx(g, bx_face.data(), i, j));
       EXPECT_DOUBLE_EQ(cell_by[k],
                        quasar::mhd::cell_by(g, by_face.data(), i, j));
+    }
+  }
+}
+
+TEST(MhdDeviceCompute, CylindricalMagneticReadbackUsesHostRadialTables) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = base_config();
+  cfg.geometry = "cylindrical";
+  cfg.boundary.fluid[0] = "axis";
+  cfg.boundary.field[0] = "axis";
+  cfg.boundary.fluid[1] = "outflow";
+  cfg.boundary.field[1] = "outflow";
+  const Grid2D& grid = cfg.grid;
+  const std::size_t storage_size = grid.storage_size();
+  std::vector<Real> bx_face(storage_size);
+  std::vector<Real> by_face(storage_size);
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      const std::size_t k = grid.index(i, j);
+      const Real r = static_cast<Real>(i);
+      const Real z = static_cast<Real>(j);
+      bx_face[k] = Real{1} + r + Real{0.1} * r * r * r;
+      by_face[k] = Real{-2} + z - Real{0.05} * z * z * z;
+    }
+  }
+
+  quasar::mhd::MhdSolver2D solver{cfg};
+  solver.seed_state("bx_face", bx_face);
+  solver.seed_state("by_face", by_face);
+  const std::vector<Real> cell_bx = solver.state_component_to_host("bx");
+  const std::vector<Real> cell_by = solver.state_component_to_host("by");
+
+  const quasar::numerics::RadialTables radial_tables{
+      grid, /*scheme_order=*/7};
+  const quasar::numerics::RadialTablesView host_tables =
+      radial_tables.host_view();
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      const std::size_t k = grid.index(i, j);
+      EXPECT_DOUBLE_EQ(
+          cell_bx[k],
+          quasar::mhd::cell_bx(grid, bx_face.data(), i, j, host_tables));
+      EXPECT_DOUBLE_EQ(
+          cell_by[k],
+          quasar::mhd::cell_by(grid, by_face.data(), i, j, host_tables));
     }
   }
 }

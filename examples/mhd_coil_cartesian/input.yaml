@@ -3,7 +3,8 @@
 # The MHD plane is the lab Y=0 meridional cut:
 #   MHD x = lab X, MHD y = lab Z, out-of-plane = lab Y.
 # `background_field.conductors` is evaluated on the solver-derived padded
-# corner grid. The Cartesian curl of lab-Y A supplies a static, discretely
+# corner grid. Treating lab-Y A as a 2-D flux function assumes translation
+# invariance along lab Y. Its Cartesian curl supplies a static, discretely
 # divergence-free in-plane B0; the evolved in-plane perturbation starts at zero.
 
 units: SI

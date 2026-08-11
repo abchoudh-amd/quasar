@@ -40,11 +40,13 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_geometric_source.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -196,6 +198,125 @@ void seed_uniform_radial_outflow(quasar::mhd::MhdSolver2D& solver,
   solver.seed_state("bx", bx);
   solver.seed_state("by", by);
   solver.seed_state("bz", bz);
+}
+
+long double integral_power(long double lo, long double hi, int power) {
+  const auto integer_power = [](long double value, int exponent) {
+    long double result = 1.0L;
+    for (int n = 0; n < exponent; ++n) result *= value;
+    return result;
+  };
+  return (integer_power(hi, power + 1) -
+          integer_power(lo, power + 1)) /
+         static_cast<long double>(power + 1);
+}
+
+// Every test cell lies wholly on one side of the axis (an edge may equal zero),
+// so these closed forms cover both physical cells and odd/even reflected halo
+// cells without a numerical integration helper.
+long double angular_average_linear(long double lo, long double hi) {
+  return integral_power(lo, hi, 3) / integral_power(lo, hi, 2);
+}
+
+long double annular_average_square(long double lo, long double hi) {
+  return integral_power(lo, hi, 3) / integral_power(lo, hi, 1);
+}
+
+void expect_standalone_native_toroidal_source(
+    int order, Real mphi_slope, Real bphi_slope, Real b0phi_slope) {
+  const int nghost = order == 7 ? 4 : 3;
+  const Grid2D grid{/*nx=*/8, /*ny=*/4, Real{1}, Real{0.5},
+                    Real{0}, Real{0}, nghost};
+  const std::size_t size = grid.storage_size();
+  const std::vector<Real> zero(size, Real{0});
+  std::vector<Real> rho(size, Real{1});
+  std::vector<Real> mphi(size), energy(size), bphi(size), b0phi(size);
+  constexpr long double pressure = 0.8L;
+  const long double internal =
+      pressure / (static_cast<long double>(kGamma) - 1.0L);
+  const long double stored_square_coefficient =
+      0.5L * (static_cast<long double>(mphi_slope) * mphi_slope +
+              static_cast<long double>(bphi_slope) * bphi_slope);
+
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      const long double lo = static_cast<long double>(grid.origin_x) +
+          static_cast<long double>(i) * grid.dx();
+      const long double hi = lo + static_cast<long double>(grid.dx());
+      const std::size_t k = grid.index(i, j);
+      // m_phi is an r^2 dr moment; B_phi and B0_phi are uniform dr moments;
+      // energy retains the annular r dr moment.
+      mphi[k] = static_cast<Real>(
+          static_cast<long double>(mphi_slope) *
+          angular_average_linear(lo, hi));
+      const long double centre = 0.5L * (lo + hi);
+      bphi[k] = static_cast<Real>(
+          static_cast<long double>(bphi_slope) * centre);
+      b0phi[k] = static_cast<Real>(
+          static_cast<long double>(b0phi_slope) * centre);
+      energy[k] = static_cast<Real>(
+          internal + stored_square_coefficient *
+                         annular_average_square(lo, hi));
+    }
+  }
+
+  quasar::mhd::MhdField2D<Real> state{grid};
+  quasar::mhd::MhdField2D<Real> residual{grid};
+  state.rho.copy_from_host(rho.data(), size);
+  state.mx.copy_from_host(zero.data(), size);
+  state.my.copy_from_host(zero.data(), size);
+  state.mz.copy_from_host(mphi.data(), size);
+  state.energy.copy_from_host(energy.data(), size);
+  state.bx_face.copy_from_host(zero.data(), size);
+  state.by_face.copy_from_host(zero.data(), size);
+  state.bz_cell.copy_from_host(bphi.data(), size);
+  residual.rho.copy_from_host(zero.data(), size);
+  residual.mx.copy_from_host(zero.data(), size);
+  residual.my.copy_from_host(zero.data(), size);
+  residual.mz.copy_from_host(zero.data(), size);
+  residual.energy.copy_from_host(zero.data(), size);
+  residual.bx_face.copy_from_host(zero.data(), size);
+  residual.by_face.copy_from_host(zero.data(), size);
+  residual.bz_cell.copy_from_host(zero.data(), size);
+
+  quasar::mhd::MhdBackgroundField<Real> background{grid};
+  background.active = true;
+  background.b0x_face.copy_from_host(zero.data(), size);
+  background.b0y_face.copy_from_host(zero.data(), size);
+  background.b0z_cell.copy_from_host(b0phi.data(), size);
+
+  quasar::numerics::RadialTables radial_tables{grid, order};
+  quasar::mhd::MhdGeometricSource::add(
+      state, residual, background, grid, kGamma,
+      /*collocation_order=*/0, radial_tables.view());
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> radial_rate(size);
+  residual.mx.copy_to_host(radial_rate.data(), size);
+  const long double source_square_coefficient =
+      static_cast<long double>(mphi_slope) * mphi_slope -
+      0.5L *
+          (static_cast<long double>(bphi_slope) + b0phi_slope) *
+          (static_cast<long double>(bphi_slope) + b0phi_slope);
+  const long double spacing = static_cast<long double>(grid.dx());
+  for (int j = 0; j < grid.ny; ++j) {
+    for (int i = 0; i < grid.nx; ++i) {
+      const long double radius =
+          static_cast<long double>(grid.r_at_cell_center(i));
+      const long double flat_r_squared =
+          radius * radius + spacing * spacing / 12.0L;
+      const Real expected = static_cast<Real>(
+          pressure / radius +
+          source_square_coefficient * flat_r_squared / radius);
+      const Real tolerance = Real{3e-11} *
+          std::max(Real{1}, std::abs(expected));
+      EXPECT_NEAR(radial_rate[grid.index(i, j)], expected, tolerance)
+          << "order=" << order << " i=" << i << " j=" << j
+          << " mphi_slope=" << mphi_slope
+          << " bphi_slope=" << bphi_slope
+          << " b0phi_slope=" << b0phi_slope;
+    }
+  }
 }
 
 }  // namespace
@@ -415,6 +536,132 @@ TEST(MhdCylindricalSource, StrongToroidalCurvatureAvoidsSquareOverflow) {
       ASSERT_TRUE(std::isfinite(expected));
       ASSERT_TRUE(std::isfinite(radial[g.index(i, j)]));
       EXPECT_NEAR(radial[g.index(i, j)] / expected, Real{1}, Real{3e-15});
+    }
+  }
+}
+
+TEST(MhdCylindricalSource,
+     StandaloneHighOrderRecoversNativeToroidalMomentsAtAxis) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    // Separate cases prevent an accidentally compensating m_phi/B_phi row swap
+    // from hiding behind the total curvature stress.
+    expect_standalone_native_toroidal_source(
+        order, /*mphi_slope=*/Real{0.7},
+        /*bphi_slope=*/Real{0}, /*b0phi_slope=*/Real{0});
+    expect_standalone_native_toroidal_source(
+        order, /*mphi_slope=*/Real{0},
+        /*bphi_slope=*/Real{0.6}, /*b0phi_slope=*/Real{0});
+    expect_standalone_native_toroidal_source(
+        order, /*mphi_slope=*/Real{0},
+        /*bphi_slope=*/Real{0}, /*b0phi_slope=*/Real{-0.5});
+  }
+}
+
+TEST(MhdCylindricalSource,
+     StandaloneHighOrderRetainsPerturbationBackgroundToroidalCrossTerm) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    // The exact source contains -b_phi*B0_phi in addition to the two half
+    // squares. Opposite slopes make omission or premature cancellation of that
+    // cross term conspicuous.
+    expect_standalone_native_toroidal_source(
+        order, /*mphi_slope=*/Real{0.2},
+        /*bphi_slope=*/Real{0.35}, /*b0phi_slope=*/Real{-0.8});
+  }
+}
+
+TEST(MhdCylindricalSource,
+     StandaloneMp7RetainsPressureAcrossTensorPointCancellation) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  constexpr int order = 7;
+  const Grid2D grid{/*nx=*/4, /*ny=*/5, Real{4}, Real{5},
+                    Real{1}, Real{-2.5}, /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  constexpr Real pressure = Real{1};
+  const Real dominant = std::scalbn(Real{1}, 200);
+  const Real axial_slope = dominant / Real{8};
+  const std::vector<Real> one(size, Real{1});
+  const std::vector<Real> zero(size, Real{0});
+  const std::vector<Real> energy(
+      size, pressure / (kGamma - Real{1}));
+  std::vector<Real> background_radial(size);
+  std::vector<Real> background_toroidal(size);
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    const Real axial_coordinate = grid.y_at_cell_center(j);
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      const std::size_t k = grid.index(i, j);
+      background_radial[k] = dominant + axial_slope * axial_coordinate;
+      background_toroidal[k] = dominant - axial_slope * axial_coordinate;
+    }
+  }
+
+  quasar::mhd::MhdField2D<Real> state{grid};
+  quasar::mhd::MhdField2D<Real> residual{grid};
+  state.rho.copy_from_host(one.data(), size);
+  state.mx.copy_from_host(zero.data(), size);
+  state.my.copy_from_host(zero.data(), size);
+  state.mz.copy_from_host(zero.data(), size);
+  state.energy.copy_from_host(energy.data(), size);
+  state.bx_face.copy_from_host(zero.data(), size);
+  state.by_face.copy_from_host(zero.data(), size);
+  state.bz_cell.copy_from_host(zero.data(), size);
+  residual.rho.copy_from_host(zero.data(), size);
+  residual.mx.copy_from_host(zero.data(), size);
+  residual.my.copy_from_host(zero.data(), size);
+  residual.mz.copy_from_host(zero.data(), size);
+  residual.energy.copy_from_host(zero.data(), size);
+  residual.bx_face.copy_from_host(zero.data(), size);
+  residual.by_face.copy_from_host(zero.data(), size);
+  residual.bz_cell.copy_from_host(zero.data(), size);
+
+  quasar::mhd::MhdBackgroundField<Real> background{grid};
+  background.active = true;
+  background.b0x_face.copy_from_host(background_radial.data(), size);
+  background.b0y_face.copy_from_host(zero.data(), size);
+  background.b0z_cell.copy_from_host(background_toroidal.data(), size);
+
+  quasar::numerics::RadialTables radial_tables{grid, order};
+  quasar::mhd::MhdGeometricSource::add(
+      state, residual, background, grid, kGamma,
+      /*collocation_order=*/0, radial_tables.view());
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> radial_rate(size);
+  residual.mx.copy_to_host(radial_rate.data(), size);
+  const int centre_j = grid.ny / 2;
+  ASSERT_EQ(grid.y_at_cell_center(centre_j), Real{0});
+  for (int i = 0; i < grid.nx; ++i) {
+    const Real radius = grid.r_at_cell_center(i);
+    const Real centre_source = radial_rate[grid.index(i, centre_j)];
+    const Real expected_pressure_source = pressure / radius;
+    ASSERT_TRUE(std::isfinite(centre_source)) << "i=" << i;
+    EXPECT_NEAR(centre_source, expected_pressure_source,
+                Real{2048} * std::numeric_limits<Real>::epsilon() *
+                    expected_pressure_source)
+        << "i=" << i;
+
+    // The same poloidal field varies axially on its native radial-face
+    // staggering.  In the adjacent cells the exact magnetic numerator is
+    // 2*H*s*z, so its sign and magnitude also pin axial point recovery.
+    for (const int offset : {-1, 1}) {
+      const int j = centre_j + offset;
+      const Real axial_coordinate = grid.y_at_cell_center(j);
+      const Real expected =
+          (pressure + Real{2} * dominant * axial_slope * axial_coordinate) /
+          radius;
+      const Real actual = radial_rate[grid.index(i, j)];
+      ASSERT_TRUE(std::isfinite(actual))
+          << "i=" << i << " j=" << j;
+      EXPECT_EQ(std::signbit(actual), std::signbit(expected))
+          << "i=" << i << " j=" << j;
+      EXPECT_NEAR(actual / expected, Real{1}, Real{2e-13})
+          << "i=" << i << " j=" << j;
     }
   }
 }

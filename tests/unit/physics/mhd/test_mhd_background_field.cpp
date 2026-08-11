@@ -761,10 +761,10 @@ TEST(MhdBackgroundField,
        j < cfg.grid.ny + cfg.grid.nghost; ++j) {
     for (int i = -cfg.grid.nghost;
          i < cfg.grid.nx + cfg.grid.nghost; ++i) {
-      // r*Bphi=1 at every positive-radius face, so checks which skip r=0 see
-      // only round-off. Nevertheless Bphi=1/r is singular on this domain and
-      // carries a distributional axial current. Its negative-radius samples
-      // also satisfy the required odd axis parity.
+      // A finite nonzero toroidal average in the axis cell cannot represent a
+      // regular curl-free field. This odd 1/r_center surrogate satisfies the
+      // required axis parity and would fool a check that merely skipped r=0;
+      // it is not an average of C/r, whose axis-cell integral diverges.
       b0phi[cfg.grid.index(i, j)] =
           Real{1} / cfg.grid.x_at_cell_center(i);
     }
@@ -819,19 +819,66 @@ TEST(MhdBackgroundField,
   const std::size_t n = g.storage_size();
   const std::vector<Real> zero(n, Real{0});
   std::vector<Real> b0phi(n);
-  // This representable C makes every canonical r*(C/r) product exactly the
-  // same dyadic value over the two checked radial faces. The one-ulp local
-  // coordinate drift above changes that product and therefore reproduces the
-  // historical false curl rejection without relying on a tolerance.
+  // B0_phi is a uniform-dr cell average.  For the canonical vacuum field
+  // C/r, its stored value is C*log(r_hi/r_lo)/dr, evaluated from the canonical
+  // global cell edge rather than the tile-local coordinate.
   constexpr Real toroidal_flux = 0x1.29bbfebdabd46p+94;
   for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
     for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real r_lo = g.r_at_edge(i);
       b0phi[g.index(i, j)] =
-          toroidal_flux / g.r_at_cell_center(i);
+          toroidal_flux * std::log1p(g.dx() / r_lo) / g.dx();
     }
   }
-  ASSERT_EQ(g.r_at_cell_center(0) * b0phi[g.index(0, 0)], toroidal_flux);
-  ASSERT_NE(g.x_at_cell_center(0) * b0phi[g.index(0, 0)], toroidal_flux);
+
+  solver.seed_background("b0x", zero);
+  solver.seed_background("b0y", zero);
+  solver.seed_background("b0z", b0phi);
+
+  Real dt = Real{0};
+  EXPECT_NO_THROW(dt = solver.cfl_limit());
+  EXPECT_TRUE(std::isfinite(dt));
+  EXPECT_GT(dt, Real{0});
+}
+
+TEST(MhdBackgroundField,
+     AcceptsUniformCellAverageOfCurlFreeToroidalFieldOnAnnulus) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  auto cfg = make_config();
+  cfg.geometry = "cylindrical";
+  cfg.reconstruction = "muscl_minmod";
+  cfg.grid = quasar::Grid2D::from_cell_spacing(
+      8, 4, Real{0.125}, Real{0.25}, Real{1}, Real{-0.5},
+      /*nghost=*/2);
+  set_all_boundaries(cfg, "outflow");
+  cfg.background.enabled = true;
+  cfg.background.profile = "uniform";
+  cfg.background.curl_free = true;
+
+  quasar::mhd::MhdSolver2D solver{cfg};
+  const auto& g = cfg.grid;
+  seed_uniform_split_state(
+      solver, g, Real{0}, Real{0}, Real{0},
+      Real{0}, Real{0}, Real{0});
+
+  const std::size_t n = g.storage_size();
+  const std::vector<Real> zero(n, Real{0});
+  std::vector<Real> b0phi(n);
+  constexpr Real toroidal_flux = Real{3.25};
+  for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
+    for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
+      const Real r_lo = g.r_at_edge(i);
+      b0phi[g.index(i, j)] =
+          toroidal_flux * std::log1p(g.dx() / r_lo) / g.dx();
+    }
+  }
+
+  // Midpoint values encode the superseded contract and are observably not
+  // constant in r; accepting this field therefore pins the uniform-average
+  // interpretation rather than accidentally preserving r_center*Bbar.
+  ASSERT_NE(g.r_at_cell_center(0) * b0phi[g.index(0, 0)],
+            g.r_at_cell_center(1) * b0phi[g.index(1, 0)]);
 
   solver.seed_background("b0x", zero);
   solver.seed_background("b0y", zero);

@@ -32,6 +32,14 @@ inline constexpr int kDiscreteSolenoidalRoundoffUlpShift = 10;  // 2^10 ulps
 // projection construction.
 inline constexpr Real kDiscreteCurlFreeTolerance = Real{1e-8};
 
+constexpr int reconstruction_order_from_nghost(int nghost) noexcept {
+  switch (nghost) {
+    case 3: return 5;
+    case 4: return 7;
+    default: return 2;
+  }
+}
+
 template <class Base>
 void require_registered_name(const std::string& name, const char* what) {
   if (name.empty() || !Registry<Base>::instance().contains(name)) {
@@ -256,6 +264,45 @@ numerics::ScaledValue scaled_directional_derivative(
   numerics::append_scaled_value_quotient(
       derivative, difference, Real{1}, spacing, Real{1});
   return numerics::finish_scaled_product_quotient_sum_to_value(derivative);
+}
+
+// B_phi is stored as an unweighted cell average.  For the only regular
+// curl-free toroidal profile on an annulus, B_phi=C/r, that average is
+//
+//   Bbar_i = C log(r_hi/r_lo) / dr.
+//
+// Recover the represented invariant C in scaled form so the validation stays
+// range-safe.  The axis cell has an infinite C/r average; only its regular
+// value Bbar=0 can therefore represent a curl-free toroidal field.
+numerics::ScaledValue scaled_toroidal_flux_from_uniform_average(
+    Real average, Real lower_radius, Real spacing) {
+  if (!(std::isfinite(average) && std::isfinite(lower_radius) &&
+        std::isfinite(spacing) && lower_radius >= Real{0} &&
+        spacing > Real{0})) {
+    return numerics::ScaledValue{
+        std::numeric_limits<Real>::infinity(), 0};
+  }
+  if (lower_radius == Real{0}) {
+    return average == Real{0}
+        ? numerics::ScaledValue{}
+        : numerics::ScaledValue{
+              std::numeric_limits<Real>::infinity(), 0};
+  }
+
+  const Real radius_ratio = spacing / lower_radius;
+  const Real log_ratio = std::isfinite(radius_ratio)
+      ? std::log1p(radius_ratio)
+      : std::log(spacing) - std::log(lower_radius);
+  if (!(std::isfinite(log_ratio) && log_ratio > Real{0})) {
+    return numerics::ScaledValue{
+        std::numeric_limits<Real>::infinity(), 0};
+  }
+
+  numerics::ScaledProductQuotientAccumulator<1> toroidal_flux;
+  numerics::append_scaled_product_quotient(
+      toroidal_flux, average, spacing, log_ratio, Real{1});
+  return numerics::finish_scaled_product_quotient_sum_to_value(
+      toroidal_flux);
 }
 
 // One representational ulp as a scaled value. This is not a raw-field scale:
@@ -690,10 +737,10 @@ void validate_background_curl_free_samples(
 
   // The two remaining curl components are derivatives of B0z. In Cartesian
   // 2.5-D they are ordinary differences. In axisymmetry the radial derivative
-  // is (1/r)d(r Bphi)/dr. Each curl component contains only this one
-  // directional derivative, so its represented discrete numerator must be
-  // exactly zero; there is no independent derivative with which it can
-  // physically cancel.
+  // is (1/r)d(r Bphi)/dr. The axial stored-value difference must be exactly
+  // zero. The radial check instead compares the C invariant inferred from each
+  // uniform-dr cell average; inversion of its logarithmic moment is admitted
+  // under the same relative tolerance as the poloidal curl check.
   for (int j = 0; j <= grid.ny; ++j) {
     for (int i = 0; i < grid.nx; ++i) {
       const numerics::ScaledValue difference =
@@ -709,26 +756,23 @@ void validate_background_curl_free_samples(
     for (int i = 0; i <= grid.nx; ++i) {
       if (cylindrical) {
         const Real r_face = grid.r_at_edge(i);
-        const Real r_hi = grid.r_at_cell_center(i);
-        const Real r_lo = grid.r_at_cell_center(i - 1);
         if (r_face == Real{0}) continue;
         if (!(r_face > Real{0})) {
           throw std::invalid_argument{
               "MhdSolver2D: curl_free cylindrical background encountered "
               "a negative interior radius"};
         }
-        numerics::ScaledProductQuotientAccumulator<4> product_difference;
-        numerics::append_scaled_exact_product(
-            product_difference, r_hi, b0z[grid.index(i, j)]);
-        numerics::append_scaled_exact_product(
-            product_difference, -r_lo, b0z[grid.index(i - 1, j)]);
-        const numerics::ScaledValue difference =
-            numerics::finish_scaled_exact_product_sum_to_value(
-                product_difference);
-        if (!std::isfinite(difference.mantissa) ||
-            difference.mantissa != Real{0}) {
-          single_derivative_is_zero = false;
-        }
+        const numerics::ScaledValue upper_toroidal_flux =
+            scaled_toroidal_flux_from_uniform_average(
+                b0z[grid.index(i, j)], grid.r_at_edge(i), grid.dx());
+        const numerics::ScaledValue lower_toroidal_flux =
+            scaled_toroidal_flux_from_uniform_average(
+                b0z[grid.index(i - 1, j)], grid.r_at_edge(i - 1),
+                grid.dx());
+        relative_linf = std::max(
+            relative_linf,
+            normalized_directional_sum_defect(
+                upper_toroidal_flux, lower_toroidal_flux, Real{-1}));
       } else {
         const numerics::ScaledValue difference =
             numerics::scaled_difference_to_value(
@@ -783,11 +827,8 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
                 cfg_.boundary.field[0], "field boundary") == 4)},
     radial_tables_{cfg_.geometry == "cylindrical"
                        ? numerics::RadialTables{
-                             grid_, reconstruction_->required_nghost() == 3
-                                        ? 5
-                                        : reconstruction_->required_nghost() == 4
-                                              ? 7
-                                              : 2}
+                             grid_, reconstruction_order_from_nghost(
+                                        reconstruction_->required_nghost())}
                        : numerics::RadialTables{}},
     rk_{MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}, MhdField2D<Real>{grid_}},
     step_backup_{grid_},
@@ -1013,6 +1054,8 @@ std::vector<Real> MhdSolver2D::state_component_to_host(std::string_view componen
   buf.copy_to_host(out.data(), out.size());
   if (component == "bx" || component == "by") {
     const std::vector<Real> face = out;
+    const numerics::RadialTablesView radial_tables =
+        radial_tables_.host_view();
     const int ilo = -grid_.nghost;
     const int ihi = grid_.nx + grid_.nghost;
     const int jlo = -grid_.nghost;
@@ -1021,14 +1064,14 @@ std::vector<Real> MhdSolver2D::state_component_to_host(std::string_view componen
       for (int j = jlo; j < jhi; ++j) {
         for (int i = ilo; i < ihi; ++i) {
           out[grid_.index(i, j)] =
-              cell_bx(grid_, face.data(), i, j, radial_tables_.view());
+              cell_bx(grid_, face.data(), i, j, radial_tables);
         }
       }
     } else {
       for (int j = jlo; j < jhi; ++j) {
         for (int i = ilo; i < ihi; ++i) {
           out[grid_.index(i, j)] =
-              cell_by(grid_, face.data(), i, j, radial_tables_.view());
+              cell_by(grid_, face.data(), i, j, radial_tables);
         }
       }
     }
@@ -1039,11 +1082,7 @@ std::vector<Real> MhdSolver2D::state_component_to_host(std::string_view componen
 int MhdSolver2D::reconstruction_order() const {
   // Map the scheme's required halo to a spatial order for the device path:
   //   nghost 2 -> order 2 (muscl_minmod), 3 -> 5 (mp5), 4 -> 7 (mp7).
-  switch (reconstruction_->required_nghost()) {
-    case 3: return 5;
-    case 4: return 7;
-    default: return 2;
-  }
+  return reconstruction_order_from_nghost(reconstruction_->required_nghost());
 }
 
 void MhdSolver2D::fill_ghosts(MhdField2D<Real>& u) const {

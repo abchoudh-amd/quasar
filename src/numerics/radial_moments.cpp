@@ -42,11 +42,23 @@ long double power_integral(int exponent, long double lo, long double hi) {
          / static_cast<long double>(antiderivative_exponent);
 }
 
-// Integrate (x-origin)^m |x| over a unit-width cell centered at cell_rho.
-// Expanding around the cell center keeps the calculation well scaled when the
-// global radius is large, unlike subtracting two nearly equal powers of x.
+int measure_power(RadialCellMeasure measure) {
+  switch (measure) {
+    case RadialCellMeasure::uniform: return 0;
+    case RadialCellMeasure::annular: return 1;
+    case RadialCellMeasure::angular_momentum: return 2;
+  }
+  throw std::invalid_argument("unknown radial cell measure");
+}
+
+// Integrate (x-origin)^m w(x) over a unit-width cell centered at cell_rho,
+// where w is 1, |x|, or x^2. Expanding both factors around the cell center
+// keeps the calculation well scaled when the global radius is large, unlike
+// subtracting two nearly equal global powers of x.
 long double shifted_weighted_cell_integral(
-    long double cell_rho, long double origin, int m) {
+    long double cell_rho, long double origin, int m,
+    RadialCellMeasure measure) {
+  const int radial_power = measure_power(measure);
   const long double displacement = cell_rho - origin;
   const auto integrate_segment = [&](long double lo, long double hi,
                                      long double radial_sign) {
@@ -54,9 +66,13 @@ long double shifted_weighted_cell_integral(
     for (int p = 0; p <= m; ++p) {
       const long double coefficient =
           binomial(m, p) * integer_power(displacement, m - p);
-      const long double weighted_power =
-          cell_rho * power_integral(p, lo, hi)
-          + power_integral(p + 1, lo, hi);
+      long double weighted_power = 0.0L;
+      for (int q = 0; q <= radial_power; ++q) {
+        weighted_power +=
+            binomial(radial_power, q) *
+            integer_power(cell_rho, radial_power - q) *
+            power_integral(p + q, lo, hi);
+      }
       value += radial_sign * coefficient * weighted_power;
     }
     return value;
@@ -64,6 +80,9 @@ long double shifted_weighted_cell_integral(
 
   constexpr long double lo = -0.5L;
   constexpr long double hi = 0.5L;
+  if (measure != RadialCellMeasure::annular) {
+    return integrate_segment(lo, hi, 1.0L);
+  }
   if (cell_rho >= 0.5L) return integrate_segment(lo, hi, 1.0L);
   if (cell_rho <= -0.5L) return integrate_segment(lo, hi, -1.0L);
 
@@ -73,13 +92,14 @@ long double shifted_weighted_cell_integral(
 }
 
 long double shifted_normalized_cell_moment(
-    long double cell_rho, long double origin, int m) {
+    long double cell_rho, long double origin, int m,
+    RadialCellMeasure measure) {
   const long double volume =
-      shifted_weighted_cell_integral(cell_rho, origin, 0);
+      shifted_weighted_cell_integral(cell_rho, origin, 0, measure);
   if (!(volume > 0.0L) || !std::isfinite(volume)) {
-    throw std::runtime_error("radial cell has invalid |r|-weighted volume");
+    throw std::runtime_error("radial cell has invalid weighted volume");
   }
-  return shifted_weighted_cell_integral(cell_rho, origin, m) / volume;
+  return shifted_weighted_cell_integral(cell_rho, origin, m, measure) / volume;
 }
 
 Vector gaussian_solve(Matrix matrix, Vector rhs, int width) {
@@ -162,18 +182,31 @@ void normalize_binary64_row(RadialStencilRow& row, const Vector& solution) {
 }  // namespace
 
 long double normalized_cell_moment(long double rho, int m) {
+  return normalized_cell_moment(rho, m, RadialCellMeasure::annular);
+}
+
+long double normalized_cell_moment(
+    long double rho, int m, RadialCellMeasure measure) {
   if (!std::isfinite(rho)) {
     throw std::invalid_argument("radial cell coordinate must be finite");
   }
   if (m < 0) {
     throw std::invalid_argument("radial moment degree must be non-negative");
   }
-  return shifted_normalized_cell_moment(rho, 0.0L, m);
+  return shifted_normalized_cell_moment(rho, 0.0L, m, measure);
 }
 
 RadialStencilRow solve_radial_row(
     long double rho_anchor, int width, int offset,
     RadialMomentTarget target, long double node_xi) {
+  return solve_radial_row(
+      rho_anchor, width, offset, target, RadialCellMeasure::annular, node_xi);
+}
+
+RadialStencilRow solve_radial_row(
+    long double rho_anchor, int width, int offset,
+    RadialMomentTarget target, RadialCellMeasure measure,
+    long double node_xi) {
   if (!std::isfinite(rho_anchor) || !std::isfinite(node_xi)) {
     throw std::invalid_argument("radial stencil coordinates must be finite");
   }
@@ -194,11 +227,11 @@ RadialStencilRow solve_radial_row(
         const long double cell_rho =
             rho_anchor + static_cast<long double>(offset + k);
         matrix[m][k] = shifted_normalized_cell_moment(
-            cell_rho, rho_anchor, m);
+            cell_rho, rho_anchor, m, measure);
       }
     } else {
       rhs[m] = shifted_normalized_cell_moment(
-          rho_anchor, rho_anchor, m);
+          rho_anchor, rho_anchor, m, measure);
       for (int k = 0; k < width; ++k) {
         const long double point =
             static_cast<long double>(offset + k) + node_xi;
@@ -223,7 +256,6 @@ RadialStencilRow solve_radial_row(
 
   RadialStencilRow row{};
   row.width = width;
-  row.offset = offset;
   normalize_binary64_row(row, solution);
 
   long double residual = 0.0L;
@@ -242,6 +274,14 @@ RadialStencilRow solve_radial_row(
 RadialStencilRow radial_gauss_weights(
     long double rho_anchor, int count, const Real* node_xi,
     const Real* cartesian_weights) {
+  return radial_gauss_weights(
+      rho_anchor, count, node_xi, cartesian_weights,
+      RadialCellMeasure::annular);
+}
+
+RadialStencilRow radial_gauss_weights(
+    long double rho_anchor, int count, const Real* node_xi,
+    const Real* cartesian_weights, RadialCellMeasure measure) {
   if (!std::isfinite(rho_anchor)) {
     throw std::invalid_argument("radial Gauss coordinate must be finite");
   }
@@ -261,7 +301,18 @@ RadialStencilRow radial_gauss_weights(
     if (!std::isfinite(node) || !std::isfinite(weight)) {
       throw std::invalid_argument("radial Gauss rule must be finite");
     }
-    weighted[q] = weight * std::fabs(rho_anchor + node);
+    const long double radius = rho_anchor + node;
+    switch (measure) {
+      case RadialCellMeasure::uniform:
+        weighted[q] = weight;
+        break;
+      case RadialCellMeasure::annular:
+        weighted[q] = weight * std::fabs(radius);
+        break;
+      case RadialCellMeasure::angular_momentum:
+        weighted[q] = weight * radius * radius;
+        break;
+    }
     normalization += weighted[q];
   }
   if (!(normalization > 0.0L) || !std::isfinite(normalization)) {
@@ -274,7 +325,7 @@ RadialStencilRow radial_gauss_weights(
   normalize_binary64_row(row, weighted);
 
   long double residual = 0.0L;
-  const int exact_degree = 2 * count - 2;
+  const int exact_degree = 2 * count - 1 - measure_power(measure);
   for (int m = 0; m <= exact_degree; ++m) {
     long double quadrature = 0.0L;
     for (int q = 0; q < count; ++q) {
@@ -284,7 +335,7 @@ RadialStencilRow radial_gauss_weights(
           quadrature);
     }
     const long double exact = shifted_normalized_cell_moment(
-        rho_anchor, rho_anchor, m);
+        rho_anchor, rho_anchor, m, measure);
     residual = std::max(residual, std::fabs(quadrature - exact));
   }
   row.residual = static_cast<Real>(residual);

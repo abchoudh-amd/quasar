@@ -9,6 +9,8 @@ and the CLI need, kept in one place so they cannot drift between io.py and cli.p
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 
 
@@ -18,33 +20,67 @@ import numpy as np
 DISCRETE_SOLENOIDAL_TOLERANCE = 1024.0 * np.finfo(np.float64).eps
 
 
-_FACE_TO_CELL_CENTERED = {
-    2: np.array([0.5, 0.5], dtype=np.float64),
-    4: np.array([-1.0, 13.0, 13.0, -1.0], dtype=np.float64) / 24.0,
-    6: np.array([11.0, -93.0, 802.0, 802.0, -93.0, 11.0],
-                dtype=np.float64) / 1440.0,
-    # Polynomial-exact coefficient is -9531, not -9504. The latter fails even
-    # the degree-zero moment (its weights sum to 2241/2240).
-    8: np.array([-191.0, 1879.0, -9531.0, 68323.0,
-                 68323.0, -9531.0, 1879.0, -191.0],
-                dtype=np.float64) / 120960.0,
-}
+def _integrate_polynomial_on_centered_cell(coefficients, power=0):
+    """Integrate ``t**power * p(t)`` exactly over ``[-1/2, 1/2]``."""
+    lower = Fraction(-1, 2)
+    upper = Fraction(1, 2)
+    total = Fraction(0)
+    for degree, coefficient in enumerate(coefficients):
+        exponent = degree + power + 1
+        total += coefficient * (upper ** exponent - lower ** exponent) / exponent
+    return total
 
-# The radius-dependent face-to-ring-average rows are affine in 1/rho, where
-# rho is the target cell-center radius in units of dr.  The first term is the
-# Cartesian row above; the antisymmetric correction integrates one additional
-# factor of the local coordinate from the r dr measure.  These exact rational
-# constants mirror R4 rows built by C++ solve_radial_row(width, -width/2,
-# RadialMomentTarget::cell_average, 0.5).
-_RADIAL_FACE_TO_CELL_CORRECTION = {
-    2: np.array([-1.0, 1.0], dtype=np.float64) / 12.0,
-    4: np.array([1.0, -63.0, 63.0, -1.0], dtype=np.float64) / 720.0,
-    6: np.array([-3.0, 43.0, -1794.0, 1794.0, -43.0, 3.0],
-                dtype=np.float64) / 20160.0,
-    8: np.array([79.0, -1093.0, 9399.0, -325685.0,
-                 325685.0, -9399.0, 1093.0, -79.0],
-                dtype=np.float64) / 3628800.0,
-}
+
+def _generate_face_to_cell_rows():
+    """Generate centered finite-volume rows from one exact definition.
+
+    For each supported width, construct the Lagrange basis through the centered
+    face nodes and integrate it exactly. The Cartesian coefficient is
+    ``integral L_k dt``. The cylindrical correction is ``integral t L_k dt``;
+    a ring average centered at dimensionless radius ``rho`` is consequently
+    ``cartesian + correction/rho``.
+
+    This is the Python source of truth for both row families. It replaces
+    transcribed rational tables while expressing the same polynomial-moment
+    definition as native ``solve_radial_row``. Cross-language golden tests pin
+    their binary64 agreement.
+    """
+    cartesian = {}
+    radial_correction = {}
+    for width in (2, 4, 6, 8):
+        nodes = [
+            Fraction(2 * index - width + 1, 2)
+            for index in range(width)
+        ]
+        cartesian_row = []
+        correction_row = []
+        for index, node in enumerate(nodes):
+            # Ascending coefficients of the Lagrange basis polynomial L_index.
+            coefficients = [Fraction(1)]
+            denominator = Fraction(1)
+            for other_index, other_node in enumerate(nodes):
+                if other_index == index:
+                    continue
+                expanded = [Fraction(0)] * (len(coefficients) + 1)
+                for degree, coefficient in enumerate(coefficients):
+                    expanded[degree] -= other_node * coefficient
+                    expanded[degree + 1] += coefficient
+                coefficients = expanded
+                denominator *= node - other_node
+            coefficients = [value / denominator for value in coefficients]
+            cartesian_row.append(
+                _integrate_polynomial_on_centered_cell(coefficients))
+            correction_row.append(
+                _integrate_polynomial_on_centered_cell(coefficients, power=1))
+
+        cartesian[width] = np.asarray(cartesian_row, dtype=np.float64)
+        radial_correction[width] = np.asarray(
+            correction_row, dtype=np.float64)
+    return cartesian, radial_correction
+
+
+(_FACE_TO_CELL_CENTERED,
+ _RADIAL_FACE_TO_CELL_CORRECTION) = _generate_face_to_cell_rows()
 
 
 def _collocation_width(extent, nghost):

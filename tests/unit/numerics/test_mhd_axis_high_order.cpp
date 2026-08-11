@@ -1,4 +1,4 @@
-// Focused r=0 contracts needed by cylindrical MP7.
+// Focused r=0 contracts needed by cylindrical MP5/MP7.
 //
 // MP7 consumes four radial ghost cells.  The axis closure must therefore fill
 // every layer with the physical m=0 parity, while the face-staggered radial
@@ -18,6 +18,8 @@
 #include "quasar/physics/mhd/mhd_field.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -35,6 +37,7 @@ constexpr Real kGamma = Real{5} / Real{3};
 constexpr long double kWaveNumber = 4.0L;
 constexpr long double kDensityAmplitude = 0.25L;
 constexpr long double kAzimuthalMomentumAmplitude = 0.5L;
+constexpr long double kToroidalFieldAmplitude = 0.2L;
 
 // Integer-valued binary64 samples make every copy/sign assertion exact.  The
 // component-specific base also detects accidental cross-component reads.
@@ -80,6 +83,18 @@ long double weighted_sine_antiderivative(long double radius) {
              (kWaveNumber * kWaveNumber);
 }
 
+long double uniform_sine_antiderivative(long double radius) {
+  return -std::cos(kWaveNumber * radius) / kWaveNumber;
+}
+
+long double angular_sine_antiderivative(long double radius) {
+  return -radius * radius * std::cos(kWaveNumber * radius) / kWaveNumber +
+         2.0L * radius * std::sin(kWaveNumber * radius) /
+             (kWaveNumber * kWaveNumber) +
+         2.0L * std::cos(kWaveNumber * radius) /
+             (kWaveNumber * kWaveNumber * kWaveNumber);
+}
+
 Real even_density(Real radius) {
   return static_cast<Real>(2.0L + kDensityAmplitude *
                                       std::cos(kWaveNumber * radius));
@@ -87,6 +102,12 @@ Real even_density(Real radius) {
 
 Real odd_azimuthal_momentum(Real radius) {
   return static_cast<Real>(kAzimuthalMomentumAmplitude *
+                           std::sin(kWaveNumber * radius));
+}
+
+
+Real odd_toroidal_field(Real radius) {
+  return static_cast<Real>(kToroidalFieldAmplitude *
                            std::sin(kWaveNumber * radius));
 }
 
@@ -103,6 +124,29 @@ Real positive_radius_ring_average(const Grid2D& grid, int i,
       : weighted_cosine_antiderivative(upper) -
             weighted_cosine_antiderivative(lower);
   return static_cast<Real>(base + amplitude * integral / measure);
+}
+
+Real positive_radius_angular_average(const Grid2D& grid, int i,
+                                     long double amplitude) {
+  const long double lower = static_cast<long double>(grid.r_at_edge(i));
+  const long double upper = static_cast<long double>(grid.r_at_edge(i + 1));
+  const long double measure =
+      (upper * upper * upper - lower * lower * lower) / 3.0L;
+  const long double integral =
+      angular_sine_antiderivative(upper) -
+      angular_sine_antiderivative(lower);
+  return static_cast<Real>(amplitude * integral / measure);
+}
+
+
+Real positive_radius_uniform_average(const Grid2D& grid, int i,
+                                     long double amplitude) {
+  const long double lower = static_cast<long double>(grid.r_at_edge(i));
+  const long double upper = static_cast<long double>(grid.r_at_edge(i + 1));
+  const long double integral =
+      uniform_sine_antiderivative(upper) -
+      uniform_sine_antiderivative(lower);
+  return static_cast<Real>(amplitude * integral / (upper - lower));
 }
 
 void seed_axis_parity_profiles(quasar::mhd::MhdField2D<Real>& field,
@@ -123,9 +167,10 @@ void seed_axis_parity_profiles(quasar::mhd::MhdField2D<Real>& field,
       rho[index] = positive_radius_ring_average(
           grid, i, /*base=*/2.0L, kDensityAmplitude,
           /*sine_profile=*/false);
-      azimuthal_momentum[index] = positive_radius_ring_average(
-          grid, i, /*base=*/0.0L, kAzimuthalMomentumAmplitude,
-          /*sine_profile=*/true);
+      azimuthal_momentum[index] = positive_radius_angular_average(
+          grid, i, kAzimuthalMomentumAmplitude);
+      azimuthal_field[index] = positive_radius_uniform_average(
+          grid, i, kToroidalFieldAmplitude);
       radial_field[index] = Real{0.2} * grid.r_at_edge(i);
     }
   }
@@ -148,17 +193,18 @@ void seed_axis_parity_profiles(quasar::mhd::MhdField2D<Real>& field,
 struct AxisReconstructionErrors {
   Real even;
   Real odd;
+  Real toroidal;
 };
 
-AxisReconstructionErrors axis_reconstruction_errors(int nx) {
-  constexpr int nghost = 4;
+AxisReconstructionErrors axis_reconstruction_errors(int scheme_order, int nx) {
+  const int nghost = scheme_order >= 7 ? 4 : 3;
   const Grid2D grid{nx, /*ny=*/2, /*lx=*/Real{1}, /*ly=*/Real{1},
                     /*origin_x=*/Real{0}, /*origin_y=*/Real{0}, nghost};
   quasar::mhd::MhdField2D<Real> field{grid};
   seed_axis_parity_profiles(field, grid);
 
   const quasar::numerics::RadialTables table_owner{
-      grid, /*scheme_order=*/7};
+      grid, scheme_order};
   const auto radial_tables = table_owner.view();
   quasar::numerics::MhdInterfaceStates<Real> interfaces{
       grid, /*direction=*/0};
@@ -167,7 +213,7 @@ AxisReconstructionErrors axis_reconstruction_errors(int nx) {
   boundaries.side[1] = 1;
   quasar::mhd::launch_mhd_reconstruct(
       field, quasar::mhd::MhdBackgroundField<Real>{}, /*dir=*/0,
-      interfaces, /*scheme_order=*/7, boundaries, kGamma,
+      interfaces, scheme_order, boundaries, kGamma,
       /*stream=*/nullptr, /*rate_only=*/false, radial_tables);
   quasar::backend::device_synchronize(nullptr);
 
@@ -175,15 +221,22 @@ AxisReconstructionErrors axis_reconstruction_errors(int nx) {
   std::vector<Real> right_density(grid.storage_size());
   std::vector<Real> left_azimuthal_momentum(grid.storage_size());
   std::vector<Real> right_azimuthal_momentum(grid.storage_size());
+  std::vector<Real> left_toroidal_field(grid.storage_size());
+  std::vector<Real> right_toroidal_field(grid.storage_size());
   interfaces.Lrho.copy_to_host(left_density.data(), left_density.size());
   interfaces.Rrho.copy_to_host(right_density.data(), right_density.size());
   interfaces.Lmz.copy_to_host(left_azimuthal_momentum.data(),
                               left_azimuthal_momentum.size());
   interfaces.Rmz.copy_to_host(right_azimuthal_momentum.data(),
                               right_azimuthal_momentum.size());
+  interfaces.Lbz.copy_to_host(left_toroidal_field.data(),
+                             left_toroidal_field.size());
+  interfaces.Rbz.copy_to_host(right_toroidal_field.data(),
+                             right_toroidal_field.size());
 
   Real even_error = Real{0};
   Real odd_error = Real{0};
+  Real toroidal_error = Real{0};
   constexpr int measured_cells = 5;
   constexpr int j = 0;
   for (int cell = 0; cell < measured_cells; ++cell) {
@@ -194,13 +247,17 @@ AxisReconstructionErrors axis_reconstruction_errors(int nx) {
     const Real radius = grid.r_at_edge(outer_face);
     const Real exact_even = even_density(radius);
     const Real exact_odd = odd_azimuthal_momentum(radius);
+    const Real exact_toroidal = odd_toroidal_field(radius);
     even_error += std::abs(left_density[index] - exact_even) +
                   std::abs(right_density[index] - exact_even);
     odd_error += std::abs(left_azimuthal_momentum[index] - exact_odd) +
                  std::abs(right_azimuthal_momentum[index] - exact_odd);
+    toroidal_error += std::abs(left_toroidal_field[index] - exact_toroidal) +
+                      std::abs(right_toroidal_field[index] - exact_toroidal);
   }
   constexpr Real sample_count = Real{2 * measured_cells};
-  return {even_error / sample_count, odd_error / sample_count};
+  return {even_error / sample_count, odd_error / sample_count,
+          toroidal_error / sample_count};
 }
 
 Real convergence_order(Real coarse_error, Real fine_error) {
@@ -211,14 +268,15 @@ Real convergence_order(Real coarse_error, Real fine_error) {
   return std::log2(coarse_error / fine_error);
 }
 
-quasar::mhd::MhdConfig axis_mp7_config() {
+quasar::mhd::MhdConfig axis_high_order_config(
+    const char* reconstruction, int nghost) {
   quasar::mhd::MhdConfig cfg;
   cfg.grid = Grid2D{/*nx=*/16, /*ny=*/12, /*lx=*/Real{1}, /*ly=*/Real{1},
                     /*origin_x=*/Real{0}, /*origin_y=*/Real{0},
-                    /*nghost=*/4};
+                    nghost};
   cfg.gamma = Real{5} / Real{3};
   cfg.geometry = "cylindrical";
-  cfg.reconstruction = "mp7";
+  cfg.reconstruction = reconstruction;
   cfg.riemann = "hlld";
   cfg.integrator = "ssprk3";
   cfg.ct = "fd_ct_christlieb";
@@ -231,6 +289,46 @@ quasar::mhd::MhdConfig axis_mp7_config() {
   cfg.boundary.fluid[0] = "axis";
   cfg.boundary.field[0] = "axis";
   return cfg;
+}
+
+Real physical_max_abs_diff(const std::vector<Real>& lhs,
+                           const std::vector<Real>& rhs,
+                           const Grid2D& grid) {
+  Real result = Real{0};
+  for (int j = 0; j < grid.ny; ++j) {
+    for (int i = 0; i < grid.nx; ++i) {
+      result = std::max(
+          result, std::abs(lhs[grid.index(i, j)] - rhs[grid.index(i, j)]));
+    }
+  }
+  return result;
+}
+
+inline constexpr std::array<const char*, 8> kEvolvedComponents = {
+    "rho", "mx", "my", "mz", "energy", "bx_face", "by_face", "bz_cell"};
+using StateSnapshot =
+    std::array<std::vector<Real>, kEvolvedComponents.size()>;
+
+StateSnapshot snapshot_state(const quasar::mhd::MhdSolver2D& solver) {
+  StateSnapshot result;
+  for (std::size_t component = 0; component < result.size(); ++component) {
+    result[component] =
+        solver.state_component_to_host(kEvolvedComponents[component]);
+  }
+  return result;
+}
+
+void expect_finite_and_stationary(const StateSnapshot& initial,
+                                  const StateSnapshot& final,
+                                  const Grid2D& grid, Real tolerance) {
+  for (std::size_t component = 0; component < initial.size(); ++component) {
+    EXPECT_TRUE(all_finite(final[component]))
+        << "component=" << kEvolvedComponents[component];
+    EXPECT_LT(physical_max_abs_diff(
+                  final[component], initial[component], grid),
+              tolerance)
+        << "component=" << kEvolvedComponents[component];
+  }
 }
 
 void seed_uniform_axis_equilibrium(quasar::mhd::MhdSolver2D& solver,
@@ -348,34 +446,67 @@ TEST(MhdAxisHighOrder, AxisRWeightedMirrorIsExact) {
 TEST(MhdAxisHighOrder, AxisReconstructionIsHighOrder) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
-  const AxisReconstructionErrors coarse = axis_reconstruction_errors(24);
-  const AxisReconstructionErrors fine = axis_reconstruction_errors(48);
+  const AxisReconstructionErrors coarse =
+      axis_reconstruction_errors(/*scheme_order=*/7, 24);
+  const AxisReconstructionErrors fine =
+      axis_reconstruction_errors(/*scheme_order=*/7, 48);
   const Real even_order = convergence_order(coarse.even, fine.even);
   const Real odd_order = convergence_order(coarse.odd, fine.odd);
+  const Real toroidal_order =
+      convergence_order(coarse.toroidal, fine.toroidal);
   ::testing::Test::RecordProperty("even_coarse_error", coarse.even);
   ::testing::Test::RecordProperty("even_fine_error", fine.even);
   ::testing::Test::RecordProperty("even_observed_order", even_order);
   ::testing::Test::RecordProperty("odd_coarse_error", coarse.odd);
   ::testing::Test::RecordProperty("odd_fine_error", fine.odd);
   ::testing::Test::RecordProperty("odd_observed_order", odd_order);
+  ::testing::Test::RecordProperty("toroidal_coarse_error", coarse.toroidal);
+  ::testing::Test::RecordProperty("toroidal_fine_error", fine.toroidal);
+  ::testing::Test::RecordProperty("toroidal_observed_order", toroidal_order);
 
   ASSERT_GT(even_order, Real{0})
       << "coarse=" << coarse.even << ", fine=" << fine.even;
   ASSERT_GT(odd_order, Real{0})
       << "coarse=" << coarse.odd << ", fine=" << fine.odd;
+  ASSERT_GT(toroidal_order, Real{0})
+      << "coarse=" << coarse.toroidal << ", fine=" << fine.toroidal;
   EXPECT_GE(even_order, Real{6.4})
       << "coarse=" << coarse.even << ", fine=" << fine.even;
   EXPECT_GE(odd_order, Real{6.4})
       << "coarse=" << coarse.odd << ", fine=" << fine.odd;
+  EXPECT_GE(toroidal_order, Real{6.4})
+      << "coarse=" << coarse.toroidal << ", fine=" << fine.toroidal;
+}
+
+TEST(MhdAxisHighOrder, AxisMp5ReconstructionIsHighOrder) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const AxisReconstructionErrors coarse =
+      axis_reconstruction_errors(/*scheme_order=*/5, 24);
+  const AxisReconstructionErrors fine =
+      axis_reconstruction_errors(/*scheme_order=*/5, 48);
+  const Real even_order = convergence_order(coarse.even, fine.even);
+  const Real odd_order = convergence_order(coarse.odd, fine.odd);
+  const Real toroidal_order =
+      convergence_order(coarse.toroidal, fine.toroidal);
+
+  EXPECT_GE(even_order, Real{4.4})
+      << "coarse=" << coarse.even << ", fine=" << fine.even;
+  EXPECT_GE(odd_order, Real{4.4})
+      << "coarse=" << coarse.odd << ", fine=" << fine.odd;
+  EXPECT_GE(toroidal_order, Real{4.4})
+      << "coarse=" << coarse.toroidal << ", fine=" << fine.toroidal;
 }
 
 TEST(MhdAxisHighOrder, AxisMp7RunsStably) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
-  const auto cfg = axis_mp7_config();
+  const auto cfg = axis_high_order_config("mp7", /*nghost=*/4);
   ASSERT_EQ(cfg.grid.nghost, 4);
   quasar::mhd::MhdSolver2D solver{cfg};
   seed_uniform_axis_equilibrium(solver, cfg.grid, cfg.gamma);
+
+  const StateSnapshot initial = snapshot_state(solver);
 
   ASSERT_LT(solver.divergence_b_max(), Real{1e-12});
   const Real dt = Real{0.2} * solver.cfl_limit();
@@ -385,13 +516,30 @@ TEST(MhdAxisHighOrder, AxisMp7RunsStably) {
     ASSERT_NO_THROW(solver.step_unchecked(dt)) << "step=" << step;
   }
 
-  EXPECT_TRUE(all_finite(solver.state_component_to_host("rho")));
-  EXPECT_TRUE(all_finite(solver.state_component_to_host("energy")));
-  EXPECT_TRUE(all_finite(solver.state_component_to_host("bx_face")));
-  EXPECT_TRUE(all_finite(solver.state_component_to_host("by_face")));
-  EXPECT_TRUE(all_finite(solver.state_component_to_host("bz_cell")));
+  const StateSnapshot final = snapshot_state(solver);
   const Real final_divergence = solver.divergence_b_max();
   ::testing::Test::RecordProperty("divb_linf_after_50_steps",
                                   final_divergence);
   EXPECT_LT(final_divergence, Real{1e-10});
+  expect_finite_and_stationary(initial, final, cfg.grid, Real{1e-10});
+}
+
+TEST(MhdAxisHighOrder, AxisMp5RunsStablyAndStaysStationary) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const auto cfg = axis_high_order_config("mp5", /*nghost=*/3);
+  quasar::mhd::MhdSolver2D solver{cfg};
+  seed_uniform_axis_equilibrium(solver, cfg.grid, cfg.gamma);
+  const StateSnapshot initial = snapshot_state(solver);
+
+  const Real dt = Real{0.2} * solver.cfl_limit();
+  ASSERT_GT(dt, Real{0});
+  ASSERT_TRUE(std::isfinite(dt));
+  for (int step = 0; step < 20; ++step) {
+    ASSERT_NO_THROW(solver.step_unchecked(dt)) << "step=" << step;
+  }
+
+  const StateSnapshot final = snapshot_state(solver);
+  EXPECT_LT(solver.divergence_b_max(), Real{1e-10});
+  expect_finite_and_stationary(initial, final, cfg.grid, Real{1e-10});
 }

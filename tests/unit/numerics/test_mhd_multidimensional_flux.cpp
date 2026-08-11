@@ -3,6 +3,7 @@
 #include "quasar/numerics/finite_volume_quadrature.hpp"
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/radial_moments.hpp"
 #include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
@@ -295,6 +296,50 @@ TEST(MhdMultidimensionalFlux,
   const Real face_moment =
       quasar::numerics::finish_scaled_product_quotient_sum(recomposed);
   EXPECT_TRUE(std::isfinite(face_moment));
+}
+
+TEST(MhdMultidimensionalFlux,
+     BphiEnergyProductRetainsCrossMeasureDifferenceWithOneConstantFactor) {
+  constexpr long double rho = 2.5L;
+  constexpr Real constant = Real{3};
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    const int count = order == 5 ? 3 : 4;
+    const Real* nodes = order == 5
+        ? quasar::numerics::kMp5TransverseNodes
+        : quasar::numerics::kMp7TransverseNodes;
+    const Real* base_weights = order == 5
+        ? quasar::numerics::kMp5TransverseGaussWeights
+        : quasar::numerics::kMp7TransverseGaussWeights;
+    const auto annular = quasar::numerics::radial_gauss_weights(
+        rho, count, nodes, base_weights);
+    const auto varying = [&](int q) {
+      return static_cast<Real>(rho) + nodes[q];
+    };
+    const auto uniform = [&](int) { return constant; };
+
+    // Both B0_phi and F_Bphi are stored with flat means.  Their contribution
+    // to energy is nevertheless the annular product moment, so constant
+    // B0_phi times a radially varying induction flux has a nonzero correction.
+    const auto b0_constant =
+        quasar::numerics::transverse_product_difference_scaled(
+            annular.c, count, constant, static_cast<Real>(rho),
+            uniform, varying);
+    const auto flux_constant =
+        quasar::numerics::transverse_product_difference_scaled(
+            annular.c, count, static_cast<Real>(rho), constant,
+            varying, uniform);
+    const Real expected = constant / (Real{12} * static_cast<Real>(rho));
+    EXPECT_NEAR(std::scalbn(b0_constant.mantissa, b0_constant.exponent),
+                expected, Real{2e-15});
+    EXPECT_NEAR(std::scalbn(flux_constant.mantissa, flux_constant.exponent),
+                expected, Real{2e-15});
+
+    const auto both_constant =
+        quasar::numerics::transverse_product_difference_scaled(
+            annular.c, count, constant, constant, uniform, uniform);
+    EXPECT_EQ(both_constant.mantissa, Real{0});
+  }
 }
 
 TEST(MhdMultidimensionalFlux,

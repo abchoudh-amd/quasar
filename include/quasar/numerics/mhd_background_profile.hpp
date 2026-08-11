@@ -31,8 +31,11 @@ class IMhdBackgroundProfile {
   // component; the profile maps element+component to a field value.
   //
   // CONTRACT: the returned value is stored and consumed as that element's
-  // DISCRETE FINITE-VOLUME MOMENT -- a face average for comp 0/1 and a cell
-  // average for comp 2 -- not as a point value. The two are identical for any
+  // DISCRETE FINITE-VOLUME MOMENT -- a face average for comp 0/1 and the same
+  // equation-native cell average as evolved bz_cell for comp 2 -- not as a
+  // point value. In cylindrical geometry comp 2 therefore uses the unweighted
+  // dr moment rather than the annular r*dr moment. The average and point value
+  // are identical for any
   // profile that is affine over an element (both built-ins, "uniform" and
   // "linear_vacuum", are affine, so evaluating them at the supplied center is
   // exact). A profile with nonzero curvature over an element must therefore

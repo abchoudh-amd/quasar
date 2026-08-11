@@ -6,7 +6,8 @@ finite-volume scheme and constrained transport (CT) that keeps the magnetic
 field divergence-free. MP5/MP7 reconstruct high-order face states from
 conserved cell averages before HLLD fluxes are differenced over each control
 volume. Cartesian grids use uniform-measure coefficients; cylindrical grids use
-radius-weighted coefficients along ``r``. It is driven from the ``quasar.mhd``
+equation-native coefficients along ``r`` (annular, angular-momentum, or
+uniform, depending on the component). It is driven from the ``quasar.mhd``
 Python front-end.
 
 Running a deck
@@ -155,14 +156,16 @@ the ``axis`` parity boundary.
 
 .. important::
 
-   Cylindrical MP5/MP7 apply radius-dependent finite-volume moments to every
-   stencil that runs along :math:`r`; stencils along :math:`z` retain the
-   Cartesian coefficients because the volume measure factors as
-   :math:`r\,dr\,dz`. This includes fluid reconstruction, magnetic collocation,
+   Cylindrical MP5/MP7 apply component-specific finite-volume moments to every
+   stencil that runs along :math:`r`: annular :math:`r\,dr` rows for mass-like
+   variables, :math:`r^2\,dr` rows for :math:`m_\phi`, and uniform :math:`dr`
+   rows for :math:`B_\phi` and prescribed :math:`B_{0\phi}`. Stencils along
+   :math:`z` retain Cartesian coefficients because each radial measure factors
+   from :math:`dz`. This applies to reconstruction, magnetic collocation,
    transverse quadrature, and constrained-transport corner interpolation. The
-   ``r=0`` axis uses the same weighted rows with the parity-filled ghost cells.
-   Selecting MP5 or MP7 automatically expands the reconstruction halo to three
-   or four cells, respectively.
+   ``r=0`` axis uses the corresponding component rows with parity-filled ghost
+   cells. Selecting MP5 or MP7 automatically expands the reconstruction halo
+   to three or four cells, respectively.
 
 Discrete radial measures
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -170,7 +173,8 @@ Discrete radial measures
 The cylindrical conserved variables are **not** all averages under a single
 :math:`r\,dr\,dz` measure. Each equation is discretized with its own natural
 measure, chosen so that the quantity the equation actually conserves telescopes
-exactly (``src/backend/hip/mhd/mhd_update.hip``):
+exactly (``src/backend/hip/mhd/mhd_update.hip`` and
+``src/backend/hip/mhd/mhd_cylindrical_momentum.hip``):
 
 * **Mass-like variables** (:math:`\rho`, axial momentum :math:`m_z`, energy) use
   the **annular ring-volume average** with measure :math:`r\,dr`. Their radial
@@ -179,12 +183,13 @@ exactly (``src/backend/hip/mhd/mhd_update.hip``):
   form :math:`(F_{hi}-F_{lo})/dr + (F_{hi}+F_{lo})/(2r_c)` so it avoids
   differences of squared radii and stays regular in the :math:`r=0` axis cell.
 
-* **Azimuthal momentum** :math:`m_\phi` is stored as a piecewise-constant annular
-  cell value, but the conserved integral is **angular momentum**
-  :math:`\int r^2 m_\phi\,dr`. Its residual therefore uses that :math:`r^2`
-  moment directly, rather than an annular divergence plus a pointwise
-  :math:`-F/r` source, so it telescopes exactly under the angular-momentum
-  weight.
+* **Azimuthal momentum** :math:`m_\phi` is stored as an
+  **angular-momentum-weighted cell average** with measure :math:`r^2\,dr`.
+  Reconstruction, radial point recovery, transverse flux quadrature, and the
+  residual all use that same measure. The residual therefore applies the
+  :math:`r^2` moment directly, rather than an annular divergence plus a
+  pointwise :math:`-F/r` source, so it telescopes exactly under the
+  angular-momentum weight without reducing the spatial order.
 
 * **Radial momentum** :math:`m_r` is excluded from the generic annular
   divergence and handled by a dedicated kernel that rounds its tensor
@@ -193,7 +198,9 @@ exactly (``src/backend/hip/mhd/mhd_update.hip``):
 
 * **Toroidal field** :math:`B_\phi` obeys the **metric-free** point equation
   :math:`\partial_t B_\phi + \partial_r F_{B_\phi} = 0` and so uses an ordinary
-  radial face difference with no :math:`r` weighting at all.
+  :math:`dr` cell average, radial reconstruction and face difference with no
+  :math:`r` weighting at all. Its transverse flux quadrature uses the same
+  uniform measure.
 
 These component-specific measures are internally consistent, and each
 cylindrical reconstruction order is conservative in every variable's own

@@ -129,6 +129,17 @@ Biot--Savart vector potential there, and differences its lab-``Y`` component
 with the Cartesian or annular cylindrical curl. Consequently, changing the
 domain or reconstruction does not require a separately synchronized coil grid.
 
+In Cartesian geometry this construction treats :math:`A_Y(X,Z)` as a
+two-dimensional flux function and assumes translational invariance along lab
+``Y``. It therefore forms :math:`B_X=-\partial_Z A_Y` and
+:math:`B_Z=\partial_X A_Y`; it does not include derivatives of the discarded
+:math:`A_X` and :math:`A_Z` components. A genuinely three-dimensional
+conductor that lacks that symmetry will not, in general, reproduce the full
+three-dimensional Biot--Savart field on the slice. In particular, use
+cylindrical geometry for an axisymmetric circular-coil magnet when its physical
+meridional field is required; the annular path interprets lab-``Y`` as
+:math:`A_\phi` and applies the axisymmetric curl.
+
 Use ``a_file`` when the vector potential must be generated or archived offline.
 Its ``A_xyz_grid`` must already use that exact padded-corner layout; unlike the
 inline path, the file producer is responsible for matching the MHD domain and

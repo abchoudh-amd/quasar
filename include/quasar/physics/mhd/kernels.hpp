@@ -239,8 +239,8 @@ void launch_mhd_split_momentum_residual(
 // The split/static tensor difference is expanded before rounding, so gas
 // pressure and axial-field terms cancel symbolically instead of being
 // reintroduced after they may already have rounded out of an aggregate face
-// flux. The quadrature-expanded active path uses a 192-term conditioned
-// accumulator. This launcher is solver-only;
+// flux. The quadrature-expanded active path has a proven 308-term maximum and
+// a 320-term bound in its exact radix accumulator. This launcher is solver-only;
 // launch_mhd_geometric_source remains the standalone source-term API.
 void launch_mhd_cylindrical_radial_momentum_residual(
     const MhdField2D<Real>& u, const MhdBackgroundField<Real>& b0,
@@ -386,9 +386,11 @@ void launch_mhd_admissible_fraction(
 // The only nonzero component is radial-momentum curvature. Azimuthal momentum
 // is already conservative under its exact int(r^2 dr) flux operator and has no
 // cell-centred geometric source.
-// This is the conventional standalone source-only API. The production solver
-// uses launch_mhd_cylindrical_radial_momentum_residual instead so its tensor
-// derivatives and pressure-free curvature share one reduction.
+// This standalone launcher selects equation-native MP5/MP7 tensor recovery
+// when an active compatible RadialTablesView is supplied, with the range-safe
+// cell-centred rule as its low-order and inadmissible-point fallback. The
+// production solver uses launch_mhd_cylindrical_radial_momentum_residual instead
+// so its tensor derivatives and pressure-free curvature share one reduction.
 void launch_mhd_geometric_source(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                                  const MhdBackgroundField<Real>& b0,
                                  Grid2D grid, Real gamma, stream_t stream,

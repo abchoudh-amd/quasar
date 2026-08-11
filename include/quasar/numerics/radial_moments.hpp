@@ -1,8 +1,9 @@
 #pragma once
 
-// Host-side construction of finite-volume interpolation rows for the
-// cylindrical r-weighted measure.  Coordinates are dimensionless: radii and
-// offsets are expressed in units of the uniform radial cell width.
+// Host-side construction of finite-volume interpolation rows for cylindrical
+// equation-native measures (dr, |r| dr, or r^2 dr). Coordinates are
+// dimensionless: radii and offsets are expressed in units of the uniform
+// radial cell width.
 
 #include "quasar/core/types.hpp"
 
@@ -16,13 +17,18 @@ enum class RadialMomentTarget {
   cell_average,
 };
 
-// Short alias retained for call sites where the surrounding name already says
-// "moment" (for example, table builders).
-using RadialTarget = RadialMomentTarget;
+// Cell-average measure associated with a conserved cylindrical component.
+// Most state variables use the annular |r| dr measure.  Azimuthal momentum
+// evolves angular momentum under r^2 dr, while toroidal induction is the
+// metric-free point equation and therefore uses the uniform dr measure.
+enum class RadialCellMeasure {
+  uniform,
+  annular,
+  angular_momentum,
+};
 
 struct RadialStencilRow {
   int width{};
-  int offset{};
   Real c[kMaxRadialStencilWidth]{};
   Real residual{};
 };
@@ -37,6 +43,12 @@ struct RadialStencilRow {
 // physical cells, reflected axis ghosts, and the (occasionally useful) cell
 // centered exactly on the axis.
 long double normalized_cell_moment(long double rho, int m);
+
+// Measure-selectable counterpart used to build component-specific
+// reconstruction rows.  The returned moment is normalized by the selected
+// cell measure, so the constant mode is exactly one for every family.
+long double normalized_cell_moment(
+    long double rho, int m, RadialCellMeasure measure);
 
 // Construct a polynomial-exact row of the requested width.
 //
@@ -59,6 +71,14 @@ RadialStencilRow solve_radial_row(
     long double rho_anchor, int width, int offset,
     RadialMomentTarget target, long double node_xi = 0.0L);
 
+// Construct a row for cell averages stored under an explicit cylindrical
+// measure.  Point targets remain ordinary point values; cell-average targets
+// use the same selected measure as their inputs.
+RadialStencilRow solve_radial_row(
+    long double rho_anchor, int width, int offset,
+    RadialMomentTarget target, RadialCellMeasure measure,
+    long double node_xi = 0.0L);
+
 // Fold the cylindrical radius into an existing Gauss--Legendre rule on the
 // unit cell.  The input Cartesian weights are expected to integrate the unit
 // interval (sum to one).  `residual` measures local-monomial exactness through
@@ -67,5 +87,9 @@ RadialStencilRow solve_radial_row(
 RadialStencilRow radial_gauss_weights(
     long double rho_anchor, int count, const Real* node_xi,
     const Real* cartesian_weights);
+
+RadialStencilRow radial_gauss_weights(
+    long double rho_anchor, int count, const Real* node_xi,
+    const Real* cartesian_weights, RadialCellMeasure measure);
 
 }  // namespace quasar::numerics

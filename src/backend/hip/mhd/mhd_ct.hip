@@ -59,20 +59,6 @@ __device__ __attribute__((noinline)) Real scaled_face_average(Real e0, Real e1) 
   return finish_scaled_ct_terms(sum, Real{2});
 }
 
-__device__ __attribute__((noinline)) Real scaled_face_average_to_edge3(
-    Real e0, Real e1, Real e2, Real e3) {
-  if (e0 == e1 && e0 == e2 && e0 == e3) return e0;
-  if (!(isfinite(e0) && isfinite(e1) && isfinite(e2) && isfinite(e3))) {
-    return (-e0 + Real{7} * e1 + Real{7} * e2 - e3) / Real{12};
-  }
-  quasar::numerics::ScaledProductQuotientAccumulator<8> sum;
-  quasar::numerics::append_scaled_exact_product(sum, Real{-1}, e0);
-  quasar::numerics::append_scaled_exact_product(sum, Real{7}, e1);
-  quasar::numerics::append_scaled_exact_product(sum, Real{7}, e2);
-  quasar::numerics::append_scaled_exact_product(sum, Real{-1}, e3);
-  return finish_scaled_ct_terms(sum, Real{12});
-}
-
 __device__ __attribute__((noinline)) Real scaled_face_average_to_edge5(
     Real e0, Real e1, Real e2, Real e3, Real e4, Real e5) {
   if (e0 == e1 && e0 == e2 && e0 == e3 && e0 == e4 && e0 == e5) return e0;
@@ -399,6 +385,7 @@ template <class Sample>
 __device__ inline void cell_point_rows(int order, int node_x,
                                        int radial_index,
                                        quasar::numerics::RadialTablesView radial_tables,
+                                       const Real* component_radial_row,
                                        const Sample& sample, Real* rows) {
   const int half = order >= 7 ? 3 : 2;
   const int taps = order >= 7 ? 7 : 5;
@@ -406,6 +393,7 @@ __device__ inline void cell_point_rows(int order, int node_x,
     const int oy = k - half;
     rows[k] = quasar::mhd::detail::point_value(
         order, node_x, /*dir=*/1, radial_index, radial_tables,
+        component_radial_row,
         [&](int ox) { return sample(ox, oy); });
   }
 }
@@ -556,21 +544,35 @@ __device__ inline Real cell_average_ez(
   for (int qx = 0; qx < count; ++qx) {
     for (int c = 0; c < 6; ++c) {
       const double* values = raw_components[c];
-      cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
-        return static_cast<Real>(values[g.index(i + ox, j + oy)]);
-      }, raw_rows[c]);
+      const Real* component_row = radial_tables.active != 0 &&
+              radial_tables.contains(i)
+          ? c == 3 ? radial_tables.r2_mphi_row(i, qx)
+                   : c == 5 ? radial_tables.r2_bphi_row(i, qx) : nullptr
+          : nullptr;
+      cell_point_rows(
+          order, qx, i, radial_tables, component_row,
+          [&](int ox, int oy) {
+            return static_cast<Real>(values[g.index(i + ox, j + oy)]);
+          }, raw_rows[c]);
     }
-    cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
-      return bx_block[ox + half][oy + half];
-    }, bx_rows);
-    cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
-      return by_block[ox + half][oy + half];
-    }, by_rows);
+    cell_point_rows(
+        order, qx, i, radial_tables, /*component_radial_row=*/nullptr,
+        [&](int ox, int oy) { return bx_block[ox + half][oy + half]; },
+        bx_rows);
+    cell_point_rows(
+        order, qx, i, radial_tables, /*component_radial_row=*/nullptr,
+        [&](int ox, int oy) { return by_block[ox + half][oy + half]; },
+        by_rows);
     if (bg.active != 0) {
       for (int which = 0; which < 3; ++which) {
-        cell_point_rows(order, qx, i, radial_tables, [&](int ox, int oy) {
-          return bg_block[which][ox + half][oy + half];
-        }, bg_rows[which]);
+        const Real* component_row = which == 2 &&
+                radial_tables.active != 0 && radial_tables.contains(i)
+            ? radial_tables.r2_bphi_row(i, qx) : nullptr;
+        cell_point_rows(
+            order, qx, i, radial_tables, component_row,
+            [&](int ox, int oy) {
+              return bg_block[which][ox + half][oy + half];
+            }, bg_rows[which]);
       }
     }
 
@@ -604,24 +606,24 @@ __device__ inline Real cell_average_ez(
       ? radial_tables.r3_row(i) : nullptr;
   for (int qy = 0; qy < count; ++qy) {
     if (radial_weights != nullptr) {
-      row[qy] = quasar::mhd::detail::weighted_value(
+      row[qy] = quasar::numerics::weighted_quadrature_value(
           radial_weights, count, [&](int qx) { return point[qy][qx]; });
     } else if (order == 5) {
-      row[qy] = quasar::mhd::detail::weighted_value(
+      row[qy] = quasar::numerics::weighted_quadrature_value(
           quasar::mhd::detail::kMp5TransverseGaussWeights,
           [&](int qx) { return point[qy][qx]; });
     } else {
-      row[qy] = quasar::mhd::detail::weighted_value(
+      row[qy] = quasar::numerics::weighted_quadrature_value(
           quasar::mhd::detail::kMp7TransverseGaussWeights,
           [&](int qx) { return point[qy][qx]; });
     }
   }
   if (order == 5) {
-    return quasar::mhd::detail::weighted_value(
+    return quasar::numerics::weighted_quadrature_value(
         quasar::mhd::detail::kMp5TransverseGaussWeights,
         [&](int qy) { return row[qy]; });
   }
-  return quasar::mhd::detail::weighted_value(
+  return quasar::numerics::weighted_quadrature_value(
       quasar::mhd::detail::kMp7TransverseGaussWeights,
       [&](int qy) { return row[qy]; });
 }

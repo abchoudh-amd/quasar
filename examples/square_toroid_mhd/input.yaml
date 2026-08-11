@@ -13,8 +13,9 @@
 # which is divergence-free by construction and static (never ghost-refilled).
 # The crop cuts through this field, so its edges are open rather than
 # conducting walls; outflow is applied consistently to the fluid and the
-# evolving perturbation b. CT preserves div(b). bz is a uniform
-# toroidal guide field (0.1); B_phi ~ mu0 N I/(2 pi R) ~ 0.040 T from the TF coils.
+# evolving perturbation b. CT preserves div(b). bz is an independent
+# prescribed uniform guide field (0.1 T), not a TF-coil model;
+# an axisymmetric vacuum TF field would vary as B_phi = C/R.
 #
 # Regenerate: python examples/square_toroid_mhd/build_yaml.py
 
@@ -25,7 +26,7 @@ numerics: {gamma: 1.6666667, reconstruction: mp7, riemann: hlld, integrator: ssp
 initial:
   type: confined_blob
   params:
-    bz: 0.1             # uniform toroidal guide field (in the state)
+    bz: 0.1             # prescribed uniform guide field (not TF coils)
     rho_in: 10.0
     rho_out: 1.0
     p_in: 1000.0

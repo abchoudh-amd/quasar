@@ -34,8 +34,11 @@ values accepted by the profile's deck ``params`` mapping.
 
    **Return the element's finite-volume moment, not a point value.** The MHD
    state is a finite-volume discretization: ``b0x``/``b0y`` are stored and
-   consumed as *face averages* and ``b0z`` as a *cell average*, exactly like the
-   evolved ``bx_face``/``by_face``/``bz_cell`` they are added to. For a profile
+   consumed as *face averages* and ``b0z`` as the equation-native *cell
+   average*, exactly like the evolved ``bx_face``/``by_face``/``bz_cell`` they
+   are added to. In cylindrical geometry that means the unweighted
+   :math:`dr` moment for toroidal ``b0z``/``bz_cell``, not the annular
+   :math:`r\,dr` moment used by mass-like variables. For a profile
    that is affine over an element the two coincide, so simply evaluating the
    analytic form at the supplied center is exact — this is why both built-ins
    (``"uniform"``, constant; ``"linear_vacuum"``, linear) are correct as written.

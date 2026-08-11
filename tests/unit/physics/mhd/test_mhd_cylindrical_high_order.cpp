@@ -58,6 +58,16 @@ long double radial_cell_average_power(long double lo, long double hi,
   return numerator / volume;
 }
 
+long double angular_cell_average_power(long double lo, long double hi,
+                                       int power) {
+  const long double numerator =
+      (integer_power(hi, power + 3) -
+       integer_power(lo, power + 3)) /
+      static_cast<long double>(power + 3);
+  const long double volume = (hi * hi * hi - lo * lo * lo) / 3.0L;
+  return numerator / volume;
+}
+
 long double radial_cell_average_sine(long double lo, long double hi,
                                      long double wave) {
   const auto primitive = [wave](long double radius) {
@@ -91,6 +101,24 @@ Real separable_monomial_average(const Grid2D& grid, int i, int j,
       static_cast<long double>(grid.origin_y) + j * dz;
   const long double radial_average =
       radial_cell_average_power(r_lo, r_lo + dr, radial_power) /
+      integer_power(radial_scale, radial_power);
+  const long double axial_average =
+      uniform_cell_average_power(z_lo, z_lo + dz, axial_power) /
+      integer_power(axial_scale, axial_power);
+  return static_cast<Real>(radial_average * axial_average);
+}
+
+Real separable_uniform_radial_monomial_average(
+    const Grid2D& grid, int i, int j, int radial_power, int axial_power,
+    long double radial_scale, long double axial_scale) {
+  const long double dr = static_cast<long double>(grid.dx());
+  const long double dz = static_cast<long double>(grid.dy());
+  const long double r_lo =
+      static_cast<long double>(grid.origin_x) + i * dr;
+  const long double z_lo =
+      static_cast<long double>(grid.origin_y) + j * dz;
+  const long double radial_average =
+      uniform_cell_average_power(r_lo, r_lo + dr, radial_power) /
       integer_power(radial_scale, radial_power);
   const long double axial_average =
       uniform_cell_average_power(z_lo, z_lo + dz, axial_power) /
@@ -175,6 +203,92 @@ void zero_momentum_flux_parts(
   parts.quadrature_valid.copy_from_host(zero_flag.data(), size);
 }
 
+struct HostRadialState {
+  explicit HostRadialState(std::size_t size)
+      : rho(size, Real{0}), radial_momentum(size, Real{0}),
+        axial_momentum(size, Real{0}),
+        azimuthal_momentum(size, Real{0}), energy(size, Real{0}),
+        radial_field(size, Real{0}), axial_field(size, Real{0}),
+        toroidal_field(size, Real{0}) {}
+
+  std::vector<Real> rho;
+  std::vector<Real> radial_momentum;
+  std::vector<Real> axial_momentum;
+  std::vector<Real> azimuthal_momentum;
+  std::vector<Real> energy;
+  std::vector<Real> radial_field;
+  std::vector<Real> axial_field;
+  std::vector<Real> toroidal_field;
+};
+
+void copy_host_state(const HostRadialState& host,
+                     quasar::mhd::MhdField2D<Real>& device) {
+  const std::size_t size = host.rho.size();
+  device.rho.copy_from_host(host.rho.data(), size);
+  device.mx.copy_from_host(host.radial_momentum.data(), size);
+  device.my.copy_from_host(host.axial_momentum.data(), size);
+  device.mz.copy_from_host(host.azimuthal_momentum.data(), size);
+  device.energy.copy_from_host(host.energy.data(), size);
+  device.bx_face.copy_from_host(host.radial_field.data(), size);
+  device.by_face.copy_from_host(host.axial_field.data(), size);
+  device.bz_cell.copy_from_host(host.toroidal_field.data(), size);
+}
+
+std::vector<Real> inactive_radial_residual(
+    const Grid2D& grid, int order, Real gamma,
+    const HostRadialState& host_state,
+    const std::vector<Real>& radial_flux,
+    const std::vector<Real>& axial_flux) {
+  const std::size_t size = grid.storage_size();
+  const std::vector<Real> zero(size, Real{0});
+  quasar::mhd::MhdField2D<Real> state{grid};
+  quasar::mhd::MhdField2D<Real> flux_r{grid};
+  quasar::mhd::MhdField2D<Real> flux_z{grid};
+  quasar::mhd::MhdField2D<Real> residual{grid};
+  copy_host_state(host_state, state);
+  zero_field(flux_r, zero);
+  zero_field(flux_z, zero);
+  zero_field(residual, zero);
+  flux_r.mx.copy_from_host(radial_flux.data(), size);
+  flux_z.mx.copy_from_host(axial_flux.data(), size);
+
+  quasar::mhd::MhdBackgroundField<Real> inactive_background{grid};
+  quasar::numerics::RadialTables radial_tables{grid, order};
+  quasar::mhd::BoundaryFlags4 outflow{};
+  for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+  quasar::mhd::launch_mhd_cylindrical_radial_momentum_residual(
+      state, inactive_background, flux_r, flux_z, residual, outflow,
+      /*stream=*/nullptr, gamma, /*collocation_order=*/0, order,
+      /*parts_r=*/nullptr, /*parts_z=*/nullptr, radial_tables.view());
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> result(size);
+  residual.mx.copy_to_host(result.data(), size);
+  return result;
+}
+
+std::vector<Real> inactive_tensor_source(
+    const Grid2D& grid, int order, Real gamma,
+    const HostRadialState& host_state) {
+  const std::size_t size = grid.storage_size();
+  const std::vector<Real> zero(size, Real{0});
+  quasar::mhd::MhdField2D<Real> state{grid};
+  quasar::mhd::MhdField2D<Real> residual{grid};
+  copy_host_state(host_state, state);
+  zero_field(residual, zero);
+
+  quasar::mhd::MhdBackgroundField<Real> inactive_background{grid};
+  quasar::numerics::RadialTables radial_tables{grid, order};
+  quasar::mhd::launch_mhd_geometric_source(
+      state, residual, inactive_background, grid, gamma,
+      /*stream=*/nullptr, /*collocation_order=*/0, radial_tables.view());
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> result(size);
+  residual.mx.copy_to_host(result.data(), size);
+  return result;
+}
+
 struct StaticToroidalForceError {
   Real radial{};
   Real axial{};
@@ -210,7 +324,7 @@ Real dynamic_radial_force_error(int order, int resolution) {
       const std::size_t index = grid.index(i, j);
       mphi[index] = static_cast<Real>(
           toroidal_coefficient *
-          radial_cell_average_power(r_lo, r_hi, /*power=*/2));
+          angular_cell_average_power(r_lo, r_hi, /*power=*/2));
       energy[index] = static_cast<Real>(
           pressure_average / (static_cast<long double>(kGamma) - 1.0L) +
           0.5L * toroidal_coefficient * toroidal_coefficient *
@@ -283,8 +397,8 @@ StaticToroidalForceError static_toroidal_force_error(int order,
   constexpr long double wave = 2.0L * quasar::pi;
 
   // B0 = r sin(2 pi z) e_phi is axisymmetrically divergence-free and carries
-  // current. Store its exact ring-volume average, including every analytic
-  // ghost needed by the MP stencil.
+  // current. B0_phi uses the uniform-dr cell measure, so store that exact
+  // average, including every analytic ghost needed by the MP stencil.
   for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
     const long double z_lo =
         static_cast<long double>(grid.origin_y) +
@@ -298,7 +412,7 @@ StaticToroidalForceError static_toroidal_force_error(int order,
           static_cast<long double>(i) * static_cast<long double>(grid.dx());
       const long double r_hi = r_lo + static_cast<long double>(grid.dx());
       background_phi[grid.index(i, j)] = static_cast<Real>(
-          radial_cell_average_power(r_lo, r_hi, /*power=*/1) * z_average);
+          uniform_cell_average_power(r_lo, r_hi, /*power=*/1) * z_average);
     }
   }
 
@@ -461,9 +575,10 @@ TEST(MhdCylindricalHighOrder,
     std::vector<Real> factor(size);
     for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
       for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
-        factor[grid.index(i, j)] = separable_monomial_average(
-            grid, i, j, factor_degree, factor_degree, radial_scale,
-            axial_scale);
+        factor[grid.index(i, j)] =
+            separable_uniform_radial_monomial_average(
+                grid, i, j, factor_degree, factor_degree, radial_scale,
+                axial_scale);
       }
     }
 
@@ -507,6 +622,56 @@ TEST(MhdCylindricalHighOrder,
     EXPECT_EQ(split_energy_inner_product(
                   grid, order, varying, uniform, target_i, target_j),
               Real{-2});
+  }
+}
+
+TEST(MhdCylindricalHighOrder,
+     SplitEnergyBphiProductUsesAnnularMomentOfFlatStoredFactors) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D grid{12, 12, Real{1.5}, Real{1.5}, Real{2}, Real{1},
+                    /*nghost=*/4};
+  constexpr int target_i = 6;
+  constexpr int target_j = 5;
+  const std::size_t size = grid.storage_size();
+  const std::vector<Real> constant_b0phi(size, Real{2});
+  std::vector<Real> varying_bphi_rate(size);
+  const long double radial_scale =
+      static_cast<long double>(grid.r_at_cell_center(target_i));
+  const long double axial_scale =
+      static_cast<long double>(grid.y_at_cell_center(target_j));
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      varying_bphi_rate[grid.index(i, j)] =
+          separable_uniform_radial_monomial_average(
+              grid, i, j, /*radial_power=*/1, /*axial_power=*/0,
+              radial_scale, axial_scale);
+    }
+  }
+  const Real expected = Real{-2} * separable_monomial_average(
+      grid, target_i, target_j, /*radial_power=*/1, /*axial_power=*/0,
+      radial_scale, axial_scale);
+  const Real flat_means_product =
+      Real{-2} * varying_bphi_rate[grid.index(target_i, target_j)];
+  ASSERT_GT(std::abs(expected - flat_means_product),
+            Real{1024} * std::numeric_limits<Real>::epsilon());
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    const Real constant_background = split_energy_inner_product(
+        grid, order, constant_b0phi, varying_bphi_rate,
+        target_i, target_j);
+    const Real constant_rate = split_energy_inner_product(
+        grid, order, varying_bphi_rate, constant_b0phi,
+        target_i, target_j);
+    EXPECT_NEAR(constant_background, expected,
+                Real{256} * std::numeric_limits<Real>::epsilon());
+    EXPECT_NEAR(constant_rate, expected,
+                Real{256} * std::numeric_limits<Real>::epsilon());
+    EXPECT_GT(std::abs(constant_background - flat_means_product),
+              Real{0.5} * std::abs(expected - flat_means_product));
+    EXPECT_GT(std::abs(constant_rate - flat_means_product),
+              Real{0.5} * std::abs(expected - flat_means_product));
   }
 }
 
@@ -566,6 +731,156 @@ TEST(MhdCylindricalHighOrder, DynamicRadialTensorKeepsMpOrder) {
       << "radial errors " << mp5_coarse << " -> " << mp5_fine;
   EXPECT_GT(mp7_order, Real{5.8})
       << "radial errors " << mp7_coarse << " -> " << mp7_fine;
+}
+
+TEST(MhdCylindricalHighOrder,
+     InactiveMpTensorExpansionAcceptsExactZero) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  // On this annulus, a constant unit gas pressure gives F_rr=T_phiphi=1.
+  // The ordinary face difference is zero and the two metric half-faces cancel
+  // the tensor source exactly.  Exact zero is an important accepted fast-path
+  // result: it must not be mistaken for an underflow requiring fallback.
+  const Grid2D grid{/*nx=*/4, /*ny=*/3, /*lx=*/Real{8}, /*ly=*/Real{3},
+                    /*origin_x=*/Real{15}, /*origin_y=*/Real{0},
+                    /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  HostRadialState state(size);
+  std::fill(state.rho.begin(), state.rho.end(), Real{1});
+  std::fill(state.energy.begin(), state.energy.end(), Real{1});
+  const std::vector<Real> radial_flux(size, Real{1});
+  const std::vector<Real> axial_flux(size, Real{0});
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    const std::vector<Real> residual = inactive_radial_residual(
+        grid, order, /*gamma=*/Real{2}, state, radial_flux, axial_flux);
+    for (int j = 0; j < grid.ny; ++j) {
+      for (int i = 0; i < grid.nx; ++i) {
+        EXPECT_EQ(residual[grid.index(i, j)], Real{0})
+            << "i=" << i << " j=" << j;
+      }
+    }
+  }
+}
+
+TEST(MhdCylindricalHighOrder,
+     InactiveMpSmoothTensorMatchesExactStandaloneReduction) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D grid{/*nx=*/4, /*ny=*/3, /*lx=*/Real{8}, /*ly=*/Real{3},
+                    /*origin_x=*/Real{15}, /*origin_y=*/Real{0},
+                    /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  HostRadialState state(size);
+  std::fill(state.rho.begin(), state.rho.end(), Real{1});
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      const long double r_lo = static_cast<long double>(grid.r_at_edge(i));
+      const long double r_hi =
+          static_cast<long double>(grid.r_at_edge(i + 1));
+      // Store the exact annular average of the smooth pressure p(r)=r.
+      // The MP tensor rule recovers p at its points, integrates it under the
+      // uniform curvature measure, and therefore gives <p>/r_center = 1.
+      state.energy[grid.index(i, j)] = static_cast<Real>(
+          radial_cell_average_power(r_lo, r_hi, /*power=*/1));
+    }
+  }
+  const std::vector<Real> zero_flux(size, Real{0});
+
+  for (const int order : {5, 7}) {
+    SCOPED_TRACE(order);
+    const std::vector<Real> fused = inactive_radial_residual(
+        grid, order, /*gamma=*/Real{2}, state, zero_flux, zero_flux);
+    const std::vector<Real> standalone = inactive_tensor_source(
+        grid, order, /*gamma=*/Real{2}, state);
+    for (int j = 0; j < grid.ny; ++j) {
+      for (int i = 0; i < grid.nx; ++i) {
+        const std::size_t index = grid.index(i, j);
+        EXPECT_EQ(fused[index], standalone[index])
+            << "i=" << i << " j=" << j;
+        EXPECT_NEAR(fused[index], Real{1}, Real{2e-13})
+            << "i=" << i << " j=" << j;
+      }
+    }
+  }
+}
+
+TEST(MhdCylindricalHighOrder,
+     InactiveMp7WideExpansionFallsBackToExactGolden) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D grid{/*nx=*/4, /*ny=*/3, /*lx=*/Real{8}, /*ly=*/Real{3},
+                    /*origin_x=*/Real{15}, /*origin_y=*/Real{0},
+                    /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  HostRadialState state(size);
+  std::fill(state.rho.begin(), state.rho.end(), Real{1});
+  const Real pressure = std::scalbn(Real{1}, 404);
+  std::fill(state.energy.begin(), state.energy.end(), pressure);
+  std::vector<Real> radial_flux(size, Real{0});
+  std::vector<Real> axial_flux(size, Real{0});
+  constexpr int target_i = 0;
+  constexpr int target_j = 1;
+  const std::size_t k = grid.index(target_i, target_j);
+  const std::size_t kr = grid.index(target_i + 1, target_j);
+  const std::size_t kz = grid.index(target_i, target_j + 1);
+  ASSERT_EQ(grid.dx(), Real{2});
+  ASSERT_EQ(grid.dy(), Real{1});
+  ASSERT_EQ(grid.r_at_cell_center(target_i), Real{16});
+
+  radial_flux[k] = std::scalbn(Real{1}, 0);
+  radial_flux[kr] = std::scalbn(Real{1}, 100);
+  axial_flux[k] = std::scalbn(Real{1}, 200);
+  axial_flux[kz] = std::scalbn(Real{1}, 300);
+
+  // Before the tensor pressure is appended, the exact face sum contains four
+  // non-overlapping bands:
+  //
+  //   15/32, -17*2^95, +2^200, -2^300.
+  //
+  // The pressure contribution is +2^400, a fifth band, so a four-component
+  // certified expansion must route this cell through the exact fallback.  All
+  // lower bands lie well below half an ulp of 2^400, making the final RNE
+  // golden exactly 2^400.
+  const std::vector<Real> residual = inactive_radial_residual(
+      grid, /*order=*/7, /*gamma=*/Real{2}, state,
+      radial_flux, axial_flux);
+  const Real expected = std::scalbn(Real{1}, 400);
+  ASSERT_TRUE(std::isfinite(residual[k]));
+  EXPECT_EQ(residual[k], expected);
+}
+
+TEST(MhdCylindricalHighOrder,
+     InactiveMp7SubnormalFinishRoutesToExactFallback) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D grid{/*nx=*/4, /*ny=*/3, /*lx=*/Real{8}, /*ly=*/Real{3},
+                    /*origin_x=*/Real{15}, /*origin_y=*/Real{0},
+                    /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  HostRadialState state(size);
+  std::fill(state.rho.begin(), state.rho.end(), Real{1});
+  const Real pressure = std::scalbn(Real{1}, -1018);
+  std::fill(state.energy.begin(), state.energy.end(), pressure);
+  const std::vector<Real> radial_flux(size, Real{0});
+  std::vector<Real> axial_flux(size, Real{0});
+  constexpr int target_i = 0;
+  constexpr int target_j = 1;
+  const std::size_t k = grid.index(target_i, target_j);
+  const std::size_t kz = grid.index(target_i, target_j + 1);
+  ASSERT_EQ(grid.r_at_cell_center(target_i), Real{16});
+
+  // p/r is exactly the smallest normal.  Cancel it with the high axial face
+  // while the low axial face contributes one 2^-1074 quantum.  The exact
+  // residual is the smallest subnormal, which the compact finish deliberately
+  // delegates to the radix path to avoid double rounding.
+  axial_flux[kz] = std::numeric_limits<Real>::min();
+  axial_flux[k] = std::numeric_limits<Real>::denorm_min();
+  const std::vector<Real> residual = inactive_radial_residual(
+      grid, /*order=*/7, /*gamma=*/Real{2}, state,
+      radial_flux, axial_flux);
+  EXPECT_EQ(residual[k], std::numeric_limits<Real>::denorm_min());
 }
 
 TEST(MhdCylindricalHighOrder,
@@ -736,6 +1051,235 @@ TEST(MhdCylindricalHighOrder,
       EXPECT_NEAR(cross_rate[grid.index(i, j)], expected_cross,
                   cross_tolerance)
           << "point cross metric at i=" << i << " j=" << j;
+    }
+  }
+}
+
+TEST(MhdCylindricalHighOrder,
+     ConstantValidPointFamiliesCancelAcrossFacesAndTensors) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D grid{/*nx=*/8, /*ny=*/4, Real{1}, Real{1},
+                    Real{1}, Real{0}, /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  const std::vector<Real> zero(size, Real{0});
+  const std::vector<Real> one(size, Real{1});
+  const std::vector<int> zero_flag(size, 0);
+  const std::vector<int> valid_flag(size, 1);
+  quasar::numerics::RadialTables radial_tables{grid, /*scheme_order=*/7};
+  quasar::mhd::BoundaryFlags4 outflow{};
+  for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+
+  const auto run = [&](bool static_background) {
+    quasar::mhd::MhdField2D<Real> state{grid};
+    quasar::mhd::MhdField2D<Real> flux_r{grid};
+    quasar::mhd::MhdField2D<Real> flux_z{grid};
+    quasar::mhd::MhdField2D<Real> residual{grid};
+    zero_field(state, zero);
+    zero_field(flux_r, zero);
+    zero_field(flux_z, zero);
+    zero_field(residual, zero);
+    state.rho.copy_from_host(one.data(), size);
+
+    quasar::mhd::MhdBackgroundField<Real> background{grid};
+    background.active = true;
+    background.globally_curl_free = !static_background;
+    background.b0x_face.copy_from_host(zero.data(), size);
+    background.b0y_face.copy_from_host(zero.data(), size);
+    background.b0z_cell.copy_from_host(zero.data(), size);
+
+    quasar::mhd::MhdMomentumFluxParts2D<Real> parts_r{grid};
+    quasar::mhd::MhdMomentumFluxParts2D<Real> parts_z{grid};
+    zero_momentum_flux_parts(parts_r, zero, zero_flag);
+    zero_momentum_flux_parts(parts_z, zero, zero_flag);
+    parts_r.quadrature_valid.copy_from_host(valid_flag.data(), size);
+    parts_z.quadrature_valid.copy_from_host(valid_flag.data(), size);
+
+    if (!static_background) {
+      // The exact MP7 weights sum to 1+2^-54 even though an ordinary
+      // binary64 reduction rounds them to one.  These valid face records must
+      // therefore use the same constant-family semantics as the tensor rule:
+      // B0_z*b_z cancels exactly despite its 2^600 scale.
+      const std::vector<Real> dominant(
+          size, std::scalbn(Real{1}, 600));
+      const std::vector<Real> energy(size, Real{1.25});
+      state.energy.copy_from_host(energy.data(), size);
+      state.by_face.copy_from_host(one.data(), size);
+      flux_r.mx.copy_from_host(one.data(), size);
+      background.b0y_face.copy_from_host(dominant.data(), size);
+      for (auto* parts : {&parts_r, &parts_z}) {
+        for (auto& point : parts->cross_b_point) {
+          point.y.copy_from_host(one.data(), size);
+        }
+      }
+    } else {
+      // A constant axial background is force-free.  A unit material flux
+      // separately cancels the unit tensor pressure, so any static axial
+      // face/tensor weight mismatch survives alone at roughly 2^945.
+      const Real background_scale = std::scalbn(Real{1}, 500);
+      const std::vector<Real> dominant(size, background_scale);
+      const std::vector<Real> energy(
+          size, Real{1} / (kGamma - Real{1}));
+      const std::vector<Real> material_flux(size, Real{1});
+      state.energy.copy_from_host(energy.data(), size);
+      flux_r.mx.copy_from_host(material_flux.data(), size);
+      background.b0y_face.copy_from_host(dominant.data(), size);
+    }
+
+    quasar::mhd::launch_mhd_cylindrical_radial_momentum_residual(
+        state, background, flux_r, flux_z, residual, outflow,
+        /*stream=*/nullptr, kGamma, /*collocation_order=*/0,
+        /*scheme_order=*/7, &parts_r, &parts_z, radial_tables.view());
+    quasar::backend::device_synchronize(nullptr);
+    std::vector<Real> radial_rate(size);
+    residual.mx.copy_to_host(radial_rate.data(), size);
+    return radial_rate;
+  };
+
+  const std::vector<Real> dynamic_rate = run(/*static_background=*/false);
+  const std::vector<Real> static_rate = run(/*static_background=*/true);
+  for (int j = 0; j < grid.ny; ++j) {
+    for (int i = 0; i < grid.nx; ++i) {
+      const std::size_t index = grid.index(i, j);
+      EXPECT_EQ(dynamic_rate[index], Real{0})
+          << "dynamic i=" << i << " j=" << j;
+      EXPECT_EQ(static_rate[index], Real{0})
+          << "static i=" << i << " j=" << j;
+    }
+  }
+}
+
+TEST(MhdCylindricalHighOrder,
+     MaximumRadialMomentumAccumulatorPathStaysFinite) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const Grid2D grid{/*nx=*/8, /*ny=*/4, Real{1}, Real{1},
+                    Real{1}, Real{0}, /*nghost=*/4};
+  const std::size_t size = grid.storage_size();
+  const std::vector<Real> zero(size, Real{0});
+  const std::vector<int> zero_flag(size, 0);
+  const std::vector<int> valid_flag(size, 1);
+
+  // Force the proven maximum path rather than allowing any constant-family
+  // shortcut.  Every state and background component varies in both r and z;
+  // rho, m_phi, and pressure are all nonconstant; both directions carry
+  // nonzero material/wave records; and every one of the four valid point-cross
+  // records is distinct.  The resulting MP7 call count is therefore genuinely
+  // 12 + 64 + 128 + 56 + 48 = 308.
+  std::vector<Real> rho(size);
+  std::vector<Real> mr(size);
+  std::vector<Real> mz(size);
+  std::vector<Real> mphi(size);
+  std::vector<Real> energy(size);
+  std::vector<Real> br(size);
+  std::vector<Real> bz(size);
+  std::vector<Real> bphi(size);
+  std::vector<Real> b0r(size);
+  std::vector<Real> b0z(size);
+  std::vector<Real> b0phi(size);
+  std::vector<Real> radial_flux(size);
+  std::vector<Real> axial_flux(size);
+  std::vector<Real> radial_wave(size);
+  std::vector<Real> axial_wave(size);
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+      const Real x = static_cast<Real>(i) + Real{0.5};
+      const Real y = static_cast<Real>(j) + Real{0.5};
+      const std::size_t index = grid.index(i, j);
+      rho[index] = Real{2} + Real{0.002} * x + Real{0.003} * y;
+      mr[index] = Real{0.11} + Real{0.001} * x - Real{0.0007} * y;
+      mz[index] = Real{-0.09} + Real{0.0008} * x + Real{0.0011} * y;
+      mphi[index] = Real{0.14} - Real{0.0013} * x + Real{0.0009} * y;
+      energy[index] = Real{20} + Real{0.02} * x + Real{0.03} * y;
+      br[index] = Real{0.21} + Real{0.0017} * x + Real{0.0012} * y;
+      bz[index] = Real{-0.17} + Real{0.0014} * x - Real{0.0015} * y;
+      bphi[index] = Real{0.13} - Real{0.0011} * x + Real{0.0018} * y;
+      b0r[index] = Real{-0.31} + Real{0.0021} * x + Real{0.0016} * y;
+      b0z[index] = Real{0.27} - Real{0.0019} * x + Real{0.0022} * y;
+      b0phi[index] = Real{0.19} + Real{0.0023} * x - Real{0.0014} * y;
+      radial_flux[index] = Real{1.1} + Real{0.004} * x + Real{0.003} * y;
+      axial_flux[index] = Real{-0.8} + Real{0.002} * x - Real{0.005} * y;
+      radial_wave[index] = Real{0.23} - Real{0.001} * x + Real{0.002} * y;
+      axial_wave[index] = Real{-0.16} + Real{0.003} * x + Real{0.001} * y;
+    }
+  }
+
+  quasar::mhd::MhdField2D<Real> state{grid};
+  quasar::mhd::MhdField2D<Real> flux_r{grid};
+  quasar::mhd::MhdField2D<Real> flux_z{grid};
+  quasar::mhd::MhdField2D<Real> residual{grid};
+  zero_field(state, zero);
+  zero_field(flux_r, zero);
+  zero_field(flux_z, zero);
+  zero_field(residual, zero);
+  state.rho.copy_from_host(rho.data(), size);
+  state.mx.copy_from_host(mr.data(), size);
+  state.my.copy_from_host(mz.data(), size);
+  state.mz.copy_from_host(mphi.data(), size);
+  state.energy.copy_from_host(energy.data(), size);
+  state.bx_face.copy_from_host(br.data(), size);
+  state.by_face.copy_from_host(bz.data(), size);
+  state.bz_cell.copy_from_host(bphi.data(), size);
+  flux_r.mx.copy_from_host(radial_flux.data(), size);
+  flux_z.mx.copy_from_host(axial_flux.data(), size);
+
+  quasar::mhd::MhdBackgroundField<Real> background{grid};
+  background.active = true;
+  background.globally_curl_free = false;
+  background.b0x_face.copy_from_host(b0r.data(), size);
+  background.b0y_face.copy_from_host(b0z.data(), size);
+  background.b0z_cell.copy_from_host(b0phi.data(), size);
+
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_r{grid};
+  quasar::mhd::MhdMomentumFluxParts2D<Real> parts_z{grid};
+  zero_momentum_flux_parts(parts_r, zero, zero_flag);
+  zero_momentum_flux_parts(parts_z, zero, zero_flag);
+  parts_r.wave_x.copy_from_host(radial_wave.data(), size);
+  parts_z.wave_x.copy_from_host(axial_wave.data(), size);
+  for (int q = 0; q < 4; ++q) {
+    std::vector<Real> cross_r(size);
+    std::vector<Real> cross_z(size);
+    std::vector<Real> cross_phi(size);
+    for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+      for (int i = -grid.nghost; i < grid.nx + grid.nghost; ++i) {
+        const Real x = static_cast<Real>(i) + Real{0.5};
+        const Real y = static_cast<Real>(j) + Real{0.5};
+        const std::size_t index = grid.index(i, j);
+        const Real point = static_cast<Real>(q + 1);
+        cross_r[index] = Real{0.07} * point + Real{0.0004} * x +
+                         Real{0.0003} * y;
+        cross_z[index] = Real{-0.05} * point + Real{0.0002} * x -
+                         Real{0.0005} * y;
+        cross_phi[index] = Real{0.04} * point - Real{0.0006} * x +
+                           Real{0.0002} * y;
+      }
+    }
+    for (auto* parts : {&parts_r, &parts_z}) {
+      parts->cross_b_point[q].x.copy_from_host(cross_r.data(), size);
+      parts->cross_b_point[q].y.copy_from_host(cross_z.data(), size);
+      parts->cross_b_point[q].z.copy_from_host(cross_phi.data(), size);
+    }
+  }
+  for (auto* parts : {&parts_r, &parts_z}) {
+    parts->quadrature_valid.copy_from_host(valid_flag.data(), size);
+  }
+
+  quasar::numerics::RadialTables radial_tables{
+      grid, /*scheme_order=*/7};
+  quasar::mhd::BoundaryFlags4 outflow{};
+  for (int side = 0; side < 4; ++side) outflow.side[side] = 1;
+  quasar::mhd::launch_mhd_cylindrical_radial_momentum_residual(
+      state, background, flux_r, flux_z, residual, outflow,
+      /*stream=*/nullptr, kGamma, /*collocation_order=*/0,
+      /*scheme_order=*/7, &parts_r, &parts_z, radial_tables.view());
+  quasar::backend::device_synchronize(nullptr);
+
+  std::vector<Real> radial_rate(size);
+  residual.mx.copy_to_host(radial_rate.data(), size);
+  for (int j = 0; j < grid.ny; ++j) {
+    for (int i = 0; i < grid.nx; ++i) {
+      const Real actual = radial_rate[grid.index(i, j)];
+      ASSERT_TRUE(std::isfinite(actual)) << "i=" << i << " j=" << j;
     }
   }
 }

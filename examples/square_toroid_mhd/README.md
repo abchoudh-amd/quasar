@@ -5,7 +5,8 @@ square-toroid magnet
 (major radius `R0 = 1.0 m`, `0.30 m` square bore). The confining **poloidal**
 magnetic field is computed from a **Biot–Savart coil calculation** and carried as
 a static, divergence-free **field-split background** `B0`; a confined plasma blob
-evolves on it, threaded by a uniform toroidal guide field `bz = 0.1`.
+evolves on it, threaded by an independently prescribed uniform toroidal guide
+field `bz = 0.1 T`.
 
 ## Coordinate mapping
 
@@ -99,8 +100,10 @@ A confined plasma blob (`initial.type: confined_blob`): denser, higher-pressure
 plasma (`rho_in`, `p_in`) inside a centered square of half-width `blob_half`,
 ambient (`rho_out`, `p_out`) outside, initially at rest with zero in-plane
 perturbation. It evolves on the field-split coil background plus the uniform
-toroidal guide field. The deck uses SI throughout: density is kg/m³, pressure
-and energy density are Pa, velocity is m/s, and magnetic input/output is tesla.
+toroidal guide field. That guide field is an idealized input, not a field
+attributed to the poloidal conductor list. The deck uses SI throughout: density
+is kg/m³, pressure and energy density are Pa, velocity is m/s, and magnetic
+input/output is tesla.
 
 The shipped pressures are `p_in = 1000 Pa` and `p_out = 100 Pa`.  The projected
 coil reaches about 0.6 T (magnetic pressure of order 10⁵ Pa), so this remains a
@@ -116,11 +119,13 @@ check.
 
 `input.yaml` contains the axisymmetric square-cross-section current sheets
 (top/bottom at `Z = ±a/2`, inner/outer cylinders at `R = R0 ± a/2`, `150 kA`
-per sheet group over 64 filaments), which generate the poloidal background.
-Eight conceptual TF windings at `25 kA` give
-`B_phi ~ mu0 N I / (2 pi R) ~ 0.04 T`; their toroidal guide field is represented
-directly by the evolved `initial.bz` instead of incorrectly treating a discrete
-3-D TF-coil `A_y` slice as axisymmetric `A_phi`.
+per sheet group over 64 filaments), which generate only the poloidal
+background. The evolved `initial.bz = 0.1 T` is a separate prescribed uniform
+guide field; the example does not claim that it comes from TF windings. A
+physical axisymmetric vacuum TF field has `B_phi(R) = C/R`, so a field normalized
+to `0.1 T` at `R0 = 1 m` would range from about `0.116 T` to `0.088 T` across
+this annulus rather than remain uniform. Modeling that radial profile is outside
+this example's focus on the field-split poloidal coil background.
 
 ## Running
 
@@ -135,12 +140,14 @@ PYTHONPATH=build/hip-gfx942-release/python \
   python -m quasar.mhd.cli run examples/square_toroid_mhd/input.yaml --log-every 50
 ```
 
-The cylindrical run uses MP7. Its radial stencils use finite-volume moments
-weighted by the annular `R dR` measure, while its vertical stencils retain the
-Cartesian coefficients. MP7 selects a four-cell reconstruction halo
-automatically. The background loader constructs the padded corner grid only
-after the solver has selected that actual halo, so the switch from MUSCL's two
-ghost cells to MP7's four requires no matching coil-grid edit.
+The cylindrical run uses MP7. Its radial stencils use equation-native
+finite-volume moments: annular `R dR` rows for mass-like components, `R^2 dR`
+rows for azimuthal momentum, and unweighted `dR` rows for the toroidal field.
+Its vertical stencils retain the Cartesian coefficients. MP7 selects a
+four-cell reconstruction halo automatically. The background loader constructs
+the padded corner grid only after the solver has selected that actual halo, so
+the switch from MUSCL's two ghost cells to MP7's four requires no matching
+coil-grid edit.
 
 ## Output
 

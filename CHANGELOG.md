@@ -335,12 +335,18 @@ interfaces may still change between entries.
   ``(1/r)d(r B_r)/dr + dB_z/dz`` telescopes with the CT curl. Finite-inner-radius
   annular domains and total-field cylindrical curvature sources (including a
   static ``B0``) are supported.
-- MHD: cylindrical MP5/MP7 now use radius-weighted finite-volume moments
-  along the radial direction while retaining the Cartesian coefficients axially.
-  High-order reconstruction, magnetic collocation, transverse quadrature, and
-  constrained transport are supported on both annular domains and grids that
-  include the `r=0` axis; native and Python deck validation now accept `mp5` and
-  `mp7` for cylindrical geometry.
+- MHD: cylindrical MP5/MP7 now use equation-matched finite-volume moments
+  along the radial direction while retaining Cartesian coefficients axially:
+  annular `r dr` rows for mass-like variables, `r^2 dr` rows for azimuthal
+  momentum, and unweighted `dr` rows for the toroidal field. High-order
+  reconstruction, point recovery, transverse flux quadrature, magnetic
+  collocation, and constrained transport are supported on both annular domains
+  and grids that include the `r=0` axis; native and Python deck validation now
+  accept `mp5` and `mp7` for cylindrical geometry.
+- MHD: cylindrical `muscl_minmod` now uses the radius-weighted four-point
+  face-to-cell, cell-to-face, and radial corner-EMF rows.  This intentionally
+  changes order-2 cylindrical results from the former two-point Cartesian
+  collocation while leaving Cartesian MUSCL unchanged.
 - PIC field boundaries are now imposed by one-sided / characteristic node
   corrections after each curl rather than by filling a ghost halo. `pec` keeps
   its reflecting, energy-conserving behavior (tangential E / normal B pinned;

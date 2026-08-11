@@ -13,6 +13,7 @@
 namespace {
 
 using quasar::Real;
+using quasar::numerics::RadialCellMeasure;
 using quasar::numerics::RadialMomentTarget;
 using quasar::numerics::mp_interp_weighted;
 using quasar::numerics::mp_limit;
@@ -56,6 +57,17 @@ Real left_face_extrapolation(long double reduced_radius) {
       quasar::numerics::normalized_cell_moment(reduced_radius - 1.0L, 1);
   return static_cast<Real>(
       (reduced_radius + 0.5L - center) / (center - neighbor));
+}
+
+Real face_extrapolation(long double reduced_radius, int neighbor_offset,
+                        long double face_offset,
+                        RadialCellMeasure measure) {
+  const long double center = quasar::numerics::normalized_cell_moment(
+      reduced_radius, 1, measure);
+  const long double neighbor = quasar::numerics::normalized_cell_moment(
+      reduced_radius + static_cast<long double>(neighbor_offset), 1, measure);
+  return static_cast<Real>(
+      (reduced_radius + face_offset - center) / (center - neighbor));
 }
 
 TEST(MpLimiterCylindrical, LimiterDoesNotActivateOnSmoothAxisData) {
@@ -169,6 +181,142 @@ TEST(MpLimiterCylindrical,
   EXPECT_NEAR(cartesian_factor, -Real{11} / Real{6}, Real{1e-15});
   EXPECT_NEAR(radial_factor, -Real{233} / Real{132}, Real{1e-15});
   EXPECT_NE(cartesian_factor, radial_factor);
+}
+
+TEST(MpLimiterCylindrical,
+     Mp5NativeCandidatesUseTheirOwnLimiterGeometry) {
+  constexpr long double rho = 0.5L;
+  const auto annular_r1 = solve_radial_row(
+      rho, 5, -2, RadialMomentTarget::point_value,
+      RadialCellMeasure::annular, 0.5L);
+  const auto angular_r1 = solve_radial_row(
+      rho, 5, -2, RadialMomentTarget::point_value,
+      RadialCellMeasure::angular_momentum, 0.5L);
+  const auto uniform_r1 = solve_radial_row(
+      rho, 5, -2, RadialMomentTarget::point_value,
+      RadialCellMeasure::uniform, 0.5L);
+  const auto annular_r6 = solve_radial_row(
+      rho, 2, 0, RadialMomentTarget::point_value,
+      RadialCellMeasure::annular, 0.5L);
+  const auto angular_r6 = solve_radial_row(
+      rho, 2, 0, RadialMomentTarget::point_value,
+      RadialCellMeasure::angular_momentum, 0.5L);
+  const auto uniform_r6 = solve_radial_row(
+      rho, 2, 0, RadialMomentTarget::point_value,
+      RadialCellMeasure::uniform, 0.5L);
+
+  constexpr std::array<Real, 5> bphi{-3, -2, 2, 3, 3};
+  const Real bphi_annular =
+      mp_interp_weighted(annular_r1.c, bphi.data(), 5);
+  const Real bphi_native =
+      mp_interp_weighted(uniform_r1.c, bphi.data(), 5);
+  EXPECT_NEAR(bphi_annular, Real{2.65}, Real{1e-14});
+  EXPECT_EQ(mp_limit(
+                bphi_annular, bphi[0], bphi[1], bphi[2], bphi[3], bphi[4],
+                annular_r6.c[0], annular_r6.c[1],
+                face_extrapolation(
+                    rho, -1, 0.5L, RadialCellMeasure::annular)),
+            bphi_annular);
+  EXPECT_NEAR(bphi_native, Real{3.1}, Real{1e-14});
+  EXPECT_EQ(mp_limit(
+                bphi_native, bphi[0], bphi[1], bphi[2], bphi[3], bphi[4],
+                uniform_r6.c[0], uniform_r6.c[1],
+                face_extrapolation(
+                    rho, -1, 0.5L, RadialCellMeasure::uniform)),
+            Real{3});
+
+  constexpr std::array<Real, 5> mphi{-1, -2, 2, 1, 3};
+  const Real mphi_annular =
+      mp_interp_weighted(annular_r1.c, mphi.data(), 5);
+  const Real mphi_native =
+      mp_interp_weighted(angular_r1.c, mphi.data(), 5);
+  EXPECT_NEAR(mphi_annular, Real{2}, Real{1e-14});
+  EXPECT_EQ(mp_limit(
+                mphi_annular, mphi[0], mphi[1], mphi[2], mphi[3], mphi[4],
+                annular_r6.c[0], annular_r6.c[1],
+                face_extrapolation(
+                    rho, -1, 0.5L, RadialCellMeasure::annular)),
+            mphi_annular);
+  EXPECT_NEAR(mphi_native, Real{1.95}, Real{1e-14});
+  EXPECT_EQ(mp_limit(
+                mphi_native, mphi[0], mphi[1], mphi[2], mphi[3], mphi[4],
+                angular_r6.c[0], angular_r6.c[1],
+                face_extrapolation(
+                    rho, -1, 0.5L,
+                    RadialCellMeasure::angular_momentum)),
+            Real{2});
+}
+
+TEST(MpLimiterCylindrical,
+     Mp7NativeLimiterBoundsBothInterfaceOrientations) {
+  constexpr long double left_rho = 5.5L;
+  constexpr long double right_rho = 6.5L;
+  constexpr std::array<Real, 8> values{
+      1000000.0, -2.0, -1.0, 0.0, 1.0, 2.0,
+      787812.0342935974, 6550699.945732342};
+  const auto annular_left = solve_radial_row(
+      left_rho, 7, -3, RadialMomentTarget::point_value,
+      RadialCellMeasure::annular, 0.5L);
+  const auto annular_right = solve_radial_row(
+      right_rho, 7, -3, RadialMomentTarget::point_value,
+      RadialCellMeasure::annular, -0.5L);
+  const auto angular_left = solve_radial_row(
+      left_rho, 7, -3, RadialMomentTarget::point_value,
+      RadialCellMeasure::angular_momentum, 0.5L);
+  const auto angular_right = solve_radial_row(
+      right_rho, 7, -3, RadialMomentTarget::point_value,
+      RadialCellMeasure::angular_momentum, -0.5L);
+  const auto uniform_left = solve_radial_row(
+      left_rho, 7, -3, RadialMomentTarget::point_value,
+      RadialCellMeasure::uniform, 0.5L);
+  const auto uniform_right = solve_radial_row(
+      right_rho, 7, -3, RadialMomentTarget::point_value,
+      RadialCellMeasure::uniform, -0.5L);
+
+  const auto check_measure = [&](const auto& left_r1, const auto& right_r1,
+                                 RadialCellMeasure measure,
+                                 Real expected_left, Real expected_right) {
+    const auto r6 = solve_radial_row(
+        left_rho, 2, 0, RadialMomentTarget::point_value, measure, 0.5L);
+    const Real left_candidate =
+        mp_interp_weighted(left_r1.c, values.data(), 7);
+    const Real right_candidate =
+        mp_interp_weighted(right_r1.c, values.data() + 1, 7);
+    const Real left_limited = mp_limit(
+        left_candidate, values[1], values[2], values[3], values[4], values[5],
+        r6.c[0], r6.c[1],
+        face_extrapolation(left_rho, -1, 0.5L, measure));
+    const Real right_limited = mp_limit(
+        right_candidate, values[6], values[5], values[4], values[3], values[2],
+        r6.c[1], r6.c[0],
+        face_extrapolation(right_rho, 1, -0.5L, measure));
+    if (measure == RadialCellMeasure::annular) {
+      EXPECT_EQ(left_limited, left_candidate);
+      EXPECT_EQ(right_limited, right_candidate);
+    } else {
+      EXPECT_EQ(left_limited, expected_left);
+      EXPECT_EQ(right_limited, expected_right);
+    }
+    return std::array<Real, 2>{left_candidate, right_candidate};
+  };
+
+  const auto annular = check_measure(
+      annular_left, annular_right, RadialCellMeasure::annular,
+      /*expected_left=*/Real{0.5}, /*expected_right=*/Real{0.5});
+  EXPECT_NEAR(annular[0], Real{0.499999999864}, Real{2e-10});
+  EXPECT_NEAR(annular[1], Real{0.500000000065}, Real{2e-10});
+
+  const auto uniform = check_measure(
+      uniform_left, uniform_right, RadialCellMeasure::uniform,
+      /*expected_left=*/Real{1}, /*expected_right=*/Real{1});
+  EXPECT_NEAR(uniform[0], Real{360.56461232}, Real{2e-8});
+  EXPECT_NEAR(uniform[1], Real{103.20957177}, Real{2e-8});
+
+  const auto angular = check_measure(
+      angular_left, angular_right, RadialCellMeasure::angular_momentum,
+      /*expected_left=*/Real{0}, /*expected_right=*/Real{0});
+  EXPECT_NEAR(angular[0], Real{-353.42301381}, Real{2e-8});
+  EXPECT_NEAR(angular[1], Real{-95.361551705}, Real{2e-8});
 }
 
 TEST(MpLimiterCylindrical, CartesianWeightsAreBitIdentical) {

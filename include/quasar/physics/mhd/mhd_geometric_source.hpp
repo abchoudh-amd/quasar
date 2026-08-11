@@ -40,8 +40,7 @@
 // induction equation, while B_r/B_z are advanced by the matching annular
 // constrained-transport curl.
 //
-// -- Exact formulas implemented (authoritative device kernel,
-//    src/backend/hip/mhd/mhd_update.hip :: geometric_source_kernel) -----------
+// -- Exact formulas -----------------------------------------------------------
 // With v = m/rho per slot, total B = B0+b, and
 // p* = p_gas + |B|^2/2:
 //
@@ -55,6 +54,19 @@
 // term are TOTAL fields, even though the evolved state stores only b and
 // perturbation magnetic energy.
 //
+// The inactive-table and order-2 paths evaluate this expression at the cell
+// centre with the backend's range-safe midpoint kernel.  With active MP5/MP7
+// tables, add() instead recovers tensor-point values from each component's
+// equation-native moment: annular R2 for mass-like components, angular-momentum
+// R2 for m_phi, and uniform R2 for B_phi and prescribed B0_phi.  It forms
+//
+//   Q = rho v_phi^2 + p* - B_phi^2
+//
+// at those points and returns <Q>_(dr dz)/r_c.  This is exactly the annular
+// finite-volume source <Q/r>_(r dr dz), with the curvature factor analytically
+// cancelling the ring measure.  An inadmissible recovered tensor state falls
+// back cell-locally to the midpoint rule.
+//
 // -- On-axis (r -> 0) handling ------------------------------------------------
 // The radius is grid.r_at_cell_center(i) = (i+0.5)*dr for a domain starting on
 // the axis (origin_x = 0), so EVERY cell center has r > 0 -- the innermost cell
@@ -63,10 +75,8 @@
 // with origin_x > 0 use the same expression. Only a non-positive cell-center
 // radius is skipped defensively; valid cylindrical grids never contain one.
 //
-// add() is a thin host wrapper that delegates to launch_mhd_geometric_source
-// (kernels.hpp); the device kernel is the single authoritative implementation
-// of the conventional source above. The production solver uses its fused
-// cylindrical residual instead.
+// The production solver uses its fused cylindrical residual instead of this
+// conventional standalone source.
 
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
@@ -80,11 +90,10 @@ struct MhdGeometricSource {
   // Accumulate the conventional annular-form axisymmetric source S(u) into
   // dudt (does NOT overwrite). This is a source only; it does not supply the
   // radial tensor derivatives used by the solver's fused residual. Direction
-  // convention: r = x (index i), z = y (index j). Delegates to the device
-  // kernel launch_mhd_geometric_source on the default stream. Active
-  // `radial_tables` select the cylindrical R4 face-to-cell magnetic
-  // collocation for `collocation_order`; the inactive default retains the
-  // Cartesian-compatible rule.
+  // convention: r = x (index i), z = y (index j). Active MP5/MP7
+  // `radial_tables` select equation-native tensor recovery and annular source
+  // integration; inactive/order-2 tables retain the range-safe cell-centred
+  // rule. `collocation_order == 1` explicitly requests that low-order rule.
   static void add(const MhdField2D<Real>& u, MhdField2D<Real>& dudt,
                   const MhdBackgroundField<Real>& b0,
                   const Grid2D& grid, Real gamma,

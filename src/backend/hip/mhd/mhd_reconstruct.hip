@@ -10,8 +10,9 @@
 //     is the left-biased extrapolation from cell (i). The eight conserved
 //     components are reconstructed after converting cell-centered conserved ->
 //     primitive (so the minmod limiter acts on rho/v/p/B), then converted back
-//     to conserved for the L/R buffers. THIS PATH IS UNCHANGED / BIT-IDENTICAL
-//     to the original body.
+//     to conserved for the L/R buffers. With inactive radial tables (the
+//     Cartesian path), this arithmetic is bit-identical to the original body;
+//     cylindrical order 2 uses its documented radius-aware collocation.
 //   * scheme_order == 5 -> MP5 CHARACTERISTIC reconstruction (Suresh-Huynh
 //     1997, 5th-order monotonicity-preserving), 5-point stencil.
 //   * scheme_order == 7 -> MP7 CHARACTERISTIC reconstruction (7th-order base
@@ -218,7 +219,8 @@ __device__ inline void project_union_stencil(
     const MhdEigensystem& eig, const MhdState& ref,
     const double* rho, const double* mx, const double* my, const double* mz,
     const double* energy, const double* bx, const double* by, const double* bz,
-    CharVec7* chars, quasar::numerics::RadialTablesView radial_tables) {
+    CharVec7* chars, Real* azimuthal_momentum, Real* toroidal_field,
+    quasar::numerics::RadialTablesView radial_tables) {
   const int di = (dir == 0) ? 1 : 0;
   const int dj = (dir == 0) ? 0 : 1;
   const int union_lo = -1 - half;
@@ -229,9 +231,12 @@ __device__ inline void project_union_stencil(
     // Projecting U'-U'_ref directly avoids ever constructing the enormous total
     // energy E'+B0.b+|B0|^2/2. B0 is frozen at this interface, so prescribed
     // background gradients are not reconstructed as evolved waves.
-    MhdState delta = rotate_xy(
-        load_state(g, rho, mx, my, mz, energy, bx, by, bz,
-                   i + off * di, j + off * dj, radial_tables), dir);
+    const MhdState loaded = load_state(
+        g, rho, mx, my, mz, energy, bx, by, bz,
+        i + off * di, j + off * dj, radial_tables);
+    azimuthal_momentum[u] = loaded.mz;
+    toroidal_field[u] = loaded.bz;
+    MhdState delta = rotate_xy(loaded, dir);
     delta.rho    -= ref.rho;
     delta.mx     -= ref.mx;
     delta.my     -= ref.my;
@@ -244,10 +249,36 @@ __device__ inline void project_union_stencil(
   }
 }
 
+// Reconstruct one scalar from a geometry-specific R1 row and apply the MP
+// bounds from the matching R6 family. Both interface states consume their R1
+// row on the same ascending stencil. For the right state, only the five-point
+// limiter window is reversed; its face pair is swapped and its own one-sided
+// extrapolation factor is selected.
+__device__ inline Real reconstruct_weighted_mp_scalar(
+    const Real* coefficient_row, const Real* limiter_row,
+    const Real* scalar, int half, bool right_state) {
+  const int width = 2 * half + 1;
+  const Real candidate = quasar::numerics::mp_interp_weighted(
+      coefficient_row, scalar, width);
+  if (right_state) {
+    return quasar::numerics::mp_limit(
+        candidate, scalar[half + 2], scalar[half + 1], scalar[half],
+        scalar[half - 1], scalar[half - 2], limiter_row[1],
+        limiter_row[0], limiter_row[3]);
+  }
+  return quasar::numerics::mp_limit(
+      candidate, scalar[half - 2], scalar[half - 1], scalar[half],
+      scalar[half + 1], scalar[half + 2], limiter_row[0],
+      limiter_row[1], limiter_row[2]);
+}
+
 __device__ inline MhdState recon_char_state(
     int dir, int center_off, bool right_state, int half,
     const MhdEigensystem& eig, const MhdState& ref, const CharVec7* chars,
-    const Real* coefficient_row, const Real* limiter_row) {
+    const Real* coefficient_row, const Real* mphi_coefficient_row,
+    const Real* bphi_coefficient_row, const Real* azimuthal_momentum,
+    const Real* toroidal_field, const Real* limiter_row,
+    const Real* mphi_limiter_row, const Real* bphi_limiter_row) {
   const int width = 2 * half + 1;
   // This state's stencil cell s sits at offset center_off + (s - half); the
   // shared table is indexed from union_lo = -1 - half.
@@ -266,19 +297,8 @@ __device__ inline MhdState recon_char_state(
       scalar[s] = chars[base + src].w[k];
     }
     if (coefficient_row != nullptr) {
-      const Real candidate = quasar::numerics::mp_interp_weighted(
-          coefficient_row, scalar, width);
-      if (right_state) {
-        w_face.w[k] = quasar::numerics::mp_limit(
-            candidate, scalar[half + 2], scalar[half + 1], scalar[half],
-            scalar[half - 1], scalar[half - 2], limiter_row[1],
-            limiter_row[0], limiter_row[3]);
-      } else {
-        w_face.w[k] = quasar::numerics::mp_limit(
-            candidate, scalar[half - 2], scalar[half - 1], scalar[half],
-            scalar[half + 1], scalar[half + 2], limiter_row[0],
-            limiter_row[1], limiter_row[2]);
-      }
+      w_face.w[k] = reconstruct_weighted_mp_scalar(
+          coefficient_row, limiter_row, scalar, half, right_state);
     } else if (half == 2) {
       w_face.w[k] = quasar::numerics::mp5_reconstruct(
           scalar[0], scalar[1], scalar[2], scalar[3], scalar[4]);
@@ -287,6 +307,21 @@ __device__ inline MhdState recon_char_state(
           scalar[0], scalar[1], scalar[2], scalar[3], scalar[4], scalar[5],
           scalar[6]);
     }
+  }
+
+  Real native_mphi = Real{0};
+  Real native_bphi = Real{0};
+  if (coefficient_row != nullptr) {
+    for (int stencil = 0; stencil < width; ++stencil) {
+      scalar[stencil] = azimuthal_momentum[base + stencil];
+    }
+    native_mphi = reconstruct_weighted_mp_scalar(
+        mphi_coefficient_row, mphi_limiter_row, scalar, half, right_state);
+    for (int stencil = 0; stencil < width; ++stencil) {
+      scalar[stencil] = toroidal_field[base + stencil];
+    }
+    native_bphi = reconstruct_weighted_mp_scalar(
+        bphi_coefficient_row, bphi_limiter_row, scalar, half, right_state);
   }
 
   // Map the reconstructed characteristic delta back to a conserved delta and add
@@ -301,6 +336,15 @@ __device__ inline MhdState recon_char_state(
   s.bx     = ref.bx + d.bx;
   s.by     = ref.by + d.by;
   s.bz     = ref.bz + d.bz;
+  // These two components evolve under measures different from the annular
+  // characteristic state. Their independently MP-limited native candidates
+  // are the final conserved face values. Do not project a correction or alter
+  // energy; the caller's existing admissibility fallback validates the mixed-
+  // measure state before it can reach the Riemann solver.
+  if (coefficient_row != nullptr) {
+    s.mz = native_mphi;
+    s.bz = native_bphi;
+  }
   return rotate_xy(s, dir);
 }
 
@@ -310,8 +354,10 @@ __device__ inline MhdState recon_char_state(
 // both the order-2 branch AND the per-interface robustness fallback that a
 // troubled MP5/MP7 face drops to. Normal-B is left as the per-cell stored value
 // here; the caller overwrites it with the CT face value, identically for all
-// orders. The math (load_state / to_primitive / slope_drop / muscl_face /
-// to_conserved) is bit-identical to the original order-2 body.
+// orders. With inactive radial tables, the math (load_state / to_primitive /
+// slope_drop / muscl_face / to_conserved) is bit-identical to the original
+// Cartesian order-2 body. Active cylindrical tables intentionally change the
+// load_state collocation used by both callers.
 __device__ inline void muscl_reconstruct_face(
     const quasar::Grid2D& g, int dir, int i, int j, Real gamma,
     int side_lo, int side_hi,
@@ -502,9 +548,11 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
     // Both states read the same reference and eigensystem, so project the union
     // of their two stencils once and let each pick its window out of it.
     CharVec7 chars[kMaxUnionWidth];
+    Real azimuthal_momentum[kMaxUnionWidth];
+    Real toroidal_field[kMaxUnionWidth];
     project_union_stencil(g, dir, i, j, half, eig, canonical_ref,
                           rho, mx, my, mz, energy, bx, by, bz, chars,
-                          radial_tables);
+                          azimuthal_momentum, toroidal_field, radial_tables);
 
     const bool radial_reconstruction =
         dir == 0 && radial_tables.active != 0 &&
@@ -514,18 +562,36 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
         ? radial_tables.r1_left_row(i) : nullptr;
     const Real* right_coefficients = radial_reconstruction
         ? radial_tables.r1_right_row(i) : nullptr;
+    const Real* left_mphi_coefficients = radial_reconstruction
+        ? radial_tables.r1_mphi_left_row(i) : nullptr;
+    const Real* right_mphi_coefficients = radial_reconstruction
+        ? radial_tables.r1_mphi_right_row(i) : nullptr;
+    const Real* left_bphi_coefficients = radial_reconstruction
+        ? radial_tables.r1_bphi_left_row(i) : nullptr;
+    const Real* right_bphi_coefficients = radial_reconstruction
+        ? radial_tables.r1_bphi_right_row(i) : nullptr;
     const Real* limiter_row = radial_reconstruction
         ? radial_tables.r6_row(i - 1) : nullptr;
+    const Real* mphi_limiter_row = radial_reconstruction
+        ? radial_tables.r6_mphi_row(i - 1) : nullptr;
+    const Real* bphi_limiter_row = radial_reconstruction
+        ? radial_tables.r6_bphi_row(i - 1) : nullptr;
 
     // L state: stencil centered on cell (i-1), reconstruct its RIGHT face.
     ul = recon_char_state(dir, /*center_off=*/-1, /*right_state=*/false,
                           half, eig, canonical_ref, chars,
-                          left_coefficients, limiter_row);
+                          left_coefficients, left_mphi_coefficients,
+                          left_bphi_coefficients, azimuthal_momentum,
+                          toroidal_field, limiter_row, mphi_limiter_row,
+                          bphi_limiter_row);
     // R state: its own radial row targets the left face directly. Cartesian
     // still reverses the scalar stencil inside recon_char_state.
     ur = recon_char_state(dir, /*center_off=*/0, /*right_state=*/true,
                           half, eig, canonical_ref, chars,
-                          right_coefficients, limiter_row);
+                          right_coefficients, right_mphi_coefficients,
+                          right_bphi_coefficients, azimuthal_momentum,
+                          toroidal_field, limiter_row, mphi_limiter_row,
+                          bphi_limiter_row);
 
     // ---- Per-interface robustness fallback (finiteness / positivity) ------
     // Characteristic MP reconstruction carries NO positivity guarantee: at a
@@ -549,7 +615,9 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 reconstruct_kernel(
                              radial_tables);
     }
   } else {
-    // ---- 2nd-order MUSCL-minmod (UNCHANGED, bit-identical) -----------------
+    // ---- 2nd-order MUSCL-minmod --------------------------------------------
+    // Cartesian/inactive-table arithmetic remains bit-identical to the
+    // original path; cylindrical runs use the radius-aware collocation above.
     // Face (i,j) lies between the "minus" cell (i-di, j-dj) and the "plus" cell
     // (i,j). The LEFT state extrapolates from the minus cell to its +side; the
     // RIGHT state extrapolates from the plus cell to its -side.

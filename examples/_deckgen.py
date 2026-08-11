@@ -19,8 +19,9 @@ def loop_block(*, indent: int, name: str, current_A: float,
                center_z_m: float, radius_m: float, n_segments: int) -> list[str]:
     """Emit a ``circular_loop`` conductor block indented by ``indent`` spaces.
 
-    ``indent`` is the column of the leading ``- name:`` item (2 for a top-level
-    ``conductors:`` list, 6 when nested under ``external_field.evaluator``)."""
+    ``indent`` is the column of the leading ``- name:`` item. Typical values are
+    2 for a top-level ``conductors:`` list, 4 under ``background_field``, and 6
+    when nested under ``external_field.evaluator``."""
     pad = " " * indent
     inner = " " * (indent + 2)
     return [

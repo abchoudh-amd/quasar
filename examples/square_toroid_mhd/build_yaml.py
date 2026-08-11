@@ -17,7 +17,9 @@ perturbation-field boundaries are open. The toroidal guide field is a uniform
 out-of-plane bz in the state.
 
 The one emitted ``input.yaml`` deck contains both the SI, axisymmetric
-cylindrical (R,Z) MHD run and the square-toroid conductor geometry:
+cylindrical (R,Z) MHD run and the square-toroid conductor geometry. Its uniform
+out-of-plane field is an independent idealized guide field, not a TF-coil
+calculation:
 
   PYTHONPATH=build/hip-gfx942-release/python \\
     python -m quasar.mhd.cli run examples/square_toroid_mhd/input.yaml
@@ -28,7 +30,6 @@ Regenerate the deck with: python examples/square_toroid_mhd/build_yaml.py
 from __future__ import annotations
 
 import importlib.util
-import math
 from pathlib import Path
 
 # Shared deck-emitting helpers (float formatter + circular-loop block), loaded by
@@ -47,9 +48,6 @@ N_SHEET_FILAMENTS = 64
 SHEET_CURRENT_A = 150_000.0
 N_SEGMENTS = 128
 
-N_TF_COILS = 8
-TF_COIL_CURRENT_A = 25_000.0
-
 # --- MHD grid: the bore interior (90% of the cross-section), centered on R0 ----
 MHD_NX = 128
 MHD_NY = 128
@@ -58,8 +56,11 @@ MHD_LX_M = MHD_FRACTION * SIDE_M
 MHD_LY_M = MHD_FRACTION * SIDE_M
 MHD_ORIGIN_X_M = R0_M - MHD_LX_M / 2.0
 MHD_ORIGIN_Y_M = -MHD_LY_M / 2.0
-# Toroidal (out-of-plane) guide field. The deck uses SI; b_scale is a
-# dimensionless optional amplitude multiplier for the generated A in T*m.
+# Prescribed uniform toroidal (out-of-plane) guide field. This is intentionally
+# independent of the poloidal conductor system below. A physical axisymmetric
+# vacuum TF field would vary as 1/R and is not represented by this constant.
+# The deck uses SI; b_scale is a dimensionless optional amplitude multiplier
+# for the generated A in T*m.
 BZ_TOROIDAL = 0.1
 B_SCALE = 1.0
 
@@ -115,15 +116,13 @@ def _conductor_lines(indent: int) -> list[str]:
     for k, y_m in enumerate(heights):
         lines.extend(loop(f"outer_cylinder_{k:02d}", -filament_current,
                           y_m, outer_radius))
-    # Poloidal TF windings generate the toroidal guide field represented by
-    # initial.bz below. They are deliberately absent here: interpreting their
-    # discrete 3-D A_y slice as axisymmetric A_phi would create a spurious
-    # poloidal background and double-count the guide system.
+    # Only the axisymmetric current sheets that generate the poloidal
+    # background belong in this list. No TF windings are emitted or attributed
+    # to the independent uniform initial.bz guide field below.
     return lines
 
 
 def build_mhd_yaml() -> str:
-    bphi = 4e-7 * math.pi * N_TF_COILS * TF_COIL_CURRENT_A / (2 * math.pi * R0_M)
     lines = [
         "# Ideal-MHD: confined plasma blob in a square-toroid bore (poloidal slice).",
         "#",
@@ -140,9 +139,9 @@ def build_mhd_yaml() -> str:
         "# which is divergence-free by construction and static (never ghost-refilled).",
         "# The crop cuts through this field, so its edges are open rather than",
         "# conducting walls; outflow is applied consistently to the fluid and the",
-        "# evolving perturbation b. CT preserves div(b). bz is a uniform",
-        f"# toroidal guide field ({BZ_TOROIDAL}); B_phi ~ mu0 N I/(2 pi R) ~ "
-        f"{bphi:.3f} T from the TF coils.",
+        "# evolving perturbation b. CT preserves div(b). bz is an independent",
+        f"# prescribed uniform guide field ({BZ_TOROIDAL} T), not a TF-coil model;",
+        "# an axisymmetric vacuum TF field would vary as B_phi = C/R.",
         "#",
         "# Regenerate: python examples/square_toroid_mhd/build_yaml.py",
         "",
@@ -157,7 +156,7 @@ def build_mhd_yaml() -> str:
         "initial:",
         "  type: confined_blob",
         "  params:",
-        f"    bz: {BZ_TOROIDAL}             # uniform toroidal guide field (in the state)",
+        f"    bz: {BZ_TOROIDAL}             # prescribed uniform guide field (not TF coils)",
         f"    rho_in: {RHO_IN}",
         f"    rho_out: {RHO_OUT}",
         f"    p_in: {P_IN}",

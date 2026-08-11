@@ -23,7 +23,11 @@ import numpy as np
 
 from quasar.pic.io import load as load_pic_deck
 from quasar.pic.postprocess import yee_component_view
-from quasar.mhd.io import load as load_mhd_deck
+from quasar.mhd import _units as mhd_units
+from quasar.mhd.io import (
+    build_background_field,
+    load as load_mhd_deck,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2123,6 +2127,7 @@ class SquareToroidMhdDeckTest(unittest.TestCase):
         self.assertEqual(mhd_deck["geometry"], "cylindrical")
         self.assertEqual(
             mhd_deck["numerics"]["reconstruction"], "mp7")
+        self.assertEqual(mhd_deck["initial"]["params"]["bz"], 0.1)
         self.assertEqual(mhd_deck["initial"]["params"]["p_in"], 1000.0)
         self.assertEqual(mhd_deck["initial"]["params"]["p_out"], 100.0)
         # This 90%-bore box is an artificial crop through a coil field with
@@ -2136,6 +2141,20 @@ class SquareToroidMhdDeckTest(unittest.TestCase):
         self.assertNotIn("file", background)
         self.assertFalse((example / "coil.yaml").exists())
         load_mhd_deck(example / "input.yaml")
+
+    def test_checked_in_deck_matches_generator(self):
+        import importlib.util
+
+        example = REPO_ROOT / "examples" / "square_toroid_mhd"
+        generator_path = example / "build_yaml.py"
+        spec = importlib.util.spec_from_file_location(
+            "square_toroid_mhd_build_yaml", generator_path)
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        self.assertEqual(
+            (example / "input.yaml").read_text(encoding="utf-8"),
+            generator.build_mhd_yaml(),
+        )
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
@@ -2243,6 +2262,45 @@ class MhdCoilCartesianDeckTest(unittest.TestCase):
         self.assertNotIn("a_file", background)
         self.assertNotIn("file", background)
         load_mhd_deck(example / "input.yaml")
+
+    def test_flux_function_background_pins_the_declared_si_magnitude(self):
+        example = REPO_ROOT / "examples" / "mhd_coil_cartesian"
+        deck = load_mhd_deck(example / "input.yaml")
+        nghost = 4
+        background = build_background_field(deck, nghost)
+
+        shape = (
+            deck.domain.ny + 2 * nghost,
+            deck.domain.nx + 2 * nghost,
+        )
+        b0y_tesla = (
+            np.asarray(background["b0y"]).reshape(shape)
+            * mhd_units.SQRT_MU0
+        )
+        # ny is even, so this is the lab-Z=0 face. nx is even, so average
+        # the two samples symmetric about lab X=0 to obtain the midpoint value.
+        center_row = nghost + deck.domain.ny // 2
+        center_col = nghost + deck.domain.nx // 2
+        seeded_midpoint = float(np.mean(
+            b0y_tesla[center_row, center_col - 1:center_col + 1]
+        ))
+
+        radius_m = 0.1
+        current_a = 1000.0
+        full_helmholtz_midpoint = (
+            (4.0 / 5.0) ** 1.5
+            * 4.0 * math.pi * 1.0e-7 * current_a / radius_m
+        )
+        expected_flux_function_midpoint = 0.5 * full_helmholtz_midpoint
+        self.assertAlmostEqual(
+            seeded_midpoint,
+            expected_flux_function_midpoint,
+            delta=2.0e-4 * expected_flux_function_midpoint,
+            msg=(
+                f"Cartesian coil flux-function midpoint {seeded_midpoint} T "
+                f"!= {expected_flux_function_midpoint} T"
+            ),
+        )
 
 
 @unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")

@@ -257,6 +257,83 @@ TEST(MhdPositivityLimiter,
   EXPECT_NEAR(active_fraction, expected_active_fraction, Real{1e-13});
 }
 
+TEST(MhdPositivityLimiter, ApplyUsesActiveCylindricalRadialCollocation) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+  constexpr Real gamma = Real{5} / Real{3};
+  constexpr Real rho_floor = Real{1e-8};
+  constexpr Real p_floor = Real{1e-9};
+  const Grid2D grid = Grid2D::from_cell_spacing(
+      8, 8, Real{1}, Real{1}, Real{4}, Real{0}, /*halo=*/4);
+  const std::size_t storage_size = grid.storage_size();
+  constexpr int target_radial_cell = 2;
+  constexpr int target_axial_cell = 3;
+  const std::size_t target =
+      grid.index(target_radial_cell, target_axial_cell);
+
+  std::vector<Real> density(storage_size, Real{1});
+  std::vector<Real> zero(storage_size, Real{0});
+  std::vector<Real> radial_face_field(storage_size, Real{0});
+  std::vector<Real> energy(storage_size, Real{1e3});
+  for (int j = -grid.nghost; j < grid.ny + grid.nghost; ++j) {
+    for (int face = -grid.nghost; face < grid.nx + grid.nghost; ++face) {
+      radial_face_field[grid.index(face, j)] = grid.r_at_edge(face);
+    }
+  }
+
+  const quasar::numerics::RadialTables radial_tables{
+      grid, /*scheme_order=*/7};
+  const Real cartesian_cell_field = quasar::mhd::cell_bx(
+      grid, radial_face_field.data(), target_radial_cell, target_axial_cell);
+  const Real cylindrical_cell_field = quasar::mhd::cell_bx(
+      grid, radial_face_field.data(), target_radial_cell, target_axial_cell,
+      radial_tables.host_view());
+  const Real cartesian_magnetic_energy = quasar::numerics::half_squared_norm3(
+      cartesian_cell_field, Real{0}, Real{0});
+  const Real cylindrical_magnetic_energy = quasar::numerics::half_squared_norm3(
+      cylindrical_cell_field, Real{0}, Real{0});
+  ASSERT_LT(cartesian_magnetic_energy, cylindrical_magnetic_energy);
+  energy[target] =
+      Real{0.5} * (cartesian_magnetic_energy + cylindrical_magnetic_energy);
+  ASSERT_GT((gamma - Real{1}) *
+                (energy[target] - cartesian_magnetic_energy),
+            p_floor);
+  ASSERT_LT((gamma - Real{1}) *
+                (energy[target] - cylindrical_magnetic_energy),
+            p_floor);
+
+  quasar::mhd::MhdField2D<Real> inactive_field{grid};
+  quasar::mhd::MhdField2D<Real> active_field{grid};
+  const auto seed = [&](quasar::mhd::MhdField2D<Real>& field) {
+    field.rho.copy_from_host(density.data(), storage_size);
+    field.mx.copy_from_host(zero.data(), storage_size);
+    field.my.copy_from_host(zero.data(), storage_size);
+    field.mz.copy_from_host(zero.data(), storage_size);
+    field.energy.copy_from_host(energy.data(), storage_size);
+    field.bx_face.copy_from_host(radial_face_field.data(), storage_size);
+    field.by_face.copy_from_host(zero.data(), storage_size);
+    field.bz_cell.copy_from_host(zero.data(), storage_size);
+  };
+  seed(inactive_field);
+  seed(active_field);
+
+  auto limiter = make_limiter();
+  limiter->apply(inactive_field, rho_floor, p_floor, gamma,
+                 /*collocation_order=*/7,
+                 quasar::numerics::RadialTablesView{});
+  limiter->apply(active_field, rho_floor, p_floor, gamma,
+                 /*collocation_order=*/7, radial_tables.view());
+
+  const HostState inactive = read_host(inactive_field, storage_size);
+  const HostState active = read_host(active_field, storage_size);
+  const Real expected_active_energy =
+      p_floor / (gamma - Real{1}) + cylindrical_magnetic_energy;
+  EXPECT_EQ(inactive.en[target], energy[target]);
+  EXPECT_NEAR(active.en[target], expected_active_energy,
+              Real{1e-13} * expected_active_energy);
+  EXPECT_GT(active.en[target], inactive.en[target]);
+  EXPECT_EQ(active.bx, radial_face_field);
+}
+
 // A cell with sub-floor density has its density raised to EXACTLY rho_floor, and
 // a cell with sub-floor (negative) pressure has its gas pressure raised to
 // EXACTLY p_floor with MOMENTUM and B held byte-unchanged. Already-physical
