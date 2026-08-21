@@ -20,12 +20,13 @@
 #include "quasar/boundary/mhd_boundary.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
-#include "quasar/numerics/ct_scheme.hpp"
+// ct_scheme.hpp / riemann_solver.hpp are deliberately NOT included here: this
+// class owns no ICtScheme or IRiemannSolver member. Both interfaces are used
+// only inside mhd_solver.cpp, to prove the configured names are registered.
 #include "quasar/numerics/flux_reconstruction.hpp"
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/positivity_limiter.hpp"
 #include "quasar/numerics/radial_tables.hpp"
-#include "quasar/numerics/riemann_solver.hpp"
 #include "quasar/numerics/ssprk_integrator.hpp"
 #include "quasar/physics/mhd/kernels.hpp"  // BoundaryFlags4
 #include "quasar/physics/mhd/mhd_background.hpp"  // MhdBackgroundField, MhdBackgroundSpec
@@ -318,8 +319,13 @@ class MhdSolver2D {
   // components.
   mutable bool background_validated_{true};
 
-  std::unique_ptr<numerics::IRiemannSolver> riemann_{};
-  std::unique_ptr<numerics::ICtScheme> ct_{};
+  // The Riemann and CT axes carry no owned scheme object. Both are pinned to a
+  // single implementation by the constructor's name gate, and the residual path
+  // calls their device launchers (launch_mhd_hlld_flux, launch_mhd_ct_emf_*)
+  // directly rather than through IRiemannSolver / ICtScheme. Constructing an
+  // instance that is never dereferenced would imply a dispatch seam that does
+  // not exist; the registered classes remain as the device kernels' host-side
+  // test harnesses. See the constructor gate and docs/dev-guide/adding_an_mhd_scheme.
   std::unique_ptr<numerics::ISsprkIntegrator> integrator_{};
   std::unique_ptr<numerics::IPositivityLimiter> positivity_{};
   std::array<std::unique_ptr<boundary::IMhdFluidBoundary>, 4> fluid_bcs_{};

@@ -27,12 +27,12 @@ from .._distributed_helpers import (
     finalize_run_telemetry as _finalize_run_telemetry,
     restart_target_error as _restart_target_error,
 )
+from .._core import mhd as mhd_core
 from .._paths import confine_output_path
 from . import io as mhd_io
 from . import _units as mhd_units
 
 
-_RECONSTRUCTION_HALO = {"muscl_minmod": 2, "mp5": 3, "mp7": 4}
 _CHECKPOINT_DIAGNOSTICS_SCHEMA = "quasar-mhd-checkpoint-diagnostics/v1"
 
 
@@ -704,7 +704,11 @@ def _prepare_mhd_run(
             "distributed MHD does not yet support "
             "background_field.conductors because it cannot preserve the "
             "solver-derived padded conductor halo; use the serial MHD runner")
-    nghost = _RECONSTRUCTION_HALO[deck.numerics.reconstruction]
+    # Ask the C++ registry for the scheme's halo rather than mirroring the table
+    # here: the canonical state below must be padded to exactly the halo the
+    # solver will size its working grid to, and that is decided by
+    # IFluxReconstruction::required_nghost().
+    nghost = mhd_core.reconstruction_halo(deck.numerics.reconstruction)
     state = _canonical_state(deck, nghost)
     background = _canonical_explicit_background(deck, nghost)
 

@@ -52,4 +52,22 @@ class IFluxReconstruction {
                                  MhdInterfaceStates<Real>& out, Real gamma) const = 0;
 };
 
+// Spatial order of the built-in device reconstruction kernel selected by a
+// scheme's required_nghost(): 2 -> 2 (muscl_minmod), 3 -> 5 (mp5), 4 -> 7 (mp7).
+//
+// The halo width, not the registry name, is the selector: MhdSolver2D sizes its
+// working grid from required_nghost() and the device kernel branches on the
+// order this returns. Keeping the mapping here -- beside the required_nghost()
+// declaration that feeds it -- makes halo and order one fact with one owner, so
+// a new scheme cannot pick up a halo and an order that disagree. The Python
+// deck layer reads both through the _core.mhd.reconstruction_halo /
+// reconstruction_order bindings rather than mirroring this table.
+constexpr int reconstruction_order_from_nghost(int nghost) noexcept {
+  switch (nghost) {
+    case 3: return 5;
+    case 4: return 7;
+    default: return 2;
+  }
+}
+
 }  // namespace quasar::numerics

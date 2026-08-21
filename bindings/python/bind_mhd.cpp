@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -92,6 +93,37 @@ void bind_mhd(py::module_& m) {
                 quasar::Registry<quasar::numerics::IFluxReconstruction>::instance().names());
           },
           "Names of registered MHD flux-reconstruction schemes.");
+  // Halo width and spatial order for a reconstruction name, resolved through the
+  // registry and numerics::reconstruction_order_from_nghost. The Python deck and
+  // distributed runner need both BEFORE a solver exists (they build the padded
+  // initial state that the solver is then seeded from), so they cannot read
+  // solver.grid().nghost. Exposing the C++ mapping keeps that pre-solver path on
+  // the same single source of truth as the solver itself instead of a mirrored
+  // Python table that must be edited in lockstep when a scheme is added.
+  //
+  // Registry::create throws std::out_of_range on an unknown name, which pybind
+  // surfaces as IndexError -- a misleading type for a bad scheme string, and the
+  // dict lookups these bindings replace raised KeyError. Translate to
+  // invalid_argument (ValueError) and name the offending scheme.
+  auto reconstruction_nghost = [](const std::string& name) {
+    try {
+      return quasar::Registry<quasar::numerics::IFluxReconstruction>::instance()
+          .create(name)
+          ->required_nghost();
+    } catch (const std::out_of_range&) {
+      throw std::invalid_argument{
+          "unknown MHD reconstruction scheme '" + name + "'"};
+    }
+  };
+  mhd.def("reconstruction_halo", reconstruction_nghost, py::arg("name"),
+          "Ghost-cell halo required by the named flux-reconstruction scheme.");
+  mhd.def("reconstruction_order",
+          [reconstruction_nghost](const std::string& name) {
+            return quasar::numerics::reconstruction_order_from_nghost(
+                reconstruction_nghost(name));
+          },
+          py::arg("name"),
+          "Spatial order of the device kernel selected by the named scheme.");
   mhd.def("registered_integrators",
           [sorted_names]() {
             return sorted_names(

@@ -2,8 +2,13 @@
 
 #include "quasar/backend/device.hpp"
 #include "quasar/core/registry.hpp"
+// The solver owns no ICtScheme / IRiemannSolver member, but it still validates
+// that the configured names resolve in those registries, so both interfaces are
+// needed here rather than in the public header.
+#include "quasar/numerics/ct_scheme.hpp"
 #include "quasar/numerics/mhd_background_profile.hpp"
 #include "quasar/numerics/mhd_state.hpp"
+#include "quasar/numerics/riemann_solver.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 
@@ -32,13 +37,10 @@ inline constexpr int kDiscreteSolenoidalRoundoffUlpShift = 10;  // 2^10 ulps
 // projection construction.
 inline constexpr Real kDiscreteCurlFreeTolerance = Real{1e-8};
 
-constexpr int reconstruction_order_from_nghost(int nghost) noexcept {
-  switch (nghost) {
-    case 3: return 5;
-    case 4: return 7;
-    default: return 2;
-  }
-}
+// Halo -> spatial order now lives beside IFluxReconstruction::required_nghost()
+// in numerics/flux_reconstruction.hpp, so the Python deck layer can read the
+// same mapping through a binding instead of mirroring it.
+using numerics::reconstruction_order_from_nghost;
 
 template <class Base>
 void require_registered_name(const std::string& name, const char* what) {
@@ -920,8 +922,14 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
   }
 
   // Resolve the remaining schemes by registry string (no if/else over types).
-  riemann_ = make_scheme<numerics::IRiemannSolver>(cfg_.riemann, "Riemann solver");
-  ct_ = make_scheme<numerics::ICtScheme>(cfg_.ct, "CT scheme");
+  // The Riemann and CT axes are deliberately absent here: the constructor gate
+  // above already pinned each to its single supported name, and the residual
+  // path calls launch_mhd_hlld_flux / launch_mhd_ct_emf_* directly. Building an
+  // IRiemannSolver or ICtScheme that nothing dereferences would advertise a
+  // dispatch seam the device path does not use. Their registered classes stay
+  // in the registry as the host-side harnesses those kernels are tested through
+  // (tests/unit/numerics/test_hlld_riemann.cpp, test_ct_divergence.cpp), and
+  // require_registered_name above still proves the registrations link.
   integrator_ = make_scheme<numerics::ISsprkIntegrator>(cfg_.integrator, "integrator");
   // combine_stage() owns the Shu-Osher weights and implements exactly the
   // three-stage SSP-RK3 tableau, rejecting any stage index outside {0,1,2}. An

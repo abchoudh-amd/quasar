@@ -998,8 +998,8 @@ def build_initial_state(deck: MhdDeck, nghost: int) -> dict:
         bx_c = mhd_num.radial_face_samples_to_cell_average(
             bx, nghost=nghost, origin_x=deck.domain.origin_x_m,
             dr=deck.domain.lx_m / deck.domain.nx,
-            scheme_order={"muscl_minmod": 2, "mp5": 5, "mp7": 7}[
-                deck.numerics.reconstruction])
+            scheme_order=_core.mhd.reconstruction_order(
+                deck.numerics.reconstruction))
     else:
         bx_c = mhd_num.face_samples_to_cell_average(
             bx, axis=1, nghost=nghost)
