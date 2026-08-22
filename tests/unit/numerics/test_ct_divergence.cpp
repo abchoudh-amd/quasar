@@ -4,14 +4,15 @@
 //
 //   class ICtScheme {
 //    public: virtual ~ICtScheme() = default;
-//     virtual void compute_emf(const quasar::mhd::MhdField2D<Real>& u,
-//                              const quasar::numerics::MhdInterfaceStates<Real>& ifx,
-//                              const quasar::numerics::MhdInterfaceStates<Real>& ify,
-//                              quasar::mhd::EmfField2D<Real>& emf, Real gamma) const = 0;
-//     virtual void update_face_b(quasar::mhd::MhdField2D<Real>& u,
-//                                const quasar::mhd::EmfField2D<Real>& emf, Real dt) const = 0;
 //     virtual Real divergence_b_linf(const quasar::mhd::MhdField2D<Real>& u) const = 0;
 //   };
+//
+// The EMF construction and the face-B advance are NOT on this interface: the
+// solver builds the corner EMF with launch_mhd_ct_emf_prepare/_finish and then
+// advances face B as an ordinary residual component (launch_mhd_emf_curl_rate
+// + rk_stage), so the tests below drive those launchers directly.  Only the
+// div(B) diagnostic is still reached through the registry object, matching
+// MhdSolver2D::divergence_b_max().
 //
 // Registry name "fd_ct_christlieb", obtained via
 //   quasar::Registry<quasar::numerics::ICtScheme>::instance().create("fd_ct_christlieb").
@@ -624,16 +625,20 @@ TEST(MhdCtScheme, Mp7EmfRetainsSmallSurvivorAfterGiantCancellation) {
   EXPECT_NEAR(actual, survivor, Real{2e-12});
 }
 
-// The retained direct update API must advance both physical high-face layers,
-// not just the nx-by-ny low-face rectangle.  Omitting Bx(nx,j) or By(i,ny)
-// breaks the curl/divergence telescoping in the last cell row/column.
-TEST(MhdCtScheme, DirectFaceUpdateAdvancesHighFacesAndPreservesDivergence) {
+// The CT rate must cover both physical high-face layers, not just the nx-by-ny
+// low-face rectangle.  Omitting Bx(nx,j) or By(i,ny) breaks the curl/divergence
+// telescoping in the last cell row/column.
+//
+// The rate is dB/dt, so a single Euler application of `rate * dt` from a zero
+// field reproduces exactly the face values the curl prescribes; the solver
+// reaches the same place through rk_stage.  Asserting on rate*dt keeps the
+// per-face expressions below in the units the curl is written in.
+TEST(MhdCtScheme, EmfCurlRateCoversHighFacesAndPreservesDivergence) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   Grid2D g{6, 5, Real{2}, Real{3}, Real{0}, Real{0}, /*nghost=*/2};
   const std::size_t n = g.storage_size();
   constexpr Real dt = Real{0.125};
-  std::vector<Real> zero(n, Real{0});
   std::vector<Real> ez(n, Real{0});
   for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
     for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
@@ -642,19 +647,21 @@ TEST(MhdCtScheme, DirectFaceUpdateAdvancesHighFacesAndPreservesDivergence) {
     }
   }
 
-  quasar::mhd::MhdField2D<Real> u{g};
-  u.bx_face.copy_from_host(zero.data(), zero.size());
-  u.by_face.copy_from_host(zero.data(), zero.size());
+  quasar::mhd::MhdField2D<Real> rate{g};
   quasar::mhd::EmfField2D<Real> emf{g};
   emf.ez_edge.copy_from_host(ez.data(), ez.size());
 
-  quasar::mhd::launch_mhd_face_b_update(
-      u, emf, dt, /*stream=*/nullptr, /*cylindrical=*/false);
+  quasar::mhd::launch_mhd_emf_curl_rate(
+      emf, rate, g, /*stream=*/nullptr, /*cylindrical=*/false);
   quasar::backend::device_synchronize(nullptr);
 
   std::vector<Real> bx(n), by(n);
-  u.bx_face.copy_to_host(bx.data(), bx.size());
-  u.by_face.copy_to_host(by.data(), by.size());
+  rate.bx_face.copy_to_host(bx.data(), bx.size());
+  rate.by_face.copy_to_host(by.data(), by.size());
+  for (std::size_t idx = 0; idx < n; ++idx) {
+    bx[idx] *= dt;
+    by[idx] *= dt;
+  }
   for (int j = 0; j < g.ny; ++j) {
     const Real expected = -dt *
         (ez[g.index(g.nx, j + 1)] - ez[g.index(g.nx, j)]) / g.dy();
@@ -671,13 +678,12 @@ TEST(MhdCtScheme, DirectFaceUpdateAdvancesHighFacesAndPreservesDivergence) {
 // In axisymmetric (r,z) geometry the same corner curl must annihilate
 // (1/r)d(r Br)/dr + dBz/dz, not the Cartesian divergence.  Exercise the axis
 // cell (r_lo=0), the interior annuli, and both physical high-face layers.
-TEST(MhdCtScheme, CylindricalFaceUpdatePreservesAnnularDivergence) {
+TEST(MhdCtScheme, CylindricalEmfCurlRatePreservesAnnularDivergence) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
 
   Grid2D g{6, 5, Real{3}, Real{4}, Real{0}, Real{-2}, /*nghost=*/2};
   const std::size_t n = g.storage_size();
   constexpr Real dt = Real{0.125};
-  std::vector<Real> zero(n, Real{0});
   std::vector<Real> ez(n, Real{0});
   for (int j = -g.nghost; j < g.ny + g.nghost; ++j) {
     for (int i = -g.nghost; i < g.nx + g.nghost; ++i) {
@@ -686,18 +692,22 @@ TEST(MhdCtScheme, CylindricalFaceUpdatePreservesAnnularDivergence) {
     }
   }
 
-  quasar::mhd::MhdField2D<Real> u{g};
-  u.bx_face.copy_from_host(zero.data(), zero.size());
-  u.by_face.copy_from_host(zero.data(), zero.size());
+  quasar::mhd::MhdField2D<Real> rate{g};
   quasar::mhd::EmfField2D<Real> emf{g};
   emf.ez_edge.copy_from_host(ez.data(), ez.size());
-  quasar::mhd::launch_mhd_face_b_update(
-      u, emf, dt, /*stream=*/nullptr, /*cylindrical=*/true);
+  quasar::mhd::launch_mhd_emf_curl_rate(
+      emf, rate, g, /*stream=*/nullptr, /*cylindrical=*/true);
   quasar::backend::device_synchronize(nullptr);
 
+  // rate * dt is the field a single Euler application of the curl produces from
+  // a zero seed; see EmfCurlRateCoversHighFacesAndPreservesDivergence.
   std::vector<Real> br(n), bz(n);
-  u.bx_face.copy_to_host(br.data(), br.size());
-  u.by_face.copy_to_host(bz.data(), bz.size());
+  rate.bx_face.copy_to_host(br.data(), br.size());
+  rate.by_face.copy_to_host(bz.data(), bz.size());
+  for (std::size_t idx = 0; idx < n; ++idx) {
+    br[idx] *= dt;
+    bz[idx] *= dt;
+  }
   for (int j = 0; j < g.ny; ++j) {
     const Real expected = -dt *
         (ez[g.index(g.nx, j + 1)] - ez[g.index(g.nx, j)]) / g.dy();
@@ -853,73 +863,6 @@ TEST(MhdCtScheme, DivergenceLinfFindsKnownNonzeroSpike) {
   // And it must be the genuinely nonzero spike, not a residual near zero.
   EXPECT_GT(dev_linf, Real{0.5} * expected_spike)
       << "reduction failed to surface the known divergence spike";
-}
-
-// After a CT update step (compute_emf + update_face_b) the discretely
-// divergence-free property is preserved to machine epsilon: the CT update curl
-// of ANY corner Ez telescopes the cell-centered div(B) change to identically
-// zero. This must hold regardless of the EMF magnitude / discretization.
-TEST(MhdCtScheme, UpdatePreservesDivergenceFreeToMachineEps) {
-  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
-  Grid2D g{32, 32, Real{1}, Real{1}, Real{0}, Real{0}, 4};
-  const Real gamma = Real{5} / Real{3};
-
-  quasar::mhd::MhdField2D<Real> u{g};
-  seed_divergence_free_b(u, g);
-
-  // Smooth, positive interface states produce a finite, spatially varying EMF;
-  // invalid zero-density defaults could otherwise turn the whole update into
-  // NaNs that a max reduction is permitted to ignore.
-  quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
-  quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
-  seed_smooth_interface(ifx, gamma);
-  seed_smooth_interface(ify, gamma);
-  quasar::mhd::EmfField2D<Real> emf{g};
-
-  auto ct = make_ct();
-  const Real divb0 = ct->divergence_b_linf(u);
-
-  ct->compute_emf(u, ifx, ify, emf, gamma);
-  expect_physical_corner_emf_finite(emf, g);
-  ct->update_face_b(u, emf, /*dt=*/Real{1e-3});
-
-  const Real divb1 = ct->divergence_b_linf(u);
-  const Real eps = std::numeric_limits<Real>::epsilon();
-  const Real bound = Real{1e3} * eps / g.dx();
-  EXPECT_LT(divb1, bound) << "div(B) after CT step = " << divb1;
-  // The CT step must not manufacture a divergence larger than the seed's.
-  EXPECT_LT(divb1, divb0 + bound);
-}
-
-// The telescoping guarantee is independent of dt: a much larger step must still
-// preserve div(B) to round-off. Pins that the preservation is structural (curl
-// of a discrete potential), not a small-dt artifact.
-TEST(MhdCtScheme, UpdatePreservesDivergenceFreeForLargeDt) {
-  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
-  Grid2D g{32, 32, Real{1}, Real{1}, Real{0}, Real{0}, 4};
-  const Real gamma = Real{5} / Real{3};
-
-  quasar::mhd::MhdField2D<Real> u{g};
-  seed_divergence_free_b(u, g);
-
-  quasar::numerics::MhdInterfaceStates<Real> ifx{g, /*dir=*/0};
-  quasar::numerics::MhdInterfaceStates<Real> ify{g, /*dir=*/1};
-  seed_smooth_interface(ifx, gamma);
-  seed_smooth_interface(ify, gamma);
-  quasar::mhd::EmfField2D<Real> emf{g};
-
-  auto ct = make_ct();
-  const Real divb0 = ct->divergence_b_linf(u);
-
-  ct->compute_emf(u, ifx, ify, emf, gamma);
-  expect_physical_corner_emf_finite(emf, g);
-  ct->update_face_b(u, emf, /*dt=*/Real{0.25});  // large step
-
-  const Real divb1 = ct->divergence_b_linf(u);
-  const Real eps = std::numeric_limits<Real>::epsilon();
-  const Real bound = Real{1e3} * eps / g.dx();
-  EXPECT_LT(divb1, bound) << "div(B) after large-dt CT step = " << divb1;
-  EXPECT_LT(divb1, divb0 + bound);
 }
 
 namespace {

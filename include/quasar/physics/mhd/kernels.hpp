@@ -288,33 +288,20 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u, const MhdBackgroundField<Real>
                        bool cylindrical = false, bool hll_only = false,
                        quasar::numerics::RadialTablesView radial_tables = {});
 
-// -- Face-B update -----------------------------------------------------------
-// Advance the face-staggered in-plane B from the corner Ez by the discrete curl
-// of E so the cell-centered div(B) telescopes to identically zero:
-//   bx_face(i,j) -= dt * (ez(i,j+1) - ez(i,j)) / dy
-//   by_face(i,j) += dt * (ez(i+1,j) - ez(i,j)) / dx
-void launch_mhd_face_b_update(MhdField2D<Real>& u, const EmfField2D<Real>& emf,
-                              Real dt, stream_t stream,
-                              bool cylindrical = false);
-
 // -- CT EMF curl rate into the residual --------------------------------------
 // Write the CT EMF curl RATE (dB/dt, no dt factor) into ONLY dudt.bx_face /
 // dudt.by_face, OVERWRITING (assign, not accumulate) whatever the Godunov flux
 // difference left in those two slots. Every other dudt component (rho, mx, my,
 // mz, energy, bz_cell) is left unchanged by this kernel (active-B0 energy is
-// overwritten later by launch_mhd_split_energy_residual). This routes
-// the face-B advance solely through the CT curl + the single rk_stage, so face B
-// is no longer double-updated by both the flux difference and a separate
-// face_b_update.
+// overwritten later by launch_mhd_split_energy_residual). This routes the
+// face-B advance solely through the CT curl + the single rk_stage, so face B is
+// never double-updated by both the flux difference and a separate direct curl.
 //   dudt.bx_face(i,j) = -(ez_edge(i,j+1) - ez_edge(i,j)) / dy
 //   dudt.by_face(i,j) = +(ez_edge(i+1,j) - ez_edge(i,j)) / dx
-// Stencil-, dx/dy-, and interior-bounds-identical to launch_mhd_face_b_update
-// (with dt factored out), so the telescoping div(B) cancellation is bit-for-bit
-// the same. `grid` is passed by value (like launch_mhd_geometric_source).
-//
-// NOTE: launch_mhd_face_b_update is retained but is now unused on the solver
-// path -- the solver advances face B via this rate + rk_stage instead of
-// applying the curl directly to the field.
+// The stencil telescopes the cell-centered div(B) change to identically zero for
+// any corner Ez, and a convex combination of divergence-free fields stays
+// divergence-free, so the guarantee survives every SSP-RK stage. `grid` is
+// passed by value (like launch_mhd_geometric_source).
 void launch_mhd_emf_curl_rate(const EmfField2D<Real>& emf, MhdField2D<Real>& dudt,
                               Grid2D grid, stream_t stream,
                               bool cylindrical = false);

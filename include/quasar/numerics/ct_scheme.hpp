@@ -4,17 +4,21 @@
 //
 // A CT scheme keeps the discrete magnetic divergence at round-off by storing the
 // in-plane field on cell faces (MhdField2D::bx_face / by_face) and evolving them
-// from a corner-staggered electromotive force (EMF). The two-step contract is:
+// from a corner-staggered electromotive force (EMF). The two steps are:
 //
-//   1. compute_emf : rerun the directional HLLD magnetic fluxes from the SAME
-//      reconstructed interface states as the conservative update, interpret
-//      them as upwind face electric fields, then interpolate those face values
-//      to the shared corner.
-//   2. update_face_b : advance bx_face / by_face by the discrete curl of that
-//      corner Ez. The stencil is chosen so the change in the cell-centered
+//   1. Corner EMF (launch_mhd_ct_emf_prepare / _finish): rerun the directional
+//      HLLD magnetic fluxes from the SAME reconstructed interface states as the
+//      conservative update, interpret them as upwind face electric fields, then
+//      interpolate those face values to the shared corner.
+//   2. Face-B rate (launch_mhd_emf_curl_rate): write the discrete curl of that
+//      corner Ez into the residual's face-B slots as a RATE, which rk_stage then
+//      advances. The stencil is chosen so the change in the cell-centered
 //      discrete divergence telescopes to *identically* zero for any Ez field --
 //      this is the machine-epsilon div(B) guarantee (Evans & Hawley 1988;
-//      Balsara & Spicer 1999).
+//      Balsara & Spicer 1999). A convex combination of divergence-free fields is
+//      divergence-free, so the guarantee survives every SSP-RK stage.
+//
+// Both steps are direct device launches from MhdSolver2D, not virtual calls.
 //
 // divergence_b_linf is a host-side diagnostic returning max |div B| over the
 // interior cells using the same discrete operator the update annihilates.
@@ -28,30 +32,24 @@
 //             + (by_face(i,j+1) - by_face(i,j))/dy
 
 #include "quasar/core/types.hpp"
-#include "quasar/numerics/interface_states.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 
 namespace quasar::numerics {
 
+// Only the div(B) diagnostic is virtual. The EMF construction and the face-B
+// advance are deliberately NOT on this interface: MhdSolver2D builds the corner
+// EMF with launch_mhd_ct_emf_prepare/_finish (passing its own background,
+// boundary flags, and MP5/MP7 order) and then advances face B as an ordinary
+// residual component via launch_mhd_emf_curl_rate + rk_stage, so face B rides
+// the same SSP-RK convex combination as the other seven components. A virtual
+// compute_emf/update_face_b pair could only ever describe a reduced
+// periodic/no-background second-order path that nothing calls -- and applying
+// the curl directly to the field on top of the flux divergence was the
+// double-count bug that shape invites. Keep the seam at the diagnostic, which
+// MhdSolver2D::divergence_b_max() genuinely dispatches through.
 class ICtScheme {
  public:
   virtual ~ICtScheme() = default;
-
-  // Build the corner-staggered EMF (emf.ez_edge) from the conserved field `u`
-  // and the dir=0 / dir=1 reconstructed interface states. `gamma` is the
-  // adiabatic index used by the HLLD flux evaluation. The resulting Ez is a
-  // Godunov/upwind electric field, not a cell-centered kinematic average.
-  virtual void compute_emf(const quasar::mhd::MhdField2D<Real>& u,
-                           const MhdInterfaceStates<Real>& ifx,   // dir=0 faces
-                           const MhdInterfaceStates<Real>& ify,   // dir=1 faces
-                           quasar::mhd::EmfField2D<Real>& emf,
-                           Real gamma) const = 0;
-
-  // Advance the face-staggered in-plane B from the corner Ez by the discrete
-  // curl of E (dB/dt = -curl E). Conserves div(B) to round-off by construction.
-  virtual void update_face_b(quasar::mhd::MhdField2D<Real>& u,
-                             const quasar::mhd::EmfField2D<Real>& emf,
-                             Real dt) const = 0;
 
   // Host diagnostic: L-infinity norm of the discrete cell-centered div(B) over
   // the interior cells.

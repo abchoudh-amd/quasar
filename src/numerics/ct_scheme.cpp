@@ -12,14 +12,19 @@
 //     reconstructed from the same interface states the conservative flux uses, so
 //     the induction update is consistent with the fluid update.
 //
-// This translation unit is the registry-facing CT scheme. Its three methods are
-// thin launchers over the MHD HIP kernels. launch_mhd_ct_emf recomputes HLLD's
-// directional magnetic fluxes at x/y faces, maps them to upwind face Ez, and
-// interpolates them to corners (second order on this registry seam; the solver
-// passes MP5/MP7 order explicitly). update_face_b exposes the direct curl update
-// for standalone callers, while MhdSolver2D uses launch_mhd_emf_curl_rate and
-// advances that rate inside the same SSP-RK stage as the fluid state. Both paths
-// use the identical staggered curl, so div(curl E) telescopes to round-off.
+// This translation unit is the registry-facing CT scheme, and it carries exactly
+// one method: the div(B) diagnostic, a thin launcher over launch_mhd_ct_divb_linf
+// that MhdSolver2D::divergence_b_max() reaches through the same kernel.
+//
+// The EMF construction and the face-B advance are NOT here. MhdSolver2D builds
+// the corner EMF with launch_mhd_ct_emf_prepare/_finish -- passing its own
+// background, boundary flags, and MP5/MP7 order -- and then advances face B as
+// an ordinary residual component via launch_mhd_emf_curl_rate + rk_stage, so it
+// rides the same SSP-RK convex combination as the other seven components. A
+// virtual compute_emf/update_face_b pair on this class could only ever describe
+// a reduced periodic/no-background second-order path that the solver does not
+// take, and applying the curl directly to the field on top of the flux
+// divergence is precisely the double count the residual routing avoids.
 //
 // ---------------------------------------------------------------------------
 // Staggering (matches mhd_field.hpp; see ct_scheme.hpp):
@@ -32,40 +37,17 @@
 
 #include "quasar/numerics/ct_scheme.hpp"
 
-#include "quasar/backend/device.hpp"
+#include "quasar/backend/device.hpp"   // DeviceBuffer for the reduction scratch
 #include "quasar/core/registry.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
-#include "quasar/physics/mhd/mhd_background.hpp"
 
 namespace quasar::numerics {
 
-// Concrete FD-CT scheme, registered "fd_ct_christlieb". Every method delegates to
-// the device launchers declared in physics/mhd/kernels.hpp and synchronizes the
-// default stream so the result is visible to the (host) caller before return.
+// Concrete FD-CT scheme, registered "fd_ct_christlieb". Delegates to the device
+// launcher declared in physics/mhd/kernels.hpp; the reduction writes its result
+// to the host before returning, so no extra synchronize is needed here.
 class ChristliebFdCt : public ICtScheme {
  public:
-  void compute_emf(const quasar::mhd::MhdField2D<Real>& u,
-                   const MhdInterfaceStates<Real>& ifx,   // dir=0 faces
-                   const MhdInterfaceStates<Real>& ify,   // dir=1 faces
-                   quasar::mhd::EmfField2D<Real>& emf,
-                   Real gamma) const override {
-    // The registry CT path is the zero-background, all-periodic seam: the solver
-    // residual path calls launch_mhd_ct_emf directly with its own b0/flags. Here
-    // an inactive background and all-zero boundary flags reproduce the periodic
-    // no-background EMF.
-    const quasar::mhd::MhdBackgroundField<Real> b0{};   // inactive => zero-B0 fast path
-    const quasar::mhd::BoundaryFlags4 flags{};          // all-zero => periodic
-    quasar::mhd::launch_mhd_ct_emf(u, b0, ifx, ify, flags, emf, gamma, nullptr);
-    backend::device_synchronize(nullptr);
-  }
-
-  void update_face_b(quasar::mhd::MhdField2D<Real>& u,
-                     const quasar::mhd::EmfField2D<Real>& emf,
-                     Real dt) const override {
-    quasar::mhd::launch_mhd_face_b_update(u, emf, dt, nullptr);
-    backend::device_synchronize(nullptr);
-  }
-
   Real divergence_b_linf(const quasar::mhd::MhdField2D<Real>& u) const override {
     Real linf = Real{0};
     quasar::mhd::launch_mhd_ct_divb_linf(u, divb_scratch_, &linf, nullptr);

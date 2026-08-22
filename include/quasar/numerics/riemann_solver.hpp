@@ -6,6 +6,15 @@
 // (0 = x, 1 = y). Concrete solvers self-register by name via
 // QUASAR_REGISTER_RIEMANN_SOLVER so the input deck selects them by string.
 //
+// Scope: this interface is a HOST test seam, not the evolution path. MhdSolver2D
+// pins riemann='hlld' by name and calls launch_mhd_hlld_flux directly; nothing in
+// production dispatches through IRiemannSolver. Its value is that the registered
+// adapter reaches the same host/device-shared hlld_core.hpp the GPU runs, so unit
+// tests can exercise the real seven-wave algebra from hand-built states. Adding a
+// second Riemann solver means teaching the device path about it -- registering a
+// class here alone would not change what the solver computes (the constructor
+// gate rejects any other name rather than silently ignoring it).
+//
 // The interface is intentionally gamma-free in flux(): the adiabatic index is a
 // solver-construction-time property. Because the registry default-constructs
 // solvers (argument-free factory), the concrete HLLD solver defaults gamma to

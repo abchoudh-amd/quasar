@@ -1251,8 +1251,8 @@ void MhdSolver2D::consume_residual_face_records(
   // combination as the other 7 components -- and since the curl stencil telescopes
   // discretely (div(curl) = 0) and a convex combination of div-free fields stays
   // div-free, div(B) is preserved at round-off through every stage. There is
-  // therefore NO separate launch_mhd_face_b_update step (that was the double-count
-  // bug: face B advanced by both the flux divergence and the CT curl).
+  // therefore no separate direct curl-into-the-field step: applying the curl to
+  // face B on top of the flux divergence would double-count it.
   const bool low_order = order <= 1;
   launch_mhd_ct_emf_prepare(u, b0_, ifx_, ify_, flags, emf_, gamma, nullptr,
                             order, low_order, radial_tables_.view());
@@ -1351,7 +1351,7 @@ int MhdSolver2D::apply_stage_update(int stage, Real dt) {
   // compute_residual already wrote the pure CT EMF-curl rate into residual_'s
   // bx_face/by_face slots (overwriting the flux-difference contamination), this
   // single convex combination advances face B by constrained transport alone --
-  // there is deliberately NO separate launch_mhd_face_b_update call. The Shu-Osher
+  // there is deliberately no second, direct curl application. The Shu-Osher
   // weights stay consistent across every component, and div(B) is preserved at
   // round-off (convex combination of div-free fields + c*curl rate is div-free,
   // since div(curl) telescopes to zero discretely).

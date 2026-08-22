@@ -140,6 +140,28 @@ So registering ``HllcRiemann`` makes the name visible in
 ``_core.mhd.registered_riemann_solvers()`` and the Python deck validator, but a
 deck selecting it is rejected by the C++ constructor rather than run as HLLD.
 
+Because of that, the ``IRiemannSolver`` and ``ICtScheme`` surfaces are sized to
+what they are actually used for rather than to the full algorithm:
+
+* ``IRiemannSolver`` is a **host test seam**. ``MhdSolver2D`` calls
+  ``launch_mhd_hlld_flux`` directly, so nothing dispatches through the interface;
+  its value is that ``HlldRiemann`` reaches the same host/device-shared
+  ``hlld_core.hpp`` the GPU runs, letting unit tests drive the seven-wave algebra
+  from hand-built states.
+* ``ICtScheme`` carries **only** ``divergence_b_linf``, the diagnostic
+  ``MhdSolver2D::divergence_b_max()`` genuinely dispatches through. The corner-EMF
+  construction and the face-B advance are not on it: the solver builds the EMF
+  with ``launch_mhd_ct_emf_prepare`` / ``_finish`` (passing its own background,
+  boundary flags, and MP5/MP7 order) and then advances face B as an ordinary
+  residual component via ``launch_mhd_emf_curl_rate`` + ``rk_stage``, so it rides
+  the same SSP-RK convex combination as the other seven components. Applying the
+  curl directly to the field on top of the flux divergence would double-count it.
+
+The solver's own scheme members mirror this: it owns an ``ISsprkIntegrator`` and
+an ``IPositivityLimiter`` (both genuinely called) and no ``IRiemannSolver`` or
+``ICtScheme`` instance at all, since constructing one that is never dereferenced
+would advertise a dispatch seam that does not exist.
+
 Adding a real scheme to one of the fixed axes therefore also requires:
 
 #. a device kernel implementing it (declared in

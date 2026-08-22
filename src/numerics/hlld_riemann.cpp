@@ -10,6 +10,17 @@
 // This file is only the registry adapter: it pins gamma and wires the
 // IRiemannSolver virtual interface to hlld::hlld_flux_x via the shared
 // rotate_in/rotate_out.
+//
+// It is NOT on the evolution path. MhdSolver2D pins riemann='hlld' by name and
+// calls launch_mhd_hlld_flux directly, so nothing in production dispatches
+// through IRiemannSolver. What this adapter buys is a HOST entry point into the
+// same hlld_core.hpp the device runs: tests/unit/numerics/test_hlld_riemann.cpp
+// drives the seven-wave algebra (Rankine-Hugoniot on the double-star state, the
+// HLL fallback weights, degenerate/vanishing normal fields, and the field-split
+// cancellation cases) from hand-built states, with no device buffers to stage.
+// Because the core is QUASAR_HOST_DEVICE and shared, those assertions bind the
+// same code the GPU executes -- keep this adapter for that reason, not as a
+// pluggable scheme seam.
 
 #include "quasar/numerics/riemann_solver.hpp"
 

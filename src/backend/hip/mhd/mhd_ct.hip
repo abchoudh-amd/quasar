@@ -877,64 +877,19 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_emf_kernel(
   ey_edge[k] = Real{0};
 }
 
-// Face-B update: dB/dt = -curl E.
-//   bx_face(i,j) -= dt * (ez(i,j+1) - ez(i,j)) / dy
-//   by_face(i,j) += dt * (ez(i+1,j) - ez(i,j)) / dx
-__global__ void QUASAR_LAUNCH_BOUNDS_256 face_b_update_kernel(
-    quasar::Grid2D g, int cylindrical, Real dt,
-    double* __restrict__ bx_face, double* __restrict__ by_face,
-    const double* __restrict__ ez_edge) {
-  const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  const int j = blockIdx.y * blockDim.y + threadIdx.y;
-  if (i > g.nx || j > g.ny) return;
-  const std::size_t k = g.index(i, j);
-  const Real one2[2] = {Real{1}, Real{1}};
-
-  // Bx has nx+1 physical x faces and ny cell rows.  Include i==nx so the
-  // last cell's high face advances by the same curl as every interior face.
-  if (i <= g.nx && j < g.ny) {
-    const Real bx_a[2] = {
-        -ez_edge[g.index(i, j + 1)], ez_edge[k]};
-    const Real bx_b[2] = {dt, dt};
-    const Real bx_d0[2] = {g.dy(), g.dy()};
-    bx_face[k] += quasar::numerics::scaled_product_quotient_sum(
-        bx_a, bx_b, bx_d0, one2, 2);
-  }
-
-  // By has nx cell columns and ny+1 physical y faces.  Include j==ny for the
-  // transposed high face.  These extents/stencils exactly match
-  // emf_curl_rate_kernel, with dt restored and accumulation into the live B.
-  if (i < g.nx && j <= g.ny) {
-    if (cylindrical != 0) {
-      const Real dr = g.dx();
-      const Real r_center = g.r_at_cell_center(i);
-      const Real ez_lo = ez_edge[k];
-      const Real ez_hi = ez_edge[g.index(i + 1, j)];
-      const Real a[4] = {ez_hi, -ez_lo, ez_hi, ez_lo};
-      const Real b[4] = {dt, dt, dt, dt};
-      const Real d0[4] = {dr, dr, r_center, r_center};
-      const Real d1[4] = {Real{1}, Real{1}, Real{2}, Real{2}};
-      by_face[k] += quasar::numerics::scaled_product_quotient_sum(
-          a, b, d0, d1, 4);
-    } else {
-      const Real by_a[2] = {
-          ez_edge[g.index(i + 1, j)], -ez_edge[k]};
-      const Real by_b[2] = {dt, dt};
-      const Real by_d0[2] = {g.dx(), g.dx()};
-      by_face[k] += quasar::numerics::scaled_product_quotient_sum(
-          by_a, by_b, by_d0, one2, 2);
-    }
-  }
-}
-
-// CT EMF curl RATE written into the residual's face-B slots. This is the SAME
-// stencil as face_b_update_kernel above with the dt factor removed (it is the
-// dB/dt rate; rk_stage applies dt later) and assigned (=) instead of accumulated
-// so it OVERWRITES the face-B contribution that flux_difference left in dudt.
-// ONLY dudt.bx_face / dudt.by_face are touched -- every other dudt component is
-// left exactly as flux_difference wrote it. The indexing, dx/dy, and interior
-// loop bounds match face_b_update_kernel exactly so the telescoping div(B)
-// cancellation stays bit-for-bit identical.
+// CT EMF curl RATE (dB/dt; rk_stage applies dt later) written into the
+// residual's face-B slots. Assigned (=) rather than accumulated, so it
+// OVERWRITES the face-B contribution flux_difference left in dudt -- advancing
+// face B by both the flux divergence and the CT curl is a double count. ONLY
+// dudt.bx_face / dudt.by_face are touched; every other dudt component is left
+// exactly as flux_difference wrote it.
+//
+// The face extents are deliberately asymmetric: Bx covers the physical high-x
+// face (i == nx) over cell rows only, By covers j == ny over cell columns only.
+// Those high-face rates are needed when cell-collocating dB/dt for split energy,
+// and dropping them breaks the telescoping div(B) cancellation in the last cell
+// row/column (pinned by MhdCtScheme.EmfCurlRateCoversHighFacesAndPreserves-
+// Divergence and its cylindrical sibling).
 __global__ void QUASAR_LAUNCH_BOUNDS_256 emf_curl_rate_kernel(
     quasar::Grid2D g, int cylindrical,
     double* __restrict__ dbx_face, double* __restrict__ dby_face,
@@ -1069,19 +1024,6 @@ void launch_mhd_ct_emf(const MhdField2D<Real>& u,
                             scheme_order, hll_only, radial_tables);
   launch_mhd_ct_emf_finish(flags, emf, stream, scheme_order, cylindrical,
                            radial_tables);
-}
-
-void launch_mhd_face_b_update(MhdField2D<Real>& u, const EmfField2D<Real>& emf,
-                              Real dt, stream_t stream, bool cylindrical) {
-  const Grid2D g = u.grid;
-  const dim3 block(kBlock2D, kBlock2D);
-  const dim3 grid((static_cast<unsigned>(g.nx) + 1 + block.x - 1) / block.x,
-                  (static_cast<unsigned>(g.ny) + 1 + block.y - 1) / block.y);
-  hipLaunchKernelGGL(face_b_update_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
-                     g, cylindrical ? 1 : 0, dt,
-                     u.bx_face.device_ptr(), u.by_face.device_ptr(),
-                     emf.ez_edge.device_ptr());
-  QUASAR_HIP_CHECK(::hipGetLastError());
 }
 
 void launch_mhd_emf_curl_rate(const EmfField2D<Real>& emf, MhdField2D<Real>& dudt,
