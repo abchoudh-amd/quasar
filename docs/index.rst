@@ -2,7 +2,8 @@ Quasar documentation
 ====================
 
 Quasar is a HIP-accelerated numerical simulation framework. It currently
-ships three physics vertical slices:
+ships three Python-driven physics vertical slices and a header-only equilibrium
+solver:
 
 * **magnetostatics** - computes magnetic flux density and its analytic
   Jacobian via the Biot-Savart law on arbitrary thin-wire current-carrying
@@ -15,6 +16,9 @@ ships three physics vertical slices:
   MP5/MP7 reconstruction on Cartesian and axisymmetric cylindrical ``(r, z)``
   grids, HLLD Riemann solver, and SSP-RK3) driven from the ``quasar.mhd``
   front-end.
+* **free-boundary equilibrium** - a header-only Grad-Shafranov solver with
+  sixth-order compact derivatives, geometric multigrid, flux-surface
+  diagnostics, and a bridge to the staggered MHD mesh.
 
 .. toctree::
    :maxdepth: 2
@@ -50,6 +54,7 @@ ships three physics vertical slices:
    dev-guide/adding_a_filter
    dev-guide/adding_a_background_field
    dev-guide/adding_an_mhd_scheme
+   dev-guide/adding_an_equilibrium_profile
    dev-guide/adding_distributed_physics
 
 Indices and tables

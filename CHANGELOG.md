@@ -7,6 +7,33 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
+- Equilibrium: new free-boundary Grad–Shafranov vertical slice — the framework's
+  first elliptic boundary-value solver (every prior slice is explicit hyperbolic
+  time-marching, and the tree previously contained no Poisson, multigrid, or
+  Krylov machinery at all). Sixth-order compact (Padé) operators supply the
+  residual, a matrix-free geometric multigrid supplies the correction, and
+  defect correction couples them so the converged solution carries sixth-order
+  accuracy while every linear solve stays local and smoothable. Free-boundary
+  closure uses the exact axisymmetric Green's function (complete elliptic
+  integrals via AGM) over external coils plus the plasma's own current.
+  Polynomial profiles in normalized flux are renormalized each outer iteration
+  to a requested total plasma current. Derived output includes `B`, `q(psi)`,
+  flux-surface geometry, and shaping parameters, all computed inside the module
+  where the high-order derivatives are still available. Documented in
+  `docs/dev-guide/adding_an_equilibrium_profile.rst`.
+- Equilibrium: MHD seeding bridge — projects a converged equilibrium onto the
+  staggered MHD mesh by differencing `psi` at cell corners rather than
+  interpolating `B`, so the result is discretely solenoidal to round-off
+  (measured 1.3e-13 relative) and is accepted by
+  `MhdSolver2D::seed_background`. This replaces the vacuum Biot–Savart `A_phi`
+  projection used by `examples/square_toroid_mhd` with a self-consistent
+  equilibrium.
+- Numerics: reusable elliptic machinery under `numerics/` — node-centered
+  `EllipticGrid`, sixth-order Padé derivative coefficients with derived
+  one-sided closures, a pivoting tridiagonal line solve, second- and
+  sixth-order Grad–Shafranov operators, matrix-free multigrid, defect
+  correction, and a tile-decomposition layer whose tiled operator is
+  bit-for-bit identical to the serial one.
 - MHD: new ideal-MHD vertical slice — MP5/MP7 monotonicity-preserving
   characteristic reconstruction on Cartesian and axisymmetric cylindrical
   `(r, z)` grids, an HLLD Riemann solver,
@@ -145,7 +172,33 @@ interfaces may still change between entries.
     variants, require the distributed dependency set and schedule GPU tests
     through a CTest resource specification.
 
+### Known limitations
+- Equilibrium: the Newton phase is implemented but **disabled by default**. Its
+  diagonal profile Jacobian is the fixed-boundary term; on a free-boundary
+  problem the boundary condition is itself a dense functional of the interior
+  solution, and with that block missing the Newton direction is wrong near
+  convergence (measured: Picard converges in 222 iterations, Newton stalls at
+  7.4e-4). Damped Picard is the production path. Completing Newton requires a
+  Jacobian-free Newton–Krylov formulation or the von Hagenow surface-current
+  form.
+- Equilibrium: the solver is host-only. The Padé closures require a pivoting
+  line solve, which rules out a textbook pivot-free parallel cyclic reduction,
+  so the device port needs a pivot-capable algorithm. The tile layer reports
+  via `TileGrid::supports_local_pade()` whether a decomposition can run the
+  sixth-order operator locally; a 2D decomposition cannot.
+- Equilibrium: the plasma-contribution boundary integral is the exact
+  `O(N_boundary * N_interior)` form. It is negligible at 256² but dominates
+  above roughly 1024²; multipole acceleration is deferred.
+
 ### Fixed
+- Equilibrium: F-profile recovery and the optional Newton profile Jacobian now
+  apply the same plasma-current normalization as the solved source; open flux
+  surfaces are excluded from q and geometry aggregates; and projection rejects
+  target meshes whose ghost faces reach the cylindrical axis rather than
+  emitting a non-solenoidal background.
+- Numerics: the pivoting tridiagonal solve handles one-row systems safely, tile
+  partitioning rejects non-positive halos, and full-weighting restriction
+  validates its exact nested-grid contract before indexing the fine field.
 - MHD: split-background momentum fluxes no longer lose material-pressure and
   perturbation-stress gradients beside a dominant static field.  Material,
   background-linear cross, wave-dissipation, and static-background stresses are
