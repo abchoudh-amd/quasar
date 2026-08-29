@@ -38,6 +38,7 @@
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
+#include "quasar/physics/equilibrium/critical_points.hpp"
 #include "quasar/physics/equilibrium/equilibrium_profile.hpp"
 #include "quasar/physics/equilibrium/free_boundary.hpp"
 
@@ -208,6 +209,69 @@ void launch_gs_compute_derivatives(const EllipticGrid& g, const Real* d_psi,
                                    GsDerivativeFields& out,
                                    GsOperatorScratch& scratch,
                                    stream_t stream);
+
+// -- Critical points -----------------------------------------------------------
+//
+// Locating the magnetic axis and the X-points is the step that decides psi_N,
+// which decides the current, which creates the axis -- so it runs every Picard
+// iteration and its tie-breaking has to match the host exactly.
+//
+// The algorithm splits into a wide part and a narrow part:
+//
+//   * candidate scan and Newton refinement -- one thread per interior node,
+//     embarrassingly parallel, and bit-exact because each Newton iterate is
+//     serial within its own thread;
+//   * duplicate merge and axis/boundary selection -- inherently SEQUENTIAL and
+//     order-dependent. The host keeps the first candidate in row-major scan
+//     order and breaks psi ties by first-wins, so any reordering silently picks
+//     a different axis on a symmetric equilibrium.
+//
+// The narrow part therefore runs single-threaded ON DEVICE rather than being
+// copied back to the host. That is a deliberate reading of the
+// device-everything decision: the candidate count is tens, so a single-threaded
+// device pass costs nothing measurable, and it keeps the result resident. The
+// alternative -- parallelizing the merge -- would change the tie-breaking.
+
+// Device-side result of the critical-point search. Fixed capacity, because a
+// kernel cannot grow a vector.
+struct GsCriticalResult {
+  // Far above any physical configuration; a diverted tokamak has one or two
+  // X-points and the merge collapses near-duplicates before they are stored.
+  static constexpr int kMaxXPoints = 64;
+
+  CriticalPoint axis{};
+  CriticalPoint x_points[kMaxXPoints]{};
+  int  n_x{0};
+  Real psi_axis{0};
+  Real psi_boundary{0};
+  bool has_closed_surface{false};
+  // Set when the merge ran out of X-point capacity. The host has no such limit,
+  // so this is the one place the device can diverge; it is reported rather than
+  // silently truncated.
+  bool x_point_overflow{false};
+};
+
+struct GsCriticalScratch {
+  GsCriticalScratch() = default;
+  explicit GsCriticalScratch(const EllipticGrid& g) { resize(g); }
+
+  void resize(const EllipticGrid& g);
+
+  backend::DeviceBuffer<Real> grad_scale{};          // single element
+  backend::DeviceBuffer<CriticalPoint> candidates{}; // grid-sized, sparse
+  backend::DeviceBuffer<GsCriticalResult> result{};  // single element
+};
+
+// Locate the magnetic axis and every interior X-point. `derivatives` must
+// already hold the sixth-order derivative fields of `d_psi`.
+void launch_gs_find_critical_points(const EllipticGrid& g, const Real* d_psi,
+                                    const GsDerivativeFields& derivatives,
+                                    GsCriticalScratch& scratch,
+                                    stream_t stream);
+
+// Copy the search result out. Synchronizes the stream.
+GsCriticalResult copy_critical_to_host(const GsCriticalScratch& scratch,
+                                       stream_t stream);
 
 // -- Source terms --------------------------------------------------------------
 
