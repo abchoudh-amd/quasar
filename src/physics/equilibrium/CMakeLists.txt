@@ -6,7 +6,7 @@ endif()
 # the kernels under src/backend/hip/equilibrium/, reached through the launch
 # ABI in physics/equilibrium/kernels.hpp.
 set(_quasar_equilibrium_sources
-  gs_solver_device.cpp
+  gs_solver.cpp
 )
 
 quasar_add_module(equilibrium SOURCES ${_quasar_equilibrium_sources})

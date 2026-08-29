@@ -1,4 +1,4 @@
-// Device-backed free-boundary Grad-Shafranov driver.
+// Free-boundary Grad-Shafranov driver.
 //
 // This is the orchestration layer: it owns the device buffers, sequences the
 // kernel launches, and reproduces GsSolver::solve step for step. There is no
@@ -11,11 +11,12 @@
 // only one of them is diagnosable: if the device result diverges, the question
 // has to be "which kernel" and not "which of two algorithms".
 
-#include "quasar/physics/equilibrium/gs_solver_device.hpp"
+#include "quasar/physics/equilibrium/gs_solver.hpp"
 
 #include "quasar/backend/device.hpp"
 #include "quasar/backend/memory.hpp"
 #include "quasar/physics/equilibrium/kernels.hpp"
+#include "quasar/numerics/gs_operator_l6.hpp"  // l6_is_applicable
 
 #include <cmath>
 #include <stdexcept>
@@ -71,31 +72,31 @@ CriticalPointSet to_host_set(const GsCriticalResult& r) {
 
 }  // namespace
 
-GsSolverDevice::GsSolverDevice(GsConfig cfg,
+GsSolver::GsSolver(GsConfig cfg,
                                std::shared_ptr<IEquilibriumProfile> profile)
   : cfg_{std::move(cfg)} {
   cfg_.grid.validate();
   if (!profile) {
-    throw std::invalid_argument{"GsSolverDevice: profile must not be null"};
+    throw std::invalid_argument{"GsSolver: profile must not be null"};
   }
   if (!numerics::l6_is_applicable(cfg_.grid)) {
     throw std::invalid_argument{
-        "GsSolverDevice: grid too small for the sixth-order operator"};
+        "GsSolver: grid too small for the sixth-order operator"};
   }
   if (!(cfg_.plasma_current != Real{0})) {
-    throw std::invalid_argument{"GsSolverDevice: plasma_current must be nonzero"};
+    throw std::invalid_argument{"GsSolver: plasma_current must be nonzero"};
   }
 
   const auto* poly = dynamic_cast<const PolynomialProfile*>(profile.get());
   if (poly == nullptr) {
     throw std::invalid_argument{
-        "GsSolverDevice: only PolynomialProfile can be lowered to the device; "
+        "GsSolver: only PolynomialProfile can be lowered to the device; "
         "a non-polynomial profile needs its own device evaluator"};
   }
   profile_ = to_coefficients(*poly);
 }
 
-GsResult GsSolverDevice::solve() {
+GsResult GsSolver::solve() {
   const numerics::EllipticGrid& g = cfg_.grid;
   const std::size_t n = g.size();
   constexpr stream_t stream = nullptr;
