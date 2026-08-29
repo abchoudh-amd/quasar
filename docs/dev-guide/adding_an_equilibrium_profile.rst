@@ -38,6 +38,7 @@ Header                                               Responsibility
 ``physics/equilibrium/critical_points.hpp``          Magnetic axis / X-point location
 ``physics/equilibrium/free_boundary.hpp``            Green's function, coil field, boundary integral
 ``physics/equilibrium/gs_solver.hpp``                Nonlinear outer loop and failure contract
+``physics/equilibrium/kernels.hpp``                  Device kernel-launch ABI for the whole module
 ``physics/equilibrium/flux_surfaces.hpp``            ``B``, ``q(\psi)``, surface geometry and metrics
 ``physics/equilibrium/mhd_seeding.hpp``              Projection onto the staggered MHD mesh
 ===================================================  ==========================================================
@@ -52,7 +53,27 @@ which is zero on the magnetic axis and one on the plasma boundary -- the
 EFIT/FreeGS convention, so a polynomial profile is directly comparable with
 published equilibria.
 
-Two requirements are easy to miss:
+.. important::
+
+   The solver runs on the GPU, and a virtual interface cannot cross to the
+   device: a vtable pointer is only valid for an object constructed on the side
+   that dispatches through it. ``IEquilibriumProfile`` therefore stays entirely
+   host-side, and ``GsSolver`` lowers the selected profile to a flat
+   ``ProfileCoefficients`` POD at construction, which the kernels evaluate with
+   no indirection.
+
+   The consequence is concrete: **only ``PolynomialProfile`` currently works.**
+   Passing anything else is a construction-time ``std::invalid_argument``,
+   deliberately, rather than a silent fallback to something slower or wrong.
+
+   Adding a non-polynomial profile therefore takes one extra step beyond
+   implementing the interface -- giving it a device representation. For a spline
+   or tabulated form the natural route is a sampled table plus a tag on
+   ``ProfileCoefficients``, with the ``__device__`` evaluator dispatching on the
+   tag. Implement the host interface as well: it is what the registry, the deck,
+   and the per-kernel reference comparisons use.
+
+Two further requirements are easy to miss:
 
 * **Vanish at the boundary.** ``dp_dpsi(1)`` and ``ff_prime(1)`` should be zero,
   otherwise current is driven outside the last closed flux surface.

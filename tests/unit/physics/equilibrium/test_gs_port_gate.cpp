@@ -2,14 +2,20 @@
 //
 // The per-kernel tests prove each piece matches the host implementation. This
 // proves the assembled thing still computes the equilibrium it computed before
-// the port, measured against numbers that were recorded BEFORE any of this work
-// started -- runs/grad_shafranov_tokamak/latest/summary.txt, produced by the
-// host-only header build at commit a7e80e7.
+// the port, measured against numbers recorded BEFORE any of this work started:
+// a host-only header build of the reference deck at commit a7e80e7.
 //
-// That distinction is what makes this gate meaningful once the host
-// implementation is deleted. Every other test compares device code against host
-// code; if both were wrong in the same way, they would agree. These numbers
-// predate the device code entirely.
+// That distinction is what makes this gate meaningful now that the host solver
+// is deleted. Every other test compares device code against host code; if both
+// were wrong in the same way they would agree. These numbers predate the device
+// code entirely.
+//
+// The constants below ARE the record. They were transcribed from a run under
+// runs/, which is scratch space excluded from the repository by its own
+// .gitignore -- so that directory cannot be relied on to exist, and this file
+// is the only durable copy. Treat a change to these numbers the way you would
+// treat a change to a golden file: it is either a deliberate physics change
+// that needs justifying, or a regression.
 //
 // -- Why tolerances rather than equality --------------------------------------
 // Three independent reasons, none of which is slack:
