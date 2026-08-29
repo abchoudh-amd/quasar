@@ -4,6 +4,7 @@ endif()
 
 set(_quasar_equilibrium_hip_sources
   gs_operator.hip
+  gs_reduce.hip
 )
 
 quasar_add_hip_module(equilibrium_hip SOURCES ${_quasar_equilibrium_hip_sources})
@@ -22,6 +23,12 @@ quasar_add_backend_src_include(equilibrium_hip)
 # The Pade line solve is where this bites hardest: it is a long serial
 # elimination chain, so a single contracted operation early on propagates
 # through every subsequent node of the line.
+#
+# gs_reduce.hip has an INDEPENDENT and harder requirement on the same flag: its
+# two-sum error-free transformation is only error-free if each operation rounds
+# separately. Contraction there does not shift the answer by an ulp, it silently
+# turns the compensated sum back into a naive one. Do not relax this flag for
+# one file without checking the other.
 target_compile_options(quasar_equilibrium_hip
   PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>)
 #

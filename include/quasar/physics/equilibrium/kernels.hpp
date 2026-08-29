@@ -22,12 +22,17 @@
 //
 // -- Determinism ---------------------------------------------------------------
 // Every kernel here is deterministic by construction and carries no
-// floating-point atomics. The line solves are per-thread serial with the same
-// operation order as the host reference, and the equilibrium HIP module is
-// compiled with -ffp-contract=off, so device results are bit-identical to the
-// host reference rather than merely close. That exactness is what makes the
-// host code deletable at the end of the port: the equivalence tests are an
-// equality, not a tolerance.
+// floating-point atomics. Reductions use a fixed-order tree that finishes on
+// device; the line solves are per-thread serial with the same operation order
+// as the host reference. The equilibrium HIP module is compiled with
+// -ffp-contract=off, so device results are bit-identical to the host reference
+// rather than merely close. That exactness is what makes the host code
+// deletable at the end of the port: the equivalence tests are an equality, not
+// a tolerance.
+//
+// One documented exception: the plasma-current SUM cannot be bit-exact against
+// a sequential host sum, because summation is not associative. It is instead
+// held to a stronger standard -- see launch_gs_total_plasma_current.
 
 #include "quasar/backend/device.hpp"
 #include "quasar/backend/memory.hpp"
@@ -85,5 +90,53 @@ void launch_gs_apply_l6(const EllipticGrid& g, const Real* d_x, Real* d_y,
 void launch_gs_residual_l6(const EllipticGrid& g, const Real* d_x,
                            const Real* d_b, Real* d_r,
                            GsOperatorScratch& scratch, stream_t stream);
+
+// -- Reductions ----------------------------------------------------------------
+//
+// Both reductions are two-pass and finish ON DEVICE: a first kernel reduces to
+// one partial per block, a second single-block kernel folds the partials. The
+// host tail used elsewhere in the codebase is deliberately avoided here so the
+// value can stay resident for device-side control flow; copy_scalar_to_host()
+// is the explicit opt-out when the host genuinely needs the number.
+//
+// Scratch holds the block partials and the final scalar, both device-side.
+struct GsReduceScratch {
+  GsReduceScratch() = default;
+  explicit GsReduceScratch(const EllipticGrid& g) { resize(g); }
+
+  void resize(const EllipticGrid& g);
+
+  backend::DeviceBuffer<Real> partial_hi{};
+  backend::DeviceBuffer<Real> partial_lo{};
+  backend::DeviceBuffer<Real> result{};  // single element
+};
+
+// Copy the reduction result out. Synchronizes the stream.
+Real copy_scalar_to_host(const GsReduceScratch& scratch, stream_t stream);
+
+// Max |f| over INTERIOR nodes. Boundary nodes carry Dirichlet data and are
+// excluded: including them would report zero there by construction and dilute
+// the measurement.
+//
+// Bit-exact against numerics::interior_max_norm. Max is associative and
+// incurs no rounding, so reduction order is irrelevant and the tree result
+// equals the sequential result exactly.
+void launch_gs_interior_max_norm(const EllipticGrid& g, const Real* d_f,
+                                 GsReduceScratch& scratch, stream_t stream);
+
+// Total toroidal plasma current: the integral of j_phi over the poloidal
+// cross-section, which is what the profile normalization targets.
+//
+// NOT bit-exact against the host, and cannot be. The host reference is a naive
+// sequential sum, whose value depends on the summation order; any parallel tree
+// necessarily sums in a different order. Rather than pretend, this kernel is
+// held to a STRONGER standard than the host: double-double (two-sum)
+// compensated accumulation in a fixed tree order, which is both reproducible
+// run-to-run and closer to the exactly-rounded sum than the host result is.
+// The equivalence test asserts exactly that -- device is at least as accurate
+// as host, measured against a long-double reference -- rather than asserting an
+// equality that would be false.
+void launch_gs_total_plasma_current(const EllipticGrid& g, const Real* d_j_phi,
+                                    GsReduceScratch& scratch, stream_t stream);
 
 }  // namespace quasar::equilibrium
