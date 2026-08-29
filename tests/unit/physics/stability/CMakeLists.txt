@@ -1,5 +1,6 @@
 set(_quasar_stability_tests
   test_flux_coordinates
+  test_radial_domains
 )
 
 foreach(_test_name IN LISTS _quasar_stability_tests)
@@ -17,4 +18,5 @@ endforeach()
 # any coordinates, so they inherit the solver's runtime.
 set_tests_properties(
   stability_test_flux_coordinates
+  stability_test_radial_domains
   PROPERTIES TIMEOUT 600)

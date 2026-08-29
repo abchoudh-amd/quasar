@@ -124,4 +124,58 @@ void launch_check_straightness(const FluxCoordinateGrid& coords,
                                const equilibrium::GsMagneticField& field,
                                Real* d_deviation, stream_t stream);
 
+// -- Rational surfaces and the radial domain layout ----------------------------
+//
+// The eigenfunction is singular where q = m/n, so a single global Chebyshev
+// expansion loses its spectral convergence exactly where the unstable modes
+// localize. The fix is to break the radial domain at those surfaces, so each
+// subinterval spans smooth data.
+//
+// Which surfaces are resonant depends on the toroidal mode number, so the
+// layout is rebuilt per n rather than computed once.
+
+struct RationalSurfaces {
+  // Far more than any physical case needs: a resonance requires q to pass
+  // through m/n, and q spans a range of a few over the whole plasma.
+  static constexpr int kMaxRational = 64;
+
+  Real psi_n[kMaxRational]{};  // ascending
+  int  m[kMaxRational]{};      // poloidal number at each resonance
+  int  count{0};
+  bool overflow{false};
+};
+
+struct RadialDomains {
+  static constexpr int kMaxDomains = 80;
+
+  // Ascending, with breakpoints[0] == psi_lo and breakpoints[n_domains] ==
+  // psi_hi. A Chebyshev expansion is built on each [k, k+1] interval.
+  Real breakpoints[kMaxDomains + 1]{};
+  int  n_domains{0};
+  bool overflow{false};
+};
+
+// Locate every psi_n where q = m/n, by scanning adjacent surfaces for a
+// crossing and interpolating within the bracketing pair.
+//
+// Single-threaded: the output is an ordered list built by a sequential scan,
+// and the count is a running index. Parallelizing would need a prefix sum over
+// a handful of entries to produce the same ordering.
+void launch_locate_rational_surfaces(const FluxCoordinateGrid& coords,
+                                     int n_toroidal, RationalSurfaces* d_out,
+                                     stream_t stream);
+
+// Lay out Chebyshev subintervals, breaking at each rational surface.
+//
+// `min_domains` forces a minimum subdivision so a mode number with no
+// resonance in range still gets a usable layout rather than one interval
+// spanning the whole plasma. Resonances closer together than `min_width` are
+// merged: two breakpoints a fraction of a percent apart would create a
+// subinterval too thin to carry a meaningful expansion, and would wreck the
+// conditioning of the block it produces.
+void launch_build_radial_domains(const RationalSurfaces* d_rational,
+                                 Real psi_lo, Real psi_hi, int min_domains,
+                                 Real min_width, RadialDomains* d_out,
+                                 stream_t stream);
+
 }  // namespace quasar::stability
