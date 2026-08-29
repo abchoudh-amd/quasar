@@ -114,6 +114,50 @@ class PolynomialProfile final : public IEquilibriumProfile {
   std::vector<Real> f_coeffs_;
 };
 
+// -- Device-side profile representation ---------------------------------------
+//
+// IEquilibriumProfile is a virtual interface, and a vtable cannot cross to the
+// device: the object would have to be constructed on device to have a valid
+// vtable pointer there, which defeats the point of a host-side registry.
+//
+// The resolution is to keep the registry and the polymorphism entirely on the
+// host, and LOWER the selected profile to this flat POD at configuration time.
+// The device then evaluates a plain polynomial with no indirection. This is
+// exactly the same trade the deck boundary already makes elsewhere: strings and
+// virtuals on the host, plain data on the device.
+//
+// A profile that is not polynomial (a spline or tabulated form, once those
+// exist) will need either a sampled-table variant of this struct or its own
+// device evaluator; the tag field is the seam where that dispatch would go.
+struct ProfileCoefficients {
+  // Sixteen terms is far beyond any physically motivated profile -- the
+  // EFIT/FreeGS family is typically two or three -- and keeps the struct
+  // trivially copyable so it can be passed to a kernel by value.
+  static constexpr int kMaxCoefficients = 16;
+
+  Real p_coeffs[kMaxCoefficients]{};
+  Real f_coeffs[kMaxCoefficients]{};
+  int  n_p{0};
+  int  n_f{0};
+};
+
+// Lower a polynomial profile to its device representation.
+inline ProfileCoefficients to_coefficients(const PolynomialProfile& profile) {
+  const auto& p = profile.p_coefficients();
+  const auto& f = profile.f_coefficients();
+  if (static_cast<int>(p.size()) > ProfileCoefficients::kMaxCoefficients
+      || static_cast<int>(f.size()) > ProfileCoefficients::kMaxCoefficients) {
+    throw std::invalid_argument{
+        "to_coefficients: profile exceeds ProfileCoefficients::kMaxCoefficients"};
+  }
+  ProfileCoefficients out;
+  out.n_p = static_cast<int>(p.size());
+  out.n_f = static_cast<int>(f.size());
+  for (int k = 0; k < out.n_p; ++k) out.p_coeffs[k] = p[static_cast<std::size_t>(k)];
+  for (int k = 0; k < out.n_f; ++k) out.f_coeffs[k] = f[static_cast<std::size_t>(k)];
+  return out;
+}
+
 // -- Solov'ev exact solution --------------------------------------------------
 //
 // The one closed-form GS equilibrium, obtained by taking both free functions

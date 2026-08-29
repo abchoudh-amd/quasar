@@ -38,6 +38,7 @@
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
+#include "quasar/physics/equilibrium/equilibrium_profile.hpp"
 #include "quasar/physics/equilibrium/free_boundary.hpp"
 
 #include <vector>
@@ -179,6 +180,76 @@ void launch_gs_apply_coil_boundary(const EllipticGrid& g,
 void launch_gs_evaluate_coil_field(const EllipticGrid& g,
                                    const GsCoilSet& coils, Real* d_psi,
                                    stream_t stream);
+
+// -- Derivative fields ---------------------------------------------------------
+//
+// First and second derivatives of psi over the whole grid, computed once with
+// the sixth-order compact operators and reused by the critical-point search and
+// the field/flux-surface diagnostics. Matches
+// critical_points.hpp::compute_derivatives bit-for-bit.
+//
+// d_rz is obtained by differentiating d_r along z, in that order -- not by
+// differentiating d_z along r. The two are not numerically identical, and the
+// host reference picks the former.
+struct GsDerivativeFields {
+  GsDerivativeFields() = default;
+  explicit GsDerivativeFields(const EllipticGrid& g) { resize(g); }
+
+  void resize(const EllipticGrid& g);
+
+  backend::DeviceBuffer<Real> d_r{};
+  backend::DeviceBuffer<Real> d_z{};
+  backend::DeviceBuffer<Real> d_rr{};
+  backend::DeviceBuffer<Real> d_zz{};
+  backend::DeviceBuffer<Real> d_rz{};
+};
+
+void launch_gs_compute_derivatives(const EllipticGrid& g, const Real* d_psi,
+                                   GsDerivativeFields& out,
+                                   GsOperatorScratch& scratch,
+                                   stream_t stream);
+
+// -- Source terms --------------------------------------------------------------
+
+// j_phi = r p'(psi_N) + FF'(psi_N) / (mu0 r), zero where psi_N >= 1.
+//
+// psi_N == 1 is outside the last closed surface, so no current is driven there.
+// The profile arrives as a flat POD rather than through IEquilibriumProfile:
+// see ProfileCoefficients for why the virtual interface cannot cross to device.
+void launch_gs_build_current(const EllipticGrid& g, const Real* d_psi,
+                             const ProfileCoefficients& profile, Real psi_axis,
+                             Real psi_boundary, Real* d_j_phi,
+                             stream_t stream);
+
+// In-place scalar multiply over the whole field. Used to apply the I_p
+// normalization to j_phi once the raw current is known.
+void launch_gs_scale_field(const EllipticGrid& g, Real scale, Real* d_field,
+                           stream_t stream);
+
+// rhs = -mu0 * r * j_phi on interior nodes; untouched on the boundary, which
+// carries Dirichlet data rather than a source.
+void launch_gs_build_rhs(const EllipticGrid& g, const Real* d_j_phi,
+                         Real* d_rhs, stream_t stream);
+
+// dS/dpsi, the diagonal of the source's derivative with respect to psi, zero
+// outside the plasma. This is the term whose omission leaves a Picard
+// iteration linear; it is the Newton path's Jacobian.
+void launch_gs_build_jacobian_diagonal(const EllipticGrid& g,
+                                       const Real* d_psi,
+                                       const ProfileCoefficients& profile,
+                                       Real psi_axis, Real psi_boundary,
+                                       Real profile_scale, Real* d_jac,
+                                       stream_t stream);
+
+// target += weight * (candidate - target), over the whole field.
+void launch_gs_blend(const EllipticGrid& g, Real* d_target,
+                     const Real* d_candidate, Real weight, stream_t stream);
+
+// Copy boundary nodes from `source` into `target`, leaving the interior alone.
+// The Picard blend interpolates the boundary too, so the exact Dirichlet data
+// has to be restored afterwards.
+void launch_gs_restore_boundary(const EllipticGrid& g, const Real* d_source,
+                                Real* d_target, stream_t stream);
 
 // ADD the plasma's own contribution to the boundary flux, from the toroidal
 // current density on interior nodes.

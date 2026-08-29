@@ -6,6 +6,7 @@ set(_quasar_equilibrium_tests
   test_gs_operator_device
   test_gs_reduce_device
   test_gs_greens_device
+  test_gs_source_device
 )
 
 foreach(_test_name IN LISTS _quasar_equilibrium_tests)

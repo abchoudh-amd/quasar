@@ -37,6 +37,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <type_traits>
 
 namespace quasar::equilibrium {
 namespace {
@@ -366,6 +367,62 @@ void launch_gs_apply_l6(const EllipticGrid& g, const Real* d_x, Real* d_y,
                      d_y, scratch.d_r.device_ptr(), scratch.d_rr.device_ptr(),
                      scratch.d_zz.device_ptr(), g.nr, g.nz, g.r_min, g.dr());
   QUASAR_HIP_CHECK(hipGetLastError());
+}
+
+void GsDerivativeFields::resize(const EllipticGrid& g) {
+  const std::size_t n = g.size();
+  d_r  = backend::DeviceBuffer<Real>{n};
+  d_z  = backend::DeviceBuffer<Real>{n};
+  d_rr = backend::DeviceBuffer<Real>{n};
+  d_zz = backend::DeviceBuffer<Real>{n};
+  d_rz = backend::DeviceBuffer<Real>{n};
+}
+
+void launch_gs_compute_derivatives(const EllipticGrid& g, const Real* d_psi,
+                                   GsDerivativeFields& out,
+                                   GsOperatorScratch& scratch,
+                                   stream_t stream) {
+  auto* s = static_cast<hipStream_t>(stream);
+  const int nr = g.nr;
+  const int nz = g.nz;
+  const Real dr = g.dr();
+  const Real dz = g.dz();
+
+  const dim3 rblock{kLineBlock};
+  const dim3 rgrid{(static_cast<unsigned>(nz) + kLineBlock - 1) / kLineBlock};
+  const dim3 zblock{kLineBlock};
+  const dim3 zgrid{(static_cast<unsigned>(nr) + kLineBlock - 1) / kLineBlock};
+
+  auto sweep = [&](auto deriv_tag, const Real* src, Real* dst, bool radial) {
+    constexpr Deriv D = decltype(deriv_tag)::value;
+    if (radial) {
+      hipLaunchKernelGGL((pade_line_kernel<D>), rgrid, rblock, 0, s, src, dst,
+                         nz, nr, static_cast<std::size_t>(nr), std::size_t{1},
+                         dr, scratch.lower.device_ptr(),
+                         scratch.diag.device_ptr(), scratch.upper.device_ptr(),
+                         scratch.upper2.device_ptr(), scratch.rhs.device_ptr());
+    } else {
+      hipLaunchKernelGGL((pade_line_kernel<D>), zgrid, zblock, 0, s, src, dst,
+                         nr, nz, std::size_t{1}, static_cast<std::size_t>(nr),
+                         dz, scratch.lower.device_ptr(),
+                         scratch.diag.device_ptr(), scratch.upper.device_ptr(),
+                         scratch.upper2.device_ptr(), scratch.rhs.device_ptr());
+    }
+    QUASAR_HIP_CHECK(hipGetLastError());
+  };
+
+  using First  = std::integral_constant<Deriv, Deriv::first>;
+  using Second = std::integral_constant<Deriv, Deriv::second>;
+
+  sweep(First{},  d_psi, out.d_r.device_ptr(),  true);
+  sweep(Second{}, d_psi, out.d_rr.device_ptr(), true);
+  sweep(First{},  d_psi, out.d_z.device_ptr(),  false);
+  sweep(Second{}, d_psi, out.d_zz.device_ptr(), false);
+
+  // Mixed derivative: differentiate d_r along z, in THAT order. Differentiating
+  // d_z along r instead is a different composition and is not numerically
+  // identical; the host reference picks this one.
+  sweep(First{}, out.d_r.device_ptr(), out.d_rz.device_ptr(), false);
 }
 
 void launch_gs_residual_l6(const EllipticGrid& g, const Real* d_x,
