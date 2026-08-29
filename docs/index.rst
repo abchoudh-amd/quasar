@@ -16,7 +16,7 @@ solver:
   MP5/MP7 reconstruction on Cartesian and axisymmetric cylindrical ``(r, z)``
   grids, HLLD Riemann solver, and SSP-RK3) driven from the ``quasar.mhd``
   front-end.
-* **free-boundary equilibrium** - a header-only Grad-Shafranov solver with
+* **free-boundary equilibrium** - a GPU-resident Grad-Shafranov solver with
   sixth-order compact derivatives, geometric multigrid, flux-surface
   diagnostics, and a bridge to the staggered MHD mesh.
 
@@ -29,6 +29,8 @@ solver:
    theory/boundary_conditions
    theory/normalization
    theory/digital_filters
+   theory/newcomb_cylindrical_energy
+   theory/toroidal_ideal_mhd_energy
 
 .. toctree::
    :maxdepth: 2

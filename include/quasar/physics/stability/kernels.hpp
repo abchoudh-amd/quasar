@@ -147,10 +147,27 @@ struct RationalSurfaces {
 
 struct RadialDomains {
   static constexpr int kMaxDomains = 80;
+  static constexpr int kMaxResonanceTags = RationalSurfaces::kMaxRational;
 
   // Ascending, with breakpoints[0] == psi_lo and breakpoints[n_domains] ==
   // psi_hi. A Chebyshev expansion is built on each [k, k+1] interval.
   Real breakpoints[kMaxDomains + 1]{};
+
+  // Resonance provenance for every breakpoint.  The tags belonging to
+  // breakpoint b occupy
+  //
+  //   [resonance_offsets[b], resonance_offsets[b + 1])
+  //
+  // in resonant_m/resonant_psi_n.  A regular breakpoint has an empty range.
+  // Keeping a flat list rather than one Boolean is essential: a resonance can
+  // be snapped onto a pre-existing regular subdivision, and several nearby
+  // resonances (possibly with different m) can merge onto the same cut.  The
+  // source psi_n is retained even when the actual cut was snapped.
+  int  resonance_offsets[kMaxDomains + 2]{};
+  int  resonant_m[kMaxResonanceTags]{};
+  Real resonant_psi_n[kMaxResonanceTags]{};
+  int  resonance_count{0};
+
   int  n_domains{0};
   bool overflow{false};
 };
@@ -170,9 +187,12 @@ void launch_locate_rational_surfaces(const FluxCoordinateGrid& coords,
 // `min_domains` forces a minimum subdivision so a mode number with no
 // resonance in range still gets a usable layout rather than one interval
 // spanning the whole plasma. Resonances closer together than `min_width` are
-// merged: two breakpoints a fraction of a percent apart would create a
-// subinterval too thin to carry a meaningful expansion, and would wreck the
-// conditioning of the block it produces.
+// merged onto one cut: two breakpoints a fraction of a percent apart would
+// create a subinterval too thin to carry a meaningful expansion, and would
+// wreck the conditioning of the block it produces.  Merging never discards
+// the singular provenance: all contributing (m, psi_n) tags are retained on
+// the surviving breakpoint, including when it was originally a regular
+// minimum-subdivision breakpoint.
 void launch_build_radial_domains(const RationalSurfaces* d_rational,
                                  Real psi_lo, Real psi_hi, int min_domains,
                                  Real min_width, RadialDomains* d_out,
@@ -230,5 +250,32 @@ struct ChebyshevBasis {
 // `domains`.
 void launch_build_chebyshev_basis(const RadialDomains* d_domains,
                                   ChebyshevBasis& out, stream_t stream);
+
+// Build PEST geometry directly on the tensor-product grid used by the
+// stability discretization.
+//
+// `surfaces` must contain one traced contour for EVERY local Chebyshev node in
+// `basis`, in the exact domain-major/node-major order of `basis.nodes`:
+//
+//   surface(d, i) = d * basis.n_nodes + i
+//
+// Adjacent domains therefore retain two contours at their common Lobatto
+// endpoint.  The launch checks that `surfaces.psi_n` matches `basis.nodes`
+// bit-for-bit; it does not sort, merge, or interpolate radial samples.  `out`
+// must have `n_psi == basis.n_domains * basis.n_nodes`.  Its poloidal dimension
+// is the uniform periodic Fourier collocation grid and may differ from the
+// contour ray count.
+//
+// The straight-field-line integration and contour resampling are the same
+// ordered per-surface construction as `launch_build_flux_coordinates`, but
+// field values are sampled with tensor-product cubic interpolation.  Radial
+// mapping derivatives are then formed with each domain's Chebyshev
+// differentiation matrix, and poloidal derivatives with the Fourier
+// collocation differentiation matrix.  All input and output buffers must be on
+// the current device; geometry remains device-resident throughout the build.
+void launch_build_spectral_flux_coordinates(
+    const EllipticGrid& g, const equilibrium::GsFluxSurfaces& surfaces,
+    const equilibrium::GsMagneticField& field, const ChebyshevBasis& basis,
+    FluxCoordinateGrid& out, stream_t stream);
 
 }  // namespace quasar::stability

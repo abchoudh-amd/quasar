@@ -1,7 +1,13 @@
 set(_quasar_stability_tests
   test_flux_coordinates
+  test_spectral_flux_coordinates
   test_radial_domains
   test_chebyshev
+  test_spectral_layout
+  test_newcomb_energy
+  test_toroidal_equilibrium
+  test_toroidal_energy
+  test_stability_solver
 )
 
 foreach(_test_name IN LISTS _quasar_stability_tests)
@@ -20,4 +26,5 @@ endforeach()
 set_tests_properties(
   stability_test_flux_coordinates
   stability_test_radial_domains
+  stability_test_stability_solver
   PROPERTIES TIMEOUT 600)

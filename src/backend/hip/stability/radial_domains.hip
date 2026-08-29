@@ -61,8 +61,11 @@ __global__ void locate_rational_kernel(const Real* __restrict__ psi_n,
     // bracketed range rather than a fixed window keeps this correct for a
     // reversed-shear profile, where q is not monotone and the same m can
     // resonate more than once.
-    const Real lo = fmin(q0, q1) * n_real;
-    const Real hi = fmax(q0, q1) * n_real;
+    // Multiplication by a negative n reverses the interval.  Form the bounds
+    // after multiplication so n and -n locate the same physical surfaces
+    // with opposite poloidal-mode labels.
+    const Real lo = fmin(q0 * n_real, q1 * n_real);
+    const Real hi = fmax(q0 * n_real, q1 * n_real);
     const int m_lo = static_cast<int>(ceil(lo));
     const int m_hi = static_cast<int>(floor(hi));
 
@@ -129,24 +132,47 @@ __global__ void build_domains_kernel(const RationalSurfaces* __restrict__ ration
                             / static_cast<Real>(uniform);
   }
 
-  // Insert each resonance in order, skipping any that would create a
-  // subinterval thinner than min_width. A sliver interval carries almost no
-  // resolution and badly conditions the block it produces, so dropping the
-  // breakpoint is better than honouring it.
-  for (int r = 0; r < rational->count; ++r) {
+  // Insert each resonance in order.  A resonance closer than min_width to an
+  // existing point is snapped onto that point rather than inserted: the thin
+  // interval would be ill-conditioned, but the surviving point is still
+  // tagged as rational below.  This distinction matters because continuity is
+  // harmonic-specific at a rational cut.
+  const Real width = min_width > Real{0} ? min_width : Real{0};
+  const int rational_count =
+      rational->count < RationalSurfaces::kMaxRational
+          ? rational->count
+          : RationalSurfaces::kMaxRational;
+  if (rational->count < 0
+      || rational->count > RationalSurfaces::kMaxRational) {
+    d.overflow = true;
+  }
+  Real assigned_breakpoint[RationalSurfaces::kMaxRational]{};
+  bool represented[RationalSurfaces::kMaxRational]{};
+  for (int r = 0; r < rational_count; ++r) {
     const Real p = rational->psi_n[r];
     if (p <= psi_lo || p >= psi_hi) continue;
 
-    bool too_close = false;
-    for (int k = 0; k < n; ++k) {
-      if (fabs(pts[k] - p) < min_width) {
-        too_close = true;
-        break;
+    int nearest = -1;
+    Real nearest_distance = Real{0};
+    // Never snap an interior rational surface onto either physical endpoint:
+    // endpoint tags are not internal interfaces and therefore cannot carry
+    // the required one-sided spectral topology.  A narrow end interval is
+    // preferable to silently erasing the resonance.
+    for (int k = 1; k + 1 < n; ++k) {
+      const Real distance = fabs(pts[k] - p);
+      if ((distance == Real{0} || distance < width)
+          && (nearest < 0 || distance < nearest_distance)) {
+        nearest = k;
+        nearest_distance = distance;
       }
     }
-    if (too_close) continue;
+    if (nearest >= 0) {
+      assigned_breakpoint[r] = pts[nearest];
+      represented[r] = true;
+      continue;
+    }
 
-    if (n >= RadialDomains::kMaxDomains) {
+    if (n >= RadialDomains::kMaxDomains + 1) {
       d.overflow = true;
       break;
     }
@@ -158,10 +184,38 @@ __global__ void build_domains_kernel(const RationalSurfaces* __restrict__ ration
     }
     pts[k] = p;
     ++n;
+    assigned_breakpoint[r] = p;
+    represented[r] = true;
   }
 
   for (int k = 0; k < n; ++k) d.breakpoints[k] = pts[k];
   d.n_domains = n - 1;
+
+  // Re-associate every represented resonance with its final breakpoint.
+  // Doing this after all insertions avoids having to shift variable-length
+  // metadata during insertion.  Tags are grouped by breakpoint so callers can
+  // query one interface without scanning unrelated resonances.
+  int tag = 0;
+  for (int breakpoint = 0; breakpoint < n; ++breakpoint) {
+    d.resonance_offsets[breakpoint] = tag;
+    for (int r = 0; r < rational_count; ++r) {
+      const Real p = rational->psi_n[r];
+      // assigned_breakpoint records the exact cut selected at insertion time.
+      // A later insertion may be geometrically closer to this resonance, but
+      // must not steal provenance from a regular cut already chosen for it.
+      if (represented[r] && assigned_breakpoint[r] == pts[breakpoint]) {
+        if (tag >= RadialDomains::kMaxResonanceTags) {
+          d.overflow = true;
+          continue;
+        }
+        d.resonant_m[tag] = rational->m[r];
+        d.resonant_psi_n[tag] = p;
+        ++tag;
+      }
+    }
+  }
+  d.resonance_offsets[n] = tag;
+  d.resonance_count = tag;
   d.overflow = d.overflow || rational->overflow;
   *out = d;
 }

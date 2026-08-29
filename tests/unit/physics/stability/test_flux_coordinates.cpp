@@ -299,12 +299,18 @@ TEST(FluxCoordinates, StraightAngleBeatsGeometricAngleSubstantially) {
   }
   ASSERT_GT(measured, 100) << "not enough sample points to compare";
 
-  DeviceBuffer<Real> d_dev{1};
+  DeviceBuffer<Real> d_dev{static_cast<std::size_t>(kNSurfaces)};
   quasar::stability::launch_check_straightness(fx.coords, fx.grid, fx.field,
                                                d_dev.device_ptr(), nullptr);
   quasar::backend::device_synchronize(nullptr);
+  const auto straight_per_surface = download(d_dev, kNSurfaces);
   Real straight = Real{0};
-  d_dev.copy_to_host(&straight, 1);
+  for (int s = 0; s < kNSurfaces; ++s) {
+    if (!valid[s]) continue;
+    ASSERT_TRUE(std::isfinite(straight_per_surface[s]))
+        << "non-finite straightness residual on surface " << s;
+    straight = std::max(straight, straight_per_surface[s]);
+  }
 
   EXPECT_GT(worst_geometric, Real{0.1})
       << "the geometric angle is already almost straight on this equilibrium, "

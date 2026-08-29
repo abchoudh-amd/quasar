@@ -6,10 +6,17 @@ set(_quasar_stability_hip_sources
   flux_coordinates.hip
   radial_domains.hip
   chebyshev.hip
+  newcomb_energy.hip
+  toroidal_equilibrium.hip
+  toroidal_energy.hip
 )
 
 quasar_add_hip_module(stability_hip SOURCES ${_quasar_stability_hip_sources})
 quasar_add_backend_src_include(stability_hip)
+target_link_libraries(quasar_stability_hip
+  PUBLIC
+    quasar::linear_algebra
+)
 
 # Same reasoning as the equilibrium HIP module: the stability path builds on
 # equilibrium output whose kernels are compiled without FP contraction, and the

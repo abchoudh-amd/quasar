@@ -128,6 +128,19 @@ TEST(RadialDomains, ResonanceCountScalesWithToroidalModeNumber) {
   }
 }
 
+TEST(RadialDomains, NegativeToroidalModeKeepsSurfacesAndFlipsHarmonics) {
+  const auto c = synthetic(linear_q(201, Real{1}, Real{4}));
+  const RationalSurfaces positive = locate(c, 2);
+  const RationalSurfaces negative = locate(c, -2);
+
+  ASSERT_EQ(negative.count, positive.count);
+  EXPECT_FALSE(negative.overflow);
+  for (int k = 0; k < positive.count; ++k) {
+    EXPECT_NEAR(negative.psi_n[k], positive.psi_n[k], Real{1e-14});
+    EXPECT_EQ(negative.m[k], -positive.m[k]);
+  }
+}
+
 // Reversed shear: q dips and comes back, so the same m resonates twice. A scan
 // that assumed monotonicity would find only one of each pair.
 TEST(RadialDomains, HandlesReversedShearWithRepeatedResonances) {
@@ -220,9 +233,9 @@ TEST(RadialDomains, EveryInRangeResonanceBecomesABreakpoint) {
   EXPECT_GT(matched, 0) << "no in-range resonances: the test is vacuous";
 }
 
-// A resonance landing almost on an existing breakpoint must be dropped rather
-// than creating a sliver subinterval, which would carry almost no resolution
-// and badly condition its block.
+// Resonances landing almost together must share one cut rather than creating a
+// sliver subinterval.  Both harmonic tags and both source locations must
+// survive on that cut so downstream layouts split only the affected harmonics.
 TEST(RadialDomains, ResonancesTooCloseTogetherAreMerged) {
   RationalSurfaces r{};
   r.count = 3;
@@ -245,6 +258,83 @@ TEST(RadialDomains, ResonancesTooCloseTogetherAreMerged) {
     EXPECT_GE(d.breakpoints[b] - d.breakpoints[b - 1], Real{1e-3})
         << "a sliver subinterval survived at " << b;
   }
+
+  int half_breakpoint = -1;
+  for (int b = 0; b <= d.n_domains; ++b) {
+    if (std::abs(d.breakpoints[b] - Real{0.5}) < Real{1e-12}) {
+      half_breakpoint = b;
+    }
+  }
+  ASSERT_GE(half_breakpoint, 0);
+  const int begin = d.resonance_offsets[half_breakpoint];
+  const int end = d.resonance_offsets[half_breakpoint + 1];
+  ASSERT_EQ(end - begin, 2);
+  EXPECT_EQ(d.resonant_m[begin], 2);
+  EXPECT_EQ(d.resonant_m[begin + 1], 3);
+  EXPECT_DOUBLE_EQ(d.resonant_psi_n[begin], Real{0.5});
+  EXPECT_DOUBLE_EQ(d.resonant_psi_n[begin + 1], Real{0.5000001});
+}
+
+TEST(RadialDomains, InteriorResonancesNeverSnapOntoPhysicalEndpoints) {
+  RationalSurfaces r{};
+  r.count = 2;
+  r.psi_n[0] = Real{0.001};
+  r.psi_n[1] = Real{0.999};
+  r.m[0] = 1;
+  r.m[1] = 2;
+
+  const RadialDomains d = layout(r, Real{0}, Real{1}, 1, Real{0.01});
+  ASSERT_FALSE(d.overflow);
+  ASSERT_EQ(d.n_domains, 3);
+  EXPECT_EQ(d.breakpoints[0], Real{0});
+  EXPECT_EQ(d.breakpoints[1], r.psi_n[0]);
+  EXPECT_EQ(d.breakpoints[2], r.psi_n[1]);
+  EXPECT_EQ(d.breakpoints[3], Real{1});
+  EXPECT_EQ(d.resonance_count, 2);
+  EXPECT_EQ(d.resonance_offsets[1], 0);
+  EXPECT_EQ(d.resonance_offsets[2], 1);
+  EXPECT_EQ(d.resonance_offsets[3], 2);
+  EXPECT_EQ(d.resonant_m[0], 1);
+  EXPECT_EQ(d.resonant_m[1], 2);
+}
+
+TEST(RadialDomains, ResonanceSnappedToRegularBreakpointKeepsProvenance) {
+  RationalSurfaces r{};
+  r.count = 1;
+  r.psi_n[0] = Real{0.5002};
+  r.m[0] = 7;
+
+  // min_domains=4 creates an ordinary breakpoint at exactly 0.5.  The nearby
+  // resonance must mark that existing cut rational rather than disappearing.
+  const RadialDomains d = layout(r, Real{0}, Real{1}, 4, Real{1e-3});
+  ASSERT_EQ(d.n_domains, 4);
+  EXPECT_DOUBLE_EQ(d.breakpoints[2], Real{0.5});
+  ASSERT_EQ(d.resonance_offsets[3] - d.resonance_offsets[2], 1);
+  const int tag = d.resonance_offsets[2];
+  EXPECT_EQ(d.resonant_m[tag], 7);
+  EXPECT_DOUBLE_EQ(d.resonant_psi_n[tag], Real{0.5002});
+  EXPECT_EQ(d.resonance_count, 1);
+}
+
+TEST(RadialDomains, LaterInsertionDoesNotStealSnappedProvenance) {
+  RationalSurfaces r{};
+  r.count = 2;
+  r.psi_n[0] = Real{0.5009};  // snaps to the regular point at 0.5
+  r.psi_n[1] = Real{0.5011};  // far enough from 0.5 to become its own cut
+  r.m[0] = 2;
+  r.m[1] = 3;
+
+  const RadialDomains d = layout(r, Real{0}, Real{1}, 2, Real{1e-3});
+  ASSERT_EQ(d.n_domains, 3);
+  EXPECT_DOUBLE_EQ(d.breakpoints[1], Real{0.5});
+  EXPECT_DOUBLE_EQ(d.breakpoints[2], Real{0.5011});
+
+  ASSERT_EQ(d.resonance_offsets[2] - d.resonance_offsets[1], 1);
+  ASSERT_EQ(d.resonance_offsets[3] - d.resonance_offsets[2], 1);
+  EXPECT_EQ(d.resonant_m[d.resonance_offsets[1]], 2);
+  EXPECT_DOUBLE_EQ(d.resonant_psi_n[d.resonance_offsets[1]], Real{0.5009});
+  EXPECT_EQ(d.resonant_m[d.resonance_offsets[2]], 3);
+  EXPECT_DOUBLE_EQ(d.resonant_psi_n[d.resonance_offsets[2]], Real{0.5011});
 }
 
 TEST(RadialDomains, MinimumSubdivisionAppliesWithNoResonances) {
