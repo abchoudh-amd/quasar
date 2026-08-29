@@ -210,6 +210,89 @@ void launch_gs_compute_derivatives(const EllipticGrid& g, const Real* d_psi,
                                    GsOperatorScratch& scratch,
                                    stream_t stream);
 
+// -- Multigrid and defect correction -------------------------------------------
+//
+// The elliptic solve: second-order multigrid as a preconditioner, driven to
+// sixth-order accuracy by defect correction against the L6 residual.
+//
+// Every stage of this ports bit-exactly, which was not a given. The host
+// smoother is red-black rather than lexicographic Gauss-Seidel, so the two
+// colours are independent within a sweep and one thread per node reproduces the
+// sequential result exactly. The bilinear prolongation looks like it
+// accumulates -- four passes each doing `+=` into the fine field -- but the
+// passes are disjoint by the parity of (i, j), so every fine node receives
+// exactly one contribution and there is no accumulation order to preserve.
+// Restriction keeps the host's (dj, di) stencil traversal order for the same
+// reason.
+//
+// The level recursion itself stays on the host: it is control flow that
+// launches kernels and performs no arithmetic, so there is nothing to move.
+
+struct GsMultigridConfig {
+  int pre_smooth{2};
+  int post_smooth{2};
+  int coarse_sweeps{60};
+  int max_levels{32};
+};
+
+// Deliberately mirrors numerics::DefectCorrectionConfig rather than reusing it.
+// That header drags in the host L6 operator, which this port exists to delete;
+// duplicating four fields is cheaper than an include that has to be unpicked
+// later.
+struct GsDefectCorrectionConfig {
+  int  max_iterations{60};
+  Real tolerance{Real{1e-10}};  // relative, on the L6 residual
+  Real relaxation{Real{0.8}};   // near-optimal; above 1 diverges
+  int  inner_cycles{2};         // V-cycles per outer step
+};
+
+struct GsDefectCorrectionReport {
+  bool converged{false};
+  int  iterations{0};
+  Real initial_residual{0};
+  Real final_residual{0};
+};
+
+// Device-resident multigrid hierarchy. Built once per grid and reused across
+// every Picard step, so the per-level allocations stay out of the inner loop.
+class GsDeviceMultigrid {
+ public:
+  GsDeviceMultigrid() = default;
+  explicit GsDeviceMultigrid(const EllipticGrid& finest,
+                             GsMultigridConfig cfg = {});
+
+  // One V-cycle toward Delta* x = b. `d_x` must already carry the Dirichlet
+  // boundary values; they are preserved.
+  void v_cycle(Real* d_x, const Real* d_b, stream_t stream);
+
+  int n_levels() const noexcept { return static_cast<int>(levels_.size()); }
+  const EllipticGrid& level(int l) const {
+    return levels_[static_cast<std::size_t>(l)];
+  }
+
+ private:
+  void vcycle_level(int l, Real* d_x, const Real* d_b, stream_t stream);
+
+  GsMultigridConfig cfg_{};
+  std::vector<EllipticGrid> levels_{};
+  std::vector<backend::DeviceBuffer<Real>> x_{};
+  std::vector<backend::DeviceBuffer<Real>> b_{};
+  std::vector<backend::DeviceBuffer<Real>> r_{};
+};
+
+// Solve L6 x = b to the configured tolerance, using L2 multigrid as the
+// preconditioner. `d_x` must carry the Dirichlet boundary values on entry;
+// they are preserved, because the correction starts from zero.
+//
+// The convergence test reads the residual norm back each outer iteration. That
+// is a synchronization per iteration, and it is kept deliberately: dropping it
+// in favour of always running max_iterations would change the iteration count
+// and therefore the answer.
+GsDefectCorrectionReport launch_gs_solve_defect_corrected(
+    const EllipticGrid& g, Real* d_x, const Real* d_b, GsDeviceMultigrid& mg,
+    GsOperatorScratch& op_scratch, GsReduceScratch& reduce_scratch,
+    GsDefectCorrectionConfig cfg, stream_t stream);
+
 // -- Critical points -----------------------------------------------------------
 //
 // Locating the magnetic axis and the X-points is the step that decides psi_N,

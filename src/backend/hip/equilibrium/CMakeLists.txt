@@ -8,6 +8,7 @@ set(_quasar_equilibrium_hip_sources
   gs_greens.hip
   gs_source.hip
   gs_critical.hip
+  gs_multigrid.hip
 )
 
 quasar_add_hip_module(equilibrium_hip SOURCES ${_quasar_equilibrium_hip_sources})
