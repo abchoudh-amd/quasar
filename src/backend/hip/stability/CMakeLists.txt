@@ -5,6 +5,7 @@ endif()
 set(_quasar_stability_hip_sources
   flux_coordinates.hip
   radial_domains.hip
+  chebyshev.hip
 )
 
 quasar_add_hip_module(stability_hip SOURCES ${_quasar_stability_hip_sources})

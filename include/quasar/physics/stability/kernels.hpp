@@ -178,4 +178,57 @@ void launch_build_radial_domains(const RationalSurfaces* d_rational,
                                  Real min_width, RadialDomains* d_out,
                                  stream_t stream);
 
+// -- Chebyshev spectral basis ---------------------------------------------------
+//
+// Each radial subinterval from RadialDomains carries a Chebyshev expansion.
+// This provides the pieces the energy assembly needs on a subinterval: the
+// Chebyshev-Gauss-Lobatto nodes, the spectral differentiation matrix, and
+// Clenshaw-Curtis quadrature weights.
+//
+// -- Why Gauss-Lobatto and not Gauss --------------------------------------------
+// Lobatto nodes include both endpoints. That is what allows continuity between
+// adjacent subintervals to be imposed as a condition on shared node values
+// rather than through an interpolation, which would introduce an error at every
+// interface -- and the interfaces are placed at resonant surfaces, where the
+// solution is least forgiving.
+//
+// -- Conditioning ---------------------------------------------------------------
+// The differentiation matrix has a condition number growing like the SQUARE of
+// the polynomial order, and applying it twice squares that again. This is the
+// reason the energy functional is assembled in weak form: integrating by parts
+// leaves only first derivatives, so the operator conditioning grows like
+// order^2 rather than order^4. At order 64 that is the difference between
+// losing about four digits and losing about eight.
+//
+// The differentiation matrix is built with the negative-sum trick -- the
+// diagonal is set so each row sums to exactly zero -- because the closed-form
+// diagonal entries suffer catastrophic cancellation at high order. Without it
+// the matrix fails to differentiate a constant to zero, which is the one thing
+// it must do exactly.
+
+struct ChebyshevBasis {
+  ChebyshevBasis() = default;
+  ChebyshevBasis(int order, int n_domains) { resize(order, n_domains); }
+
+  void resize(int order, int n_domains);
+
+  // Per-domain physical node positions: domain d, node i at d * n_nodes + i.
+  backend::DeviceBuffer<Real> nodes{};
+  // Quadrature weights on the physical interval, same layout.
+  backend::DeviceBuffer<Real> weights{};
+  // Differentiation matrices in physical units, one dense (n_nodes x n_nodes)
+  // block per domain: entry (i, j) of domain d at
+  // d * n_nodes * n_nodes + i * n_nodes + j.
+  backend::DeviceBuffer<Real> diff{};
+
+  int order{0};      // polynomial order; n_nodes = order + 1
+  int n_nodes{0};
+  int n_domains{0};
+};
+
+// Build nodes, weights, and differentiation matrices for every subinterval of
+// `domains`.
+void launch_build_chebyshev_basis(const RadialDomains* d_domains,
+                                  ChebyshevBasis& out, stream_t stream);
+
 }  // namespace quasar::stability

@@ -1,6 +1,7 @@
 set(_quasar_stability_tests
   test_flux_coordinates
   test_radial_domains
+  test_chebyshev
 )
 
 foreach(_test_name IN LISTS _quasar_stability_tests)
