@@ -3,6 +3,7 @@ set(_quasar_equilibrium_tests
   test_free_boundary_gs
   test_flux_surfaces
   test_mhd_seeding
+  test_gs_operator_device
 )
 
 foreach(_test_name IN LISTS _quasar_equilibrium_tests)
