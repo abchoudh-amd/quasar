@@ -38,6 +38,9 @@
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
+#include "quasar/physics/equilibrium/free_boundary.hpp"
+
+#include <vector>
 
 namespace quasar::equilibrium {
 
@@ -138,5 +141,60 @@ void launch_gs_interior_max_norm(const EllipticGrid& g, const Real* d_f,
 // equality that would be false.
 void launch_gs_total_plasma_current(const EllipticGrid& g, const Real* d_j_phi,
                                     GsReduceScratch& scratch, stream_t stream);
+
+// -- Green's-function boundary coupling ----------------------------------------
+//
+// This is the dominant cost of a free-boundary solve: the plasma boundary
+// integral is O(N_boundary * N_interior) elliptic-integral evaluations per
+// Picard step, and on the 65x65 reference case it is most of the 30 s the
+// host-side test spends.
+
+// Device-resident coil set. Uploaded once and reused across every Picard step;
+// the coils do not change during a solve.
+class GsCoilSet {
+ public:
+  GsCoilSet() = default;
+  explicit GsCoilSet(const std::vector<CoilFilament>& coils) { upload(coils); }
+
+  void upload(const std::vector<CoilFilament>& coils);
+
+  const CoilFilament* device_ptr() const noexcept {
+    return buffer_.device_ptr();
+  }
+  int count() const noexcept { return count_; }
+
+ private:
+  backend::DeviceBuffer<CoilFilament> buffer_{};
+  int count_{0};
+};
+
+// psi on the computational boundary from external coils alone. Interior nodes
+// are left untouched, matching apply_coil_boundary.
+void launch_gs_apply_coil_boundary(const EllipticGrid& g,
+                                   const GsCoilSet& coils, Real* d_psi,
+                                   stream_t stream);
+
+// psi everywhere from external coils alone -- the vacuum field used to seed the
+// nonlinear iteration.
+void launch_gs_evaluate_coil_field(const EllipticGrid& g,
+                                   const GsCoilSet& coils, Real* d_psi,
+                                   stream_t stream);
+
+// ADD the plasma's own contribution to the boundary flux, from the toroidal
+// current density on interior nodes.
+//
+// One thread per boundary node, each looping over interior sources in the same
+// row-major order the host uses. That ordering is deliberate: it keeps the
+// accumulation bit-identical to the host reference, so this kernel is covered
+// by an equality test like the operator rather than a tolerance.
+//
+// The cost is occupancy -- a 65x65 grid has only 256 boundary nodes, so the
+// launch is a few wavefronts wide. That is accepted for the port: even at this
+// width it is far ahead of the single-threaded host loop, and a cooperative
+// block-per-boundary-node variant would reduce over sources in a different
+// order and forfeit the equality test. Revisit only if profiling says this is
+// the bottleneck after the port is complete and the oracle is no longer needed.
+void launch_gs_add_plasma_boundary(const EllipticGrid& g, const Real* d_j_phi,
+                                   Real* d_psi, stream_t stream);
 
 }  // namespace quasar::equilibrium

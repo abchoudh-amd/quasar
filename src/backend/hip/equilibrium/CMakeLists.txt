@@ -5,6 +5,7 @@ endif()
 set(_quasar_equilibrium_hip_sources
   gs_operator.hip
   gs_reduce.hip
+  gs_greens.hip
 )
 
 quasar_add_hip_module(equilibrium_hip SOURCES ${_quasar_equilibrium_hip_sources})
