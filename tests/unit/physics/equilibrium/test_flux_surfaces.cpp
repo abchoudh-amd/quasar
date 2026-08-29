@@ -198,6 +198,22 @@ TEST(FProfile, IntegratesToTheVacuumValueAtTheBoundary) {
   for (const Real v : f) EXPECT_TRUE(std::isfinite(v));
 }
 
+TEST(FProfile, PreservesTheNegativeVacuumFieldBranch) {
+  const PolynomialProfile prof;
+  const Real magnitude = Real{4.2};
+  const auto positive =
+      integrate_f_profile(prof, magnitude, Real{1}, Real{0}, Real{1});
+  const auto negative =
+      integrate_f_profile(prof, -magnitude, Real{1}, Real{0}, Real{1});
+
+  ASSERT_EQ(negative.size(), positive.size());
+  EXPECT_DOUBLE_EQ(negative.back(), -magnitude);
+  for (std::size_t k = 0; k < negative.size(); ++k) {
+    EXPECT_DOUBLE_EQ(negative[k], -positive[k]) << "sample " << k;
+    EXPECT_TRUE(std::signbit(negative[k])) << "sample " << k;
+  }
+}
+
 TEST(FProfile, AppliesTheProfileNormalizationScale) {
   const PolynomialProfile prof;
   const Real f_vac = Real{20};

@@ -31,6 +31,9 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <string>
 
 namespace quasar::equilibrium {
 namespace {
@@ -119,7 +122,9 @@ __global__ void integrate_f_kernel(ProfileCoefficients profile, Real f_vacuum,
     const Real v = f_table[k];
     // F^2 < 0 means the requested profile is not realizable with this vacuum
     // field. Clamp rather than emit NaN, and let the caller notice through q.
-    f_table[k] = v > Real{0} ? sqrt(v) : Real{0};
+    // F^2 leaves a sign ambiguity; the prescribed boundary value selects it.
+    const Real magnitude = v > Real{0} ? sqrt(v) : Real{0};
+    f_table[k] = copysign(magnitude, f_vacuum);
   }
 }
 
@@ -157,7 +162,9 @@ __global__ void compute_field_kernel(GridView g, const Real* __restrict__ psi,
 __global__ void trace_rays_kernel(GridView g, const Real* __restrict__ psi,
                                   Real axis_r, Real axis_z, Real psi_axis,
                                   Real psi_boundary, int n_surfaces,
-                                  int n_theta, Real* __restrict__ hit_r,
+                                  int n_theta,
+                                  const Real* __restrict__ psi_n_targets,
+                                  Real* __restrict__ hit_r,
                                   Real* __restrict__ hit_z,
                                   int* __restrict__ hit_ok) {
   const int t = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
@@ -167,7 +174,10 @@ __global__ void trace_rays_kernel(GridView g, const Real* __restrict__ psi,
   const std::size_t slot = static_cast<std::size_t>(s) * n_theta + t;
   hit_ok[slot] = 0;
 
-  const Real pn = static_cast<Real>(s + 1) / static_cast<Real>(n_surfaces + 1);
+  const Real pn = psi_n_targets != nullptr
+                      ? psi_n_targets[s]
+                      : static_cast<Real>(s + 1)
+                            / static_cast<Real>(n_surfaces + 1);
   const Real target = psi_axis + pn * (psi_boundary - psi_axis);
 
   const Real max_reach = fmax(g.r_max - g.r_min, g.z_max - g.z_min);
@@ -208,6 +218,7 @@ __global__ void surface_reduce_kernel(GridView g, const Real* __restrict__ hit_r
                                       const Real* __restrict__ b_pol,
                                       const Real* __restrict__ b_phi,
                                       int n_surfaces, int n_theta,
+                                      const Real* __restrict__ psi_n_targets,
                                       Real* __restrict__ out_r,
                                       Real* __restrict__ out_z,
                                       int* __restrict__ out_count,
@@ -220,7 +231,10 @@ __global__ void surface_reduce_kernel(GridView g, const Real* __restrict__ hit_r
   if (s >= n_surfaces) return;
 
   const std::size_t base = static_cast<std::size_t>(s) * n_theta;
-  out_psi_n[s] = static_cast<Real>(s + 1) / static_cast<Real>(n_surfaces + 1);
+  out_psi_n[s] = psi_n_targets != nullptr
+                     ? psi_n_targets[s]
+                     : static_cast<Real>(s + 1)
+                           / static_cast<Real>(n_surfaces + 1);
 
   int n = 0;
   bool closed = true;
@@ -354,6 +368,118 @@ dim3 grid_2d(int nx, int ny, dim3 block) {
               (static_cast<unsigned>(ny) + block.y - 1) / block.y);
 }
 
+std::size_t checked_surface_storage(int n_surfaces, int n_theta) {
+  if (n_surfaces <= 0 || n_theta <= 0) {
+    throw std::invalid_argument{
+        "flux-surface tracing requires positive surface and ray counts"};
+  }
+  const auto surfaces = static_cast<std::size_t>(n_surfaces);
+  const auto theta = static_cast<std::size_t>(n_theta);
+  if (surfaces > std::numeric_limits<std::size_t>::max() / theta) {
+    throw std::length_error{"flux-surface output size overflows size_t"};
+  }
+  return surfaces * theta;
+}
+
+template <class T>
+void require_size(const backend::DeviceBuffer<T>& buffer,
+                  std::size_t expected, const char* name) {
+  if (buffer.size() != expected) {
+    throw std::invalid_argument{std::string{name} + " has size "
+                                + std::to_string(buffer.size())
+                                + "; expected " + std::to_string(expected)};
+  }
+}
+
+template <class T>
+void require_owner(const backend::DeviceBuffer<T>& buffer, int expected,
+                   const char* name) {
+  if (buffer.owner_device() != expected) {
+    throw std::invalid_argument{std::string{name}
+                                + " is allocated on a different device"};
+  }
+}
+
+std::size_t validate_trace_storage(const EllipticGrid& g, const Real* d_psi,
+                                   const GsMagneticField& field,
+                                   const GsFluxSurfaces& out) {
+  if (d_psi == nullptr) {
+    throw std::invalid_argument{"flux-surface psi buffer must not be null"};
+  }
+
+  const std::size_t points =
+      checked_surface_storage(out.n_surfaces, out.n_theta);
+  const std::size_t surfaces = static_cast<std::size_t>(out.n_surfaces);
+  require_size(out.r, points, "GsFluxSurfaces::r");
+  require_size(out.z, points, "GsFluxSurfaces::z");
+  require_size(out.count, surfaces, "GsFluxSurfaces::count");
+  require_size(out.closed, surfaces, "GsFluxSurfaces::closed");
+  require_size(out.q, surfaces, "GsFluxSurfaces::q");
+  require_size(out.area, surfaces, "GsFluxSurfaces::area");
+  require_size(out.volume, surfaces, "GsFluxSurfaces::volume");
+  require_size(out.psi_n, surfaces, "GsFluxSurfaces::psi_n");
+  require_size(field.b_poloidal, g.size(), "GsMagneticField::b_poloidal");
+  require_size(field.b_phi, g.size(), "GsMagneticField::b_phi");
+
+  const int owner = out.r.owner_device();
+  if (owner < 0) {
+    throw std::invalid_argument{
+        "flux-surface output storage is not device-resident"};
+  }
+  require_owner(out.z, owner, "GsFluxSurfaces::z");
+  require_owner(out.count, owner, "GsFluxSurfaces::count");
+  require_owner(out.closed, owner, "GsFluxSurfaces::closed");
+  require_owner(out.q, owner, "GsFluxSurfaces::q");
+  require_owner(out.area, owner, "GsFluxSurfaces::area");
+  require_owner(out.volume, owner, "GsFluxSurfaces::volume");
+  require_owner(out.psi_n, owner, "GsFluxSurfaces::psi_n");
+  require_owner(field.b_poloidal, owner, "GsMagneticField::b_poloidal");
+  require_owner(field.b_phi, owner, "GsMagneticField::b_phi");
+  if (backend::current_device() != owner) {
+    throw std::invalid_argument{
+        "flux-surface storage is not on the current device"};
+  }
+  return points;
+}
+
+void launch_gs_trace_surfaces_impl(
+    const EllipticGrid& g, const Real* d_psi, const GsMagneticField& field,
+    Real axis_r, Real axis_z, Real psi_axis, Real psi_boundary,
+    const Real* d_psi_n_targets, GsFluxSurfaces& out, stream_t stream) {
+  auto* s = static_cast<hipStream_t>(stream);
+  const std::size_t n = validate_trace_storage(g, d_psi, field, out);
+
+  // Ray hits land in scratch first; compaction then rewrites them in place
+  // into the dense output arrays.
+  backend::DeviceBuffer<Real> hit_r{n};
+  backend::DeviceBuffer<Real> hit_z{n};
+  backend::DeviceBuffer<int> hit_ok{n};
+
+  const dim3 ray_block{kBlock1D};
+  const dim3 ray_grid{
+      (static_cast<unsigned>(out.n_theta) + kBlock1D - 1) / kBlock1D,
+      static_cast<unsigned>(out.n_surfaces)};
+  hipLaunchKernelGGL(trace_rays_kernel, ray_grid, ray_block, 0, s, view_of(g),
+                     d_psi, axis_r, axis_z, psi_axis, psi_boundary,
+                     out.n_surfaces, out.n_theta, d_psi_n_targets,
+                     hit_r.device_ptr(), hit_z.device_ptr(),
+                     hit_ok.device_ptr());
+  QUASAR_HIP_CHECK(hipGetLastError());
+
+  const unsigned sblock = 64;
+  const dim3 sgrid{
+      (static_cast<unsigned>(out.n_surfaces) + sblock - 1) / sblock};
+  hipLaunchKernelGGL(surface_reduce_kernel, sgrid, dim3{sblock}, 0, s,
+                     view_of(g), hit_r.device_ptr(), hit_z.device_ptr(),
+                     hit_ok.device_ptr(), field.b_poloidal.device_ptr(),
+                     field.b_phi.device_ptr(), out.n_surfaces, out.n_theta,
+                     d_psi_n_targets, out.r.device_ptr(), out.z.device_ptr(),
+                     out.count.device_ptr(), out.closed.device_ptr(),
+                     out.q.device_ptr(), out.area.device_ptr(),
+                     out.volume.device_ptr(), out.psi_n.device_ptr());
+  QUASAR_HIP_CHECK(hipGetLastError());
+}
+
 }  // namespace
 
 void GsMagneticField::resize(const EllipticGrid& g) {
@@ -408,35 +534,27 @@ void launch_gs_trace_surfaces(const EllipticGrid& g, const Real* d_psi,
                               const GsMagneticField& field, Real axis_r,
                               Real axis_z, Real psi_axis, Real psi_boundary,
                               GsFluxSurfaces& out, stream_t stream) {
-  auto* s = static_cast<hipStream_t>(stream);
-  const std::size_t n = static_cast<std::size_t>(out.n_surfaces) * out.n_theta;
+  launch_gs_trace_surfaces_impl(g, d_psi, field, axis_r, axis_z, psi_axis,
+                                psi_boundary, nullptr, out, stream);
+}
 
-  // Ray hits land in scratch first; compaction then rewrites them in place
-  // into the dense output arrays.
-  backend::DeviceBuffer<Real> hit_r{n};
-  backend::DeviceBuffer<Real> hit_z{n};
-  backend::DeviceBuffer<int> hit_ok{n};
-
-  const dim3 ray_block{kBlock1D};
-  const dim3 ray_grid{(static_cast<unsigned>(out.n_theta) + kBlock1D - 1) / kBlock1D,
-                      static_cast<unsigned>(out.n_surfaces)};
-  hipLaunchKernelGGL(trace_rays_kernel, ray_grid, ray_block, 0, s, view_of(g),
-                     d_psi, axis_r, axis_z, psi_axis, psi_boundary,
-                     out.n_surfaces, out.n_theta, hit_r.device_ptr(),
-                     hit_z.device_ptr(), hit_ok.device_ptr());
-  QUASAR_HIP_CHECK(hipGetLastError());
-
-  const unsigned sblock = 64;
-  const dim3 sgrid{(static_cast<unsigned>(out.n_surfaces) + sblock - 1) / sblock};
-  hipLaunchKernelGGL(surface_reduce_kernel, sgrid, dim3{sblock}, 0, s,
-                     view_of(g), hit_r.device_ptr(), hit_z.device_ptr(),
-                     hit_ok.device_ptr(), field.b_poloidal.device_ptr(),
-                     field.b_phi.device_ptr(), out.n_surfaces, out.n_theta,
-                     out.r.device_ptr(), out.z.device_ptr(),
-                     out.count.device_ptr(), out.closed.device_ptr(),
-                     out.q.device_ptr(), out.area.device_ptr(),
-                     out.volume.device_ptr(), out.psi_n.device_ptr());
-  QUASAR_HIP_CHECK(hipGetLastError());
+void launch_gs_trace_surfaces_at(
+    const EllipticGrid& g, const Real* d_psi,
+    const GsMagneticField& field, Real axis_r, Real axis_z, Real psi_axis,
+    Real psi_boundary, const backend::DeviceBuffer<Real>& psi_n_targets,
+    GsFluxSurfaces& out, stream_t stream) {
+  if (psi_n_targets.size()
+      != static_cast<std::size_t>(out.n_surfaces > 0 ? out.n_surfaces : 0)) {
+    throw std::invalid_argument{
+        "psi_n target count must equal GsFluxSurfaces::n_surfaces"};
+  }
+  if (psi_n_targets.owner_device() != out.r.owner_device()) {
+    throw std::invalid_argument{
+        "psi_n targets are allocated on a different device"};
+  }
+  launch_gs_trace_surfaces_impl(
+      g, d_psi, field, axis_r, axis_z, psi_axis, psi_boundary,
+      psi_n_targets.device_ptr(), out, stream);
 }
 
 void launch_gs_reduce_diagnostics(GsFluxSurfaces& surfaces, GsDiagnostics* d_out,

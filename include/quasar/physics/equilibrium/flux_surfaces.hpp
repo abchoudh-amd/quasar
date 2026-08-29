@@ -111,7 +111,10 @@ inline std::vector<Real> integrate_f_profile(const IEquilibriumProfile& prof,
     const Real v = f2[static_cast<std::size_t>(k)];
     // F^2 < 0 means the requested profile is not realizable with this vacuum
     // field; clamp rather than produce NaN, and let the caller notice via q.
-    f[static_cast<std::size_t>(k)] = v > Real{0} ? std::sqrt(v) : Real{0};
+    // The Grad--Shafranov equation determines F^2, so the prescribed boundary
+    // value supplies the sign branch throughout the reconstructed profile.
+    const Real magnitude = v > Real{0} ? std::sqrt(v) : Real{0};
+    f[static_cast<std::size_t>(k)] = std::copysign(magnitude, f_vacuum);
   }
   return f;
 }

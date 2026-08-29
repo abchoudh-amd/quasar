@@ -69,6 +69,7 @@
 // psi AND j_phi retained -- an optimizer must be able to score a failed
 // configuration and continue. Malformed INPUT still throws.
 
+#include "quasar/backend/memory.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
 #include "quasar/physics/equilibrium/critical_points.hpp"
@@ -80,6 +81,8 @@
 #include <vector>
 
 namespace quasar::equilibrium {
+
+using stream_t = ::quasar::backend::stream_t;
 
 enum class GsStatus {
   converged,
@@ -179,9 +182,48 @@ struct GsResult {
   // Amplitude applied to p' and FF' to satisfy the requested plasma current.
   // Derived quantities reconstructed from the profile must use the same scale.
   Real profile_scale{1};
+  // Exact device-lowered profile used by the solve.  Downstream physics must
+  // use these coefficients rather than accepting a second, potentially
+  // inconsistent profile from the caller.
+  ProfileCoefficients profile_coefficients{};
   int  newton_steps{0};
 
   bool ok() const noexcept { return status == GsStatus::converged; }
+};
+
+// Device-resident counterpart to GsResult. Scalar metadata remains on the host
+// because it already drives the nonlinear iteration, while the two full grid
+// fields stay on the device for downstream equilibrium consumers.
+struct GsDeviceResult {
+  GsDeviceResult() = default;
+  GsDeviceResult(const GsDeviceResult&) = delete;
+  GsDeviceResult& operator=(const GsDeviceResult&) = delete;
+  GsDeviceResult(GsDeviceResult&&) noexcept = default;
+  GsDeviceResult& operator=(GsDeviceResult&&) noexcept = default;
+
+  GsStatus status{GsStatus::iteration_limit};
+  int  iterations{0};
+  Real residual{0};
+  std::vector<Real> residual_history{};
+  numerics::EllipticGrid grid{};
+  backend::DeviceBuffer<Real> psi{};
+  backend::DeviceBuffer<Real> j_phi{};
+  CriticalPointSet critical{};
+  Real achieved_current{0};
+  Real profile_scale{1};
+  // Exact device-lowered profile used by the solve; retained so downstream
+  // device consumers (notably ideal-MHD stability) cannot drift from the
+  // Grad--Shafranov source that produced psi and j_phi.
+  ProfileCoefficients profile_coefficients{};
+  int  newton_steps{0};
+
+  bool ok() const noexcept { return status == GsStatus::converged; }
+
+  // Download both fields after all preceding work on `stream` completes and
+  // reconstruct the existing host-side result contract. Both fields must have
+  // the same device owner. A non-null stream must have been created on that
+  // same device; raw stream handles do not carry portable ownership metadata.
+  GsResult copy_to_host(stream_t stream = nullptr) const;
 };
 
 class GsSolver {
@@ -189,6 +231,9 @@ class GsSolver {
   GsSolver(GsConfig cfg, std::shared_ptr<IEquilibriumProfile> profile);
 
   GsResult solve();
+  // A non-null stream must belong to the current device at call entry; all
+  // returned buffers are allocated on that device.
+  GsDeviceResult solve_device(stream_t stream = nullptr);
 
  private:
   GsConfig cfg_;

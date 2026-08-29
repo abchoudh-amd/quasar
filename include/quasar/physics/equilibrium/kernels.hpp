@@ -230,11 +230,13 @@ struct GsMagneticField {
   backend::DeviceBuffer<Real> b_poloidal{};  // the denominator in q
 };
 
-// Recover F(psi_N) = R*B_phi by integrating FF' inward from a prescribed vacuum
-// value at the boundary. Serial by nature -- each sample depends on the one
-// outside it -- so this runs single-threaded on device over `samples` points.
-// `profile_scale` must be the amplitude GsResult reports; using the raw profile
-// reconstructs a field inconsistent with the solved source.
+// Recover F(psi_N) = R*B_phi by integrating FF' inward from a prescribed signed
+// vacuum value at the boundary.  The Grad--Shafranov equation determines F^2;
+// the sign of `f_vacuum` selects the branch used at every realizable sample.
+// Serial by nature -- each sample depends on the one outside it -- so this runs
+// single-threaded on device over `samples` points. `profile_scale` must be the
+// amplitude GsResult reports; using the raw profile reconstructs a field
+// inconsistent with the solved source.
 void launch_gs_integrate_f_profile(const ProfileCoefficients& profile,
                                    Real f_vacuum, Real psi_axis, Real psi_bdry,
                                    Real profile_scale, int samples,
@@ -295,6 +297,17 @@ void launch_gs_trace_surfaces(const EllipticGrid& g, const Real* d_psi,
                               const GsMagneticField& field, Real axis_r,
                               Real axis_z, Real psi_axis, Real psi_boundary,
                               GsFluxSurfaces& out, stream_t stream);
+
+// Trace the caller-selected normalized-flux surfaces. `psi_n_targets` remains
+// device-resident throughout the launch and must contain exactly one target per
+// output surface. Each value is used directly for ray tracing and copied
+// bit-for-bit to `out.psi_n`; callers may therefore use nonuniform grids such as
+// mapped Chebyshev nodes without an intervening host resampling step.
+void launch_gs_trace_surfaces_at(
+    const EllipticGrid& g, const Real* d_psi,
+    const GsMagneticField& field, Real axis_r, Real axis_z, Real psi_axis,
+    Real psi_boundary, const backend::DeviceBuffer<Real>& psi_n_targets,
+    GsFluxSurfaces& out, stream_t stream);
 
 // Fold the per-surface results into the aggregate bundle. Single-threaded: the
 // selections (first closed surface, nearest to psi_N = 0.95, last closed) are

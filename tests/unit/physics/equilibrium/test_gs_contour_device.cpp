@@ -124,6 +124,34 @@ TEST(GsContourDevice, FProfileMatchesHostBitExactly) {
       << "max |host - device| = " << max_abs_difference(host, dev);
 }
 
+TEST(GsContourDevice, NegativeFProfileMatchesHostBitExactly) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  const PolynomialProfile profile;
+  constexpr Real f_vacuum = -kFVacuum;
+  constexpr Real psi_axis = Real{1};
+  constexpr Real psi_boundary = Real{0};
+  constexpr Real profile_scale = Real{1};
+  constexpr int samples = 33;
+  const std::vector<Real> host = quasar::equilibrium::integrate_f_profile(
+      profile, f_vacuum, psi_axis, psi_boundary, profile_scale, samples);
+
+  DeviceBuffer<Real> device{static_cast<std::size_t>(samples)};
+  quasar::equilibrium::launch_gs_integrate_f_profile(
+      quasar::equilibrium::to_coefficients(profile), f_vacuum, psi_axis,
+      psi_boundary, profile_scale, samples, device.device_ptr(), nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  const std::vector<Real> actual = download(device, samples);
+
+  ASSERT_EQ(host.size(), actual.size());
+  EXPECT_EQ(bitwise_mismatches(host, actual), 0u)
+      << "max |host - device| = " << max_abs_difference(host, actual);
+  EXPECT_DOUBLE_EQ(actual.back(), f_vacuum);
+  for (std::size_t k = 0; k < actual.size(); ++k) {
+    EXPECT_TRUE(std::signbit(actual[k])) << "sample " << k;
+  }
+}
+
 TEST(GsContourDevice, MagneticFieldMatchesHostBitExactly) {
   const Fixture fx;
   ASSERT_TRUE(fx.result.critical.axis.valid);

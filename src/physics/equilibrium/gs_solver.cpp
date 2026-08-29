@@ -1,9 +1,9 @@
 // Free-boundary Grad-Shafranov driver.
 //
-// This is the orchestration layer: it owns the device buffers, sequences the
-// kernel launches, and reproduces GsSolver::solve step for step. There is no
-// arithmetic here beyond the two scalar decisions the loop cannot avoid making
-// on the host.
+// This is the orchestration layer: it owns the device buffers and sequences the
+// kernel launches in GsSolver::solve_device. The legacy GsSolver::solve entry
+// point is only the explicit download adapter. There is no arithmetic here
+// beyond the two scalar decisions the loop cannot avoid making on the host.
 //
 // The structure deliberately mirrors the host solver line for line rather than
 // being reorganized around what would be natural for a GPU. During a
@@ -72,6 +72,36 @@ CriticalPointSet to_host_set(const GsCriticalResult& r) {
 
 }  // namespace
 
+GsResult GsDeviceResult::copy_to_host(stream_t stream) const {
+  if (psi.owner_device() != j_phi.owner_device()) {
+    throw std::invalid_argument{
+        "GsDeviceResult::copy_to_host: psi and j_phi reside on different "
+        "devices"};
+  }
+
+  GsResult host;
+  host.status = status;
+  host.iterations = iterations;
+  host.residual = residual;
+  host.residual_history = residual_history;
+  host.psi.resize(psi.size());
+  host.j_phi.resize(j_phi.size());
+  host.critical = critical;
+  host.achieved_current = achieved_current;
+  host.profile_scale = profile_scale;
+  host.profile_coefficients = profile_coefficients;
+  host.newton_steps = newton_steps;
+
+  if (!psi.empty() || !j_phi.empty()) {
+    const int owner = !psi.empty() ? psi.owner_device() : j_phi.owner_device();
+    backend::DeviceGuard guard{owner};
+    psi.copy_to_host_async(host.psi.data(), host.psi.size(), stream);
+    j_phi.copy_to_host_async(host.j_phi.data(), host.j_phi.size(), stream);
+    backend::device_synchronize(stream);
+  }
+  return host;
+}
+
 GsSolver::GsSolver(GsConfig cfg,
                                std::shared_ptr<IEquilibriumProfile> profile)
   : cfg_{std::move(cfg)} {
@@ -97,13 +127,16 @@ GsSolver::GsSolver(GsConfig cfg,
 }
 
 GsResult GsSolver::solve() {
+  return solve_device().copy_to_host();
+}
+
+GsDeviceResult GsSolver::solve_device(stream_t stream) {
   const numerics::EllipticGrid& g = cfg_.grid;
   const std::size_t n = g.size();
-  constexpr stream_t stream = nullptr;
 
-  GsResult res;
-  res.psi.assign(n, Real{0});
-  res.j_phi.assign(n, Real{0});
+  GsDeviceResult res;
+  res.grid = g;
+  res.profile_coefficients = profile_;
 
   DeviceBuffer<Real> d_psi{n};
   DeviceBuffer<Real> d_psi_next{n};
@@ -138,18 +171,15 @@ GsResult GsSolver::solve() {
   bool have_prev_axis = false;
   Real first_residual = Real{0};
 
-  // Every exit path -- converged or not -- must retain BOTH partial fields.
-  // GsResult documents that a failed solve keeps its best-effort solution so an
-  // optimizer can score the configuration and continue, and j_phi is half of
-  // that. Reading back only psi on the failure paths left j_phi as the zeros it
-  // was constructed with, which reads as "no current anywhere" rather than "the
-  // current that was there when the plasma was lost".
-  const auto finish = [&](GsStatus status) -> GsResult& {
+  // Every exit path -- converged or not -- retains BOTH partial fields. The
+  // synchronization is required before the local scratch buffers are
+  // destroyed; it does not download either full field.
+  const auto finish = [&](GsStatus status) -> GsDeviceResult {
     res.status = status;
     backend::device_synchronize(stream);
-    d_psi.copy_to_host(res.psi.data(), res.psi.size());
-    d_j_phi.copy_to_host(res.j_phi.data(), res.j_phi.size());
-    return res;
+    res.psi = std::move(d_psi);
+    res.j_phi = std::move(d_j_phi);
+    return std::move(res);
   };
 
   for (int it = 1; it <= cfg_.max_iterations; ++it) {

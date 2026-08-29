@@ -12,6 +12,8 @@ set(_quasar_equilibrium_tests
   test_gs_solver_invariants
   test_gs_contour_device
   test_gs_port_gate
+  test_gs_device_result
+  test_gs_trace_targets
 )
 
 foreach(_test_name IN LISTS _quasar_equilibrium_tests)
@@ -36,4 +38,6 @@ set_tests_properties(
   equilibrium_test_gs_solver_invariants
   equilibrium_test_gs_contour_device
   equilibrium_test_gs_port_gate
+  equilibrium_test_gs_device_result
+  equilibrium_test_gs_trace_targets
   PROPERTIES TIMEOUT 600)
