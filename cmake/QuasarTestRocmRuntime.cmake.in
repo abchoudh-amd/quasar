@@ -1,0 +1,23 @@
+# Keep every CTest process on the ROCm installation selected by CMake's HIP
+# compiler.  Direct hipSOLVER/hipBLAS dependencies have an RPATH, but their
+# transitive dependencies may otherwise be loaded from a different nightly
+# through the caller's LD_LIBRARY_PATH.
+set(_quasar_rocm_library_path [==[@QUASAR_CTEST_ROCM_LIBRARY_PATH@]==])
+
+if(DEFINED ENV{LD_LIBRARY_PATH} AND NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "")
+  set(_quasar_rocm_library_prefix "${_quasar_rocm_library_path}:")
+  string(FIND "$ENV{LD_LIBRARY_PATH}"
+         "${_quasar_rocm_library_prefix}"
+         _quasar_rocm_library_prefix_position)
+  if(NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "${_quasar_rocm_library_path}" AND
+     NOT _quasar_rocm_library_prefix_position EQUAL 0)
+    set(ENV{LD_LIBRARY_PATH}
+        "${_quasar_rocm_library_prefix}$ENV{LD_LIBRARY_PATH}")
+  endif()
+else()
+  set(ENV{LD_LIBRARY_PATH} "${_quasar_rocm_library_path}")
+endif()
+
+unset(_quasar_rocm_library_path)
+unset(_quasar_rocm_library_prefix)
+unset(_quasar_rocm_library_prefix_position)

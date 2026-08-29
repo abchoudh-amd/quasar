@@ -8,6 +8,61 @@
 
 include_guard(GLOBAL)
 
+function(_quasar_add_ctest_include_to_directory_tree directory include_file)
+  set_property(DIRECTORY "${directory}" APPEND PROPERTY
+    TEST_INCLUDE_FILES "${include_file}")
+
+  get_property(_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+  foreach(_subdirectory IN LISTS _subdirectories)
+    _quasar_add_ctest_include_to_directory_tree(
+      "${_subdirectory}" "${include_file}")
+  endforeach()
+endfunction()
+
+function(quasar_configure_test_rocm_runtime)
+  if(NOT QUASAR_ENABLE_HIP OR NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    return()
+  endif()
+  if(NOT DEFINED CMAKE_HIP_COMPILER_ROCM_ROOT OR
+     CMAKE_HIP_COMPILER_ROCM_ROOT STREQUAL "")
+    message(FATAL_ERROR
+      "QuasarHipRuntime: CMAKE_HIP_COMPILER_ROCM_ROOT is unavailable; "
+      "cannot configure a consistent CTest runtime environment.")
+  endif()
+
+  cmake_path(ABSOLUTE_PATH CMAKE_HIP_COMPILER_ROCM_ROOT
+             NORMALIZE OUTPUT_VARIABLE _quasar_rocm_root)
+  set(_quasar_rocm_library_dirs)
+  foreach(_candidate IN ITEMS lib lib64)
+    if(IS_DIRECTORY "${_quasar_rocm_root}/${_candidate}")
+      list(APPEND _quasar_rocm_library_dirs
+           "${_quasar_rocm_root}/${_candidate}")
+    endif()
+  endforeach()
+  if(NOT _quasar_rocm_library_dirs)
+    message(FATAL_ERROR
+      "QuasarHipRuntime: no lib or lib64 directory exists below "
+      "${_quasar_rocm_root}.")
+  endif()
+  list(JOIN _quasar_rocm_library_dirs ":"
+       QUASAR_CTEST_ROCM_LIBRARY_PATH)
+  set(_quasar_ctest_runtime_directory "${PROJECT_BINARY_DIR}/cmake")
+  set(_quasar_ctest_runtime_include
+      "${_quasar_ctest_runtime_directory}/QuasarTestRocmRuntime.cmake")
+  file(MAKE_DIRECTORY "${_quasar_ctest_runtime_directory}")
+  configure_file(
+    "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/QuasarTestRocmRuntime.cmake.in"
+    "${_quasar_ctest_runtime_include}"
+    @ONLY)
+
+  # Install the hook in every configured directory so the policy also applies
+  # when CTest is launched from a subdirectory of the build tree.  The runtime
+  # script is idempotent because a normal top-level CTest traversal includes it
+  # once per directory.
+  _quasar_add_ctest_include_to_directory_tree(
+    "${PROJECT_SOURCE_DIR}" "${_quasar_ctest_runtime_include}")
+endfunction()
+
 function(quasar_check_hip_runtime)
   set(_dir "${CMAKE_BINARY_DIR}/cmake-probes/hip_runtime")
   set(_probe "${_dir}/probe.hip")

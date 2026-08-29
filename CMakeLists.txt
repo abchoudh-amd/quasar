@@ -48,9 +48,11 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(QuasarAddModule)
 include(QuasarHipRuntime)
+include(QuasarLinearAlgebra)
 include(QuasarDistributed)
 
 quasar_check_hip_runtime()
+quasar_find_linear_algebra()
 
 if(QUASAR_BUILD_TESTING)
   enable_testing()
@@ -84,6 +86,7 @@ endif()
 
 if(QUASAR_BUILD_TESTING)
   add_subdirectory(tests)
+  quasar_configure_test_rocm_runtime()
 endif()
 
 message(STATUS "Quasar configured:")
