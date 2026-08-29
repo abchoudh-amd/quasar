@@ -10,6 +10,7 @@ set(_quasar_equilibrium_tests
   test_gs_critical_device
   test_gs_multigrid_device
   test_gs_solver_device
+  test_gs_contour_device
 )
 
 foreach(_test_name IN LISTS _quasar_equilibrium_tests)
@@ -32,4 +33,5 @@ set_tests_properties(
   equilibrium_test_flux_surfaces
   equilibrium_test_mhd_seeding
   equilibrium_test_gs_solver_device
+  equilibrium_test_gs_contour_device
   PROPERTIES TIMEOUT 600)

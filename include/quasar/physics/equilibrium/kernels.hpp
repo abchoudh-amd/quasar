@@ -210,6 +210,101 @@ void launch_gs_compute_derivatives(const EllipticGrid& g, const Real* d_psi,
                                    GsOperatorScratch& scratch,
                                    stream_t stream);
 
+// -- Derived diagnostics: field, flux surfaces, q profile ----------------------
+//
+// These are computed inside the equilibrium module rather than left to each
+// consumer, because B and q are derivatives of psi and the sixth-order Pade
+// operators that make them accurate are only available here. A consumer handed
+// psi on a grid would re-differentiate it with whatever scheme it has, and the
+// sixth-order claim would quietly stop being true at the module boundary.
+
+struct GsMagneticField {
+  GsMagneticField() = default;
+  explicit GsMagneticField(const EllipticGrid& g) { resize(g); }
+
+  void resize(const EllipticGrid& g);
+
+  backend::DeviceBuffer<Real> b_r{};
+  backend::DeviceBuffer<Real> b_z{};
+  backend::DeviceBuffer<Real> b_phi{};
+  backend::DeviceBuffer<Real> b_poloidal{};  // the denominator in q
+};
+
+// Recover F(psi_N) = R*B_phi by integrating FF' inward from a prescribed vacuum
+// value at the boundary. Serial by nature -- each sample depends on the one
+// outside it -- so this runs single-threaded on device over `samples` points.
+// `profile_scale` must be the amplitude GsResult reports; using the raw profile
+// reconstructs a field inconsistent with the solved source.
+void launch_gs_integrate_f_profile(const ProfileCoefficients& profile,
+                                   Real f_vacuum, Real psi_axis, Real psi_bdry,
+                                   Real profile_scale, int samples,
+                                   Real* d_f_table, stream_t stream);
+
+// B from psi. `d_f_table` is the sampled F(psi_N) above, looked up by nearest
+// neighbour exactly as the host driver does.
+void launch_gs_compute_field(const EllipticGrid& g, const Real* d_psi,
+                             const GsDerivativeFields& derivatives,
+                             const Real* d_f_table, int f_samples,
+                             Real psi_axis, Real psi_boundary,
+                             GsMagneticField& out, stream_t stream);
+
+// Traced flux surfaces. Storage is dense (n_surfaces * n_theta) with a per
+// surface point count, because a ray that finds no crossing contributes no
+// point and marks the surface open.
+struct GsFluxSurfaces {
+  GsFluxSurfaces() = default;
+  GsFluxSurfaces(int n_surfaces, int n_theta) { resize(n_surfaces, n_theta); }
+
+  void resize(int n_surfaces, int n_theta);
+
+  backend::DeviceBuffer<Real> r{};
+  backend::DeviceBuffer<Real> z{};
+  backend::DeviceBuffer<int>  count{};   // points actually found, per surface
+  backend::DeviceBuffer<int>  closed{};  // 1 if every ray hit
+  backend::DeviceBuffer<Real> q{};
+  backend::DeviceBuffer<Real> area{};
+  backend::DeviceBuffer<Real> volume{};
+  backend::DeviceBuffer<Real> psi_n{};
+
+  int n_surfaces{0};
+  int n_theta{0};
+};
+
+// Aggregates, small enough to copy back as one struct.
+struct GsDiagnostics {
+  Real q_axis{0};
+  Real q_95{0};  // q at the traced surface nearest psi_N = 0.95
+  Real total_volume{0};
+  Real psi_n_boundary{0};
+  Real r_major{0};
+  Real r_minor{0};
+  Real elongation{0};
+  Real triangularity{0};
+  int  n_open_surfaces{0};
+  bool have_closed{false};
+};
+
+// Trace `n_surfaces` surfaces, then compute each one's area, volume and q.
+//
+// Two phases, split by what can be parallelized. Ray marching is one thread per
+// (surface, ray) -- rays are independent. Compaction and the per-surface
+// integrals are one thread per SURFACE, walking rays in index order, because
+// the host appends hit points in ray order and both the shoelace area and the q
+// contour integral accumulate sequentially around the resulting polygon.
+void launch_gs_trace_surfaces(const EllipticGrid& g, const Real* d_psi,
+                              const GsMagneticField& field, Real axis_r,
+                              Real axis_z, Real psi_axis, Real psi_boundary,
+                              GsFluxSurfaces& out, stream_t stream);
+
+// Fold the per-surface results into the aggregate bundle. Single-threaded: the
+// selections (first closed surface, nearest to psi_N = 0.95, last closed) are
+// order-dependent first-wins choices, exactly as in the critical-point merge.
+void launch_gs_reduce_diagnostics(GsFluxSurfaces& surfaces,
+                                  GsDiagnostics* d_out, stream_t stream);
+
+GsDiagnostics copy_diagnostics_to_host(const backend::DeviceBuffer<GsDiagnostics>& buffer,
+                                       stream_t stream);
+
 // -- Multigrid and defect correction -------------------------------------------
 //
 // The elliptic solve: second-order multigrid as a preconditioner, driven to
