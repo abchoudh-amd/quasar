@@ -217,6 +217,20 @@ __global__ void apply_correction_kernel(GridView g, Real* __restrict__ x,
   x[k] += relaxation * e[k];
 }
 
+// rhs_shift = residual + jac * delta, interior only. This is the right-hand
+// side of the Newton system after the diagonal shift has been moved across.
+__global__ void newton_shift_kernel(GridView g,
+                                    const Real* __restrict__ residual,
+                                    const Real* __restrict__ jac,
+                                    const Real* __restrict__ delta,
+                                    Real* __restrict__ shift) {
+  const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x) + 1;
+  const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y) + 1;
+  if (i >= g.nr - 1 || j >= g.nz - 1) return;
+  const std::size_t k = g.index(i, j);
+  shift[k] = residual[k] + jac[k] * delta[k];
+}
+
 dim3 grid_2d(int nx, int ny, dim3 block) {
   return dim3((static_cast<unsigned>(nx) + block.x - 1) / block.x,
               (static_cast<unsigned>(ny) + block.y - 1) / block.y);
@@ -301,6 +315,67 @@ void GsDeviceMultigrid::vcycle_level(int l, Real* d_x, const Real* d_b,
   QUASAR_HIP_CHECK(hipGetLastError());
 
   smooth(g, d_x, d_b, cfg_.post_smooth, s);
+}
+
+void launch_gs_newton_correction(const EllipticGrid& g, const Real* d_jac,
+                                 const Real* d_residual, Real* d_delta,
+                                 GsDeviceMultigrid& mg, stream_t stream) {
+  auto* s = static_cast<hipStream_t>(stream);
+
+  backend::DeviceBuffer<Real> d_work{g.size()};
+  backend::DeviceBuffer<Real> d_shift{g.size()};
+  QUASAR_HIP_CHECK(hipMemsetAsync(d_delta, 0, g.size() * sizeof(Real), s));
+
+  const dim3 block{kBlock2D, kBlock2D};
+
+  // The shifted operator [Delta* - diag(jac)] is not the plain Delta* the
+  // multigrid hierarchy was built for, so the shift is carried as a
+  // defect-corrected outer iteration around the existing V-cycle rather than by
+  // rebuilding the hierarchy. The shift is small against the operator diagonal,
+  // so a handful of passes suffices.
+  for (int pass = 0; pass < 4; ++pass) {
+    // Residual convention here is r = b - L6(psi), so L6(psi) - b = -r and the
+    // Newton system [L6 - J] delta = -(L6(psi) - b) has right-hand side +r.
+    // Moving the diagonal shift across gives Delta* delta = r + jac*delta.
+    hipLaunchKernelGGL(newton_shift_kernel, grid_2d(g.nr - 2, g.nz - 2, block),
+                       block, 0, s, view_of(g), d_residual, d_jac, d_delta,
+                       d_shift.device_ptr());
+    QUASAR_HIP_CHECK(hipGetLastError());
+
+    QUASAR_HIP_CHECK(hipMemsetAsync(d_work.device_ptr(), 0, d_work.bytes(), s));
+    for (int c = 0; c < 3; ++c) {
+      mg.v_cycle(d_work.device_ptr(), d_shift.device_ptr(), stream);
+    }
+    QUASAR_HIP_CHECK(hipMemcpyAsync(d_delta, d_work.device_ptr(),
+                                    g.size() * sizeof(Real),
+                                    hipMemcpyDeviceToDevice, s));
+  }
+}
+
+Real launch_gs_newton_line_search(const EllipticGrid& g, const Real* d_current,
+                                  const Real* d_delta, const Real* d_rhs,
+                                  Real* d_trial, GsOperatorScratch& op_scratch,
+                                  GsReduceScratch& reduce_scratch,
+                                  stream_t stream) {
+  auto* s = static_cast<hipStream_t>(stream);
+  backend::DeviceBuffer<Real> d_resid{g.size()};
+
+  launch_gs_residual_l6(g, d_current, d_rhs, d_resid.device_ptr(), op_scratch,
+                        stream);
+  launch_gs_interior_max_norm(g, d_resid.device_ptr(), reduce_scratch, stream);
+  const Real base = copy_scalar_to_host(reduce_scratch, stream);
+
+  for (const Real alpha : {Real{1}, Real{0.5}, Real{0.25}, Real{0.125}}) {
+    QUASAR_HIP_CHECK(hipMemcpyAsync(d_trial, d_current, g.size() * sizeof(Real),
+                                    hipMemcpyDeviceToDevice, s));
+    launch_gs_axpy_interior(g, d_trial, d_delta, alpha, stream);
+    launch_gs_residual_l6(g, d_trial, d_rhs, d_resid.device_ptr(), op_scratch,
+                          stream);
+    launch_gs_interior_max_norm(g, d_resid.device_ptr(), reduce_scratch,
+                                stream);
+    if (copy_scalar_to_host(reduce_scratch, stream) < base) return alpha;
+  }
+  return Real{0};
 }
 
 GsDefectCorrectionReport launch_gs_solve_defect_corrected(

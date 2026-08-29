@@ -84,6 +84,11 @@ void device_memcpy_d2h_async(void* dst, const void* src, std::size_t bytes, stre
   QUASAR_HIP_CHECK(::hipMemcpyAsync(dst, src, bytes, ::hipMemcpyDeviceToHost, as_hip(stream)));
 }
 
+void device_memcpy_d2d_async(void* dst, const void* src, std::size_t bytes, stream_t stream) {
+  if (bytes == 0) return;
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(dst, src, bytes, ::hipMemcpyDeviceToDevice, as_hip(stream)));
+}
+
 void device_memcpy_peer_async(void* dst, int dst_device,
                               const void* src, int src_device,
                               std::size_t bytes, stream_t stream) {

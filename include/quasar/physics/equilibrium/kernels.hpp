@@ -388,6 +388,44 @@ void launch_gs_build_jacobian_diagonal(const EllipticGrid& g,
                                        Real profile_scale, Real* d_jac,
                                        stream_t stream);
 
+// Superimpose the seeded plasma column: psi += sign * depth * (1 - s^2)^2 for
+// s < 1, where s is the normalized distance from the seed centre.
+//
+// All parameters arrive already resolved -- the host applies the "0 means use
+// the domain default" rules and scales the depth by mu0*|I_p| before calling,
+// so the kernel has no policy in it. Boundary nodes are skipped, since those
+// carry Green's-function data.
+void launch_gs_add_plasma_seed(const EllipticGrid& g, Real r_center,
+                               Real z_center, Real minor_radius, Real depth,
+                               Real sign, Real* d_psi, stream_t stream);
+
+// x += alpha * delta on interior nodes only, leaving Dirichlet data intact.
+void launch_gs_axpy_interior(const EllipticGrid& g, Real* d_x,
+                             const Real* d_delta, Real alpha, stream_t stream);
+
+// -- Newton path ---------------------------------------------------------------
+//
+// Off by default. The diagonal profile Jacobian is incomplete for a
+// free-boundary solve, where psi on the boundary is itself a dense functional
+// of the interior psi, and the measured result is that Newton stalls where
+// damped Picard converges. Ported anyway so the two paths stay comparable and
+// the switch remains meaningful.
+
+// Solve [Delta* - diag(jac)] delta = -residual, applying the diagonal shift as
+// a defect-corrected outer iteration around the existing V-cycle rather than
+// rebuilding the multigrid hierarchy for the shifted operator.
+void launch_gs_newton_correction(const EllipticGrid& g, const Real* d_jac,
+                                 const Real* d_residual, Real* d_delta,
+                                 GsDeviceMultigrid& mg, stream_t stream);
+
+// Backtracking line search on the L6 residual norm. Returns the accepted step
+// length, or 0 if no tested length improved on the current residual.
+Real launch_gs_newton_line_search(const EllipticGrid& g, const Real* d_current,
+                                  const Real* d_delta, const Real* d_rhs,
+                                  Real* d_trial, GsOperatorScratch& op_scratch,
+                                  GsReduceScratch& reduce_scratch,
+                                  stream_t stream);
+
 // target += weight * (candidate - target), over the whole field.
 void launch_gs_blend(const EllipticGrid& g, Real* d_target,
                      const Real* d_candidate, Real weight, stream_t stream);

@@ -90,6 +90,9 @@ void  device_memcpy_h2d(void* dst, const void* src, std::size_t bytes);
 void  device_memcpy_d2h(void* dst, const void* src, std::size_t bytes);
 void  device_memcpy_h2d_async(void* dst, const void* src, std::size_t bytes, stream_t stream);
 void  device_memcpy_d2h_async(void* dst, const void* src, std::size_t bytes, stream_t stream);
+// Device-to-device copy within a single device. Distinct from
+// device_memcpy_peer_async, which crosses devices and needs both ordinals.
+void  device_memcpy_d2d_async(void* dst, const void* src, std::size_t bytes, stream_t stream);
 void  device_memcpy_peer_async(void* dst, int dst_device,
                                const void* src, int src_device,
                                std::size_t bytes, stream_t stream);

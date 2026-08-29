@@ -172,6 +172,39 @@ __global__ void restore_boundary_kernel(GridView g,
   target[k] = source[k];
 }
 
+// Seeded plasma column: a quadratic-with-compact-support well.
+//
+// The (1-s^2)^2 form is C^1 at the seed edge, so it does not inject a kink the
+// sixth-order residual would then have to smooth away over many iterations.
+// Everything else -- the centre, the radius, the depth scaling by mu0*|I_p|,
+// and the sign -- is resolved by the caller; the kernel carries no policy.
+__global__ void plasma_seed_kernel(GridView g, Real rc, Real zc, Real a,
+                                   Real depth, Real sign, Real dz, Real z_min,
+                                   Real* __restrict__ psi) {
+  const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+  if (i >= g.nr || j >= g.nz) return;
+  if (g.on_boundary(i, j)) return;  // boundary is Green's-function data
+
+  const Real dr = (g.r(i) - rc) / a;
+  const Real dzn = ((z_min + static_cast<Real>(j) * dz) - zc) / a;
+  const Real s2 = dr * dr + dzn * dzn;
+  if (s2 >= Real{1}) return;
+
+  const Real w = Real{1} - s2;
+  psi[g.index(i, j)] += depth * w * w * sign;
+}
+
+__global__ void axpy_interior_kernel(GridView g, Real* __restrict__ x,
+                                     const Real* __restrict__ delta,
+                                     Real alpha) {
+  const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x) + 1;
+  const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y) + 1;
+  if (i >= g.nr - 1 || j >= g.nz - 1) return;
+  const std::size_t k = g.index(i, j);
+  x[k] += alpha * delta[k];
+}
+
 dim3 grid_2d(int nx, int ny, dim3 block) {
   return dim3((static_cast<unsigned>(nx) + block.x - 1) / block.x,
               (static_cast<unsigned>(ny) + block.y - 1) / block.y);
@@ -182,6 +215,27 @@ dim3 grid_1d(std::size_t n, unsigned block) {
 }
 
 }  // namespace
+
+void launch_gs_add_plasma_seed(const EllipticGrid& g, Real r_center,
+                               Real z_center, Real minor_radius, Real depth,
+                               Real sign, Real* d_psi, stream_t stream) {
+  const dim3 block{kBlock2D, kBlock2D};
+  hipLaunchKernelGGL(plasma_seed_kernel, grid_2d(g.nr, g.nz, block), block, 0,
+                     static_cast<hipStream_t>(stream), view_of(g), r_center,
+                     z_center, minor_radius, depth, sign, g.dz(), g.z_min,
+                     d_psi);
+  QUASAR_HIP_CHECK(hipGetLastError());
+}
+
+void launch_gs_axpy_interior(const EllipticGrid& g, Real* d_x,
+                             const Real* d_delta, Real alpha,
+                             stream_t stream) {
+  const dim3 block{kBlock2D, kBlock2D};
+  hipLaunchKernelGGL(axpy_interior_kernel, grid_2d(g.nr - 2, g.nz - 2, block),
+                     block, 0, static_cast<hipStream_t>(stream), view_of(g),
+                     d_x, d_delta, alpha);
+  QUASAR_HIP_CHECK(hipGetLastError());
+}
 
 void launch_gs_build_current(const EllipticGrid& g, const Real* d_psi,
                              const ProfileCoefficients& profile, Real psi_axis,
