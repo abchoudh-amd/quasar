@@ -7,6 +7,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <limits>
+
 #include <algorithm>
 #include <cstddef>
 #include <cmath>
@@ -17,6 +20,17 @@ namespace {
 
 using quasar::Grid2D;
 using quasar::Real;
+
+// A few ulp of the expected value. Used only where binary64 genuinely cannot
+// reproduce the exact rational the long-double host code did; everything that
+// is still exact keeps EXPECT_EQ, which is what makes this bound informative
+// rather than a blanket loosening.
+void expect_near_ulp(Real actual, Real expected, int ulps = 4) {
+  const Real tolerance = static_cast<Real>(ulps)
+                       * std::numeric_limits<Real>::epsilon()
+                       * std::abs(expected);
+  EXPECT_NEAR(actual, expected, tolerance);
+}
 using quasar::numerics::RadialCellMeasure;
 using quasar::numerics::RadialMomentTarget;
 using quasar::numerics::RadialStencilRow;
@@ -269,23 +283,31 @@ TEST(RadialTables, LimiterRowsCarryMeasureSpecificAxisGeometry) {
 
   EXPECT_EQ(annular[cell_zero], Real{5} / Real{8});
   EXPECT_EQ(annular[cell_zero + 1], Real{3} / Real{8});
-  EXPECT_EQ(annular[cell_zero + 2], Real{1} / Real{4});
-  EXPECT_EQ(annular[cell_zero + 3], Real{25} / Real{44});
+  // Slots 2 and 3 are the v_lc extrapolation slope factors, not interpolation
+  // coefficients. They are formed from two first moments and a ratio, and the
+  // moment integral is a binomial expansion whose rounding no longer cancels
+  // now that it runs in binary64 rather than the host's long double. The
+  // interpolation coefficients above are unaffected and stay exact; a few ulp
+  // in a limiter bound is inert.
+  expect_near_ulp(annular[cell_zero + 2], Real{1} / Real{4});
+  expect_near_ulp(annular[cell_zero + 3], Real{25} / Real{44});
 
   EXPECT_EQ(angular[cell_zero], Real{17} / Real{24});
   // Rows enforce a bit-exact partition of unity; the binary64 encoding of
   // 7/24 is therefore formed as 1 - fl(17/24).
   EXPECT_EQ(angular[cell_zero + 1],
             Real{1} - Real{17} / Real{24});
-  EXPECT_EQ(angular[cell_zero + 2], Real{1} / Real{6});
-  EXPECT_EQ(angular[cell_zero + 3], Real{19} / Real{30});
+  expect_near_ulp(angular[cell_zero + 2], Real{1} / Real{6});
+  expect_near_ulp(angular[cell_zero + 3], Real{19} / Real{30});
   EXPECT_EQ(angular[axis_face], Real{1} / Real{2});
   EXPECT_EQ(angular[axis_face + 1], Real{1} / Real{2});
-  EXPECT_EQ(angular[axis_face + 2], Real{7} / Real{8});
-  EXPECT_EQ(angular[axis_face + 3], Real{7} / Real{8});
+  expect_near_ulp(angular[axis_face + 2], Real{7} / Real{8});
+  expect_near_ulp(angular[axis_face + 3], Real{7} / Real{8});
 
   for (const std::size_t offset : {axis_face, cell_zero}) {
     for (std::size_t k = 0; k < 4; ++k) {
+      // The uniform measure has no radial weight, so both the coefficients and
+      // the slope factors remain exact.
       EXPECT_EQ(uniform[offset + k], Real{1} / Real{2});
     }
   }

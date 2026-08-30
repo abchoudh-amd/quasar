@@ -183,8 +183,14 @@ function(quasar_find_linear_algebra)
       "${_quasar_rocm_root}.")
   endif()
 
+  # rocblas/rocsolver are required in addition to the hip* wrappers: the batched
+  # LU used by the radial-moment tables has no hipSOLVER entry point (hipSOLVER
+  # exposes only single-matrix getrf/getrs), so it calls
+  # rocsolver_dgetrf_strided_batched directly. hipSOLVER already loads rocSOLVER
+  # underneath, but that is an implementation detail of a different package and
+  # is not a target we may link.
   set(_quasar_required_rocm_packages
-      hip hipblas-common hipblas hipsolver)
+      hip hipblas-common hipblas hipsolver rocblas rocsolver)
   if(NOT WIN32)
     list(APPEND _quasar_required_rocm_packages
       AMDDeviceLibs amd_comgr hsa-runtime64)
@@ -228,15 +234,25 @@ function(quasar_find_linear_algebra)
   endif()
   set(_quasar_hipblas_search_paths)
   set(_quasar_hipsolver_search_paths)
+  set(_quasar_rocblas_search_paths)
+  set(_quasar_rocsolver_search_paths)
   foreach(_cmake_dir IN LISTS _quasar_rocm_cmake_dirs)
     list(APPEND _quasar_hipblas_search_paths "${_cmake_dir}/hipblas")
     list(APPEND _quasar_hipsolver_search_paths "${_cmake_dir}/hipsolver")
+    list(APPEND _quasar_rocblas_search_paths "${_cmake_dir}/rocblas")
+    list(APPEND _quasar_rocsolver_search_paths "${_cmake_dir}/rocsolver")
   endforeach()
   find_package(hipblas CONFIG REQUIRED
     PATHS ${_quasar_hipblas_search_paths}
     NO_DEFAULT_PATH)
   find_package(hipsolver CONFIG REQUIRED
     PATHS ${_quasar_hipsolver_search_paths}
+    NO_DEFAULT_PATH)
+  find_package(rocblas CONFIG REQUIRED
+    PATHS ${_quasar_rocblas_search_paths}
+    NO_DEFAULT_PATH)
+  find_package(rocsolver CONFIG REQUIRED
+    PATHS ${_quasar_rocsolver_search_paths}
     NO_DEFAULT_PATH)
   if(NOT WIN32)
     if(_quasar_had_rocm_path)
@@ -248,6 +264,7 @@ function(quasar_find_linear_algebra)
 
   set(_quasar_required_rocm_targets
       roc::hipblas roc::hipsolver roc::hipblas-common
+      roc::rocblas roc::rocsolver
       hip::amdhip64 hip::host hip::device)
   if(NOT WIN32)
     list(APPEND _quasar_required_rocm_targets
@@ -290,7 +307,7 @@ function(quasar_find_linear_algebra)
   # Fail at configure time if pre-existing package targets or stale cache
   # entries injected either libraries or headers from another ROCm tree.
   set(_quasar_rocm_library_targets
-      roc::hipblas roc::hipsolver hip::amdhip64)
+      roc::hipblas roc::hipsolver roc::rocblas roc::rocsolver hip::amdhip64)
   if(NOT WIN32)
     list(APPEND _quasar_rocm_library_targets
       amd_comgr hsa-runtime64::hsa-runtime64 ocml)
@@ -308,6 +325,7 @@ function(quasar_find_linear_algebra)
   _quasar_require_link_target(roc::hipblas roc::hipblas-common)
   _quasar_require_link_target(roc::hipblas hip::host)
   _quasar_require_link_target(roc::hipsolver hip::host)
+  _quasar_require_link_target(roc::rocsolver roc::rocblas)
 
   add_library(quasar_linear_algebra INTERFACE)
   add_library(quasar::linear_algebra ALIAS quasar_linear_algebra)
@@ -315,6 +333,8 @@ function(quasar_find_linear_algebra)
     INTERFACE
       roc::hipsolver
       roc::hipblas
+      roc::rocsolver
+      roc::rocblas
   )
 
   # Linking an absolute .so still records its SONAME.  These development hosts

@@ -8,7 +8,6 @@ set(_quasar_numerics_sources
   ssprk_integrator.cpp
   positivity_limiter.cpp
   mhd_background_profile.cpp
-  radial_moments.cpp
   radial_tables.cpp
 )
 
@@ -30,4 +29,10 @@ quasar_add_module(numerics REGISTERS SOURCES ${_quasar_numerics_sources})
 # consumer of these schemes appears.
 if(TARGET quasar_pic_hip)
   target_link_libraries(quasar_numerics PUBLIC quasar_pic_hip)
+endif()
+
+# radial_tables.cpp drives the batched radial-moment solve, whose kernels and
+# rocSOLVER LU live in the numerics backend.
+if(TARGET quasar_numerics_hip)
+  target_link_libraries(quasar_numerics PUBLIC quasar_numerics_hip)
 endif()

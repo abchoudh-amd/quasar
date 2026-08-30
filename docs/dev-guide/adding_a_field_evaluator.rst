@@ -204,6 +204,15 @@ launch ABI in ``include/quasar/physics/mhd/kernels.hpp``.
    ``include/quasar/numerics/radial_moments.hpp``. ``MhdSolver2D`` owns their
    device storage through ``RadialTables`` and threads a non-owning
    ``RadialTablesView`` through every affected launch; the inactive default is
-   the Cartesian path. Fluid reconstruction and staggered magnetic face-to-cell
+   the Cartesian path.
+
+   Those rows are themselves solved on the device, in one batched
+   factorization: ``solve_radial_rows`` assembles every system, runs two
+   batched rocSOLVER LUs (the second being the iterative-refinement step), and
+   normalizes and measures the residual in kernels. The single-row
+   ``solve_radial_row`` is a one-element batch, useful in a test and wrong in a
+   table build. The refinement step is not optional: it is what makes the
+   binary64 result backward stable, and hence what keeps the residual under the
+   1e-11 threshold ``RadialTables`` enforces on every row it accepts. Fluid reconstruction and staggered magnetic face-to-cell
    collocation must always use matching moment families and order when this
    device seam is extended.

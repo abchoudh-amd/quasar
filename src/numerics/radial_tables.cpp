@@ -19,40 +19,110 @@ int collocation_width(int scheme_order) {
   return scheme_order == 7 ? 8 : scheme_order == 5 ? 6 : 4;
 }
 
-long double reduced_cell_radius(const Grid2D& grid, int cell) {
+Real reduced_cell_radius(const Grid2D& grid, int cell) {
   // Do not replace this accessor with cell+1/2.  On a distributed tile it uses
   // Grid2D's canonical global-x mapping, avoiding the nested-FMA rounding of a
   // tile-local origin and making overlapping rows bit-identical.
-  return static_cast<long double>(grid.r_at_cell_center(cell)) /
-         static_cast<long double>(grid.dx());
+  return grid.r_at_cell_center(cell) / grid.dx();
 }
 
 bool is_axis_face(const Grid2D& grid, int face) {
   return grid.r_at_edge(face) == Real{0};
 }
 
-Real linear_face_extrapolation_factor(long double rho_center,
-                                      int neighbor_offset,
-                                      long double face_offset,
-                                      RadialCellMeasure measure) {
-  const long double center =
-      normalized_cell_moment(rho_center, 1, measure);
-  const long double neighbor = normalized_cell_moment(
-      rho_center + static_cast<long double>(neighbor_offset), 1, measure);
-  const long double denominator = center - neighbor;
-  const long double beta =
-      (rho_center + face_offset - center) / denominator;
-  if (denominator == 0.0L || !std::isfinite(beta)) {
-    throw std::runtime_error{
-        "RadialTables: ill-conditioned R6 v_lc extrapolation"};
+// Two-pass collector for the stencil rows.
+//
+// The construction loop below emits about twenty independent small systems per
+// radial index. `record` mode stashes each specification and returns a
+// placeholder that satisfies the same validation the real row will face, so the
+// loop body can be written once; `solve()` then runs the whole set through one
+// batched factorization, and a second traversal of the identical loop replays
+// the results in order.
+//
+// The cursor discipline is the invariant that makes this safe: the two
+// traversals must request rows in exactly the same order, and `replay` throws
+// rather than returning a mismatched row if they ever diverge.
+class BatchedRowBuilder {
+ public:
+  RadialStencilRow row(const RadialRowSpec& spec) {
+    if (!solved_) {
+      row_specs_.push_back(spec);
+      return placeholder(spec.width);
+    }
+    return replay(rows_, row_cursor_, spec.width, "stencil");
   }
-  const Real result = static_cast<Real>(beta);
-  if (!std::isfinite(result)) {
-    throw std::runtime_error{
-        "RadialTables: non-representable R6 v_lc extrapolation"};
+
+  Real extrapolation(Real rho_center, int neighbor_offset, Real face_offset,
+                     RadialCellMeasure measure) {
+    if (!solved_) {
+      extrapolation_specs_.push_back(RadialExtrapolationSpec{
+          rho_center, face_offset, neighbor_offset, measure});
+      return Real{0};
+    }
+    if (extrapolation_cursor_ >= extrapolations_.size()) {
+      throw std::runtime_error{
+          "RadialTables: extrapolation request order diverged between passes"};
+    }
+    return extrapolations_[extrapolation_cursor_++];
   }
-  return result;
-}
+
+  RadialStencilRow gauss(Real rho_anchor, int count, const Real* node_xi,
+                         const Real* cartesian_weights,
+                         RadialCellMeasure measure) {
+    if (!solved_) {
+      RadialGaussSpec spec{};
+      spec.rho_anchor = rho_anchor;
+      spec.count = count;
+      spec.measure = measure;
+      for (int q = 0; q < count; ++q) {
+        spec.node_xi[q] = node_xi[q];
+        spec.cartesian_weights[q] = cartesian_weights[q];
+      }
+      gauss_specs_.push_back(spec);
+      return placeholder(count);
+    }
+    return replay(gauss_rows_, gauss_cursor_, count, "Gauss");
+  }
+
+  void solve() {
+    rows_ = solve_radial_rows(row_specs_);
+    gauss_rows_ = radial_gauss_weight_rows(gauss_specs_);
+    extrapolations_ = radial_face_extrapolation_factors(extrapolation_specs_);
+    solved_ = true;
+  }
+
+ private:
+  // Width-correct, finite, exactly partitioned: passes validate_row so the
+  // collect pass cannot trip a check that the real data would not.
+  static RadialStencilRow placeholder(int width) {
+    RadialStencilRow row{};
+    row.width = width;
+    row.c[0] = Real{1};
+    return row;
+  }
+
+  static RadialStencilRow replay(const std::vector<RadialStencilRow>& source,
+                                 std::size_t& cursor, int width,
+                                 const char* what) {
+    if (cursor >= source.size() || source[cursor].width != width) {
+      throw std::runtime_error{
+          std::string{"RadialTables: "} + what
+          + " row request order diverged between passes"};
+    }
+    return source[cursor++];
+  }
+
+  std::vector<RadialRowSpec> row_specs_{};
+  std::vector<RadialGaussSpec> gauss_specs_{};
+  std::vector<RadialExtrapolationSpec> extrapolation_specs_{};
+  std::vector<RadialStencilRow> rows_{};
+  std::vector<RadialStencilRow> gauss_rows_{};
+  std::vector<Real> extrapolations_{};
+  std::size_t row_cursor_{0};
+  std::size_t gauss_cursor_{0};
+  std::size_t extrapolation_cursor_{0};
+  bool solved_{false};
+};
 
 void validate_row(const RadialStencilRow& row, int expected_width,
                   const char* family, int logical_index,
@@ -166,36 +236,73 @@ RadialTables::RadialTables(const Grid2D& grid, int scheme_order)
   r6_mphi_limiter.reserve(rows * std::size_t{4});
   r6_bphi_limiter.reserve(rows * std::size_t{4});
 
+  // Every stencil row below is an independent small system, and there are about
+  // twenty of them per radial index. Solving them one at a time would spend all
+  // its time on launch overhead, so the loop runs twice: once to collect the
+  // specifications, then once more to consume the batched results in the same
+  // order. In the collect pass `solve_row`/`gauss_row` record their argument and
+  // hand back a harmless placeholder, so the loop body itself is written once.
+  BatchedRowBuilder batch;
+  const auto solve_row = [&batch](Real rho_anchor, int width, int offset,
+                                  RadialMomentTarget target,
+                                  RadialCellMeasure measure, Real node_xi) {
+    return batch.row(
+        RadialRowSpec{rho_anchor, node_xi, width, offset, target, measure});
+  };
+  const auto gauss_row = [&batch](Real rho_anchor, int count,
+                                  const Real* node_xi,
+                                  const Real* cartesian_weights,
+                                  RadialCellMeasure measure) {
+    return batch.gauss(rho_anchor, count, node_xi, cartesian_weights, measure);
+  };
+
   const int reconstruction_half = reconstruction_width_ / 2;
+  for (int pass = 0; pass < 2; ++pass) {
+    if (pass == 1) {
+      // The collect pass filled the destination vectors with placeholders.
+      batch.solve();
+      for (std::vector<Real>* destination :
+           {&r1_left, &r1_right, &r1_mphi_left, &r1_mphi_right, &r1_bphi_left,
+            &r1_bphi_right, &r2_points, &r2_mphi_points, &r2_bphi_points,
+            &r3_weights, &r3_mphi_weights, &r3_bphi_weights, &r4_face_to_cell,
+            &r5_cell_to_face, &r5_bphi_cell_to_face, &r6_limiter,
+            &r6_mphi_limiter, &r6_bphi_limiter}) {
+        destination->clear();
+      }
+    }
   for (int logical = radial_lo_;
        logical < radial_lo_ + radial_count_; ++logical) {
-    const long double rho = reduced_cell_radius(grid, logical);
+    const Real rho = reduced_cell_radius(grid, logical);
 
     if (reconstruction_width_ != 0) {
       // R1L and R1R share a physical face but not a reflected coefficient row.
       // Each anchor is obtained from the Grid2D radius accessor of the cell
       // whose face is being reconstructed.
-      const auto left = solve_radial_row(
-          reduced_cell_radius(grid, logical - 1), reconstruction_width_,
-          -reconstruction_half, RadialMomentTarget::point_value, 0.5L);
-      const auto right = solve_radial_row(
+      const Real left_rho = reduced_cell_radius(grid, logical - 1);
+      const auto left = solve_row(
+          left_rho, reconstruction_width_, -reconstruction_half,
+          RadialMomentTarget::point_value, RadialCellMeasure::annular,
+          Real{0.5});
+      const auto right = solve_row(
           rho, reconstruction_width_, -reconstruction_half,
-          RadialMomentTarget::point_value, -0.5L);
-      const auto mphi_left = solve_radial_row(
-          reduced_cell_radius(grid, logical - 1), reconstruction_width_,
-          -reconstruction_half, RadialMomentTarget::point_value,
-          RadialCellMeasure::angular_momentum, 0.5L);
-      const auto mphi_right = solve_radial_row(
+          RadialMomentTarget::point_value, RadialCellMeasure::annular,
+          Real{-0.5});
+      const auto mphi_left = solve_row(
+          left_rho, reconstruction_width_, -reconstruction_half,
+          RadialMomentTarget::point_value,
+          RadialCellMeasure::angular_momentum, Real{0.5});
+      const auto mphi_right = solve_row(
           rho, reconstruction_width_, -reconstruction_half,
           RadialMomentTarget::point_value,
-          RadialCellMeasure::angular_momentum, -0.5L);
-      const auto bphi_left = solve_radial_row(
-          reduced_cell_radius(grid, logical - 1), reconstruction_width_,
-          -reconstruction_half, RadialMomentTarget::point_value,
-          RadialCellMeasure::uniform, 0.5L);
-      const auto bphi_right = solve_radial_row(
+          RadialCellMeasure::angular_momentum, Real{-0.5});
+      const auto bphi_left = solve_row(
+          left_rho, reconstruction_width_, -reconstruction_half,
+          RadialMomentTarget::point_value, RadialCellMeasure::uniform,
+          Real{0.5});
+      const auto bphi_right = solve_row(
           rho, reconstruction_width_, -reconstruction_half,
-          RadialMomentTarget::point_value, RadialCellMeasure::uniform, -0.5L);
+          RadialMomentTarget::point_value, RadialCellMeasure::uniform,
+          Real{-0.5});
       // R1 is consumed by every reconstructed component. In particular, the
       // metric-free B_phi flux difference and the radial-momentum positivity
       // fallback do not eliminate the physical r=0 face value, so its moment
@@ -213,20 +320,20 @@ RadialTables::RadialTables(const Grid2D& grid, int scheme_order)
 
       // R2 has one point-recovery row per radial Gauss node.
       for (int node = 0; node < quadrature_nodes_; ++node) {
-        const long double node_xi = scheme_order == 5
-            ? static_cast<long double>(kMp5TransverseNodes[node])
-            : static_cast<long double>(kMp7TransverseNodes[node]);
-        const auto point = solve_radial_row(
+        const Real node_xi = scheme_order == 5 ? kMp5TransverseNodes[node]
+                                               : kMp7TransverseNodes[node];
+        const auto point = solve_row(
             rho, reconstruction_width_, -reconstruction_half,
-            RadialMomentTarget::point_value, node_xi);
-        const auto mphi_point = solve_radial_row(
+            RadialMomentTarget::point_value, RadialCellMeasure::annular,
+            node_xi);
+        const auto mphi_point = solve_row(
             rho, reconstruction_width_, -reconstruction_half,
             RadialMomentTarget::point_value,
             RadialCellMeasure::angular_momentum, node_xi);
-        const auto bphi_point = solve_radial_row(
+        const auto bphi_point = solve_row(
             rho, reconstruction_width_, -reconstruction_half,
-            RadialMomentTarget::point_value,
-            RadialCellMeasure::uniform, node_xi);
+            RadialMomentTarget::point_value, RadialCellMeasure::uniform,
+            node_xi);
         append_checked_row(r2_points, point, reconstruction_width_, "R2",
                            logical);
         append_checked_row(
@@ -236,30 +343,19 @@ RadialTables::RadialTables(const Grid2D& grid, int scheme_order)
             r2_bphi_points, bphi_point, reconstruction_width_, "R2-bphi",
             logical);
       }
-      const auto gauss = scheme_order == 5
-          ? radial_gauss_weights(
-                rho, quadrature_nodes_, kMp5TransverseNodes,
-                kMp5TransverseGaussWeights)
-          : radial_gauss_weights(
-                rho, quadrature_nodes_, kMp7TransverseNodes,
-                kMp7TransverseGaussWeights);
+      const Real* const nodes = scheme_order == 5 ? kMp5TransverseNodes
+                                                  : kMp7TransverseNodes;
+      const Real* const weights = scheme_order == 5
+          ? kMp5TransverseGaussWeights
+          : kMp7TransverseGaussWeights;
+      const auto gauss = gauss_row(rho, quadrature_nodes_, nodes, weights,
+                                   RadialCellMeasure::annular);
       append_checked_row(r3_weights, gauss, quadrature_nodes_, "R3", logical);
-      const auto mphi_gauss = scheme_order == 5
-          ? radial_gauss_weights(
-                rho, quadrature_nodes_, kMp5TransverseNodes,
-                kMp5TransverseGaussWeights,
-                RadialCellMeasure::angular_momentum)
-          : radial_gauss_weights(
-                rho, quadrature_nodes_, kMp7TransverseNodes,
-                kMp7TransverseGaussWeights,
-                RadialCellMeasure::angular_momentum);
-      const auto bphi_gauss = scheme_order == 5
-          ? radial_gauss_weights(
-                rho, quadrature_nodes_, kMp5TransverseNodes,
-                kMp5TransverseGaussWeights, RadialCellMeasure::uniform)
-          : radial_gauss_weights(
-                rho, quadrature_nodes_, kMp7TransverseNodes,
-                kMp7TransverseGaussWeights, RadialCellMeasure::uniform);
+      const auto mphi_gauss = gauss_row(
+          rho, quadrature_nodes_, nodes, weights,
+          RadialCellMeasure::angular_momentum);
+      const auto bphi_gauss = gauss_row(rho, quadrature_nodes_, nodes, weights,
+                                        RadialCellMeasure::uniform);
       append_checked_row(
           r3_mphi_weights, mphi_gauss, quadrature_nodes_, "R3-mphi", logical);
       append_checked_row(
@@ -268,24 +364,27 @@ RadialTables::RadialTables(const Grid2D& grid, int scheme_order)
 
     // R4 point samples are the centered face sequence around this cell.  Face
     // k is at +1/2 relative to the integer cell index used by the solve API.
-    const auto face_to_cell = solve_radial_row(
+    const auto face_to_cell = solve_row(
         rho, collocation_width_, -collocation_width_ / 2,
-        RadialMomentTarget::cell_average, 0.5L);
+        RadialMomentTarget::cell_average, RadialCellMeasure::annular,
+        Real{0.5});
     append_checked_row(r4_face_to_cell, face_to_cell, collocation_width_, "R4",
                        logical);
 
     // R5 row `logical` targets the left face of cell `logical`.
-    const auto cell_to_face = solve_radial_row(
+    const auto cell_to_face = solve_row(
         rho, collocation_width_, -collocation_width_ / 2,
-        RadialMomentTarget::point_value, -0.5L);
+        RadialMomentTarget::point_value, RadialCellMeasure::annular,
+        Real{-0.5});
     // The r=0 collocated scratch value is likewise absent from the annular
     // update and its CT EMF is pinned; only this unused face row's residual may
     // therefore be diagnostic-only.
     append_checked_row(r5_cell_to_face, cell_to_face, collocation_width_, "R5",
                        logical, is_axis_face(grid, logical));
-    const auto bphi_cell_to_face = solve_radial_row(
+    const auto bphi_cell_to_face = solve_row(
         rho, collocation_width_, -collocation_width_ / 2,
-        RadialMomentTarget::point_value, RadialCellMeasure::uniform, -0.5L);
+        RadialMomentTarget::point_value, RadialCellMeasure::uniform,
+        Real{-0.5});
     append_checked_row(
         r5_bphi_cell_to_face, bphi_cell_to_face, collocation_width_,
         "R5-bphi", logical);
@@ -296,17 +395,19 @@ RadialTables::RadialTables(const Grid2D& grid, int scheme_order)
     // conserved measure needs its own pair and slope geometry: limiting a
     // native R1 candidate with annular bounds can admit an arbitrary native
     // overshoot even when the ordinary characteristic candidate is bounded.
-    const long double right_rho = reduced_cell_radius(grid, logical + 1);
+    const Real right_rho = reduced_cell_radius(grid, logical + 1);
     const auto append_limiter_family = [&](std::vector<Real>& destination,
                                            RadialCellMeasure measure,
                                            const char* family) {
-      const auto pair = solve_radial_row(
-          rho, 2, 0, RadialMomentTarget::point_value, measure, 0.5L);
+      const auto pair = solve_row(rho, 2, 0,
+                                  RadialMomentTarget::point_value, measure,
+                                  Real{0.5});
       append_checked_row(destination, pair, 2, family, logical);
-      destination.push_back(linear_face_extrapolation_factor(
-          rho, /*neighbor_offset=*/-1, /*face_offset=*/0.5L, measure));
-      destination.push_back(linear_face_extrapolation_factor(
-          right_rho, /*neighbor_offset=*/1, /*face_offset=*/-0.5L, measure));
+      destination.push_back(batch.extrapolation(
+          rho, /*neighbor_offset=*/-1, /*face_offset=*/Real{0.5}, measure));
+      destination.push_back(batch.extrapolation(
+          right_rho, /*neighbor_offset=*/1, /*face_offset=*/Real{-0.5},
+          measure));
     };
     append_limiter_family(
         r6_limiter, RadialCellMeasure::annular, "R6-pair");
@@ -315,6 +416,7 @@ RadialTables::RadialTables(const Grid2D& grid, int scheme_order)
         "R6-mphi-pair");
     append_limiter_family(
         r6_bphi_limiter, RadialCellMeasure::uniform, "R6-bphi-pair");
+  }
   }
 
   copy_to_device(r1_left_, r1_left);

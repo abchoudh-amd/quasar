@@ -132,6 +132,16 @@ Concrete physics modules currently present:
   (`include/quasar/numerics/scaled_arithmetic.hpp`), which is what the
   `-ffp-contract=off` requirement protects.
 
+The **cylindrical radial moment tables** (`numerics/radial_moments.hpp`,
+`radial_tables.hpp`) are solved on the device in one batched factorization per
+`RadialTables` construction, over `numerics/batched_lu.hpp` and rocSOLVER's
+strided-batched LU. rocSOLVER rather than hipSOLVER because hipSOLVER has no
+batched `getrf`/`getrs` and these systems are at most 8x8. The
+iterative-refinement step in `solve_radial_rows` is load-bearing rather than
+optional: it is what makes the binary64 result backward stable, and hence what
+keeps every row under the 1e-11 residual threshold `RadialTables` enforces —
+measured worst case 3.4e-12 against a 2.0e-12 `long double` reference.
+
 CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target
 creation, including `DETACHED` modules such as distributed),
 `QuasarDistributed.cmake` (tri-state MPI/parallel-HDF5 discovery),

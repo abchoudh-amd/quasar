@@ -497,6 +497,54 @@ interfaces may still change between entries.
   is the precision-comparison test, which is an output boundary; a float
   `DeviceVectorField` for one test caller would be abstraction without a second
   user.
+- Numerics: **the cylindrical radial moment tables are solved on the device**,
+  in one batched factorization rather than thousands of host eliminations.
+
+  `RadialTables` builds roughly twenty stencil rows per radial index across the
+  padded grid. Each is an independent general system of width at most eight --
+  a moment matrix against monomial data, or a Vandermonde matrix against moment
+  data -- and the host solved them one at a time with its own partial-pivoted
+  Gaussian elimination in `long double`. The assembly, the iterative-refinement
+  defect, the normalization and the residual are now kernels, and the two
+  eliminations are one batched `rocsolver_dgetrf_strided_batched` /
+  `dgetrs_strided_batched` each, behind a new public
+  `numerics/batched_lu.hpp`.
+
+  rocSOLVER rather than hipSOLVER because hipSOLVER exposes only single-matrix
+  `getrf`/`getrs`; driving that once per 8x8 system would spend all its time on
+  launch overhead. `rocblas`/`rocsolver` join the pinned ROCm package set in
+  `cmake/QuasarLinearAlgebra.cmake`, resolved from the same compiler root as
+  hipBLAS and hipSOLVER. Determinism needs no flag here: each system is factored
+  independently, so there is no cross-system reduction whose order could vary.
+
+  The precision question was the real one, and it was measured rather than
+  assumed. Dropping from `long double` to binary64 on an ill-conditioned
+  Vandermonde system could plausibly have stopped satisfying the 1e-11
+  acceptance threshold `RadialTables` enforces on every row. It does not: swept
+  over the padded grid for every width and measure the tables build, the worst
+  binary64 residual is 3.4e-12 against a 2.0e-12 `long double` reference. The
+  iterative-refinement step is what buys that margin -- it makes the result
+  backward stable, so the residual tracks working precision times the matrix
+  norm rather than the condition number. A new equivalence test carries its own
+  `long double` oracle and asserts all of this, plus that batching changes no
+  row and that repeated solves are bitwise identical.
+
+  One measurable regression, reported rather than hidden: the R6 v_lc
+  extrapolation slope factors are now one ulp from the exact small rationals
+  (1/4, 25/44, 19/30, 7/8) the `long double` path produced. The difference is in
+  the moment integral's binomial expansion, not in the division -- reformulating
+  to a single quotient does not recover it -- and it is inert in what the value
+  is for, an MP limiter bound. The interpolation coefficients in the same rows
+  are unaffected and still assert exactly; only those four assertions were
+  relaxed to a four-ulp bound.
+
+  **Breaking:** `normalized_cell_moment`, `solve_radial_row` and
+  `radial_gauss_weights` take and return `Real` rather than `long double`, and
+  `RadialCellMeasure` moved to a new `numerics/radial_cell_moments.hpp` that
+  carries the `QUASAR_HOST_DEVICE` closed forms shared by the host accessors and
+  the kernels. The batched `solve_radial_rows`, `radial_gauss_weight_rows` and
+  `radial_face_extrapolation_factors` are the primary interface; the single-row
+  forms are one-element batches. `src/numerics/radial_moments.cpp` is deleted.
 - Core/magnetostatics: **coil geometry and observation-point generation moved to
   the device**, which removes the last per-point host arithmetic in front of the
   now device-resident field evaluators.
