@@ -19,5 +19,7 @@ add_subdirectory(magnetostatics)
 add_subdirectory(pic)
 add_subdirectory(mhd)
 add_subdirectory(equilibrium)
-add_subdirectory(stability)
+# numerics precedes stability: the stability backend links quasar_numerics_hip
+# by target name, so that target must already exist.
 add_subdirectory(numerics)
+add_subdirectory(stability)

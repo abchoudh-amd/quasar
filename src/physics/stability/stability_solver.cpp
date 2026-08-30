@@ -88,6 +88,18 @@ void validate_config(const StabilityConfig& config,
     throw std::invalid_argument{
         "StabilitySolver: f_vacuum must be finite and nonzero"};
   }
+  if (config.eigen_method == EigenMethod::shift_invert) {
+    if (!std::isfinite(config.eigen_shift)) {
+      throw std::invalid_argument{
+          "StabilitySolver: eigen_shift must be finite"};
+    }
+    if (config.eigen_wanted <= 0 || config.eigen_maximum_iterations < 0
+        || !finite_nonnegative(config.eigen_residual_tolerance)
+        || !finite_nonnegative(config.block_structure_tolerance)) {
+      throw std::invalid_argument{
+          "StabilitySolver: invalid shift-invert parameters"};
+    }
+  }
   if (profiles.density.count <= 0
       || profiles.density.count
              > DensityProfileCoefficients::kMaxCoefficients) {
@@ -274,6 +286,63 @@ RationalSurfaces relevant_rational_surfaces(
   return filtered;
 }
 
+// Runs the shift-invert path on an assembled pencil.
+//
+// Returns false, with `fallback` set, whenever the block-tridiagonal route is
+// not available or does not converge.  The caller then keeps the dense result,
+// so a fallback costs an extra factorization attempt but never a wrong answer.
+[[nodiscard]] bool try_shift_invert(
+    const ToroidalMatrixPair& matrices, const SpectralDofLayout& layout,
+    const StabilityConfig& config, ModeSummary& summary, stream_t stream) {
+  const SpectralBlockStructure structure = build_spectral_block_structure(
+      layout, matrices.free_to_full_complex, config.chebyshev_order);
+  if (!structure.ok() || structure.order != matrices.real_order) {
+    summary.shift_invert_fallback = ShiftInvertFallback::unsupported_topology;
+    return false;
+  }
+
+  SpectralBlockMatrix shifted;
+  launch_extract_shifted_block_tridiagonal(
+      matrices.stiffness, matrices.inertia, config.eigen_shift, structure,
+      shifted, stream);
+  summary.block_structure_residual = shifted.maximum_outside_pattern;
+  if (!(shifted.maximum_outside_pattern
+        <= config.block_structure_tolerance)) {
+    summary.shift_invert_fallback = ShiftInvertFallback::structure_not_exact;
+    return false;
+  }
+
+  auto factorization = numerics::factor_block_tridiagonal(
+      shifted.lower, shifted.diagonal, shifted.upper, structure.partition,
+      stream);
+  if (!factorization.ok()) {
+    summary.shift_invert_fallback = ShiftInvertFallback::iteration_failed;
+    return false;
+  }
+
+  backend::DeviceBuffer<Real> permuted_mass;
+  launch_permute_dense_symmetric(matrices.inertia, structure, permuted_mass,
+                                 stream);
+
+  numerics::ShiftInvertLanczosConfig lanczos;
+  lanczos.wanted = std::min(config.eigen_wanted, matrices.real_order);
+  lanczos.shift = config.eigen_shift;
+  lanczos.maximum_iterations = config.eigen_maximum_iterations;
+  lanczos.residual_tolerance = config.eigen_residual_tolerance;
+  auto solution = numerics::solve_shift_invert_lanczos(
+      factorization, permuted_mass, lanczos, stream);
+  if (!solution.ok() || solution.eigenvalues.empty()) {
+    summary.shift_invert = std::move(solution);
+    summary.shift_invert_fallback = ShiftInvertFallback::iteration_failed;
+    return false;
+  }
+
+  summary.shift_invert = std::move(solution);
+  summary.shift_invert_fallback = ShiftInvertFallback::none;
+  summary.eigen_method = EigenMethod::shift_invert;
+  return true;
+}
+
 [[nodiscard]] bool geometry_is_acceptable(
     const ToroidalGeometryValidationSummary& geometry,
     const ToroidalAssemblyConfig& config) {
@@ -297,6 +366,10 @@ ModeEigenResult solve_prepared_mode(
   result.chebyshev_order = config.chebyshev_order;
   result.m_max = config.m_max;
   result.n_theta = config.n_theta;
+  result.summary.shift_invert_fallback =
+      config.eigen_method == EigenMethod::shift_invert
+          ? ShiftInvertFallback::unsupported_topology
+          : ShiftInvertFallback::not_requested;
 
   if (n_toroidal == 0) {
     throw std::invalid_argument{
@@ -403,6 +476,12 @@ ModeEigenResult solve_prepared_mode(
 
   ToroidalAssemblyConfig assembly_config = config.assembly;
   assembly_config.n_toroidal = n_toroidal;
+  // The generalized eigensolve below factors the inertia internally and reports
+  // an indefinite mass through GeneralizedEigenStatus::mass_not_positive_
+  // definite, which is mapped back onto the assembly diagnostics after the
+  // solve.  Running the assembly's own Cholesky here would pay for the same
+  // O(real_order^3) factorization a second time.
+  assembly_config.verify_mass_positive_definite = false;
   ToroidalMatrixPair matrices;
   launch_assemble_fixed_boundary_toroidal_matrices(
       basis, domains, coordinates, toroidal_equilibrium, layout,
@@ -439,6 +518,18 @@ ModeEigenResult solve_prepared_mode(
   result.summary.eigen_status = eigensystem.status;
   result.summary.eigen_solver_info = eigensystem.solver_info;
   if (!eigensystem.ok()) {
+    // The assembly's own Cholesky was suppressed above to avoid factoring the
+    // inertia twice.  Restore the diagnostic it would have produced so an
+    // indefinite mass matrix is still reported as such, and with the same
+    // leading-minor order, rather than only as an opaque eigensolver failure.
+    if (eigensystem.status
+            == numerics::GeneralizedEigenStatus::mass_not_positive_definite
+        && result.summary.assembly.has_value()) {
+      result.summary.assembly->status |=
+          ToroidalAssemblyStatus::mass_not_positive_definite;
+      result.summary.assembly->mass_failed_leading_minor_order =
+          eigensystem.failed_leading_minor_order;
+    }
     result.summary.status = ModeSolveStatus::eigensolver_failed;
     result.eigensystem = std::move(eigensystem);
     return result;
@@ -484,6 +575,21 @@ ModeEigenResult solve_prepared_mode(
     result.summary.classification =
         StabilityClassification::no_instability_detected;
   }
+  // Shift-invert runs alongside the dense solve rather than replacing it.
+  //
+  // The dense spectrum supplies `maximum_absolute_omega_squared`, and that
+  // number is what the resolution threshold -- and therefore the stable/unstable
+  // decision -- is defined against.  Shift-invert returns only the eigenvalues
+  // nearest the shift and has no way to bound the top of the spectrum, so
+  // dropping the dense solve today would mean silently redefining the threshold
+  // in terms of a looser bound.  Skipping the O(real_order^3) solve entirely
+  // needs a largest-magnitude estimator for the pencil as well; until that
+  // exists, this path is exercised, cross-checked against the dense result, and
+  // reported, but it is not yet load-bearing.
+  if (config.eigen_method == EigenMethod::shift_invert) {
+    (void)try_shift_invert(matrices, layout, config, result.summary, stream);
+  }
+
   result.summary.status = ModeSolveStatus::solved;
   result.free_to_full_complex = std::move(matrices.free_to_full_complex);
   result.radial_nodes = std::move(basis.nodes);
@@ -572,7 +678,15 @@ StabilityResult StabilitySolver::solve(
         std::max(result.maximum_growth_rate, summary.growth_rate);
   }
 
-  if (!have_trusted_mode || have_unresolved_mode) {
+  // The aggregates describe the modes that were actually resolved, and nothing
+  // more.  An unresolved mode makes the scan incomplete -- which is already
+  // reported through `status` and through the per-mode `modes` entries -- but
+  // it does not invalidate a growth rate measured on a mode that converged.
+  // Poisoning the aggregate here used to hand callers a NaN `maximum_growth_
+  // rate` alongside an `unstable` classification, which is strictly less
+  // information than the trusted maximum plus the incomplete-scan flag.
+  result.complete_mode_coverage = !have_unresolved_mode;
+  if (!have_trusted_mode) {
     result.aggregate_margin = std::numeric_limits<Real>::quiet_NaN();
     result.maximum_growth_rate = std::numeric_limits<Real>::quiet_NaN();
     result.worst_n = 0;

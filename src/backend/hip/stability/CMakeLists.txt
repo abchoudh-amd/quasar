@@ -9,13 +9,19 @@ set(_quasar_stability_hip_sources
   newcomb_energy.hip
   toroidal_equilibrium.hip
   toroidal_energy.hip
+  spectral_blocks.hip
 )
 
 quasar_add_hip_module(stability_hip SOURCES ${_quasar_stability_hip_sources})
 quasar_add_backend_src_include(stability_hip)
+# quasar_numerics_hip supplies the public Cholesky, block-tridiagonal, and
+# shift-invert entry points this module calls.  It is linked as a normal public
+# dependency precisely so that nothing here has to reach into that module's
+# private headers under src/.
 target_link_libraries(quasar_stability_hip
   PUBLIC
     quasar::linear_algebra
+    quasar_numerics_hip
 )
 
 # Same reasoning as the equilibrium HIP module: the stability path builds on

@@ -1,7 +1,7 @@
 #include "quasar/physics/stability/toroidal_energy.hpp"
 
 #include "backend/hip/hip_check.hpp"
-#include "backend/hip/numerics/linear_algebra_detail.hpp"
+#include "quasar/numerics/cholesky.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -20,6 +20,17 @@ namespace {
 constexpr unsigned kBlock1D = 128;
 constexpr unsigned kBlock2D = 8;
 constexpr int kMaximumOccurrences = 2;
+
+// Block size for the dense-matrix validation reduction.  Must be a power of two
+// so the shared-memory tree reduction is exact and complete.
+constexpr unsigned kBlockReduce = 256;
+static_assert((kBlockReduce & (kBlockReduce - 1)) == 0,
+              "kBlockReduce must be a power of two");
+
+// Cap on the grid of the validation scan.  The reduction is min/max/or only, so
+// the result is independent of how many blocks the work is spread over; this
+// simply bounds the size of the partial-result buffer.
+constexpr unsigned kMaximumScanBlocks = 1024;
 
 struct DeviceDiagnostics {
   std::uint64_t status;
@@ -931,58 +942,154 @@ __global__ void assemble_matrices_kernel(
                                   inertia_entry);
 }
 
-__global__ void validate_matrices_kernel(
+// Partial result of one thread block's scan over the dense matrices.
+//
+// Only min, max, and logical-or reductions appear here.  All three are exactly
+// associative and commutative on IEEE doubles, so the block decomposition below
+// returns the same bits as the serial scan it replaces regardless of how the
+// grid is scheduled.  That is what allows this validation to be parallel
+// without weakening the module's determinism contract.
+struct MatrixScanPartial {
+  Real maximum_residual;
+  Real minimum_diagonal;
+  int nonfinite;
+  int nonfinite_inertia;
+};
+
+__device__ MatrixScanPartial combine(MatrixScanPartial a,
+                                     MatrixScanPartial b) {
+  MatrixScanPartial result;
+  result.maximum_residual = fmax(a.maximum_residual, b.maximum_residual);
+  result.minimum_diagonal = fmin(a.minimum_diagonal, b.minimum_diagonal);
+  result.nonfinite = a.nonfinite | b.nonfinite;
+  result.nonfinite_inertia = a.nonfinite_inertia | b.nonfinite_inertia;
+  return result;
+}
+
+__device__ MatrixScanPartial identity_partial() {
+  return MatrixScanPartial{-std::numeric_limits<Real>::infinity(),
+                           std::numeric_limits<Real>::infinity(), 0, 0};
+}
+
+// fmax/fmin propagate the non-NaN operand, so a NaN residual would vanish in
+// the reduction.  Map it onto infinity, which the tolerance comparison rejects.
+__device__ Real reducible_residual(Real residual) {
+  return isnan(residual) ? std::numeric_limits<Real>::infinity() : residual;
+}
+
+template <unsigned BlockSize>
+__device__ MatrixScanPartial reduce_block(MatrixScanPartial value) {
+  __shared__ MatrixScanPartial shared[BlockSize];
+  const unsigned lane = threadIdx.x;
+  shared[lane] = value;
+  __syncthreads();
+  for (unsigned stride = BlockSize / 2; stride > 0; stride >>= 1) {
+    if (lane < stride) {
+      shared[lane] = combine(shared[lane], shared[lane + stride]);
+    }
+    __syncthreads();
+  }
+  return shared[0];
+}
+
+// Grid-stride scan of the two dense real matrices: finiteness, the inertia
+// diagonal minimum, and the symmetry residual against the transposed entry.
+__global__ void scan_matrices_kernel(
     const Real* __restrict__ stiffness, const Real* __restrict__ inertia,
-    const Real* __restrict__ assembly_hermitian_residuals,
-    int complex_order, int order, Real hermitian_tolerance,
+    int order, MatrixScanPartial* __restrict__ partials) {
+  const std::size_t total =
+      static_cast<std::size_t>(order) * static_cast<std::size_t>(order);
+  const std::size_t stride =
+      static_cast<std::size_t>(gridDim.x) * blockDim.x;
+  MatrixScanPartial value = identity_partial();
+  for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x
+                         + threadIdx.x;
+       index < total; index += stride) {
+    const std::size_t row = index % static_cast<std::size_t>(order);
+    const std::size_t column = index / static_cast<std::size_t>(order);
+    const std::size_t transpose =
+        column + row * static_cast<std::size_t>(order);
+    const Real stiffness_entry = stiffness[index];
+    const Real inertia_entry = inertia[index];
+
+    MatrixScanPartial contribution = identity_partial();
+    if (!isfinite(stiffness_entry) || !isfinite(inertia_entry)) {
+      contribution.nonfinite = 1;
+    }
+    if (!isfinite(inertia_entry)) contribution.nonfinite_inertia = 1;
+    if (row == column) contribution.minimum_diagonal = inertia_entry;
+    contribution.maximum_residual = fmax(
+        reducible_residual(
+            relative_deviation(stiffness_entry, stiffness[transpose])),
+        reducible_residual(
+            relative_deviation(inertia_entry, inertia[transpose])));
+    value = combine(value, contribution);
+  }
+
+  value = reduce_block<kBlockReduce>(value);
+  if (threadIdx.x == 0) partials[blockIdx.x] = value;
+}
+
+// Grid-stride scan of the per-entry Hermitian residuals recorded by the
+// assembly.  Only the upper triangle (row <= column) was written.
+__global__ void scan_assembly_residuals_kernel(
+    const Real* __restrict__ assembly_hermitian_residuals, int complex_order,
+    MatrixScanPartial* __restrict__ partials) {
+  const std::size_t total = static_cast<std::size_t>(complex_order)
+                          * static_cast<std::size_t>(complex_order);
+  const std::size_t stride =
+      static_cast<std::size_t>(gridDim.x) * blockDim.x;
+  MatrixScanPartial value = identity_partial();
+  for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x
+                         + threadIdx.x;
+       index < total; index += stride) {
+    const std::size_t row = index % static_cast<std::size_t>(complex_order);
+    const std::size_t column =
+        index / static_cast<std::size_t>(complex_order);
+    if (row > column) continue;
+    MatrixScanPartial contribution = identity_partial();
+    contribution.maximum_residual =
+        reducible_residual(assembly_hermitian_residuals[index]);
+    value = combine(value, contribution);
+  }
+
+  value = reduce_block<kBlockReduce>(value);
+  if (threadIdx.x == 0) partials[blockIdx.x] = value;
+}
+
+// Single-block final reduction over the two partial arrays, followed by the
+// status decisions the serial kernel used to make.
+__global__ void combine_matrix_scan_kernel(
+    const MatrixScanPartial* __restrict__ matrix_partials,
+    int matrix_partial_count,
+    const MatrixScanPartial* __restrict__ residual_partials,
+    int residual_partial_count, Real hermitian_tolerance,
     DeviceDiagnostics* __restrict__ diagnostics) {
-  if (blockIdx.x != 0 || threadIdx.x != 0) return;
-  Real minimum_diagonal = std::numeric_limits<Real>::infinity();
-  Real hermitian_residual = diagnostics->hermitian_residual;
-  bool nonfinite = false;
-  bool nonfinite_inertia = false;
-  if (assembly_hermitian_residuals != nullptr) {
-    for (int column = 0; column < complex_order; ++column) {
-      for (int row = 0; row <= column; ++row) {
-        const Real residual =
-            assembly_hermitian_residuals[static_cast<std::size_t>(row)
-                                         + static_cast<std::size_t>(column)
-                                               * complex_order];
-        hermitian_residual = fmax(hermitian_residual, residual);
-      }
-    }
+  MatrixScanPartial value = identity_partial();
+  for (int index = static_cast<int>(threadIdx.x);
+       index < matrix_partial_count;
+       index += static_cast<int>(blockDim.x)) {
+    value = combine(value, matrix_partials[index]);
   }
-  for (int column = 0; column < order; ++column) {
-    minimum_diagonal = fmin(
-        minimum_diagonal,
-        inertia[static_cast<std::size_t>(column) * (order + 1)]);
-    for (int row = 0; row < order; ++row) {
-      const std::size_t index =
-          static_cast<std::size_t>(row)
-          + static_cast<std::size_t>(column) * order;
-      const std::size_t transpose =
-          static_cast<std::size_t>(column)
-          + static_cast<std::size_t>(row) * order;
-      if (!isfinite(stiffness[index]) || !isfinite(inertia[index])) {
-        nonfinite = true;
-      }
-      if (!isfinite(inertia[index])) nonfinite_inertia = true;
-      hermitian_residual = fmax(
-          hermitian_residual,
-          relative_deviation(stiffness[index], stiffness[transpose]));
-      hermitian_residual = fmax(
-          hermitian_residual,
-          relative_deviation(inertia[index], inertia[transpose]));
-    }
+  for (int index = static_cast<int>(threadIdx.x);
+       index < residual_partial_count;
+       index += static_cast<int>(blockDim.x)) {
+    value = combine(value, residual_partials[index]);
   }
-  diagnostics->minimum_mass_diagonal = minimum_diagonal;
+  value = reduce_block<kBlockReduce>(value);
+  if (threadIdx.x != 0) return;
+
+  // The input-validation kernel already recorded a residual; keep the maximum.
+  const Real hermitian_residual =
+      fmax(diagnostics->hermitian_residual, value.maximum_residual);
+  diagnostics->minimum_mass_diagonal = value.minimum_diagonal;
   diagnostics->hermitian_residual = hermitian_residual;
-  diagnostics->nonfinite_inertia = nonfinite_inertia ? 1 : 0;
-  if (nonfinite) {
+  diagnostics->nonfinite_inertia = value.nonfinite_inertia;
+  if (value.nonfinite != 0) {
     diagnostics->status |= static_cast<std::uint64_t>(
         ToroidalAssemblyStatus::nonfinite_matrix);
   }
-  if (!(minimum_diagonal > Real{0})) {
+  if (!(value.minimum_diagonal > Real{0})) {
     diagnostics->status |= static_cast<std::uint64_t>(
         ToroidalAssemblyStatus::nonpositive_mass_diagonal);
   }
@@ -990,6 +1097,65 @@ __global__ void validate_matrices_kernel(
     diagnostics->status |= static_cast<std::uint64_t>(
         ToroidalAssemblyStatus::nonhermitian_matrix);
   }
+}
+
+// Host-side driver replacing the former single-thread validate kernel.  The
+// dense scan is O(order^2) work; running it on one lane made validation the
+// dominant cost of the assembly at production resolutions.
+void launch_matrix_validation(
+    const backend::DeviceBuffer<Real>& stiffness,
+    const backend::DeviceBuffer<Real>& inertia,
+    const backend::DeviceBuffer<Real>* assembly_hermitian_residuals,
+    int complex_order, int order, Real hermitian_tolerance, int owner,
+    backend::DeviceBuffer<DeviceDiagnostics>& diagnostics,
+    stream_t stream) {
+  auto* hip_stream = static_cast<hipStream_t>(stream);
+  const std::size_t matrix_entries =
+      static_cast<std::size_t>(order) * static_cast<std::size_t>(order);
+  const int matrix_blocks = static_cast<int>(std::min<std::size_t>(
+      kMaximumScanBlocks,
+      (matrix_entries + kBlockReduce - 1) / kBlockReduce));
+
+  backend::DeviceBuffer<MatrixScanPartial> matrix_partials{
+      static_cast<std::size_t>(matrix_blocks), backend::uninitialized,
+      backend::on_device(owner)};
+  hipLaunchKernelGGL(scan_matrices_kernel, dim3{
+                         static_cast<unsigned>(matrix_blocks)},
+                     dim3{kBlockReduce}, 0, hip_stream,
+                     stiffness.device_ptr(), inertia.device_ptr(), order,
+                     matrix_partials.device_ptr());
+  QUASAR_HIP_CHECK(hipGetLastError());
+
+  int residual_blocks = 0;
+  backend::DeviceBuffer<MatrixScanPartial> residual_partials{};
+  if (assembly_hermitian_residuals != nullptr && complex_order > 0) {
+    const std::size_t residual_entries =
+        static_cast<std::size_t>(complex_order)
+        * static_cast<std::size_t>(complex_order);
+    residual_blocks = static_cast<int>(std::min<std::size_t>(
+        kMaximumScanBlocks,
+        (residual_entries + kBlockReduce - 1) / kBlockReduce));
+    residual_partials = backend::DeviceBuffer<MatrixScanPartial>{
+        static_cast<std::size_t>(residual_blocks), backend::uninitialized,
+        backend::on_device(owner)};
+    hipLaunchKernelGGL(scan_assembly_residuals_kernel,
+                       dim3{static_cast<unsigned>(residual_blocks)},
+                       dim3{kBlockReduce}, 0, hip_stream,
+                       assembly_hermitian_residuals->device_ptr(),
+                       complex_order, residual_partials.device_ptr());
+    QUASAR_HIP_CHECK(hipGetLastError());
+  }
+
+  hipLaunchKernelGGL(
+      combine_matrix_scan_kernel, dim3{1}, dim3{kBlockReduce}, 0, hip_stream,
+      matrix_partials.device_ptr(), matrix_blocks,
+      residual_blocks > 0 ? residual_partials.device_ptr() : nullptr,
+      residual_blocks, hermitian_tolerance, diagnostics.device_ptr());
+  QUASAR_HIP_CHECK(hipGetLastError());
+
+  // The partial buffers are freed when this scope exits, so the caller must
+  // observe the combine kernel before that happens.
+  backend::device_synchronize(stream);
 }
 
 DeviceDiagnostics download_diagnostics(
@@ -1059,45 +1225,22 @@ void validate_mass_positive_definite(
     ToroidalMatrixPair& matrices, bool inertia_is_finite, stream_t stream) {
   if (!inertia_is_finite) return;
 
-  const std::size_t order = static_cast<std::size_t>(matrices.real_order);
-  const std::size_t matrix_entries = order * order;
-  const int owner = matrices.inertia.owner_device();
-  backend::DeviceBuffer<Real> factor{
-      matrix_entries, backend::uninitialized, backend::on_device(owner)};
-  backend::DeviceBuffer<int> device_info{1, backend::on_device(owner)};
-  numerics::detail::copy_device_buffer(
-      factor, matrices.inertia, matrix_entries, stream);
-
-  numerics::detail::SolverHandle solver{stream};
-  int workspace_size = 0;
-  numerics::detail::check_hipsolver(
-      hipsolverDnDpotrf_bufferSize(
-          solver.get(), HIPBLAS_FILL_MODE_LOWER, matrices.real_order,
-          factor.device_ptr(), matrices.real_order, &workspace_size),
-      "potrf workspace query");
-  if (workspace_size < 0) {
+  const numerics::CholeskyResult factorization =
+      numerics::check_symmetric_positive_definite(
+          matrices.inertia, matrices.real_order,
+          numerics::MatrixTriangle::lower, stream);
+  if (factorization.status
+      == numerics::CholeskyStatus::invalid_solver_argument) {
     throw std::runtime_error{
-        "hipSOLVER potrf workspace query returned a negative size"};
+        "hipSOLVER potrf rejected argument "
+        + std::to_string(factorization.invalid_argument_position)};
   }
-  backend::DeviceBuffer<Real> workspace{
-      static_cast<std::size_t>(workspace_size), backend::uninitialized,
-      backend::on_device(owner)};
-  numerics::detail::check_hipsolver(
-      hipsolverDnDpotrf(
-          solver.get(), HIPBLAS_FILL_MODE_LOWER, matrices.real_order,
-          factor.device_ptr(), matrices.real_order, workspace.device_ptr(),
-          workspace_size, device_info.device_ptr()),
-      "potrf");
-
-  const int info = numerics::detail::read_info(device_info, stream);
-  if (info < 0) {
-    throw std::runtime_error{
-        "hipSOLVER potrf rejected argument " + std::to_string(-info)};
-  }
-  if (info > 0) {
+  if (factorization.status
+      == numerics::CholeskyStatus::not_positive_definite) {
     matrices.diagnostics.status |=
         ToroidalAssemblyStatus::mass_not_positive_definite;
-    matrices.diagnostics.mass_failed_leading_minor_order = info;
+    matrices.diagnostics.mass_failed_leading_minor_order =
+        factorization.failed_leading_minor_order;
   }
 }
 
@@ -1223,13 +1366,9 @@ void launch_validate_toroidal_matrix_pair(
       to_device_diagnostics(matrices.diagnostics);
   device_diagnostics.copy_from_host_async(&initial, 1, stream);
 
-  auto* hip_stream = static_cast<hipStream_t>(stream);
-  hipLaunchKernelGGL(
-      validate_matrices_kernel, dim3{1}, dim3{1}, 0, hip_stream,
-      matrices.stiffness.device_ptr(), matrices.inertia.device_ptr(), nullptr,
-      0, matrices.real_order, hermitian_tolerance,
-      device_diagnostics.device_ptr());
-  QUASAR_HIP_CHECK(hipGetLastError());
+  launch_matrix_validation(matrices.stiffness, matrices.inertia, nullptr, 0,
+                           matrices.real_order, hermitian_tolerance, owner,
+                           device_diagnostics, stream);
   const DeviceDiagnostics host =
       download_diagnostics(device_diagnostics, stream);
   matrices.diagnostics =
@@ -1437,16 +1576,16 @@ void launch_assemble_fixed_boundary_toroidal_matrices(
       out.inertia.device_ptr(), assembly_hermitian_residuals.device_ptr());
   QUASAR_HIP_CHECK(hipGetLastError());
 
-  hipLaunchKernelGGL(
-      validate_matrices_kernel, dim3{1}, dim3{1}, 0, hip_stream,
-      out.stiffness.device_ptr(), out.inertia.device_ptr(),
-      assembly_hermitian_residuals.device_ptr(), complex_order_int, real_order,
-      config.hermitian_tolerance, device_diagnostics.device_ptr());
-  QUASAR_HIP_CHECK(hipGetLastError());
+  launch_matrix_validation(out.stiffness, out.inertia,
+                           &assembly_hermitian_residuals, complex_order_int,
+                           real_order, config.hermitian_tolerance,
+                           shape.owner, device_diagnostics, stream);
   host_diagnostics = download_diagnostics(device_diagnostics, stream);
   out.diagnostics = to_public_diagnostics(host_diagnostics, dense_bytes);
-  validate_mass_positive_definite(
-      out, host_diagnostics.nonfinite_inertia == 0, stream);
+  if (config.verify_mass_positive_definite) {
+    validate_mass_positive_definite(
+        out, host_diagnostics.nonfinite_inertia == 0, stream);
+  }
 }
 
 }  // namespace quasar::stability

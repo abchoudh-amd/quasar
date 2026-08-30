@@ -153,6 +153,20 @@ struct ToroidalAssemblyConfig {
   // intentionally excluded.  Zero disables the policy limit; arithmetic
   // overflow is always rejected independently.
   std::size_t max_dense_storage_bytes{std::size_t{8} << 30};
+
+  // Run a Cholesky factorization of the assembled inertia to classify a
+  // non-positive-definite mass matrix.  This is an O(real_order^3) operation on
+  // top of the assembly itself.
+  //
+  // Leave it enabled when the matrices are consumed by anything other than the
+  // dense symmetric-definite eigensolver, which is the default and is what the
+  // direct assembly tests exercise.  A caller that immediately calls
+  // `solve_generalized_symmetric_eigenproblem` on this pair can disable it: that
+  // solver factors the mass term internally and reports the identical condition
+  // through `GeneralizedEigenStatus::mass_not_positive_definite`, so leaving
+  // this on pays for the same factorization twice.  `StabilitySolver` disables
+  // it for exactly that reason.
+  bool verify_mass_positive_definite{true};
 };
 
 struct ToroidalAssemblyDiagnostics {

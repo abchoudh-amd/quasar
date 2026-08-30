@@ -19,8 +19,10 @@
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/condition_estimator.hpp"
 #include "quasar/numerics/generalized_eigensolver.hpp"
+#include "quasar/numerics/shift_invert_lanczos.hpp"
 #include "quasar/physics/equilibrium/gs_solver.hpp"
 #include "quasar/physics/stability/kernels.hpp"
+#include "quasar/physics/stability/spectral_blocks.hpp"
 #include "quasar/physics/stability/toroidal_energy.hpp"
 #include "quasar/physics/stability/toroidal_equilibrium.hpp"
 
@@ -60,6 +62,39 @@ enum class RadialBoundaryModel {
   outer_fixed_inner_natural,
 };
 
+// How the assembled pencil K x = omega^2 M x is solved.
+enum class EigenMethod {
+  // Full spectrum via hipSOLVER sygvd: O(real_order^3), returns every
+  // eigenvalue, and is the reference the shift-invert path is validated
+  // against.  This is the default because the spectral extremes it reports are
+  // what the classification and the resolution threshold are defined in terms
+  // of.
+  dense,
+
+  // Shift-invert Lanczos on the block-tridiagonal factorization of
+  // (K - shift*M).  Returns only the eigenvalues nearest `eigen_shift`, so it
+  // is the right choice when a scan needs the growth rate of the worst mode and
+  // not the whole spectrum.  Falls back to `dense` and records the reason in
+  // `ModeSummary::shift_invert_fallback` when the discretization has no exact
+  // block-tridiagonal structure -- currently any rational-surface topology.
+  shift_invert,
+};
+
+// Why a requested shift-invert solve did not run.
+enum class ShiftInvertFallback {
+  not_requested,
+  // The solve ran; no fallback occurred.
+  none,
+  // Harmonic-specific radial splits make the radial-major reordering
+  // non-rectangular, so no exact block-tridiagonal partition exists.
+  unsupported_topology,
+  // The reordered matrix had nonzeros outside the block-tridiagonal pattern,
+  // so extracting it would have silently discarded real couplings.
+  structure_not_exact,
+  // (K - shift*M) could not be factored, or the iteration did not converge.
+  iteration_failed,
+};
+
 struct StabilityProfiles {
   DensityProfileCoefficients density{};
   Real f_vacuum{0};
@@ -87,6 +122,24 @@ struct StabilityConfig {
   Real eigenvalue_absolute_tolerance{0};
   Real eigenvalue_relative_tolerance{Real{1e-10}};
   Real maximum_mass_digits_lost{Real{12}};
+
+  // Eigenvalue method and its shift-invert parameters.
+  //
+  // The shift must lie below the eigenvalue of interest for the lowest mode to
+  // be the one nearest it; a shift inside the spectrum converges to whatever
+  // surrounds it instead.  The default of a small negative value targets the
+  // marginally unstable band, which is where the classification decision is
+  // actually made.
+  EigenMethod eigen_method{EigenMethod::dense};
+  Real eigen_shift{Real{-1}};
+  int eigen_wanted{4};
+  int eigen_maximum_iterations{0};
+  Real eigen_residual_tolerance{Real{1e-10}};
+
+  // Largest magnitude tolerated outside the block-tridiagonal pattern before
+  // the shift-invert path refuses to use it.  The couplings are structurally
+  // zero, so the default admits nothing but exact zeros.
+  Real block_structure_tolerance{0};
 };
 
 struct ModeSummary {
@@ -113,6 +166,16 @@ struct ModeSummary {
   std::optional<numerics::GeneralizedEigenStatus> eigen_status{};
   int eigen_solver_info{0};
 
+  // Shift-invert provenance.  `shift_invert` is populated only when the
+  // shift-invert path actually ran; `shift_invert_fallback` says why it did not
+  // when the method was requested.  A fallback is not an error: the dense
+  // result is returned and the classification is unaffected.
+  EigenMethod eigen_method{EigenMethod::dense};
+  ShiftInvertFallback shift_invert_fallback{
+      ShiftInvertFallback::not_requested};
+  std::optional<numerics::ShiftInvertLanczosResult> shift_invert{};
+  Real block_structure_residual{0};
+
   [[nodiscard]] bool solved() const noexcept {
     return status == ModeSolveStatus::solved;
   }
@@ -136,6 +199,18 @@ struct StabilityResult {
   std::vector<ModeSummary> modes{};
   StabilityClassification classification{
       StabilityClassification::unresolved};
+
+  // The aggregates below are reduced over the TRUSTED modes only -- those with
+  // `status == solved` and a classification other than `unresolved`.  They are
+  // NaN only when no mode in the scan was trusted.
+  //
+  // `complete_mode_coverage` is false when at least one requested mode failed
+  // to solve or came back unresolved.  A false value does not invalidate the
+  // aggregates; it says the scan did not cover every requested n, so the true
+  // worst case may lie in a mode that was not resolved.  Read it before quoting
+  // `aggregate_margin` or `maximum_growth_rate` as a property of the
+  // equilibrium rather than of the modes that converged.
+  bool complete_mode_coverage{false};
   Real aggregate_margin{std::numeric_limits<Real>::quiet_NaN()};
   Real maximum_growth_rate{std::numeric_limits<Real>::quiet_NaN()};
   int worst_n{0};
