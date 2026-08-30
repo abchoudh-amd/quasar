@@ -11,6 +11,14 @@
 // The estimate is intended for assembled energy, inertia, and shift-invert
 // matrices.  `digits_lost` is log10(condition_estimate); callers can therefore
 // reject a marginal result whose expected loss exceeds their precision budget.
+//
+// -- Cost ---------------------------------------------------------------------
+// This is not a cheap norm-based estimator in the LAPACK `gecon` sense.  It is
+// exact, and it is exact because it computes the whole spectrum: one full
+// eigenvalue-only `syevd`, O(order^3) work and O(order^2) scratch, comparable
+// to the eigensolve the caller is usually about to run anyway.  Budget for it
+// as a second dense factorization rather than as a diagnostic afterthought, and
+// do not call it per iteration inside a loop.
 
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/types.hpp"

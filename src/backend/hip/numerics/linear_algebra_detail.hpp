@@ -9,8 +9,20 @@
 
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace quasar::numerics::detail {
+
+// Every hipSOLVER/hipBLAS entry point reached from this module is the
+// double-precision variant (Dsygvd, Dsyevd, Dpotrf, Dgetrf, Dgetrs, Dgemm,
+// Dgemv, Dnrm2, Ddot, Daxpy, Dscal) called on DeviceBuffer<Real> storage.  The
+// binding is by name, so a change of the Real typedef would silently
+// reinterpret the buffers rather than fail to compile.  Pin it here.
+static_assert(std::is_same_v<Real, double>,
+              "quasar::numerics dispatches to the double-precision hipSOLVER "
+              "and hipBLAS entry points; Real must be double.  Introducing a "
+              "single-precision Real requires templating those call sites onto "
+              "the S variants.");
 
 inline const char* hipsolver_status_name(hipsolverStatus_t status) noexcept {
   switch (status) {
@@ -133,6 +145,16 @@ inline void copy_device_buffer(backend::DeviceBuffer<Real>& destination,
   if (count == 0) return;
   backend::device_memcpy_d2d_async(destination.device_ptr(), source.device_ptr(),
                                    count * sizeof(Real), stream);
+}
+
+// Raw-pointer form, for copies into a column of a larger buffer where no
+// DeviceBuffer names the destination.
+inline void copy_device_buffer_raw(Real* destination, const Real* source,
+                                   std::size_t count,
+                                   backend::stream_t stream) {
+  if (count == 0) return;
+  backend::device_memcpy_d2d_async(destination, source, count * sizeof(Real),
+                                   stream);
 }
 
 }  // namespace quasar::numerics::detail

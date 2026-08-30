@@ -2,6 +2,7 @@
 
 #include "backend/hip/numerics/linear_algebra_detail.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
@@ -10,41 +11,21 @@
 namespace quasar::numerics {
 namespace {
 
-struct BlockSizes {
-  std::size_t block{};
-  std::size_t off_diagonal{};
-  std::size_t diagonal{};
-};
-
-BlockSizes checked_block_sizes(int block_count, int block_order) {
-  if (block_count <= 0 || block_order <= 0) {
-    throw std::invalid_argument{
-        "block tridiagonal dimensions must both be positive"};
+std::size_t checked_multiply(std::size_t a, std::size_t b,
+                             const char* what) {
+  if (a != 0 && b > std::numeric_limits<std::size_t>::max() / a) {
+    throw std::length_error{std::string{"block tridiagonal "} + what
+                            + " overflows addressable storage"};
   }
-  const auto count = static_cast<std::size_t>(block_count);
-  const auto order = static_cast<std::size_t>(block_order);
-  if (order > std::numeric_limits<std::size_t>::max() / order) {
-    throw std::length_error{"block order overflows addressable storage"};
-  }
-  const std::size_t block = order * order;
-  if (block > std::numeric_limits<std::size_t>::max() / count) {
-    throw std::length_error{"block diagonal storage size overflows"};
-  }
-  return BlockSizes{block, (count - 1) * block, count * block};
+  return a * b;
 }
 
-std::size_t checked_rhs_size(int block_count, int block_order, int rhs_count) {
-  if (rhs_count <= 0) {
-    throw std::invalid_argument{
-        "block tridiagonal rhs_count must be positive"};
+std::size_t checked_add(std::size_t a, std::size_t b, const char* what) {
+  if (b > std::numeric_limits<std::size_t>::max() - a) {
+    throw std::length_error{std::string{"block tridiagonal "} + what
+                            + " overflows addressable storage"};
   }
-  const auto rows = static_cast<std::size_t>(block_count)
-                  * static_cast<std::size_t>(block_order);
-  const auto columns = static_cast<std::size_t>(rhs_count);
-  if (rows > std::numeric_limits<std::size_t>::max() / columns) {
-    throw std::length_error{"block right-hand-side storage size overflows"};
-  }
-  return rows * columns;
+  return a + b;
 }
 
 void require_size(const backend::DeviceBuffer<Real>& buffer,
@@ -69,25 +50,24 @@ void require_owner(const backend::DeviceBuffer<Real>& buffer,
 }
 
 void validate_factorization_storage(
-    const BlockTridiagonalFactorization& factorization,
-    const BlockSizes& sizes) {
-  require_size(factorization.lower, sizes.off_diagonal, "factor lower");
-  require_size(factorization.diagonal_lu, sizes.diagonal,
+    const BlockTridiagonalFactorization& factorization) {
+  const BlockPartition& partition = factorization.partition;
+  require_size(factorization.lower, partition.off_diagonal_size(),
+               "factor lower");
+  require_size(factorization.diagonal_lu, partition.diagonal_size(),
                "factor diagonal");
-  require_size(factorization.upper_reduced, sizes.off_diagonal,
+  require_size(factorization.upper_reduced, partition.off_diagonal_size(),
                "factor upper");
-  const auto pivot_size = static_cast<std::size_t>(factorization.block_count)
-                        * static_cast<std::size_t>(factorization.block_order);
-  if (factorization.pivots.size() != pivot_size) {
+  if (factorization.pivots.size() != partition.pivot_size()) {
     throw std::invalid_argument{
         "block tridiagonal factor pivot buffer has the wrong size"};
   }
 
   const int device = factorization.diagonal_lu.owner_device();
-  require_owner(factorization.lower, sizes.off_diagonal, device,
+  require_owner(factorization.lower, partition.off_diagonal_size(), device,
                 "factor lower");
-  require_owner(factorization.upper_reduced, sizes.off_diagonal, device,
-                "factor upper");
+  require_owner(factorization.upper_reduced, partition.off_diagonal_size(),
+                device, "factor upper");
   if (factorization.pivots.owner_device() != device) {
     throw std::invalid_argument{
         "block tridiagonal factor pivots reside on a different device"};
@@ -108,55 +88,192 @@ BlockTridiagonalStatus classify_solve_info(int info) noexcept {
                   : BlockTridiagonalStatus::solve_failed;
 }
 
+void require_partition(const BlockPartition& partition) {
+  if (partition.empty()) {
+    throw std::invalid_argument{
+        "block tridiagonal partition must contain at least one block"};
+  }
+}
+
+int checked_rhs_count(int rhs_count) {
+  if (rhs_count <= 0) {
+    throw std::invalid_argument{
+        "block tridiagonal rhs_count must be positive"};
+  }
+  return rhs_count;
+}
+
 }  // namespace
+
+BlockPartition::BlockPartition(std::vector<int> block_orders)
+    : orders_{std::move(block_orders)} {
+  build();
+}
+
+BlockPartition BlockPartition::uniform(int block_count, int block_order) {
+  if (block_count <= 0 || block_order <= 0) {
+    throw std::invalid_argument{
+        "block tridiagonal dimensions must both be positive"};
+  }
+  return BlockPartition{
+      std::vector<int>(static_cast<std::size_t>(block_count), block_order)};
+}
+
+void BlockPartition::build() {
+  if (orders_.empty()) {
+    throw std::invalid_argument{
+        "block tridiagonal partition must contain at least one block"};
+  }
+  for (const int order : orders_) {
+    if (order <= 0) {
+      throw std::invalid_argument{
+          "block tridiagonal block orders must all be positive"};
+    }
+  }
+
+  const std::size_t count = orders_.size();
+  diagonal_offsets_.assign(count + 1, 0);
+  off_diagonal_offsets_.assign(count, 0);
+  row_offsets_.assign(count + 1, 0);
+
+  maximum_ = *std::max_element(orders_.begin(), orders_.end());
+  uniform_order_ =
+      std::all_of(orders_.begin(), orders_.end(),
+                  [this](int order) { return order == orders_.front(); })
+          ? orders_.front()
+          : 0;
+
+  for (std::size_t block = 0; block < count; ++block) {
+    const auto order = static_cast<std::size_t>(orders_[block]);
+    row_offsets_[block + 1] =
+        checked_add(row_offsets_[block], order, "row count");
+    diagonal_offsets_[block + 1] = checked_add(
+        diagonal_offsets_[block],
+        checked_multiply(order, order, "diagonal block"), "diagonal storage");
+  }
+  total_rows_ = row_offsets_[count];
+  diagonal_size_ = diagonal_offsets_[count];
+
+  // L_k and U_k both couple block k to block k+1 and hold n_k*n_{k+1} values,
+  // so a single offset array serves both arrays.
+  std::size_t off_diagonal = 0;
+  for (std::size_t block = 0; block + 1 < count; ++block) {
+    off_diagonal_offsets_[block] = off_diagonal;
+    off_diagonal = checked_add(
+        off_diagonal,
+        checked_multiply(static_cast<std::size_t>(orders_[block]),
+                         static_cast<std::size_t>(orders_[block + 1]),
+                         "off-diagonal block"),
+        "off-diagonal storage");
+  }
+  off_diagonal_offsets_[count - 1] = off_diagonal;
+  off_diagonal_size_ = off_diagonal;
+}
+
+int BlockPartition::block_order(int block) const {
+  if (block < 0 || block >= block_count()) {
+    throw std::out_of_range{"block tridiagonal block index out of range"};
+  }
+  return orders_[static_cast<std::size_t>(block)];
+}
+
+std::size_t BlockPartition::diagonal_offset(int block) const {
+  if (block < 0 || block >= block_count()) {
+    throw std::out_of_range{"block tridiagonal block index out of range"};
+  }
+  return diagonal_offsets_[static_cast<std::size_t>(block)];
+}
+
+std::size_t BlockPartition::off_diagonal_offset(int block) const {
+  if (block < 0 || block + 1 >= block_count()) {
+    throw std::out_of_range{
+        "block tridiagonal off-diagonal index out of range"};
+  }
+  return off_diagonal_offsets_[static_cast<std::size_t>(block)];
+}
+
+std::size_t BlockPartition::pivot_offset(int block) const {
+  if (block < 0 || block >= block_count()) {
+    throw std::out_of_range{"block tridiagonal block index out of range"};
+  }
+  return row_offsets_[static_cast<std::size_t>(block)];
+}
+
+std::size_t BlockPartition::rhs_offset(int block, int rhs_count) const {
+  if (block < 0 || block >= block_count()) {
+    throw std::out_of_range{"block tridiagonal block index out of range"};
+  }
+  if (rhs_count <= 0) {
+    throw std::invalid_argument{
+        "block tridiagonal rhs_count must be positive"};
+  }
+  return checked_multiply(row_offsets_[static_cast<std::size_t>(block)],
+                          static_cast<std::size_t>(rhs_count),
+                          "right-hand-side offset");
+}
+
+std::size_t BlockPartition::rhs_size(int rhs_count) const {
+  if (rhs_count <= 0) {
+    throw std::invalid_argument{
+        "block tridiagonal rhs_count must be positive"};
+  }
+  return checked_multiply(total_rows_, static_cast<std::size_t>(rhs_count),
+                          "right-hand-side storage");
+}
 
 BlockTridiagonalFactorization factor_block_tridiagonal(
     const backend::DeviceBuffer<Real>& lower,
     const backend::DeviceBuffer<Real>& diagonal,
     const backend::DeviceBuffer<Real>& upper,
-    int block_count,
-    int block_order,
+    const BlockPartition& partition,
     backend::stream_t stream) {
-  const BlockSizes sizes = checked_block_sizes(block_count, block_order);
-  require_size(lower, sizes.off_diagonal, "lower");
-  require_size(diagonal, sizes.diagonal, "diagonal");
-  require_size(upper, sizes.off_diagonal, "upper");
+  require_partition(partition);
+  require_size(lower, partition.off_diagonal_size(), "lower");
+  require_size(diagonal, partition.diagonal_size(), "diagonal");
+  require_size(upper, partition.off_diagonal_size(), "upper");
 
   const int device = diagonal.owner_device();
-  require_owner(lower, sizes.off_diagonal, device, "lower");
-  require_owner(upper, sizes.off_diagonal, device, "upper");
+  require_owner(lower, partition.off_diagonal_size(), device, "lower");
+  require_owner(upper, partition.off_diagonal_size(), device, "upper");
   backend::DeviceGuard device_guard{device};
 
+  const int block_count = partition.block_count();
   BlockTridiagonalFactorization result;
+  result.partition = partition;
   result.block_count = block_count;
-  result.block_order = block_order;
+  result.block_order = partition.uniform_block_order();
   result.lower = backend::DeviceBuffer<Real>{
-      sizes.off_diagonal, backend::uninitialized, backend::on_device(device)};
+      partition.off_diagonal_size(), backend::uninitialized,
+      backend::on_device(device)};
   result.diagonal_lu = backend::DeviceBuffer<Real>{
-      sizes.diagonal, backend::uninitialized, backend::on_device(device)};
+      partition.diagonal_size(), backend::uninitialized,
+      backend::on_device(device)};
   result.upper_reduced = backend::DeviceBuffer<Real>{
-      sizes.off_diagonal, backend::uninitialized, backend::on_device(device)};
+      partition.off_diagonal_size(), backend::uninitialized,
+      backend::on_device(device)};
   result.pivots = backend::DeviceBuffer<int>{
-      static_cast<std::size_t>(block_count)
-          * static_cast<std::size_t>(block_order),
-      backend::uninitialized, backend::on_device(device)};
+      partition.pivot_size(), backend::uninitialized,
+      backend::on_device(device)};
 
-  detail::copy_device_buffer(result.lower, lower, sizes.off_diagonal, stream);
-  detail::copy_device_buffer(result.diagonal_lu, diagonal, sizes.diagonal,
-                             stream);
+  detail::copy_device_buffer(result.lower, lower,
+                             partition.off_diagonal_size(), stream);
+  detail::copy_device_buffer(result.diagonal_lu, diagonal,
+                             partition.diagonal_size(), stream);
   detail::copy_device_buffer(result.upper_reduced, upper,
-                             sizes.off_diagonal, stream);
+                             partition.off_diagonal_size(), stream);
 
   detail::SolverHandle solver{stream};
   detail::BlasHandle blas{stream};
   backend::DeviceBuffer<int> device_factor_info{1, backend::on_device(device)};
   backend::DeviceBuffer<int> device_solve_info{1, backend::on_device(device)};
 
+  // One workspace sized for the largest diagonal block serves every block.
+  const int maximum_order = partition.maximum_block_order();
   int workspace_size = 0;
   detail::check_hipsolver(
       hipsolverDnDgetrf_bufferSize(
-          solver.get(), block_order, block_order,
-          result.diagonal_lu.device_ptr(), block_order, &workspace_size),
+          solver.get(), maximum_order, maximum_order,
+          result.diagonal_lu.device_ptr(), maximum_order, &workspace_size),
       "getrf workspace query");
   if (workspace_size < 0) {
     throw std::runtime_error{
@@ -169,19 +286,19 @@ BlockTridiagonalFactorization factor_block_tridiagonal(
   const Real minus_one = Real{-1};
   const Real plus_one = Real{1};
   for (int block_index = 0; block_index < block_count; ++block_index) {
-    const auto diagonal_offset =
-        static_cast<std::size_t>(block_index) * sizes.block;
-    const auto pivot_offset = static_cast<std::size_t>(block_index)
-                            * static_cast<std::size_t>(block_order);
-    Real* diagonal_block = result.diagonal_lu.device_ptr() + diagonal_offset;
-    int* pivots = result.pivots.device_ptr() + pivot_offset;
+    const int order = partition.block_order(block_index);
+    Real* diagonal_block =
+        result.diagonal_lu.device_ptr() + partition.diagonal_offset(
+                                              block_index);
+    int* pivots =
+        result.pivots.device_ptr() + partition.pivot_offset(block_index);
 
     // Installed hipSOLVER releases take the workspace pointer here, but no
     // lwork argument; lwork is used only to size this allocation.
     detail::check_hipsolver(
-        hipsolverDnDgetrf(solver.get(), block_order, block_order,
-                          diagonal_block, block_order, workspace.device_ptr(),
-                          pivots, device_factor_info.device_ptr()),
+        hipsolverDnDgetrf(solver.get(), order, order, diagonal_block, order,
+                          workspace.device_ptr(), pivots,
+                          device_factor_info.device_ptr()),
         "getrf");
     result.factorization_info = detail::read_info(device_factor_info, stream);
     if (result.factorization_info != 0) {
@@ -198,14 +315,15 @@ BlockTridiagonalFactorization factor_block_tridiagonal(
 
     if (block_index + 1 == block_count) continue;
 
-    const auto off_diagonal_offset =
-        static_cast<std::size_t>(block_index) * sizes.block;
+    const int next_order = partition.block_order(block_index + 1);
+    const std::size_t off_diagonal_offset =
+        partition.off_diagonal_offset(block_index);
+    // U_k is order x next_order with leading dimension order.
     Real* reduced_upper =
         result.upper_reduced.device_ptr() + off_diagonal_offset;
     detail::check_hipsolver(
-        hipsolverDnDgetrs(solver.get(), HIPBLAS_OP_N, block_order,
-                          block_order, diagonal_block, block_order, pivots,
-                          reduced_upper, block_order,
+        hipsolverDnDgetrs(solver.get(), HIPBLAS_OP_N, order, next_order,
+                          diagonal_block, order, pivots, reduced_upper, order,
                           device_solve_info.device_ptr()),
         "getrs while reducing upper block");
     result.solve_info = detail::read_info(device_solve_info, stream);
@@ -215,14 +333,17 @@ BlockTridiagonalFactorization factor_block_tridiagonal(
       return result;
     }
 
-    // D_{k+1} <- D_{k+1} - L_k (D_k^{-1} U_k).
+    // D_{k+1} <- D_{k+1} - L_k (D_k^{-1} U_k), with L_k next_order x order and
+    // the reduced upper block order x next_order.
     const Real* lower_block = result.lower.device_ptr() + off_diagonal_offset;
-    Real* next_diagonal = diagonal_block + sizes.block;
+    Real* next_diagonal =
+        result.diagonal_lu.device_ptr()
+        + partition.diagonal_offset(block_index + 1);
     detail::check_hipblas(
-        hipblasDgemm(blas.get(), HIPBLAS_OP_N, HIPBLAS_OP_N,
-                     block_order, block_order, block_order, &minus_one,
-                     lower_block, block_order, reduced_upper, block_order,
-                     &plus_one, next_diagonal, block_order),
+        hipblasDgemm(blas.get(), HIPBLAS_OP_N, HIPBLAS_OP_N, next_order,
+                     next_order, order, &minus_one, lower_block, next_order,
+                     reduced_upper, order, &plus_one, next_diagonal,
+                     next_order),
         "Schur-complement update");
   }
 
@@ -230,6 +351,18 @@ BlockTridiagonalFactorization factor_block_tridiagonal(
   // for use even if the caller chooses a different stream for the solve.
   result.status = BlockTridiagonalStatus::success;
   return result;
+}
+
+BlockTridiagonalFactorization factor_block_tridiagonal(
+    const backend::DeviceBuffer<Real>& lower,
+    const backend::DeviceBuffer<Real>& diagonal,
+    const backend::DeviceBuffer<Real>& upper,
+    int block_count,
+    int block_order,
+    backend::stream_t stream) {
+  return factor_block_tridiagonal(
+      lower, diagonal, upper, BlockPartition::uniform(block_count, block_order),
+      stream);
 }
 
 BlockTridiagonalSolveResult solve_block_tridiagonal(
@@ -249,11 +382,11 @@ BlockTridiagonalSolveResult solve_block_tridiagonal(
     return result;
   }
 
-  const BlockSizes sizes = checked_block_sizes(factorization.block_count,
-                                               factorization.block_order);
-  validate_factorization_storage(factorization, sizes);
-  const std::size_t rhs_size = checked_rhs_size(
-      factorization.block_count, factorization.block_order, rhs_count);
+  const BlockPartition& partition = factorization.partition;
+  require_partition(partition);
+  validate_factorization_storage(factorization);
+  checked_rhs_count(rhs_count);
+  const std::size_t rhs_size = partition.rhs_size(rhs_count);
   require_size(rhs, rhs_size, "right-hand-side");
 
   const int device = factorization.diagonal_lu.owner_device();
@@ -270,43 +403,40 @@ BlockTridiagonalSolveResult solve_block_tridiagonal(
 
   const Real minus_one = Real{-1};
   const Real plus_one = Real{1};
-  const auto rhs_block_size = static_cast<std::size_t>(factorization.block_order)
-                            * static_cast<std::size_t>(rhs_count);
+  const int block_count = partition.block_count();
 
-  for (int block_index = 0; block_index < factorization.block_count;
-       ++block_index) {
-    const auto rhs_offset =
-        static_cast<std::size_t>(block_index) * rhs_block_size;
-    Real* rhs_block = result.solution.device_ptr() + rhs_offset;
+  for (int block_index = 0; block_index < block_count; ++block_index) {
+    const int order = partition.block_order(block_index);
+    Real* rhs_block = result.solution.device_ptr()
+                    + partition.rhs_offset(block_index, rhs_count);
 
     if (block_index > 0) {
-      const auto off_diagonal_offset =
-          static_cast<std::size_t>(block_index - 1) * sizes.block;
+      const int previous_order = partition.block_order(block_index - 1);
       const Real* lower_block =
-          factorization.lower.device_ptr() + off_diagonal_offset;
-      const Real* previous_rhs = rhs_block - rhs_block_size;
-      // b_k <- b_k - L_{k-1} y_{k-1}, for every RHS at once.
+          factorization.lower.device_ptr()
+          + partition.off_diagonal_offset(block_index - 1);
+      const Real* previous_rhs =
+          result.solution.device_ptr()
+          + partition.rhs_offset(block_index - 1, rhs_count);
+      // b_k <- b_k - L_{k-1} y_{k-1}, for every RHS at once.  L_{k-1} is
+      // order x previous_order with leading dimension order.
       detail::check_hipblas(
-          hipblasDgemm(blas.get(), HIPBLAS_OP_N, HIPBLAS_OP_N,
-                       factorization.block_order, rhs_count,
-                       factorization.block_order, &minus_one, lower_block,
-                       factorization.block_order, previous_rhs,
-                       factorization.block_order, &plus_one, rhs_block,
-                       factorization.block_order),
+          hipblasDgemm(blas.get(), HIPBLAS_OP_N, HIPBLAS_OP_N, order,
+                       rhs_count, previous_order, &minus_one, lower_block,
+                       order, previous_rhs, previous_order, &plus_one,
+                       rhs_block, order),
           "block forward-substitution update");
     }
 
-    const auto diagonal_offset =
-        static_cast<std::size_t>(block_index) * sizes.block;
-    const auto pivot_offset = static_cast<std::size_t>(block_index)
-                            * static_cast<std::size_t>(factorization.block_order);
     detail::check_hipsolver(
         hipsolverDnDgetrs(
-            solver.get(), HIPBLAS_OP_N, factorization.block_order, rhs_count,
-            factorization.diagonal_lu.device_ptr() + diagonal_offset,
-            factorization.block_order,
-            factorization.pivots.device_ptr() + pivot_offset, rhs_block,
-            factorization.block_order, device_solve_info.device_ptr()),
+            solver.get(), HIPBLAS_OP_N, order, rhs_count,
+            factorization.diagonal_lu.device_ptr()
+                + partition.diagonal_offset(block_index),
+            order,
+            factorization.pivots.device_ptr()
+                + partition.pivot_offset(block_index),
+            rhs_block, order, device_solve_info.device_ptr()),
         "getrs while solving right-hand side");
     result.solve_info = detail::read_info(device_solve_info, stream);
     if (result.solve_info != 0) {
@@ -316,24 +446,23 @@ BlockTridiagonalSolveResult solve_block_tridiagonal(
     }
   }
 
-  for (int block_index = factorization.block_count - 1;
-       block_index-- > 0;) {
-    const auto off_diagonal_offset =
-        static_cast<std::size_t>(block_index) * sizes.block;
-    const auto rhs_offset =
-        static_cast<std::size_t>(block_index) * rhs_block_size;
-    Real* rhs_block = result.solution.device_ptr() + rhs_offset;
-    const Real* next_solution = rhs_block + rhs_block_size;
-    // x_k <- y_k - (D_k^{-1} U_k) x_{k+1}.
+  for (int block_index = block_count - 1; block_index-- > 0;) {
+    const int order = partition.block_order(block_index);
+    const int next_order = partition.block_order(block_index + 1);
+    Real* rhs_block = result.solution.device_ptr()
+                    + partition.rhs_offset(block_index, rhs_count);
+    const Real* next_solution = result.solution.device_ptr()
+                              + partition.rhs_offset(block_index + 1,
+                                                     rhs_count);
+    // x_k <- y_k - (D_k^{-1} U_k) x_{k+1}, with the reduced upper block
+    // order x next_order.
     detail::check_hipblas(
-        hipblasDgemm(
-            blas.get(), HIPBLAS_OP_N, HIPBLAS_OP_N,
-            factorization.block_order, rhs_count, factorization.block_order,
-            &minus_one,
-            factorization.upper_reduced.device_ptr() + off_diagonal_offset,
-            factorization.block_order, next_solution,
-            factorization.block_order, &plus_one, rhs_block,
-            factorization.block_order),
+        hipblasDgemm(blas.get(), HIPBLAS_OP_N, HIPBLAS_OP_N, order, rhs_count,
+                     next_order, &minus_one,
+                     factorization.upper_reduced.device_ptr()
+                         + partition.off_diagonal_offset(block_index),
+                     order, next_solution, next_order, &plus_one, rhs_block,
+                     order),
         "block back-substitution update");
   }
 
@@ -347,13 +476,26 @@ BlockTridiagonalSolveResult solve_block_tridiagonal(
     const backend::DeviceBuffer<Real>& diagonal,
     const backend::DeviceBuffer<Real>& upper,
     const backend::DeviceBuffer<Real>& rhs,
+    const BlockPartition& partition,
+    int rhs_count,
+    backend::stream_t stream) {
+  auto factorization =
+      factor_block_tridiagonal(lower, diagonal, upper, partition, stream);
+  return solve_block_tridiagonal(factorization, rhs, rhs_count, stream);
+}
+
+BlockTridiagonalSolveResult solve_block_tridiagonal(
+    const backend::DeviceBuffer<Real>& lower,
+    const backend::DeviceBuffer<Real>& diagonal,
+    const backend::DeviceBuffer<Real>& upper,
+    const backend::DeviceBuffer<Real>& rhs,
     int block_count,
     int block_order,
     int rhs_count,
     backend::stream_t stream) {
-  auto factorization = factor_block_tridiagonal(
-      lower, diagonal, upper, block_count, block_order, stream);
-  return solve_block_tridiagonal(factorization, rhs, rhs_count, stream);
+  return solve_block_tridiagonal(
+      lower, diagonal, upper, rhs,
+      BlockPartition::uniform(block_count, block_order), rhs_count, stream);
 }
 
 }  // namespace quasar::numerics
