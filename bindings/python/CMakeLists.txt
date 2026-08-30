@@ -30,6 +30,17 @@ target_link_libraries(quasar_core_py
 )
 
 if(QUASAR_DISTRIBUTED_AVAILABLE)
+  # Route this TU through the HIP compiler for the same reason the core
+  # bindings are, plus one that only shows up at run time: pybind11 keys its
+  # shared type registry on an internals ID that embeds the compiler and C++
+  # ABI tag. Built as plain CXX by GCC this module got
+  # `__pybind11_internals_v4_gcc_libstdcpp_cxxabi1016__` while `_core`, built by
+  # the HIP clang, got `..._v4_clang_libstdcpp_cxxabi1002__`. Two registries
+  # means `_distributed` cannot see a class `_core` registered, and every cast
+  # of a shared type across the boundary fails with "Unable to cast Python
+  # instance of type quasar._core.mhd.MhdConfig to C++ type
+  # quasar::mhd::MhdConfig". Both modules must be built by the same compiler.
+  set_source_files_properties(bind_distributed.cpp PROPERTIES LANGUAGE HIP)
   pybind11_add_module(quasar_distributed_py MODULE WITH_SOABI
     bind_distributed.cpp
   )

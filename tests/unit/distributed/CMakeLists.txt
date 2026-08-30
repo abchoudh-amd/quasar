@@ -393,6 +393,7 @@ add_executable(quasar_distributed_test_pic_runtime test_pic_runtime.cpp)
 target_link_libraries(quasar_distributed_test_pic_runtime
   PRIVATE
     quasar::distributed
+    quasar_test_support
     MPI::MPI_CXX
 )
 

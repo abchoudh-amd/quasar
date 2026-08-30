@@ -5,6 +5,8 @@
 #include "quasar/distributed/topology.hpp"
 #include "quasar/physics/pic/diagnostics.hpp"
 
+#include "host_field_evaluator.hpp"
+
 #include <mpi.h>
 
 #include <algorithm>
@@ -47,16 +49,15 @@ constexpr int kSkip = 77;
 
 class EmptyFieldSource final : public quasar::core::IFieldSource {};
 
-class LinearElectricEvaluator final
-    : public quasar::numerics::IFieldEvaluator {
- public:
-  quasar::Field<quasar::Vec3> evaluate_B(
+class LinearElectricEvaluator final : public quasar::test::HostFieldEvaluator {
+ protected:
+  quasar::Field<quasar::Vec3> host_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     return quasar::Field<quasar::Vec3>(observations.size());
   }
 
-  quasar::Field<quasar::Vec3> evaluate_E(
+  quasar::Field<quasar::Vec3> host_E(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Vec3> values(observations.size());
