@@ -1,0 +1,4 @@
+# ROCm's default Clang configuration appends --enable-new-dtags after ordinary
+# command-line linker options.  The leading '$' uses the same append semantics,
+# so this explicit config is loaded later and makes DT_RPATH the final choice.
+$-Wl,--disable-new-dtags
