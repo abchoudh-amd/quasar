@@ -300,6 +300,40 @@ Implementation invariants
 * Free-boundary work additionally requires wall topology and conserved vacuum
   flux degrees of freedom; the plasma volume form alone is incomplete.
 
+What an annular truncation does and does not prove
+--------------------------------------------------
+
+Because magnetic-axis regularity is not yet available, the implementation
+evaluates the volume integral above over an annulus
+:math:`\lambda\in[\lambda_{\rm in},\lambda_{\rm out}]` rather than over the whole
+plasma.  The outer surface carries the fixed conducting condition
+:math:`\xi^\lambda=0`.  The truncated inner surface carries the *natural*
+condition of the weak form, which is what a variational formulation imposes when
+nothing is prescribed: the inner edge is free to move.
+
+This is worth stating explicitly because it is easy to read an annular
+:math:`\delta W` as a conservative estimate, and it is not one in either
+direction:
+
+* The trial space is not a subspace of the full-plasma trial space.  A
+  displacement that is nonzero at :math:`\lambda_{\rm in}` does not extend to
+  the core at the same energy, so a negative annular :math:`\delta W` does not
+  by itself exhibit an unstable full-plasma displacement.
+* Neither is it a restriction that can only miss instabilities.  The annulus
+  omits the core contribution to :math:`\delta W` entirely, and that
+  contribution is not sign-definite.
+
+So the sign of the annular :math:`\delta W` bounds the full-plasma
+:math:`\delta W` neither from above nor from below.  A classification from this
+model is a statement about the model.  The implementation reports
+``RadialBoundaryModel`` on every result for exactly this reason, and the
+supported value is named ``outer_fixed_inner_natural`` rather than something
+that reads like a physical boundary condition.
+
+Removing the caveat means implementing the harmonic- and component-dependent
+regularity conditions at :math:`\lambda=0` and admitting the axis as a
+collocation point, not refining the existing grid.
+
 References
 ----------
 

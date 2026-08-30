@@ -91,6 +91,20 @@ Concrete physics modules currently present:
 - `physics/pic` — EM-PIC vertical slice (`EmPicConfig`, Cartesian and axisymmetric-cylindrical FDTD, particle shapes, charge-conserving deposition, particle and field boundaries, and diagnostics). Driven from Python at `python -m quasar.pic.cli run <input.yaml>`; no C++ app exists. Deck I/O is under `quasar.pic`.
 - `physics/mhd` — high-order ideal-MHD vertical slice (MP5/MP7 characteristic reconstruction with Cartesian or radius-weighted cylindrical finite-volume moments, HLLD Riemann solver, FD constrained transport, SSP-RK3, conservative troubled-cell positivity control). Driven from Python at `python -m quasar.mhd.cli run <input.yaml>`. The numerics live under `numerics/` (the second consumer of that axis after PIC); deck I/O is under `quasar.mhd`.
 - `physics/equilibrium` — free-boundary Grad–Shafranov solver (sixth-order compact operator, defect-corrected geometric multigrid, Green's-function boundary coupling, critical-point location, flux surfaces and `q(ψ)`), plus projection onto the staggered MHD mesh. **Fully GPU-resident**: all arithmetic runs through the launch ABI in `physics/equilibrium/kernels.hpp` with kernels under `src/backend/hip/equilibrium/`; `GsSolver` retains only control flow. Two consequences worth knowing before extending it: profiles are lowered to a `ProfileCoefficients` POD at construction because a vtable cannot cross to the device, so only `PolynomialProfile` works today; and the module is compiled with `-ffp-contract=off`, which is load-bearing for both the Padé line solve and the compensated current integral (see `src/backend/hip/equilibrium/CMakeLists.txt`). No Python bindings or CLI yet.
+- `physics/stability` — fixed-boundary ideal-MHD stability of a converged
+  Grad–Shafranov equilibrium: PEST straight-field-line coordinates, per-`n`
+  rational-surface location, Chebyshev spectral elements crossed with a Fourier
+  poloidal basis, and a dense Hermitian energy/inertia pencil solved with
+  hipSOLVER. The first consumer of `GsDeviceResult`, and the first eigenvalue
+  problem in the tree. Like equilibrium it is fully GPU-resident behind
+  `physics/stability/kernels.hpp` with kernels under `src/backend/hip/stability/`,
+  and it is compiled `-ffp-contract=off` for the same reason. Three things to
+  know before extending it: the model is **annular** (the axis is excluded and
+  the inner surface gets the natural condition, so results are not full-axis
+  tokamak results); `n = 0` and rational-surface topologies are refused rather
+  than approximated; and the shift-invert path in `spectral_blocks.hpp` is
+  exercised and cross-checked but does not yet replace the dense solve. No
+  Python bindings or CLI yet.
 - `physics/analytic_fields` — analytic and rectilinear file-backed fields used
   by simulations, tests, and examples.
 
@@ -110,4 +124,7 @@ C++ unit tests under `tests/unit/<axis>/` mirror the public header tree. Python 
 
 Dev-guide RST under `docs/dev-guide/` (`adding_a_background_field`, `adding_a_boundary`, `adding_a_deposit_scheme`, `adding_a_field_evaluator`, `adding_a_field_solver`, `adding_a_filter`, `adding_a_geometry`, `adding_an_mhd_scheme`, `adding_a_pusher`) is the source of truth for the steps to add a new pluggable component — consult these before adding a new scheme. The MHD numerics axes (Riemann solver, CT scheme, SSP-RK integrator, positivity limiter) are covered by `adding_an_mhd_scheme`.
 `adding_distributed_physics` is the corresponding source of truth for adding a
-new physics slice to MPI/multi-GPU execution.
+new physics slice to MPI/multi-GPU execution. `extending_stability` covers the
+ideal-MHD stability slice, which has no plugin registry but does have a chain of
+stage contracts and several deliberate refusals that must not be quietly
+relaxed.

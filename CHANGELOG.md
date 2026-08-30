@@ -7,6 +7,69 @@ interfaces may still change between entries.
 ## [Unreleased]
 
 ### Added
+- Stability: new fixed-boundary ideal-MHD stability vertical slice under
+  `physics/stability` — the framework's first eigenvalue problem, and the first
+  end-to-end consumer of a converged `GsDeviceResult`. PEST straight-field-line
+  coordinates are built from the traced flux surfaces, rational surfaces are
+  located per toroidal mode number, the radial domain is cut at them and
+  discretized with Chebyshev–Gauss–Lobatto spectral elements crossed with a
+  Fourier poloidal basis, and the compressible Glasser/Bernstein plasma energy
+  and inertia are assembled into a dense Hermitian pencil solved by hipSOLVER
+  `sygvd`. The energy is assembled in weak form so the operator conditioning
+  grows like `order^2` rather than `order^4`. Everything except a compact
+  diagnostic summary stays on device. Documented in
+  `docs/theory/toroidal_ideal_mhd_energy.rst` and
+  `docs/theory/newcomb_cylindrical_energy.rst`.
+
+  The supported model is explicitly annular: the outer surface carries the fixed
+  conducting condition `xi^lambda = 0`, while the truncated inner surface gets
+  the natural weak-form condition, because magnetic-axis regularity is
+  harmonic- and component-specific and is not implemented yet. `n = 0` and any
+  rational-surface topology are refused outright rather than approximated. A
+  result from this slice must not be presented as a full-axis tokamak result.
+- Numerics: deterministic dense GPU linear algebra — a symmetric-definite
+  generalized eigensolver, an exact spectral condition estimate, a positive-
+  definiteness test, and a pivoted block-Thomas factorization/solve, all in
+  hipSOLVER deterministic mode with hipBLAS atomics disabled. hipBLAS and
+  hipSOLVER are resolved from the same ROCm prefix the HIP compiler selected, so
+  a development host cannot compile against one release and load another.
+- Numerics: shift-invert Lanczos (`numerics/shift_invert_lanczos.hpp`) for the
+  eigenvalues of a symmetric-definite pencil nearest a shift, iterating in the
+  `M` inner product on `(K - sigma M)^-1 M` with full reorthogonalization and a
+  reproducible seeded start vector. It reuses one block-Thomas factorization for
+  every Lanczos vector, so the per-vector cost is a block back-substitution
+  rather than a dense solve.
+- Numerics: `BlockPartition` gives the block-tridiagonal solver non-uniform
+  block orders. A Chebyshev spectral-element operator has `n_domains*order + 1`
+  radial nodes because adjacent domains share their common Lobatto endpoint, and
+  that count is never a multiple of `order`, so no uniform blocking of it exists.
+  Rectangular off-diagonal blocks avoid the alternatives, which were a padded
+  pencil carrying spurious modes or no block structure at all. The uniform
+  entry points remain as thin wrappers.
+- Stability: `spectral_blocks.hpp` exposes the assembled pencil's exact
+  block-tridiagonal structure under a radial-major reordering, and
+  `StabilityConfig::eigen_method` can request the shift-invert path on top of it.
+  The extraction reduces the largest magnitude found *outside* the
+  block-tridiagonal pattern and refuses to proceed unless it is zero, so a
+  structural assumption that stops holding is reported rather than silently
+  discarding couplings. The dense solve still runs and still owns the
+  classification: shift-invert returns only the eigenvalues near the shift and
+  cannot bound the top of the spectrum, which is what
+  `eigenvalue_resolution_threshold` is defined against.
+- Equilibrium: the Grad–Shafranov solver is now fully GPU-resident. Every
+  arithmetic stage — the sixth-order compact operator, deterministic reductions,
+  Green's-function boundary coupling, source terms and derivative fields, the
+  critical-point search, multigrid with defect correction, and flux-surface and
+  shape diagnostics — runs through the launch ABI in
+  `physics/equilibrium/kernels.hpp`, and `GsSolver` retains only control flow.
+  Two consequences are load-bearing: profiles are lowered to a
+  `ProfileCoefficients` POD at construction because a vtable cannot cross to the
+  device, so only `PolynomialProfile` works today; and the module is compiled
+  with `-ffp-contract=off` for both the Padé line solve and the compensated
+  current integral.
+- Equilibrium: `GsDeviceResult` retains its profile provenance and derived
+  fields, so a downstream consumer can rebuild the source terms of the
+  equilibrium it was handed without re-deriving them from `psi`.
 - Equilibrium: new free-boundary Grad–Shafranov vertical slice — the framework's
   first elliptic boundary-value solver (every prior slice is explicit hyperbolic
   time-marching, and the tree previously contained no Poisson, multigrid, or
@@ -181,14 +244,39 @@ interfaces may still change between entries.
   7.4e-4). Damped Picard is the production path. Completing Newton requires a
   Jacobian-free Newton–Krylov formulation or the von Hagenow surface-current
   form.
-- Equilibrium: the solver is host-only. The Padé closures require a pivoting
-  line solve, which rules out a textbook pivot-free parallel cyclic reduction,
-  so the device port needs a pivot-capable algorithm. The tile layer reports
-  via `TileGrid::supports_local_pade()` whether a decomposition can run the
-  sixth-order operator locally; a 2D decomposition cannot.
+- Equilibrium: the tile layer reports via `TileGrid::supports_local_pade()`
+  whether a decomposition can run the sixth-order operator locally; a 2D
+  decomposition cannot, because the Padé closures need a pivoting line solve
+  spanning the full line.
 - Equilibrium: the plasma-contribution boundary integral is the exact
   `O(N_boundary * N_interior)` form. It is negligible at 256² but dominates
   above roughly 1024²; multipole acceleration is deferred.
+- Equilibrium: only `PolynomialProfile` is usable. Profiles are lowered to a
+  `ProfileCoefficients` POD at construction because the device cannot follow a
+  vtable, so a new profile shape has to extend that POD rather than subclass an
+  interface. See `docs/dev-guide/adding_an_equilibrium_profile.rst`.
+- Stability: the domain is annular and excludes the magnetic axis. The outer
+  surface is a fixed conducting wall; the truncated inner surface carries the
+  natural weak-form condition. A δW over that truncated annulus bounds the
+  full-plasma δW neither from above nor from below, so `unstable` and
+  `no_instability_detected` are properties of the annular model, not verdicts
+  on the equilibrium. `RadialBoundaryModel` is reported on every result so a
+  consumer cannot lose track of which model produced a number.
+- Stability: `n = 0` is refused. The cited non-axisymmetric reduction omits an
+  additional inductive contribution for that mode.
+- Stability: any rational-surface topology is refused
+  (`unsupported_rational_topology`). The DOF layout can already represent
+  all-component one-sided cuts at a resonant interface, but the continuum
+  interface conditions for the two tangential components have not been derived,
+  and an undecided admissible space must not become a stability classification.
+- Stability: free-boundary work needs wall topology and conserved vacuum flux
+  degrees of freedom; the plasma volume form alone is incomplete.
+- Stability: the shift-invert path does not yet replace the dense eigensolve.
+  It has no way to bound the largest `|omega^2|`, and that bound defines
+  `eigenvalue_resolution_threshold` and therefore the stable/unstable decision.
+  Skipping the `O(real_order^3)` solve needs a largest-magnitude estimator for
+  the pencil as well; until then shift-invert runs alongside the dense solve and
+  is cross-checked against it.
 
 ### Fixed
 - Equilibrium: F-profile recovery and the optional Newton profile Jacobian now
