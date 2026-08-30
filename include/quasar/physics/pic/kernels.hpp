@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 // The kernel-launch ABI speaks the backend-neutral stream handle so callers in
 // the physics/boundary/numerics layers never include a HIP header. The .hip
@@ -182,6 +183,114 @@ struct PicChargeTotals {
 
 PicChargeTotals launch_pic_total_charge(const ParticleSpecies& species,
                                         backend::stream_t stream);
+
+// -- Distributed particle migration ------------------------------------------
+//
+// A particle that leaves its tile has to be told which tile it belongs to next,
+// and that decision is arithmetic: a periodic coordinate is wrapped back into
+// the global domain, then divided by the cell width and floored to a global
+// cell index, which an integer partition maps to an owning endpoint. All of it
+// used to run on the host over a downloaded snapshot. It runs here now, so the
+// records that cross to the host are already routed and already ordered, and
+// the host does nothing to them but memcpy.
+//
+// These entry points speak pic and backend types, so they are ordinary C++ in
+// this namespace rather than part of the extern "C" field-data ABI below.
+
+// The departing set left where the partition kernel wrote it. Same records
+// `extract_pic_departing_particles` downloads, minus the download.
+struct PicDepartingParticles {
+  backend::DeviceBuffer<Real> x, y, x_prev, y_prev;
+  backend::DeviceBuffer<Real> vx, vy, vz, vphi_deposit, weight;
+  backend::DeviceBuffer<std::uint8_t> alive;
+  backend::DeviceBuffer<std::uint64_t> id;
+  std::size_t count{0};
+};
+
+PicDepartingParticles extract_pic_departing_particles_device(
+    ParticleSpecies& species, int include_x_high, int include_y_high,
+    backend::stream_t stream);
+
+// One migrating particle on the wire. Trivially copyable and transmitted
+// verbatim, so this layout *is* the migration wire format; both the packing
+// kernel and the receiving host path go through this one definition rather
+// than two that have to be kept in agreement.
+struct PicParticleRecord {
+  Real x{}, y{}, x_prev{}, y_prev{}, vx{}, vy{}, vz{}, vphi_deposit{},
+      weight{};
+  std::uint64_t id{0};
+  std::uint64_t source_endpoint{0};
+  std::uint8_t alive{0};
+};
+
+struct PicParticleMigrationRecord {
+  PicParticleRecord particle{};
+  std::uint64_t destination_endpoint{0};
+  std::uint64_t species{0};
+};
+
+// The global mesh and its tile decomposition, reduced to the plain integers and
+// grid scalars a kernel can take. The distributed topology's own types stay on
+// its side of this seam; `quasar::distributed::VirtualTopology` fills this in.
+//
+// `px`/`py` are the tile counts per axis and the endpoint of tile (tx, ty) is
+// ty * px + tx, matching VirtualTopology::endpoint_at. The cell-to-tile split
+// is the same balanced partition as VirtualTopology's: the first
+// `global_n % p` tiles get one extra cell.
+struct PicMigrationTopology {
+  Grid2D grid{};
+  std::uint64_t global_nx{0}, global_ny{0};
+  std::uint64_t px{1}, py{1};
+  std::uint64_t endpoint_count{1};
+  int periodic_x{0};
+  int periodic_y{0};
+};
+
+// Status bits ORed into the routing status word. A kernel cannot throw, so it
+// reports and the host raises; see src/distributed/pic_runtime.cpp for the
+// messages. Bits are independent and may all be set by one batch.
+inline constexpr int kPicMigrationCoordinateOutsideMesh = 1;
+inline constexpr int kPicMigrationOwnerOutOfRange = 2;
+inline constexpr int kPicMigrationDuplicateId = 4;
+
+// Route one species' departing particles and emit their wire records.
+//
+// Records come back grouped by destination rank -- `rank_offsets` has
+// rank_count + 1 entries and group r occupies [rank_offsets[r],
+// rank_offsets[r + 1]) -- and within a group ordered by ascending stable id.
+// Both orderings are produced on the device, and the id order is what makes the
+// result independent of the order the partition kernel happened to emit.
+//
+// `endpoint_rank` is a device array of `topology.endpoint_count` entries giving
+// the world rank that owns each endpoint.
+struct PicMigrationRouting {
+  std::vector<PicParticleMigrationRecord> records;
+  std::vector<std::uint64_t> rank_offsets;
+  // Particles whose owner changed. Counted on the device for the same reason
+  // the routing is: it is a property of the routing decision.
+  std::uint64_t migrated{0};
+};
+
+PicMigrationRouting launch_pic_route_departing_particles(
+    const PicDepartingParticles& departing, PicMigrationTopology topology,
+    std::uint64_t source_endpoint, std::uint64_t species_index,
+    const backend::DeviceBuffer<std::uint64_t>& endpoint_rank,
+    std::size_t rank_count, int* status, backend::stream_t stream);
+
+// Sort a merged arrival set by stable id and append it to the species.
+//
+// The merge itself is a host memcpy of records that arrived from several ranks
+// in no particular order; this restores a deterministic order and expands the
+// records into the species' SoA planes without either step touching the host.
+void launch_pic_append_migrated_records(
+    ParticleSpecies& species,
+    const std::vector<PicParticleMigrationRecord>& records,
+    backend::stream_t stream);
+
+// Report whether `ids` contains a repeat. Sorts on the device rather than
+// building an O(N) host hash set.
+bool launch_pic_ids_have_duplicate(const std::vector<std::uint64_t>& ids,
+                                   backend::stream_t stream);
 
 }  // namespace quasar::pic
 

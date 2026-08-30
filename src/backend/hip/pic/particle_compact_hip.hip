@@ -349,4 +349,105 @@ ParticleSpecies::HostSnapshot extract_pic_departing_particles(
   return departing;
 }
 
+PicDepartingParticles extract_pic_departing_particles_device(
+    ParticleSpecies& species, int include_x_high, int include_y_high,
+    backend::stream_t stream_in) {
+  // Same partition as the host-snapshot extraction above -- deliberately the
+  // same kernel, so the rule for what counts as departing exists once -- but
+  // the departing block is copied device-to-device instead of downloaded. The
+  // distributed runtime routes it here and never sees the coordinates.
+  const auto stream = static_cast<hipStream_t>(stream_in);
+  const std::size_t count = species.size();
+  PicDepartingParticles departing;
+  if (count == 0) return departing;
+
+  QUASAR_HIP_CHECK(::hipMemsetAsync(species.compact_counter(), 0,
+                                    2 * sizeof(unsigned int), stream));
+  const dim3 block(256);
+  const dim3 blocks((count + block.x - 1) / block.x);
+  hipLaunchKernelGGL(
+      partition_departing_kernel, blocks, block, 0, stream, count,
+      species.grid(), species.x(), species.y(), species.x_prev(),
+      species.y_prev(), species.vx(), species.vy(), species.vz(),
+      species.vphi_deposit(), species.weight(), species.alive(), species.id(),
+      species.compact_x(), species.compact_y(), species.compact_x_prev(),
+      species.compact_y_prev(), species.compact_vx(), species.compact_vy(),
+      species.compact_vz(), species.compact_vphi_deposit(),
+      species.compact_weight(), species.compact_alive(), species.compact_id(),
+      include_x_high != 0, include_y_high != 0,
+      species.compact_counter(), species.departure_counter());
+  QUASAR_HIP_CHECK(::hipGetLastError());
+
+  std::array<unsigned int, 2> counts{};
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(
+      counts.data(), species.compact_counter(), 2 * sizeof(unsigned int),
+      ::hipMemcpyDeviceToHost, stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
+  const std::size_t resident_count = counts[0];
+  const std::size_t departure_count = counts[1];
+  if (resident_count + departure_count != count) {
+    throw std::runtime_error{
+        "PIC device departure partition produced an invalid count"};
+  }
+
+  if (departure_count != 0) {
+    departing.count = departure_count;
+    const auto claim_real = [&](const Real* compact) {
+      backend::DeviceBuffer<Real> buffer(departure_count,
+                                         backend::uninitialized);
+      QUASAR_HIP_CHECK(::hipMemcpyAsync(
+          buffer.device_ptr(), compact + resident_count,
+          departure_count * sizeof(Real), ::hipMemcpyDeviceToDevice, stream));
+      return buffer;
+    };
+    departing.x = claim_real(species.compact_x());
+    departing.y = claim_real(species.compact_y());
+    departing.x_prev = claim_real(species.compact_x_prev());
+    departing.y_prev = claim_real(species.compact_y_prev());
+    departing.vx = claim_real(species.compact_vx());
+    departing.vy = claim_real(species.compact_vy());
+    departing.vz = claim_real(species.compact_vz());
+    departing.vphi_deposit = claim_real(species.compact_vphi_deposit());
+    departing.weight = claim_real(species.compact_weight());
+    departing.alive = backend::DeviceBuffer<std::uint8_t>(
+        departure_count, backend::uninitialized);
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(
+        departing.alive.device_ptr(),
+        species.compact_alive() + resident_count,
+        departure_count * sizeof(std::uint8_t), ::hipMemcpyDeviceToDevice,
+        stream));
+    departing.id = backend::DeviceBuffer<std::uint64_t>(
+        departure_count, backend::uninitialized);
+    QUASAR_HIP_CHECK(::hipMemcpyAsync(
+        departing.id.device_ptr(), species.compact_id() + resident_count,
+        departure_count * sizeof(std::uint64_t), ::hipMemcpyDeviceToDevice,
+        stream));
+  }
+
+  const auto copy_residents =
+      [stream, resident_count](void* destination, const void* source,
+                               std::size_t element_size) {
+        if (resident_count == 0) return;
+        QUASAR_HIP_CHECK(::hipMemcpyAsync(
+            destination, source, resident_count * element_size,
+            ::hipMemcpyDeviceToDevice, stream));
+      };
+  copy_residents(species.x(), species.compact_x(), sizeof(Real));
+  copy_residents(species.y(), species.compact_y(), sizeof(Real));
+  copy_residents(species.x_prev(), species.compact_x_prev(), sizeof(Real));
+  copy_residents(species.y_prev(), species.compact_y_prev(), sizeof(Real));
+  copy_residents(species.vx(), species.compact_vx(), sizeof(Real));
+  copy_residents(species.vy(), species.compact_vy(), sizeof(Real));
+  copy_residents(species.vz(), species.compact_vz(), sizeof(Real));
+  copy_residents(species.vphi_deposit(), species.compact_vphi_deposit(),
+                 sizeof(Real));
+  copy_residents(species.weight(), species.compact_weight(), sizeof(Real));
+  copy_residents(species.alive(), species.compact_alive(),
+                 sizeof(std::uint8_t));
+  copy_residents(species.id(), species.compact_id(), sizeof(std::uint64_t));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
+  species.set_count(resident_count);
+  return departing;
+}
+
 }  // namespace quasar::pic

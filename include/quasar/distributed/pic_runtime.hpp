@@ -7,6 +7,8 @@
 #include "quasar/distributed/topology.hpp"
 #include "quasar/distributed/transport.hpp"
 #include "quasar/distributed/worker_pool.hpp"
+#include "quasar/backend/memory.hpp"
+#include "quasar/physics/pic/kernels.hpp"
 #include "quasar/physics/pic/pic_solver.hpp"
 
 #include <array>
@@ -282,6 +284,13 @@ class PicTileRuntime {
   void rebuild_periodic_source_duplicates(DenseSources& sources) const;
 
   void migrate_particles();
+  // Global mesh + decomposition in the form the migration routing kernel
+  // takes, and the endpoint-to-rank table it reads. The table is built per
+  // call because a DeviceBuffer belongs to whichever device was current when
+  // it was allocated, and the workers each run on their own.
+  [[nodiscard]] pic::PicMigrationTopology migration_topology() const;
+  [[nodiscard]] backend::DeviceBuffer<std::uint64_t> endpoint_rank_table()
+      const;
   [[nodiscard]] std::unique_ptr<MigrationBatch>
   extract_departing_particles();
   void route_departing_particles(MigrationBatch& batch);

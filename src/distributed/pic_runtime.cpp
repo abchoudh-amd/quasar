@@ -335,6 +335,19 @@ void append_wire_record(std::vector<std::byte>& destination,
   std::memcpy(destination.data() + offset, &record, sizeof(Record));
 }
 
+// Append a contiguous run of records. The migration path emits records already
+// grouped by destination, so a peer's whole payload is one memcpy rather than
+// one per particle.
+template <class Record>
+void append_wire_records(std::vector<std::byte>& destination,
+                         const Record* records, std::size_t count) {
+  static_assert(std::is_trivially_copyable_v<Record>);
+  if (count == 0) return;
+  const std::size_t offset = destination.size();
+  destination.resize(offset + count * sizeof(Record));
+  std::memcpy(destination.data() + offset, records, count * sizeof(Record));
+}
+
 template <class Record, class Callback>
 void for_each_wire_record(std::span<const std::byte> payload,
                           std::string_view description,
@@ -1028,8 +1041,15 @@ struct PicTileRuntime::MigrationBatch {
   std::size_t species_count{0};
   std::size_t first_endpoint{0};
   std::vector<std::vector<std::uint64_t>> departure_counts{};
-  std::vector<std::vector<pic::ParticleSpecies::HostSnapshot>> departures{};
-  std::vector<std::vector<pic::ParticleSpecies::HostSnapshot>> arrivals{};
+  // Per local endpoint, per species: the routed records the device produced,
+  // grouped by destination rank. `departure_offsets` holds the matching
+  // rank_count + 1 group boundaries. Nothing here is ever inspected
+  // field-by-field on the host -- it is sliced and memcpy'd.
+  std::vector<std::vector<std::vector<pic::PicParticleMigrationRecord>>>
+      departures{};
+  std::vector<std::vector<std::vector<std::uint64_t>>> departure_offsets{};
+  std::vector<std::vector<std::vector<pic::PicParticleMigrationRecord>>>
+      arrivals{};
   std::vector<std::vector<std::byte>> outgoing{};
   std::uint64_t local_migrated{0};
 };
@@ -3500,18 +3520,64 @@ void PicTileRuntime::validate_distributed_particle_ids(
   collective_try_with_fallback(
       *runtime_, worker_epoch_, phase,
       "PIC checkpoint particle IDs are not globally unique", -1, [&] {
-        std::unordered_set<std::uint64_t> ids;
+        // Collected, then checked by a device sort and an adjacent compare
+        // rather than an O(N) host hash set.
+        std::vector<std::uint64_t> ids;
         for (const auto& payload : incoming) {
           for_each_wire_record<std::uint64_t>(
               payload, "PIC stable particle IDs",
-              [&ids](std::uint64_t id) {
-                if (!ids.insert(id).second) {
-                  throw std::invalid_argument{
-                      "distributed PIC checkpoint particle IDs must be globally unique across species"};
-                }
-              });
+              [&ids](std::uint64_t id) { ids.push_back(id); });
+        }
+        if (pic::launch_pic_ids_have_duplicate(ids, nullptr)) {
+          throw std::invalid_argument{
+              "distributed PIC checkpoint particle IDs must be globally unique across species"};
         }
       });
+}
+
+// Flatten the global mesh and its decomposition into the POD the routing kernel
+// takes. VirtualTopology's own types stop here.
+pic::PicMigrationTopology PicTileRuntime::migration_topology() const {
+  const auto shape = topology_.shape();
+  return pic::PicMigrationTopology{
+      .grid = global_config_.grid,
+      .global_nx = static_cast<std::uint64_t>(topology_.global_nx()),
+      .global_ny = static_cast<std::uint64_t>(topology_.global_ny()),
+      .px = static_cast<std::uint64_t>(shape.px),
+      .py = static_cast<std::uint64_t>(shape.py),
+      .endpoint_count = static_cast<std::uint64_t>(topology_.endpoint_count()),
+      .periodic_x = periodic_x(global_config_) ? 1 : 0,
+      .periodic_y = periodic_y(global_config_) ? 1 : 0,
+  };
+}
+
+// Endpoint -> owning world rank, as a device array. Built per worker rather
+// than cached on the runtime because a DeviceBuffer belongs to the device that
+// was current when it was allocated, and each worker runs on its own.
+backend::DeviceBuffer<std::uint64_t>
+PicTileRuntime::endpoint_rank_table() const {
+  const std::size_t count = topology_.endpoint_count();
+  std::vector<std::uint64_t> host(count, 0);
+  for (std::size_t endpoint = 0; endpoint < count; ++endpoint) {
+    host[endpoint] =
+        static_cast<std::uint64_t>(mapping_.endpoint(endpoint).world_rank);
+  }
+  backend::DeviceBuffer<std::uint64_t> table(count, backend::uninitialized);
+  table.copy_from_host(host.data(), count);
+  return table;
+}
+
+// The routing kernel cannot throw, so it ORs bits into a status word and this
+// turns them into the exceptions the host path used to raise inline.
+void throw_on_migration_status(int status) {
+  if ((status & pic::kPicMigrationCoordinateOutsideMesh) != 0) {
+    throw std::invalid_argument{
+        "distributed PIC particle position has no half-open tile owner"};
+  }
+  if ((status & pic::kPicMigrationOwnerOutOfRange) != 0) {
+    throw std::runtime_error{
+        "distributed PIC particle retained an invalid endpoint owner"};
+  }
 }
 
 std::unique_ptr<PicTileRuntime::MigrationBatch>
@@ -3566,106 +3632,135 @@ PicTileRuntime::extract_departing_particles() {
   ++telemetry_.particle_migrations;
   if (global_departures == 0) return {};
 
+  const std::size_t rank_count = static_cast<std::size_t>(runtime_->size());
+  std::vector<std::uint64_t> migrated_per_endpoint;
   collective_try(
       *runtime_, worker_epoch_, "pic-migration-departure-storage",
       "PIC migration departure storage allocation failed", -1, [&] {
         batch->departures.resize(solvers_.size());
+        batch->departure_offsets.resize(solvers_.size());
         for (auto& endpoint : batch->departures) {
           endpoint.resize(batch->species_count);
         }
+        for (auto& endpoint : batch->departure_offsets) {
+          endpoint.assign(batch->species_count,
+                          std::vector<std::uint64_t>(rank_count + 1, 0));
+        }
+        migrated_per_endpoint.assign(solvers_.size(), 0);
       });
 
+  // Extraction and routing run together: the departing block never leaves the
+  // device between them, and what comes back is already routed, grouped by
+  // destination rank and ordered by stable id.
   auto extract_tasks = pic_worker_tasks(
       *runtime_, worker_epoch_, solvers_.size(),
-      [this, &batch](std::size_t local, WorkerContext& context) {
-        const TileExtent& tile =
-            topology_.tile(batch->first_endpoint + local);
+      [this, &batch, rank_count, &migrated_per_endpoint](
+          std::size_t local, WorkerContext& context) {
+        const std::size_t endpoint = batch->first_endpoint + local;
+        const TileExtent& tile = topology_.tile(endpoint);
         const auto shape = topology_.shape();
         const int include_x_high =
             tile.coordinate.x + 1 == shape.px ? 1 : 0;
         const int include_y_high =
             tile.coordinate.y + 1 == shape.py ? 1 : 0;
+        const pic::PicMigrationTopology mesh = migration_topology();
+        const backend::DeviceBuffer<std::uint64_t> endpoint_rank =
+            endpoint_rank_table();
+        backend::DeviceBuffer<int> status(1);
         auto& species = PicTileAccess::species(*solvers_[local]);
+        std::uint64_t migrated = 0;
         for (std::size_t kind = 0; kind < species.size(); ++kind) {
           if (batch->departure_counts[local][kind] == 0) continue;
-          batch->departures[local][kind] =
-              pic::extract_pic_departing_particles(
+          pic::PicDepartingParticles departing =
+              pic::extract_pic_departing_particles_device(
                   species[kind], include_x_high, include_y_high,
                   context.communication_stream.get());
-          if (batch->departures[local][kind].x.size() !=
-              batch->departure_counts[local][kind]) {
+          if (departing.count != batch->departure_counts[local][kind]) {
             throw std::runtime_error{
                 "PIC migration departure count changed during extraction"};
           }
+          pic::PicMigrationRouting routing =
+              pic::launch_pic_route_departing_particles(
+                  departing, mesh, endpoint, kind, endpoint_rank, rank_count,
+                  status.device_ptr(), context.communication_stream.get());
+          int host_status = 0;
+          status.copy_to_host(&host_status, 1);
+          throw_on_migration_status(host_status);
+          migrated += routing.migrated;
+          batch->departures[local][kind] = std::move(routing.records);
+          batch->departure_offsets[local][kind] =
+              std::move(routing.rank_offsets);
         }
+        migrated_per_endpoint[local] = migrated;
       });
   require_worker_success(*workers_, *runtime_, worker_epoch_,
                          "pic-migration-extract", extract_tasks);
+  for (const std::uint64_t migrated : migrated_per_endpoint) {
+    batch->local_migrated += migrated;
+  }
   return batch;
 }
 
 void PicTileRuntime::route_departing_particles(MigrationBatch& batch) {
+  // The routing decision was made on the device; this is transport. Each
+  // species' records already sit grouped by destination rank, so a rank's
+  // payload is one contiguous slice and the host neither classifies nor
+  // reorders -- it slices and copies bytes.
+  const std::size_t rank_count = static_cast<std::size_t>(runtime_->size());
+  const std::size_t self_rank = static_cast<std::size_t>(runtime_->rank());
   collective_try(
       *runtime_, worker_epoch_, "pic-migration-pack",
       "PIC migration packing failed", -1, [&] {
-    batch.arrivals.resize(solvers_.size());
-    for (auto& endpoint : batch.arrivals) {
-      endpoint.resize(batch.species_count);
-    }
-    batch.outgoing.resize(static_cast<std::size_t>(runtime_->size()));
-    for (std::size_t kind = 0; kind < batch.species_count; ++kind) {
-      for (std::size_t local = 0; local < solvers_.size(); ++local) {
-        const auto& snapshot = batch.departures[local][kind];
-        const std::size_t endpoint = batch.first_endpoint + local;
-        for (std::size_t particle = 0; particle < snapshot.x.size();
-             ++particle) {
-          ParticleRecord record = make_record(snapshot, particle, endpoint);
-          std::size_t owner = endpoint;
-          if (record.alive != 0) {
-            if (periodic_x(global_config_)) {
-              const Real wrapped = wrap_periodic(
-                  record.x, global_config_.grid.origin_x,
-                  global_config_.grid.lx);
-              const Real shift = wrapped - record.x;
-              record.x = wrapped;
-              record.x_prev += shift;
-            }
-            if (periodic_y(global_config_)) {
-              const Real wrapped = wrap_periodic(
-                  record.y, global_config_.grid.origin_y,
-                  global_config_.grid.ly);
-              const Real shift = wrapped - record.y;
-              record.y = wrapped;
-              record.y_prev += shift;
-            }
-            owner = owner_for_position(record.x, record.y);
-          }
-          if (owner >= topology_.endpoint_count()) {
-            throw std::runtime_error{
-                "distributed PIC particle retained an invalid endpoint owner"};
-          }
-          if (owner != endpoint) ++batch.local_migrated;
-          const int destination_rank = mapping_.endpoint(owner).world_rank;
-          if (destination_rank == runtime_->rank()) {
-            if (owner < batch.first_endpoint ||
-                owner >= batch.first_endpoint + solvers_.size()) {
+        batch.arrivals.resize(solvers_.size());
+        for (auto& endpoint : batch.arrivals) {
+          endpoint.resize(batch.species_count);
+        }
+        batch.outgoing.assign(rank_count, {});
+        for (std::size_t kind = 0; kind < batch.species_count; ++kind) {
+          for (std::size_t local = 0; local < solvers_.size(); ++local) {
+            const auto& records = batch.departures[local][kind];
+            if (records.empty()) continue;
+            const auto& offsets = batch.departure_offsets[local][kind];
+            if (offsets.size() != rank_count + 1 ||
+                offsets.back() != records.size()) {
               throw std::runtime_error{
-                  "PIC migration resolved an invalid local endpoint"};
+                  "PIC migration rank grouping is inconsistent with its "
+                  "record count"};
             }
-            append_record(
-                batch.arrivals[owner - batch.first_endpoint][kind], record);
-          } else {
-            append_wire_record(
-                batch.outgoing[static_cast<std::size_t>(destination_rank)],
-                ParticleMigrationRecord{
-                    .particle = record,
-                    .destination_endpoint = owner,
-                    .species = kind,
-                });
+            for (std::size_t peer = 0; peer < rank_count; ++peer) {
+              const std::size_t begin =
+                  static_cast<std::size_t>(offsets[peer]);
+              const std::size_t end =
+                  static_cast<std::size_t>(offsets[peer + 1]);
+              if (begin > end || end > records.size()) {
+                throw std::runtime_error{
+                    "PIC migration rank grouping produced an invalid range"};
+              }
+              if (begin == end) continue;
+              if (peer == self_rank) {
+                // A record that stays on this rank still has to reach the
+                // right local endpoint. The group is ordered by id, and the
+                // per-endpoint subsequences of an ordered sequence are
+                // themselves ordered, so appending in order preserves it.
+                for (std::size_t index = begin; index < end; ++index) {
+                  const auto& record = records[index];
+                  const std::size_t endpoint = static_cast<std::size_t>(
+                      record.destination_endpoint);
+                  if (endpoint < batch.first_endpoint ||
+                      endpoint >= batch.first_endpoint + solvers_.size()) {
+                    throw std::runtime_error{
+                        "PIC migration resolved an invalid local endpoint"};
+                  }
+                  batch.arrivals[endpoint - batch.first_endpoint][kind]
+                      .push_back(record);
+                }
+              } else {
+                append_wire_records(batch.outgoing[peer], &records[begin],
+                                    end - begin);
+              }
+            }
           }
         }
-      }
-    }
       });
 
   const auto incoming = exchange_variable_payloads(
@@ -3674,13 +3769,13 @@ void PicTileRuntime::route_departing_particles(MigrationBatch& batch) {
       *runtime_, worker_epoch_, "pic-migration-unpack",
       "PIC migration unpacking failed", -1, [&] {
         for (const auto& payload : incoming) {
-          for_each_wire_record<ParticleMigrationRecord>(
+          for_each_wire_record<pic::PicParticleMigrationRecord>(
               payload, "PIC particle migration",
-              [this, &batch](const ParticleMigrationRecord& migration) {
+              [this, &batch](const pic::PicParticleMigrationRecord& record) {
                 const std::size_t endpoint =
-                    static_cast<std::size_t>(migration.destination_endpoint);
+                    static_cast<std::size_t>(record.destination_endpoint);
                 const std::size_t kind =
-                    static_cast<std::size_t>(migration.species);
+                    static_cast<std::size_t>(record.species);
                 if (endpoint < batch.first_endpoint ||
                     endpoint >= batch.first_endpoint + solvers_.size() ||
                     kind >= batch.species_count ||
@@ -3689,30 +3784,27 @@ void PicTileRuntime::route_departing_particles(MigrationBatch& batch) {
                   throw std::runtime_error{
                       "PIC particle migration received an invalid destination"};
                 }
-                append_record(
-                    batch.arrivals[endpoint - batch.first_endpoint][kind],
-                    migration.particle);
+                batch.arrivals[endpoint - batch.first_endpoint][kind]
+                    .push_back(record);
               });
         }
       });
-
-  collective_try(
-      *runtime_, worker_epoch_, "pic-migration-sort",
-      "PIC migration sorting failed", -1, [&] {
-        for (auto& endpoint : batch.arrivals) {
-          for (auto& species : endpoint) sort_particles(species);
-        }
-      });
+  // No host sort here. Records arrive from peers in whatever order MPI
+  // delivered them, and the deterministic id order is restored on the device
+  // as part of the append; see launch_pic_append_migrated_records.
 }
 
 void PicTileRuntime::commit_migrated_particles(MigrationBatch& batch) {
   auto append_tasks = pic_worker_tasks(
       *runtime_, worker_epoch_, solvers_.size(),
       [this, &batch](std::size_t local, WorkerContext& context) {
+        auto& species = PicTileAccess::species(*solvers_[local]);
         for (std::size_t kind = 0;
              kind < batch.arrivals[local].size(); ++kind) {
-          PicTileAccess::append_migrated_species(
-              *solvers_[local], kind, batch.arrivals[local][kind],
+          // Sorts by stable id and expands into the species planes, both on
+          // the device. The host contributed no ordering.
+          pic::launch_pic_append_migrated_records(
+              species[kind], batch.arrivals[local][kind],
               context.communication_stream.get());
         }
         context.communication_ready.record(context.communication_stream);

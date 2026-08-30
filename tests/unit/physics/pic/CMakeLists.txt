@@ -31,6 +31,7 @@ set(_quasar_pic_tests
   test_cyl_diagnostics
   test_cyl_charge_conservation
   test_diagnostics_reduction_accuracy
+  test_particle_migration
 )
 
 foreach(_test_name IN LISTS _quasar_pic_tests)
