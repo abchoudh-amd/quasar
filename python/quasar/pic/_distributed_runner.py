@@ -33,7 +33,6 @@ from .._distributed_helpers import (
 )
 from .._paths import confine_output_path
 from ..coil.io import build_conductor_system
-from . import initial_conditions as ic
 from . import io as pic_io
 from ._units import QE as EV_TO_J
 from ._units import Units
@@ -142,35 +141,6 @@ def _canonical_initial_fields(
     return sink.fields
 
 
-def _counter_maxwellian(
-        count: int, thermal_speed: float, drift: tuple[float, float, float],
-        seed: int, species_index: int) -> np.ndarray:
-    """Counter-based, species-keyed antithetic Maxwellian sampling."""
-
-    seed_word = int(seed) % (1 << 64)
-    sequence = np.random.SeedSequence([
-        seed_word & 0xFFFFFFFF,
-        seed_word >> 32,
-        int(species_index) & 0xFFFFFFFF,
-        (int(species_index) >> 32) & 0xFFFFFFFF,
-    ])
-    generator = np.random.Generator(np.random.Philox(sequence))
-    pair_count = count // 2
-    with np.errstate(over="ignore", invalid="ignore"):
-        draws = generator.normal(
-            0.0, thermal_speed, size=(pair_count, 3))
-        result = np.empty((count, 3), dtype=np.float64)
-        result[0:2 * pair_count:2] = draws
-        result[1:2 * pair_count:2] = -draws
-        if count % 2:
-            result[-1] = 0.0
-        result += np.asarray(drift, dtype=np.float64)
-    if not np.all(np.isfinite(result)):
-        raise ValueError(
-            "thermal speed and drift produce non-finite Maxwellian velocities")
-    return result
-
-
 def _species_states(
         deck: pic_io.PicDeck, units: Units, seed: int,
         ) -> list[dict[str, Any]]:
@@ -194,50 +164,56 @@ def _species_states(
         drift = tuple(units.velocity(value)
                       for value in species.initial.drift_v)
 
+        config = _core.pic.ParticleSampleConfig()
+        config.count = species.n_particles
+        config.cylindrical = deck.geometry == "cylindrical"
         if species.initial.distribution == "maxwellian_block":
-            x_min = units.length(species.initial.region_x_min_m)
-            x_max = units.length(species.initial.region_x_max_m)
-            y_min = units.length(species.initial.region_y_min_m)
-            y_max = units.length(species.initial.region_y_max_m)
+            config.x_min = units.length(species.initial.region_x_min_m)
+            config.x_max = units.length(species.initial.region_x_max_m)
+            config.y_min = units.length(species.initial.region_y_min_m)
+            config.y_max = units.length(species.initial.region_y_max_m)
         else:
-            x_min, x_max = domain_ox, domain_ox + domain_lx
-            y_min, y_max = domain_oy, domain_oy + domain_ly
-        if deck.geometry == "cylindrical":
-            positions = ic.quiet_positions_rz_block(
-                species.n_particles, x_min, x_max, y_min, y_max)
-            particle_volume = ic.quiet_block_ring_volume(
-                species.n_particles, x_min, x_max, y_min, y_max)
-        else:
-            positions = ic.quiet_positions_2d_block(
-                species.n_particles, x_min, x_max, y_min, y_max)
-            particle_volume = ic.quiet_block_cell_area(
-                species.n_particles, x_min, x_max, y_min, y_max)
+            config.x_min, config.x_max = domain_ox, domain_ox + domain_lx
+            config.y_min, config.y_max = domain_oy, domain_oy + domain_ly
+        config.thermal_speed = thermal_speed
+        config.drift_x, config.drift_y, config.drift_z = drift
+        config.seed = int(seed) % (1 << 64)
+        config.species_key = species_index
+        config.domain_origin_x = domain_ox
+        config.domain_origin_y = domain_oy
+        config.domain_lx = domain_lx
+        config.domain_ly = domain_ly
 
-        velocities = _counter_maxwellian(
-            species.n_particles, thermal_speed, drift, seed, species_index)
         perturbation = species.initial.velocity_perturbation
         if perturbation is not None:
             mx, my = perturbation.mode
-            phase = (2.0 * np.pi
-                     * (mx * (positions[:, 0] - domain_ox) / domain_lx
-                        + my * (positions[:, 1] - domain_oy) / domain_ly)
-                     + math.remainder(
-                         perturbation.phase_rad, 2.0 * math.pi))
-            amplitude = np.asarray([
-                units.velocity(value)
-                for value in perturbation.amplitude_v], dtype=np.float64)
-            velocities += np.sin(phase)[:, np.newaxis] * amplitude
-        speeds = np.linalg.norm(velocities, axis=1)
-        if speeds.size and float(np.max(speeds)) >= 1.0:
-            raise ValueError(
-                f"species {species.name!r}: sampled |v|/c >= 1, outside the "
-                "nonrelativistic Boris model; lower temperature/drift or use "
-                "a relativistic pusher")
+            config.perturb = True
+            config.mode_x = float(mx)
+            config.mode_y = float(my)
+            config.phase = math.remainder(perturbation.phase_rad,
+                                          2.0 * math.pi)
+            (config.amplitude_x, config.amplitude_y,
+             config.amplitude_z) = [units.velocity(value)
+                                    for value in perturbation.amplitude_v]
 
-        macro_weight = _macro_weight(
+        particle_volume = _core.pic.quiet_block_measure(config)
+        # The sampler needs the macro weight to fill the weight plane, and
+        # _macro_weight is where the density conversion's representability
+        # checks live, so it is formed before the sample rather than after.
+        config.weight = _macro_weight(
             species.initial.density_per_m3,
             units.density(species.initial.density_per_m3),
             particle_volume, species.name)
+        # Same kernels the serial CLI drives, so one deck seed gives one
+        # sample whether it is run on one rank or many. The device path also
+        # performs the |v| < c and in-domain checks that used to be host loops
+        # here.
+        sample = _core.pic.sample_particles(config)
+        positions = np.column_stack((sample["x"], sample["y"]))
+        velocities = np.column_stack(
+            (sample["vx"], sample["vy"], sample["vz"]))
+
+        macro_weight = config.weight
         stop_id = next_id + species.n_particles
         if stop_id > 1 << 64:
             raise OverflowError("distributed PIC stable particle IDs overflow uint64")

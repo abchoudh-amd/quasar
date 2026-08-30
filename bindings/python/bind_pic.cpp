@@ -22,6 +22,7 @@
 #include "quasar/physics/magnetostatics/biot_savart.hpp"
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/pic/diagnostics.hpp"
+#include "quasar/physics/pic/particle_sampling.hpp"
 #include "quasar/physics/pic/pic_solver.hpp"
 #include "quasar/physics/pic/species.hpp"
 
@@ -252,6 +253,87 @@ void bind_pic(py::module_& m) {
       .def_readwrite("mass", &quasar::pic::SpeciesConfig::mass)
       .def_readwrite("capacity", &quasar::pic::SpeciesConfig::capacity);
 
+  // Keyword-only construction with defaults, so a deck that uses none of the
+  // optional perturbation fields does not have to name them.
+  py::class_<quasar::pic::ParticleSampleConfig>(pic, "ParticleSampleConfig")
+      .def(py::init<>())
+      .def_readwrite("count", &quasar::pic::ParticleSampleConfig::count)
+      .def_readwrite("x_min", &quasar::pic::ParticleSampleConfig::x_min)
+      .def_readwrite("x_max", &quasar::pic::ParticleSampleConfig::x_max)
+      .def_readwrite("y_min", &quasar::pic::ParticleSampleConfig::y_min)
+      .def_readwrite("y_max", &quasar::pic::ParticleSampleConfig::y_max)
+      .def_readwrite("cylindrical",
+                     &quasar::pic::ParticleSampleConfig::cylindrical)
+      .def_readwrite("thermal_speed",
+                     &quasar::pic::ParticleSampleConfig::thermal_speed)
+      .def_readwrite("drift_x", &quasar::pic::ParticleSampleConfig::drift_x)
+      .def_readwrite("drift_y", &quasar::pic::ParticleSampleConfig::drift_y)
+      .def_readwrite("drift_z", &quasar::pic::ParticleSampleConfig::drift_z)
+      .def_readwrite("seed", &quasar::pic::ParticleSampleConfig::seed)
+      .def_readwrite("species_key",
+                     &quasar::pic::ParticleSampleConfig::species_key)
+      .def_readwrite("perturb", &quasar::pic::ParticleSampleConfig::perturb)
+      .def_readwrite("mode_x", &quasar::pic::ParticleSampleConfig::mode_x)
+      .def_readwrite("mode_y", &quasar::pic::ParticleSampleConfig::mode_y)
+      .def_readwrite("phase", &quasar::pic::ParticleSampleConfig::phase)
+      .def_readwrite("amplitude_x",
+                     &quasar::pic::ParticleSampleConfig::amplitude_x)
+      .def_readwrite("amplitude_y",
+                     &quasar::pic::ParticleSampleConfig::amplitude_y)
+      .def_readwrite("amplitude_z",
+                     &quasar::pic::ParticleSampleConfig::amplitude_z)
+      .def_readwrite("domain_origin_x",
+                     &quasar::pic::ParticleSampleConfig::domain_origin_x)
+      .def_readwrite("domain_origin_y",
+                     &quasar::pic::ParticleSampleConfig::domain_origin_y)
+      .def_readwrite("domain_lx",
+                     &quasar::pic::ParticleSampleConfig::domain_lx)
+      .def_readwrite("domain_ly",
+                     &quasar::pic::ParticleSampleConfig::domain_ly)
+      .def_readwrite("weight", &quasar::pic::ParticleSampleConfig::weight);
+
+  // The per-particle block measure and the lattice stride are O(1) scalars the
+  // deck layer needs before it can form a macro weight, so they are exposed
+  // rather than recomputed in Python.
+  pic.def("quiet_block_measure", &quasar::pic::quiet_block_measure,
+          py::arg("config"),
+          "Area (Cartesian) or ring volume (cylindrical) per equal-weight "
+          "particle.");
+  // Standalone sampling into host arrays, for the callers that genuinely need
+  // the particles on the host: the distributed runner partitions the sample
+  // across ranks before any solver exists. It runs the same kernels as
+  // EmPic2D3V::sample_species_particles, so a serial and a distributed run of
+  // one deck draw the same velocities.
+  pic.def("sample_particles",
+          [](const quasar::pic::ParticleSampleConfig& config) {
+            quasar::pic::SpeciesConfig species_config;
+            species_config.name = "sample";
+            species_config.capacity = config.count;
+            quasar::pic::ParticleSpecies species{species_config};
+            quasar::pic::sample_species(species, config, nullptr);
+            const auto snapshot = species.to_host();
+            py::dict out;
+            out["x"] = py::array_t<Real>(snapshot.x.size(), snapshot.x.data());
+            out["y"] = py::array_t<Real>(snapshot.y.size(), snapshot.y.data());
+            out["vx"] =
+                py::array_t<Real>(snapshot.vx.size(), snapshot.vx.data());
+            out["vy"] =
+                py::array_t<Real>(snapshot.vy.size(), snapshot.vy.data());
+            out["vz"] =
+                py::array_t<Real>(snapshot.vz.size(), snapshot.vz.data());
+            out["weight"] = py::array_t<Real>(snapshot.weight.size(),
+                                              snapshot.weight.data());
+            return out;
+          },
+          py::arg("config"),
+          "Sample one species' quiet-start particles and return them as host "
+          "arrays. Same kernels as EmPic2D3V.sample_species_particles.");
+
+  pic.def("quiet_start_stride", &quasar::pic::quiet_start_stride,
+          py::arg("count"),
+          "Rank-1 lattice stride: the golden-ratio multiple of count raised "
+          "to coprimality with it.");
+
   // NOTE: ParticleSpecies is move-only (DeviceBuffer is non-copyable). Python
   // users never construct or mutate one directly. The solver owns uploads so it
   // can validate the physical domain and invalidate charge/background caches;
@@ -313,6 +395,17 @@ void bind_pic(py::module_& m) {
            "Upload physical particle positions and velocities at t=0. "
            "Velocity must not be pre-staggered; the first step applies the "
            "initial half-width Boris force update before drifting.")
+      .def("sample_species_particles",
+           [](quasar::pic::EmPic2D3V& self, std::size_t index,
+              const quasar::pic::ParticleSampleConfig& config) {
+             self.sample_species_particles(index, config);
+           },
+           py::arg("index"), py::arg("config"),
+           "Sample this species' quiet-start positions and Maxwellian "
+           "velocities directly into device memory. Replaces building the "
+           "arrays on the host and calling set_species_particles; the "
+           "velocities come from a counter-based Philox generator and are "
+           "therefore different draws than the NumPy path produced.")
       .def("species_count",
            [](const quasar::pic::EmPic2D3V& self) { return self.species().size(); })
       .def("species_alive_count",

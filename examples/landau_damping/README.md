@@ -23,7 +23,18 @@ PYTHONPATH=build/hip-gfx942-release/python \
 ## Reference signature
 
 The single-mode `Ex` response grows from zero, then its oscillation envelope
-decays through phase mixing. The 2000-step run resolves three pre-noise-floor
-mode-amplitude peaks. The integration test requires those peaks to decrease and
-fits their logarithmic envelope against the Maxwellian damping rate, with a
-finite-grid/finite-particle tolerance.
+decays through phase mixing. Its first maximum falls a quarter period after the
+perturbation, at `t = pi/(2 omega_r) = 1.11`, and successive maxima follow every
+`pi/omega_r = 2.22`; the 2000-step run therefore resolves the first four peaks
+of the damped sequence directly, with no window to choose. The integration test
+requires those peaks to decrease and fits their logarithmic envelope against the
+Maxwellian damping rate, with a tolerance set by the measured seed-to-seed
+spread.
+
+`n_particles` is set by signal-to-noise rather than by cost. Discrete-particle
+noise in the `k = 1` mode falls as `1/sqrt(N)`; at the earlier 8192 particles it
+was within a small factor of the excited mode, so the envelope reached the noise
+floor after about one e-folding and the late peaks were the amplitude coming
+back up rather than damping. 65536 particles with a `4e-3` perturbation — still
+linear, `delta_n/n` of order one percent — keep the mode above the floor for all
+four peaks.

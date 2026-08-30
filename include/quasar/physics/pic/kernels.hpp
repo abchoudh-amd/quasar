@@ -292,6 +292,91 @@ void launch_pic_append_migrated_records(
 bool launch_pic_ids_have_duplicate(const std::vector<std::uint64_t>& ids,
                                    backend::stream_t stream);
 
+// -- Initial particle sampling -----------------------------------------------
+//
+// Quiet-start positions and Maxwellian velocities for a species at t = 0. This
+// used to be NumPy in `quasar.pic.cli`: an O(N) lattice, an O(N) normal sample
+// from `np.random.default_rng`, an O(N) perturbation, and an O(N) speed check,
+// all on the host and then uploaded. It is kernels now, writing straight into
+// the species' device planes.
+//
+// The RNG changed with the move and the sampled velocities are therefore
+// different draws. `np.random.default_rng` is a stateful PCG64 stream, which a
+// kernel cannot reproduce without serializing; the replacement is Philox4x32-10
+// keyed on the seed and the species and *counted* by the particle's own index,
+// so every particle's draw is a pure function of where it sits. That makes the
+// sample independent of thread order, of block size, and of how the population
+// is partitioned across devices -- properties the stream RNG never had. The
+// antithetic pairing is unchanged: particle 2j and particle 2j+1 receive equal
+// and opposite thermal velocities, so the thermal sample carries exactly zero
+// bulk momentum and an odd population gives its last particle a zero draw.
+
+// A rank-1 lattice over the block. `stride` must be coprime with `count`; the
+// caller picks it (a golden-ratio choice adjusted upward to coprimality) since
+// that is O(1) integer work.
+struct PicQuietStartSpec {
+  std::uint64_t count{0};
+  std::uint64_t stride{1};
+  Real x_min{0}, x_max{1}, y_min{0}, y_max{1};
+  // Cylindrical blocks sample uniformly in r^2 rather than r, so an equal
+  // weight is an equal ring volume.
+  int cylindrical{0};
+  // The physical domain. A block inside the domain puts every lattice point
+  // inside it too, up to the rounding of one multiply-add per coordinate, so
+  // the check is still made per particle rather than on the four block bounds.
+  Real domain_x_min{0}, domain_x_max{1}, domain_y_min{0}, domain_y_max{1};
+};
+
+struct PicMaxwellianSpec {
+  Real thermal_speed{0};
+  Real drift_x{0}, drift_y{0}, drift_z{0};
+  std::uint64_t seed{0};
+  std::uint64_t species_key{0};
+};
+
+// v += sin(2*pi*(mx*(x-ox)/lx + my*(y-oy)/ly) + phase) * amplitude.
+struct PicVelocityPerturbationSpec {
+  int active{0};
+  Real mode_x{0}, mode_y{0}, phase{0};
+  Real amplitude_x{0}, amplitude_y{0}, amplitude_z{0};
+  Real origin_x{0}, origin_y{0}, lx{1}, ly{1};
+};
+
+// Status bits from the sampling kernels.
+inline constexpr int kPicSampleNonFinitePosition = 1;
+inline constexpr int kPicSampleNonFiniteVelocity = 2;
+inline constexpr int kPicSampleSuperluminal = 4;
+inline constexpr int kPicSampleOutsideDomain = 8;
+
+void launch_pic_quiet_positions(PicQuietStartSpec spec, Real* x, Real* y,
+                                int* status, backend::stream_t stream);
+
+void launch_pic_maxwellian_velocities(std::uint64_t count,
+                                      PicMaxwellianSpec spec, Real* vx,
+                                      Real* vy, Real* vz, int* status,
+                                      backend::stream_t stream);
+
+void launch_pic_velocity_perturbation(std::uint64_t count,
+                                      PicVelocityPerturbationSpec spec,
+                                      const Real* x, const Real* y, Real* vx,
+                                      Real* vy, Real* vz, int* status,
+                                      backend::stream_t stream);
+
+// |v| >= 1 leaves the nonrelativistic Boris model. Checked here so the sampled
+// velocities never have to come back to the host to be inspected.
+void launch_pic_check_subluminal(std::uint64_t count, const Real* vx,
+                                 const Real* vy, const Real* vz, int* status,
+                                 backend::stream_t stream);
+
+// Fill the planes a seeded species needs beyond position and velocity:
+// previous positions equal to the initial ones, vphi_deposit equal to vz, a
+// uniform macro weight, alive flags, and identity ids.
+void launch_pic_finalize_seed(std::uint64_t count, Real weight, const Real* x,
+                              const Real* y, const Real* vz, Real* x_prev,
+                              Real* y_prev, Real* vphi_deposit, Real* weights,
+                              std::uint8_t* alive, std::uint64_t* id,
+                              backend::stream_t stream);
+
 }  // namespace quasar::pic
 
 // The field-data ABI is phrased in quasar::Real (and YeeField2D<Real> /

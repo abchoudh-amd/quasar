@@ -7,16 +7,25 @@ numerics: {fdtd_order: 2, shape: tsc, current_filter: []}
 # law at t=0; the perturbation excites a Langmuir mode whose electric response
 # is collisionlessly Landau damped.  The thermal speed gives k*lambda_D=0.5
 # for the k=2*pi/L fundamental, a standard resolvable Landau-damping regime.
+#
+# The particle count and perturbation amplitude are set by the signal-to-noise
+# requirement, not by cost. Discrete-particle noise in the k=1 mode falls as
+# 1/sqrt(N); at 8192 particles it sat within a factor of a few of the excited
+# mode, so the damped envelope reached the noise floor after roughly one
+# e-folding and a fit over the resolved peaks measured the realization rather
+# than the damping. 65536 particles and a 4e-3 perturbation -- still linear,
+# delta_n/n of order one percent -- keep the mode above the floor for four
+# resolved peaks in every seed tried.
 species:
   - name: electron
     charge_C: -1
     mass_kg: 1
-    n_particles: 8192
+    n_particles: 65536
     initial:
       distribution: maxwellian_uniform
       density_per_m3: 1.0
       temperature_eV: 6.332573977646112e-3
       drift_v: [0.0, 0.0, 0.0]
-      velocity_perturbation: {amplitude_v: [1.0e-3, 0.0, 0.0], mode: [1, 0]}
+      velocity_perturbation: {amplitude_v: [4.0e-3, 0.0, 0.0], mode: [1, 0]}
 time: {dt_s: auto, steps: 2000}
 diagnostics: {output_path: out.npz, cadence: 16, fields: [ex], per_species: true}

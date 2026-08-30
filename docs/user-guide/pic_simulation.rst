@@ -249,7 +249,15 @@ CLI
 
 Flags:
 
-* ``--seed N``            — RNG seed for initial-condition sampling (0).
+* ``--seed N``            — RNG seed for initial-condition sampling (0). The
+  seed is used verbatim as the key of a counter-based Philox generator, with
+  each species separated by its index rather than by advancing a stream, and
+  each particle's draw counted by its own index. Two consequences worth
+  relying on: the sample is a pure function of ``(seed, species, particle)``,
+  so a run on one GPU and the same deck run across several draw identical
+  velocities; and a species' draw does not change when the population is
+  resized, so particle ``p`` of an ``N``-particle run and of a ``2N``-particle
+  run get the same thermal velocity.
 * ``--verbose``           — print informational output (the driver is quiet by
   default).
 * ``--print-config``      — echo the resolved deck and ``dt`` before running.

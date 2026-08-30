@@ -9,6 +9,7 @@
 #include "quasar/numerics/field_solver.hpp"
 #include "quasar/numerics/filter.hpp"
 #include "quasar/numerics/particle_pusher.hpp"
+#include "quasar/physics/pic/particle_sampling.hpp"
 #include "quasar/physics/pic/species.hpp"
 
 #include <array>
@@ -103,6 +104,12 @@ class EmPic2D3V {
                              const std::vector<Real>& vy,
                              const std::vector<Real>& vz,
                              const std::vector<Real>& weight);
+  // Sample this species' initial particles directly into device memory. Same
+  // preconditions and cache invalidation as set_species_particles, and the
+  // same physical-domain requirement -- checked in the kernel that produces
+  // the coordinates rather than on an uploaded array.
+  void sample_species_particles(std::size_t index,
+                                ParticleSampleConfig config);
   void step(Real dt);
   void advance(Real t_end, Real dt);
   // The CFL stability limit (internal units, c = 1) for the scheme actually

@@ -431,6 +431,72 @@ interfaces may still change between entries.
   like the grid/plane/line observation kinds.
 
 ### Changed
+- Distributed PIC: **particle migration routing runs on the device.** Deciding
+  where a departing particle goes is arithmetic — a periodic coordinate is
+  wrapped back into the global domain, divided by the cell width and floored to
+  a global cell index, and that index is mapped through the balanced tile
+  partition to an owning endpoint — and all of it used to run on the host, once
+  per departing particle, over a snapshot downloaded for the purpose.
+  `extract_pic_departing_particles_device` now keeps the departing block where
+  the partition kernel wrote it, and `launch_pic_route_departing_particles`
+  wraps, resolves the owner and looks up the destination rank in one launch.
+  What crosses to the host is a routed array of wire records that the host
+  slices and memcpys but never inspects field by field.
+
+  Ordering moved with it. Records come back grouped by destination rank and, in
+  each group, sorted by ascending stable id; arrivals are re-sorted by id as
+  part of the append. A species' particle order therefore no longer depends on
+  the order the partition kernel emitted departures or the order MPI delivered
+  peers. The sort is a stable counting sort applied over the eight bytes of the
+  id and once more over the rank, and it also replaces the host
+  `unordered_set` behind the checkpoint id-uniqueness check.
+
+  Still host arithmetic, deliberately: the seed and checkpoint-restore routing
+  in `seed_local_species`, `replace_local_species_particles` and
+  `route_checkpoint_species`. Those route particles that originate on the host,
+  they run once per run rather than once per step, and they route a dead
+  particle by id rather than by position.
+- PIC: **initial particle sampling runs on the device, and seeded velocity
+  draws have changed.** The quiet-start lattice, the Maxwellian sample, the
+  optional sinusoidal perturbation, the `|v| < c` check and the in-domain check
+  were NumPy in `quasar.pic.cli`, evaluated per particle on the host and then
+  uploaded. They are kernels now, writing straight into the species' device
+  planes through `EmPic2D3V::sample_species_particles`. What stays on the host
+  is O(1) configuration arithmetic: the lattice stride, the per-particle block
+  measure, the thermal speed.
+
+  The generator changed with the move. `numpy.random.default_rng` is a stateful
+  PCG64 stream, and a stream cannot be evaluated in parallel at an arbitrary
+  index without advancing through it; the replacement is Philox4x32-10 keyed on
+  `(seed, species)` and *counted* by particle index, so a particle's draw is a
+  pure function of where it sits. That makes the sample independent of block
+  size, of thread scheduling, and of how the population is partitioned across
+  devices. The antithetic pairing is unchanged, so the thermal sample still
+  carries exactly zero bulk momentum. **Seeded PIC decks draw different
+  velocities than they did before.**
+
+  One consequence was a latent inconsistency, now fixed: the distributed runner
+  carried its own host Philox sampler alongside the CLI's NumPy one, so a
+  serial and a multi-rank run of the same deck drew different velocities. Both
+  now drive the same kernels, and `test_pic_distributed_runner` pins that they
+  agree exactly.
+
+  `quasar/pic/initial_conditions.py` is gone. Its only consumer was the CLI, and
+  leaving a second host sampler in the tree would have meant a user script and
+  the CLI producing different physics from one deck. Its tests were rewritten
+  against the sampler that actually runs.
+- Examples: `landau_damping` now uses 65536 particles and a `4e-3` perturbation
+  instead of 8192 and `1e-3`, and its integration test measures the first four
+  peaks of the damped sequence rather than peaks inside a fixed `[3, 11]`
+  window. The old form was tuned to one sampling realization: it excluded the
+  excitation peak, included the late finite-N recurrence where particle noise
+  pushes the mode back up, and passed because that recurrence happened to land
+  outside the window for that one draw. At 8192 particles the `k = 1` mode sat
+  close enough to the thermal noise floor that the ensemble envelope showed no
+  net damping at all. The new particle count keeps the mode above the floor for
+  all four peaks in every seed tried, the peak times now match the analytic
+  quarter-period and half-period spacing so no window has to be chosen, and the
+  rate tolerance is the measured seed-to-seed spread rather than a guess.
 - Numerics/magnetostatics/analytic fields: **`IFieldEvaluator` is now
   device-resident, and this is a breaking interface change.** `evaluate_B`,
   `evaluate_E`, `evaluate_A` and `evaluate_grad_B` take a

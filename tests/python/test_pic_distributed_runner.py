@@ -10,6 +10,7 @@ from unittest import mock
 
 import numpy as np
 
+from quasar import _core
 from quasar import distributed
 from quasar.pic import _distributed_runner as runner
 from quasar.pic import io as pic_io
@@ -317,13 +318,59 @@ class _RestartRunSession(_ShardedRunSession):
 
 class InitializationTests(unittest.TestCase):
 
+    def test_serial_and_distributed_seeding_draw_the_same_sample(self):
+        """One deck seed, one sample, whether run on one rank or many.
+
+        The runner used to carry its own host Philox sampler alongside the
+        serial CLI's NumPy one, so the two paths drew different velocities for
+        the same deck. Both now drive the sampling kernels through
+        ``_core.pic``, and this pins that they agree exactly rather than
+        approximately.
+        """
+        from quasar.pic.cli import _seed_species
+
+        deck = _deck(particles=9)
+        units = Units(deck)
+        distributed = runner._species_states(deck, units, 42)
+
+        class _Recorder:
+            def __init__(self):
+                self.host = None
+
+            def add_species(self, cfg):
+                return 0
+
+            def sample_species_particles(self, index, config):
+                self.host = _core.pic.sample_particles(config)
+
+        recorder = _Recorder()
+        _seed_species(recorder, deck, units, 42)
+
+        particles = distributed[0]["particles"]
+        for name in ("x", "y", "vx", "vy", "vz", "weight"):
+            np.testing.assert_array_equal(
+                np.asarray(particles[name]), np.asarray(recorder.host[name]),
+                err_msg=f"{name} differs between the serial and distributed "
+                        "seeding paths")
+
     def test_counter_sampling_is_reproducible_antithetic_and_species_keyed(self):
-        first = runner._counter_maxwellian(
-            7, 0.2, (0.1, -0.2, 0.3), 1234, 0)
-        repeat = runner._counter_maxwellian(
-            7, 0.2, (0.1, -0.2, 0.3), 1234, 0)
-        other_species = runner._counter_maxwellian(
-            7, 0.2, (0.1, -0.2, 0.3), 1234, 1)
+        def sample(count, thermal, drift, seed, species_index):
+            config = _core.pic.ParticleSampleConfig()
+            config.count = count
+            config.x_min, config.x_max = 0.0, 1.0
+            config.y_min, config.y_max = 0.0, 1.0
+            config.domain_lx = config.domain_ly = 1.0
+            config.thermal_speed = thermal
+            config.drift_x, config.drift_y, config.drift_z = drift
+            config.seed = seed
+            config.species_key = species_index
+            config.weight = 1.0
+            out = _core.pic.sample_particles(config)
+            return np.column_stack((out["vx"], out["vy"], out["vz"]))
+
+        first = sample(7, 0.2, (0.1, -0.2, 0.3), 1234, 0)
+        repeat = sample(7, 0.2, (0.1, -0.2, 0.3), 1234, 0)
+        other_species = sample(7, 0.2, (0.1, -0.2, 0.3), 1234, 1)
 
         np.testing.assert_array_equal(first, repeat)
         self.assertFalse(np.array_equal(first, other_species))

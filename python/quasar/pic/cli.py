@@ -24,7 +24,6 @@ from .. import _core
 from .. import distributed as _distributed
 from .._paths import confine_output_path, positive_int as _positive_int
 from ..coil.io import build_conductor_system
-from . import initial_conditions as ic
 from . import io as pic_io
 from ._units import QE as EV_TO_J  # elementary charge in C == eV->J factor
 from ._units import Units
@@ -154,10 +153,22 @@ def _make_solver(deck: pic_io.PicDeck, units: Units):
 
 
 def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
-                  rng: np.random.Generator) -> list[int]:
+                  seed: int) -> list[int]:
+    """Seed every species directly into device memory.
+
+    The quiet-start lattice, the Maxwellian draw, the optional sinusoidal
+    perturbation and the |v| < c check all run in kernels; this function
+    assembles the O(1) scalars each species needs (thermal speed, block bounds,
+    macro weight) and hands them over. Nothing here is per particle.
+
+    The velocities are therefore different draws than the previous NumPy path
+    produced: the sampler uses a counter-based Philox generator keyed on
+    ``(seed, species index)`` and counted by particle index, which a stateful
+    ``numpy.random.default_rng`` stream cannot reproduce. See CHANGELOG.md.
+    """
     pic = _core.pic
     indices: list[int] = []
-    for sp in deck.species:
+    for species_index, sp in enumerate(deck.species):
         # In normalized decks temperature is a dimensionless kinetic energy in
         # the same mass/velocity system as the solver, so v_th=sqrt(T/m). Applying
         # the SI eV->J formula to identity-unit values suppresses v_th by ~1e-10.
@@ -172,67 +183,54 @@ def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
         domain_ly = units.length(deck.domain.ly_m)
         domain_ox = units.length(deck.domain.origin_x_m)
         domain_oy = units.length(deck.domain.origin_y_m)
+
+        config = pic.ParticleSampleConfig()
+        config.count = sp.n_particles
+        config.cylindrical = deck.geometry == "cylindrical"
         if sp.initial.distribution == "maxwellian_block":
-            x_min = units.length(sp.initial.region_x_min_m)
-            x_max = units.length(sp.initial.region_x_max_m)
-            y_min = units.length(sp.initial.region_y_min_m)
-            y_max = units.length(sp.initial.region_y_max_m)
-            if deck.geometry == "cylindrical":
-                positions = ic.quiet_positions_rz_block(
-                    sp.n_particles, x_min, x_max, y_min, y_max)
-                particle_volume = ic.quiet_block_ring_volume(
-                    sp.n_particles, x_min, x_max, y_min, y_max)
-            else:
-                positions = ic.quiet_positions_2d_block(
-                    sp.n_particles, x_min, x_max, y_min, y_max)
-                particle_volume = ic.quiet_block_cell_area(
-                    sp.n_particles, x_min, x_max, y_min, y_max)
+            config.x_min = units.length(sp.initial.region_x_min_m)
+            config.x_max = units.length(sp.initial.region_x_max_m)
+            config.y_min = units.length(sp.initial.region_y_min_m)
+            config.y_max = units.length(sp.initial.region_y_max_m)
         else:
-            if deck.geometry == "cylindrical":
-                positions = ic.quiet_positions_rz_block(
-                    sp.n_particles, domain_ox, domain_ox + domain_lx,
-                    domain_oy, domain_oy + domain_ly)
-                particle_volume = ic.quiet_block_ring_volume(
-                    sp.n_particles, domain_ox, domain_ox + domain_lx,
-                    domain_oy, domain_oy + domain_ly)
-            else:
-                positions = ic.quiet_positions_2d_block(
-                    sp.n_particles, domain_ox, domain_ox + domain_lx,
-                    domain_oy, domain_oy + domain_ly)
-                particle_volume = ic.quiet_block_cell_area(
-                    sp.n_particles, domain_ox, domain_ox + domain_lx,
-                    domain_oy, domain_oy + domain_ly)
-        velocities = ic.maxwellian(sp.n_particles, v_thermal,
-                                   drift=drift,
-                                   seed=int(rng.integers(0, 2**31 - 1)))
+            config.x_min = domain_ox
+            config.x_max = domain_ox + domain_lx
+            config.y_min = domain_oy
+            config.y_max = domain_oy + domain_ly
+        config.thermal_speed = v_thermal
+        config.drift_x, config.drift_y, config.drift_z = drift
+        # The deck seed verbatim, separated per species by the Philox key
+        # rather than by advancing a stream. The distributed runner does the
+        # same, which is what makes a serial and a multi-rank run of one deck
+        # draw the same sample.
+        config.seed = int(seed) % (1 << 64)
+        config.species_key = species_index
+        config.domain_origin_x = domain_ox
+        config.domain_origin_y = domain_oy
+        config.domain_lx = domain_lx
+        config.domain_ly = domain_ly
+
         perturbation = sp.initial.velocity_perturbation
         if perturbation is not None:
             mx, my = perturbation.mode
-            reduced_phase = math.remainder(
-                perturbation.phase_rad, 2.0 * math.pi)
-            phase = (2.0 * np.pi
-                     * (mx * (positions[:, 0] - domain_ox) / domain_lx
-                        + my * (positions[:, 1] - domain_oy) / domain_ly)
-                     + reduced_phase)
-            amplitude = np.asarray(
-                [units.velocity(value) for value in perturbation.amplitude_v],
-                dtype=float)
-            velocities += np.sin(phase)[:, np.newaxis] * amplitude
-        speeds = np.linalg.norm(velocities, axis=1)
-        if speeds.size and float(np.max(speeds)) >= 1.0:
-            raise ValueError(
-                f"species {sp.name!r}: sampled |v|/c >= 1, outside the "
-                "nonrelativistic Boris model; lower temperature/drift or use a "
-                "relativistic pusher")
+            config.perturb = True
+            config.mode_x = float(mx)
+            config.mode_y = float(my)
+            config.phase = math.remainder(perturbation.phase_rad,
+                                          2.0 * math.pi)
+            amplitude = [units.velocity(value)
+                         for value in perturbation.amplitude_v]
+            (config.amplitude_x, config.amplitude_y,
+             config.amplitude_z) = amplitude
 
         # The rank-1 quiet start partitions the full Cartesian area (or
         # cylindrical volume) equally among all particles, so each macro-weight
         # is density times that per-particle area/volume.  Block initializers use
         # the corresponding selected-block area/volume divided by their count.
-        macro_weight = _macro_weight(
+        particle_volume = pic.quiet_block_measure(config)
+        config.weight = _macro_weight(
             sp.initial.density_per_m3,
             units.density(sp.initial.density_per_m3), particle_volume, sp.name)
-        weights = np.full(sp.n_particles, macro_weight)
 
         cfg = pic.SpeciesConfig(name=sp.name,
                                 charge=units.charge(sp.charge_C),
@@ -241,18 +239,8 @@ def _seed_species(solver, deck: pic_io.PicDeck, units: Units,
         idx = solver.add_species(cfg)
         # These samples are the physical velocity distribution at t=0. The C++
         # solver owns the initial dt/2 Boris kick; the deck path must not
-        # pre-stagger them. The pybind binding is declared with
-        # py::array::forcecast, so it copies to contiguous float64 itself; no
-        # host-side astype needed here.
-        solver.set_species_particles(
-            idx,
-            x=positions[:, 0],
-            y=positions[:, 1],
-            vx=velocities[:, 0],
-            vy=velocities[:, 1],
-            vz=velocities[:, 2],
-            weight=weights,
-        )
+        # pre-stagger them.
+        solver.sample_species_particles(idx, config)
         indices.append(idx)
     return indices
 
@@ -708,8 +696,7 @@ def prepare_run(deck: pic_io.PicDeck, units: Units, *, seed: int = 0):
     t_end_internal = _internal_end_time(deck, units)
     first_dt = dt if t_end_internal is None else min(dt, t_end_internal)
     _seed_fields(solver, deck, first_dt, units)
-    rng = np.random.default_rng(seed)
-    species_indices = _seed_species(solver, deck, units, rng)
+    species_indices = _seed_species(solver, deck, units, seed)
     return solver, species_indices, dt, dt_si
 
 

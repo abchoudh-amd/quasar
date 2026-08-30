@@ -857,6 +857,32 @@ void EmPic2D3V::set_species_particles(
   background_charge_density_ = Real{0};
 }
 
+void EmPic2D3V::sample_species_particles(std::size_t index,
+                                         ParticleSampleConfig config) {
+  if (evolution_started_) {
+    throw std::logic_error{
+        "EmPic2D3V::sample_species_particles: particles cannot be replaced "
+        "after evolution begins"};
+  }
+  if (index >= species_.size()) {
+    throw std::out_of_range{
+        "EmPic2D3V::sample_species_particles: species index out of range"};
+  }
+  // The domain is the solver's, not the deck's: the sampler checks every
+  // coordinate it produces against it, which is the device counterpart of the
+  // host loop set_species_particles runs over an uploaded array.
+  config.domain_origin_x = grid_.origin_x;
+  config.domain_origin_y = grid_.origin_y;
+  config.domain_lx = grid_.lx;
+  config.domain_ly = grid_.ly;
+  // sample_species publishes the count only after the status word comes back
+  // clean, so a rejected configuration leaves the existing state unchanged.
+  sample_species(species_[index], config, nullptr);
+  charge_valid_ = false;
+  background_initialized_ = false;
+  background_charge_density_ = Real{0};
+}
+
 void EmPic2D3V::initialize_neutralizing_background() {
   if (background_initialized_) return;
   background_charge_density_ = Real{0};

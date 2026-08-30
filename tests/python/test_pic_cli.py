@@ -676,10 +676,18 @@ class _RecordingSpecies:
 
 
 class _SpeciesRecordingSolver:
-    """Stub solver capturing solver-owned particle uploads for _seed_species."""
+    """Stub solver capturing what _seed_species hands the sampler.
+
+    The sampling arithmetic lives in kernels now, so this records the
+    ParticleSampleConfig the CLI assembled -- which is the part under test --
+    and then runs the real sampler on it to get the arrays. The one thing it
+    does not do is override the domain from a solver grid, since there is no
+    grid here; the CLI has already filled the domain fields from the deck.
+    """
 
     def __init__(self):
         self.configs = []
+        self.sample_configs = []
         self.species = []
 
     def add_species(self, cfg):
@@ -690,9 +698,11 @@ class _SpeciesRecordingSolver:
     def species_at(self, idx):
         return self.species[idx]
 
-    def set_species_particles(self, idx, **kwargs):
+    def sample_species_particles(self, idx, config):
+        self.sample_configs.append(config)
+        sample = _core.pic.sample_particles(config)
         self.species[idx].host = {
-            key: np.asarray(value) for key, value in kwargs.items()}
+            key: np.asarray(value) for key, value in sample.items()}
 
 
 def _species_deck(initial: SpeciesInitial) -> PicDeck:
@@ -719,7 +729,7 @@ class SeedSpeciesTests(unittest.TestCase):
         units = Units(deck)
         solver = _SpeciesRecordingSolver()
         rng = np.random.default_rng(0)
-        _seed_species(solver, deck, units, rng)
+        _seed_species(solver, deck, units, 0)
 
         host = solver.species[0].host
         self.assertIsNotNone(host)
@@ -745,7 +755,7 @@ class SeedSpeciesTests(unittest.TestCase):
                                             temperature_eV=1.0e-4))
         units = Units(deck)
         solver = _SpeciesRecordingSolver()
-        _seed_species(solver, deck, units, np.random.default_rng(0))
+        _seed_species(solver, deck, units, 0)
         host = solver.species[0].host
         # Uniform weight uses the full domain area, so it differs from a sub-block.
         domain_area = units.length(deck.domain.lx_m) * units.length(deck.domain.ly_m)
@@ -762,7 +772,7 @@ class SeedSpeciesTests(unittest.TestCase):
         deck.validate()
         units = Units(deck)
         solver = _SpeciesRecordingSolver()
-        _seed_species(solver, deck, units, np.random.default_rng(0))
+        _seed_species(solver, deck, units, 0)
         host = solver.species[0].host
         phase = 2.0 * np.pi * host["x"] + perturbation.phase_rad
         np.testing.assert_allclose(
