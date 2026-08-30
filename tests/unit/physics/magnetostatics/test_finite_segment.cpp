@@ -6,6 +6,8 @@
 #include "quasar/physics/magnetostatics/field_evaluator.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -62,8 +64,8 @@ TEST(FiniteSegment, NearWireOffFilamentIsNotSuppressed) {
   pc.add(Vec3{d, 0, 0});
   const Real ref = finite_segment_By_ref(d, kHalfLen, kCurrent);
 
-  const auto Bd = BiotSavartEvaluator{}.evaluate_B(cs, pc);
-  const auto Bf = BiotSavartEvaluatorF{}.evaluate_B(cs, pc);
+  const auto Bd = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, cs, pc);
+  const auto Bf = quasar::test::host_evaluate_B(BiotSavartEvaluatorF{}, cs, pc);
   ASSERT_EQ(Bd.size(), 1u);
   ASSERT_EQ(Bf.size(), 1u);
   EXPECT_NEAR(Bd[0].y, ref, Real{2e-12} * std::abs(ref));
@@ -84,7 +86,7 @@ TEST(FiniteSegment, MatchesClosedFormViaDirectCtor) {
     PointCloud pc;
     pc.add(Vec3{d, Real{0}, Real{0}});
 
-    const auto field = eval.evaluate_B(cs, pc);
+    const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
     ASSERT_EQ(field.size(), 1u);
 
     const Real B_y_ref = finite_segment_By_ref(d, kHalfLen, kCurrent);
@@ -113,7 +115,7 @@ TEST(FiniteSegment, MatchesClosedFormViaRegistry) {
     PointCloud pc;
     pc.add(Vec3{d, Real{0}, Real{0}});
 
-    const auto field = eval->evaluate_B(cs, pc);
+    const auto field = quasar::test::host_evaluate_B(*eval, cs, pc);
     ASSERT_EQ(field.size(), 1u);
 
     const Real B_y_ref = finite_segment_By_ref(d, kHalfLen, kCurrent);

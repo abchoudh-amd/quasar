@@ -9,6 +9,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "quasar/core/device_observations.hpp"
 #include "quasar/core/field_source.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/analytic_fields/dipole.hpp"
@@ -45,6 +46,7 @@ using ::quasar::magnetostatics::helix;
 using ::quasar::magnetostatics::LineProbe;
 using ::quasar::magnetostatics::ObservationGrid;
 using ::quasar::magnetostatics::PlaneSlice;
+using ::quasar::core::DevicePointCloud;
 using ::quasar::magnetostatics::PointCloud;
 using ::quasar::magnetostatics::polygon;
 using ::quasar::magnetostatics::racetrack;
@@ -233,28 +235,38 @@ PYBIND11_MODULE(_core, m) {
            py::arg("params"),
            "Apply deck parameters (name -> flat float list; Vec3=3, Mat3x3=9 "
            "row-major) after registry construction. Unknown keys are rejected.")
+      // Python is an output boundary by definition: these hand back NumPy
+      // arrays. So each wrapper uploads the host PointCloud, evaluates entirely
+      // on the device, and downloads once via .to_host(). The C++ callers that
+      // chain evaluations (the PIC external-field sampler, the MHD background
+      // builder) keep the DevicePointCloud and never make this round trip.
       .def("evaluate_B",
            [](const IFieldEvaluator& self,
               const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
-             return field_to_numpy(self.evaluate_B(src, obs));
+             const auto device_obs = DevicePointCloud::upload(obs);
+             return field_to_numpy(self.evaluate_B(src, device_obs).to_host());
            },
            py::arg("source"), py::arg("observations"))
       .def("evaluate_E",
            [](const IFieldEvaluator& self,
               const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
-             return field_to_numpy(self.evaluate_E(src, obs));
+             const auto device_obs = DevicePointCloud::upload(obs);
+             return field_to_numpy(self.evaluate_E(src, device_obs).to_host());
            },
            py::arg("source"), py::arg("observations"))
       .def("evaluate_grad_B",
            [](const IFieldEvaluator& self,
               const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
-             return grad_field_to_numpy(self.evaluate_grad_B(src, obs));
+             const auto device_obs = DevicePointCloud::upload(obs);
+             return grad_field_to_numpy(
+                 self.evaluate_grad_B(src, device_obs).to_host());
            },
            py::arg("source"), py::arg("observations"))
       .def("evaluate_A",
            [](const IFieldEvaluator& self,
               const ::quasar::core::IFieldSource& src, const PointCloud& obs) {
-             return field_to_numpy(self.evaluate_A(src, obs));
+             const auto device_obs = DevicePointCloud::upload(obs);
+             return field_to_numpy(self.evaluate_A(src, device_obs).to_host());
            },
            py::arg("source"), py::arg("observations"),
            "Magnetic vector potential A (B = curl A), NumPy (N, 3). Raises if "

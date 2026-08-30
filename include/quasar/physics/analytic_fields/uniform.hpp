@@ -12,10 +12,12 @@ class UniformEvaluator final : public numerics::IFieldEvaluator {
   // Deck params: "b0" (Vec3 tesla), "e0" (Vec3 V/m). Both default to zero.
   void configure(const numerics::EvaluatorParams& p) override;
 
-  Field<Vec3> evaluate_B(const core::IFieldSource&,
-                         const core::PointCloud& observations) const override;
-  Field<Vec3> evaluate_E(const core::IFieldSource&,
-                         const core::PointCloud& observations) const override;
+  core::DeviceVectorField evaluate_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
+  core::DeviceVectorField evaluate_E(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
   // The base-class zero Jacobian is the exact gradient of this evaluator.
   bool provides_grad_B() const noexcept override { return true; }
 

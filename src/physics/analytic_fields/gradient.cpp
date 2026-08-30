@@ -1,11 +1,11 @@
 #include "quasar/physics/analytic_fields/gradient.hpp"
 
-#include "quasar/core/observations.hpp"
+#include "quasar/core/device_observations.hpp"
+#include "quasar/physics/analytic_fields/kernels.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <initializer_list>
+#include <cstddef>
 #include <limits>
 #include <stdexcept>
 
@@ -15,16 +15,6 @@ namespace {
 
 bool finite(Vec3 v) noexcept {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
-}
-
-Real checked_real(long double value) {
-  constexpr long double max_real =
-      static_cast<long double>(std::numeric_limits<Real>::max());
-  if (!std::isfinite(value) || std::abs(value) > max_real) {
-    throw std::overflow_error{
-        "GradientEvaluator: magnetic field is not representable in host precision"};
-  }
-  return static_cast<Real>(value);
 }
 
 void validate(Vec3 b0, const Mat3x3& grad, Vec3 origin) {
@@ -47,80 +37,12 @@ void validate(Vec3 b0, const Mat3x3& grad, Vec3 origin) {
   }
 }
 
-struct ScaledTerm {
-  long double mantissa{};
-  int exponent{};
-};
-
-ScaledTerm make_scaled_term(std::initializer_list<Real> factors) {
-  ScaledTerm term{1.0L, 0};
-  for (const Real factor : factors) {
-    if (factor == Real{0}) return {};
-    int factor_exponent = 0;
-    const Real factor_mantissa = std::frexp(factor, &factor_exponent);
-    term.mantissa *= static_cast<long double>(factor_mantissa);
-    term.exponent += factor_exponent;
-    int adjustment = 0;
-    term.mantissa = std::frexp(term.mantissa, &adjustment);
-    term.exponent += adjustment;
+int checked_point_count(std::size_t n) {
+  if (n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::length_error{
+        "GradientEvaluator: observation count exceeds the signed kernel-index limit"};
   }
-  return term;
-}
-
-Real checked_scaled_sum(const std::array<ScaledTerm, 4>& terms) {
-  std::array<ScaledTerm, 4> active{};
-  std::size_t count = 0;
-  for (const ScaledTerm term : terms) {
-    if (term.mantissa != 0.0L) active[count++] = term;
-  }
-  if (count == 0) return Real{0};
-
-  // Repeatedly combine the two largest-exponent terms, then reinsert the
-  // normalized result.  Thus large cancelling terms meet before a much smaller
-  // term is rescaled into their domain.  Unlike a single common-exponent sum,
-  // this does not rely on long double having a wider exponent range than Real.
-  while (count > 1) {
-    std::size_t first = 0;
-    for (std::size_t i = 1; i < count; ++i) {
-      if (active[i].exponent > active[first].exponent) first = i;
-    }
-    std::size_t second = first == 0 ? 1 : 0;
-    for (std::size_t i = 0; i < count; ++i) {
-      if (i != first && active[i].exponent > active[second].exponent) second = i;
-    }
-    const ScaledTerm a = active[first];
-    const ScaledTerm b = active[second];
-    const long double sum = a.mantissa
-        + std::scalbn(b.mantissa, b.exponent - a.exponent);
-    std::array<ScaledTerm, 4> remaining{};
-    std::size_t remaining_count = 0;
-    for (std::size_t i = 0; i < count; ++i) {
-      if (i != first && i != second) remaining[remaining_count++] = active[i];
-    }
-    if (sum != 0.0L) {
-      int adjustment = 0;
-      const long double mantissa = std::frexp(sum, &adjustment);
-      remaining[remaining_count++] =
-          ScaledTerm{mantissa, a.exponent + adjustment};
-    }
-    active = remaining;
-    count = remaining_count;
-  }
-  if (count == 0) return Real{0};
-  return checked_real(std::scalbn(active[0].mantissa, active[0].exponent));
-}
-
-ScaledTerm displacement_term(Real gradient, Real point, Real origin) {
-  if (gradient == Real{0}) return {};
-  const Real delta = point - origin;
-  if (std::isfinite(delta)) return make_scaled_term({gradient, delta});
-
-  // Only divide first when the direct subtraction overflows.  For nearby large
-  // coordinates, subtracting the two representable values first preserves the
-  // exact small displacement; normalizing each coordinate separately does not.
-  const Real coordinate_scale = std::max(std::abs(point), std::abs(origin));
-  const Real scaled_delta = point / coordinate_scale - origin / coordinate_scale;
-  return make_scaled_term({gradient, scaled_delta, coordinate_scale});
+  return static_cast<int>(n);
 }
 
 }  // namespace
@@ -142,30 +64,54 @@ void GradientEvaluator::configure(const numerics::EvaluatorParams& p) {
   origin_ = origin;
 }
 
-Field<Vec3> GradientEvaluator::evaluate_B(const core::IFieldSource&,
-                                          const core::PointCloud& obs) const {
-  Field<Vec3> out(obs.size());
-  const auto& pts = obs.points();
-  for (std::size_t i = 0; i < out.size(); ++i) {
-    const Vec3 rows[] = {grad_.r0, grad_.r1, grad_.r2};
-    Real values[3]{};
-    for (int row = 0; row < 3; ++row) {
-      const Real b = row == 0 ? b0_.x : row == 1 ? b0_.y : b0_.z;
-      values[row] = checked_scaled_sum({
-          make_scaled_term({b}),
-          displacement_term(rows[row].x, pts[i].x, origin_.x),
-          displacement_term(rows[row].y, pts[i].y, origin_.y),
-          displacement_term(rows[row].z, pts[i].z, origin_.z)});
-    }
-    out[i] = Vec3{values[0], values[1], values[2]};
+core::DeviceVectorField GradientEvaluator::evaluate_B(
+    const core::IFieldSource&, const core::DevicePointCloud& obs) const {
+  const int M = checked_point_count(obs.size());
+  core::DeviceVectorField out(obs.size(), backend::uninitialized);
+  backend::DeviceBuffer<int> status(1);
+
+  QuasarAfGradientParams params{};
+  params.b0[0] = b0_.x;
+  params.b0[1] = b0_.y;
+  params.b0[2] = b0_.z;
+  const Vec3 rows[3] = {grad_.r0, grad_.r1, grad_.r2};
+  for (int row = 0; row < 3; ++row) {
+    params.grad[3 * row + 0] = rows[row].x;
+    params.grad[3 * row + 1] = rows[row].y;
+    params.grad[3 * row + 2] = rows[row].z;
   }
+  params.origin[0] = origin_.x;
+  params.origin[1] = origin_.y;
+  params.origin[2] = origin_.z;
+
+  ::launch_analytic_gradient_B(params, obs.x(), obs.y(), obs.z(), M, out.x(),
+                               out.y(), out.z(), status.device_ptr(), nullptr);
+
+  int host_status = 0;
+  status.copy_to_host(&host_status, 1);
+  core::throw_on_evaluator_status(host_status, "GradientEvaluator",
+                                  "magnetic field");
   return out;
 }
 
-Field<Mat3x3> GradientEvaluator::evaluate_grad_B(const core::IFieldSource&,
-                                                 const core::PointCloud& obs) const {
-  Field<Mat3x3> out(obs.size());
-  for (std::size_t i = 0; i < out.size(); ++i) out[i] = grad_;
+core::DeviceTensorField GradientEvaluator::evaluate_grad_B(
+    const core::IFieldSource&, const core::DevicePointCloud& obs) const {
+  // The Jacobian is the configured constant matrix at every point, so this is
+  // three constant fills rather than a gradient kernel. DeviceTensorField is
+  // component-major, so the three planes of matrix row `i` -- entries (i,0),
+  // (i,1), (i,2) -- are the contiguous block starting at 3*i*n, which is
+  // exactly the (ox, oy, oz) triple the uniform fill writes.
+  const int M = checked_point_count(obs.size());
+  core::DeviceTensorField out(obs.size(), backend::uninitialized);
+  if (M == 0) return out;
+
+  const std::size_t n = obs.size();
+  const Vec3 rows[3] = {grad_.r0, grad_.r1, grad_.r2};
+  for (int row = 0; row < 3; ++row) {
+    Real* base = out.data() + static_cast<std::size_t>(3 * row) * n;
+    ::launch_analytic_uniform_fill(rows[row].x, rows[row].y, rows[row].z, M,
+                                   base, base + n, base + 2 * n, nullptr);
+  }
   return out;
 }
 

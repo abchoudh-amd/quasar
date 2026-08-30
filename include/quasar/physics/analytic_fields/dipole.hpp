@@ -12,11 +12,13 @@ class DipoleEvaluator final : public numerics::IFieldEvaluator {
   // Deck params: "moment" (Vec3 A*m^2, default (0,0,1)), "origin" (Vec3 m).
   void configure(const numerics::EvaluatorParams& p) override;
 
-  Field<Vec3> evaluate_B(const core::IFieldSource&,
-                         const core::PointCloud& observations) const override;
+  core::DeviceVectorField evaluate_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
   bool provides_grad_B() const noexcept override { return true; }
-  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
-                                const core::PointCloud& observations) const override;
+  core::DeviceTensorField evaluate_grad_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
 
  private:
   Vec3 moment_{0, 0, 1};

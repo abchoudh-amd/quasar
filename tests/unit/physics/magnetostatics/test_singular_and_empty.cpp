@@ -12,6 +12,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -78,9 +80,9 @@ TEST(BiotSavartSingular, OnSegmentPointsThrowDomainError) {
   pc.add(Vec3{0, 0, 0});   // segment midpoint
   pc.add(Vec3{1, 0, 0});   // segment end vertex
 
-  EXPECT_THROW((void)eval.evaluate_B(cs, pc), std::domain_error);
-  EXPECT_THROW((void)eval.evaluate_grad_B(cs, pc), std::domain_error);
-  EXPECT_THROW((void)eval.evaluate_A(cs, pc), std::domain_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pc), std::domain_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pc), std::domain_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_A(eval, cs, pc), std::domain_error);
 }
 
 TEST(BiotSavartSingular, DiagonalSegmentMidpointThrowsInBothPrecisions) {
@@ -94,9 +96,9 @@ TEST(BiotSavartSingular, DiagonalSegmentMidpointThrowsInBothPrecisions) {
   pc.add(Vec3{1, 2, 3});
 
   const auto expect_singular = [&](const auto& eval) {
-    EXPECT_THROW((void)eval.evaluate_B(cs, pc), std::domain_error);
-    EXPECT_THROW((void)eval.evaluate_A(cs, pc), std::domain_error);
-    EXPECT_THROW((void)eval.evaluate_grad_B(cs, pc), std::domain_error);
+    EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pc), std::domain_error);
+    EXPECT_THROW((void)quasar::test::host_evaluate_A(eval, cs, pc), std::domain_error);
+    EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pc), std::domain_error);
   };
   expect_singular(BiotSavartEvaluator{});
   expect_singular(BiotSavartEvaluatorF{});
@@ -117,9 +119,9 @@ TEST(BiotSavartSingular, NonRepresentableSegmentFractionStillThrows) {
   pc.add(Vec3{27, 63, 0});
 
   const auto expect_singular = [&](const auto& eval) {
-    EXPECT_THROW((void)eval.evaluate_B(cs, pc), std::domain_error);
-    EXPECT_THROW((void)eval.evaluate_A(cs, pc), std::domain_error);
-    EXPECT_THROW((void)eval.evaluate_grad_B(cs, pc), std::domain_error);
+    EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pc), std::domain_error);
+    EXPECT_THROW((void)quasar::test::host_evaluate_A(eval, cs, pc), std::domain_error);
+    EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pc), std::domain_error);
   };
   expect_singular(BiotSavartEvaluator{});
   expect_singular(BiotSavartEvaluatorF{});
@@ -136,9 +138,9 @@ TEST(BiotSavartSingular, DistinctNearDiagonalPointRemainsFinite) {
   pc.add(Vec3{1, 2, Real{3.0001}});
 
   const auto expect_finite = [&](const auto& eval) {
-    const auto field = eval.evaluate_B(cs, pc);
-    const auto potential = eval.evaluate_A(cs, pc);
-    const auto gradient = eval.evaluate_grad_B(cs, pc);
+    const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
+    const auto potential = quasar::test::host_evaluate_A(eval, cs, pc);
+    const auto gradient = quasar::test::host_evaluate_grad_B(eval, cs, pc);
     EXPECT_TRUE(std::isfinite(field[0].x));
     EXPECT_TRUE(std::isfinite(field[0].y));
     EXPECT_TRUE(std::isfinite(field[0].z));
@@ -161,7 +163,7 @@ TEST(BiotSavartSingular, ZeroCurrentHasNoFilamentSingularity) {
   cs.add(Filament{"zero", Real{0}, {Vec3{-1, 0, 0}, Vec3{1, 0, 0}}});
   PointCloud pc;
   pc.add(Vec3{0, 0, 0});
-  const auto B = BiotSavartEvaluator{}.evaluate_B(cs, pc);
+  const auto B = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, cs, pc);
   ASSERT_EQ(B.size(), 1u);
   EXPECT_EQ(B[0].x, Real{0});
   EXPECT_EQ(B[0].y, Real{0});
@@ -178,8 +180,8 @@ TEST(BiotSavartNumerics, UnrepresentableResultThrowsInsteadOfReturningInfinity) 
   PointCloud pc;
   pc.add(Vec3{0, Real{1e-100}, 0});
   const BiotSavartEvaluator eval;
-  EXPECT_THROW((void)eval.evaluate_B(cs, pc), std::overflow_error);
-  EXPECT_THROW((void)eval.evaluate_grad_B(cs, pc), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pc), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pc), std::overflow_error);
 }
 
 TEST(BiotSavartNumerics, OppositeSignObservationDifferenceDoesNotFalseSingular) {
@@ -194,8 +196,8 @@ TEST(BiotSavartNumerics, OppositeSignObservationDifferenceDoesNotFalseSingular) 
   pc.add(Vec3{largest, 0, 0});  // collinear but strictly beyond the endpoint
 
   const BiotSavartEvaluator eval;
-  const auto field = eval.evaluate_B(cs, pc);
-  const auto potential = eval.evaluate_A(cs, pc);
+  const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
+  const auto potential = quasar::test::host_evaluate_A(eval, cs, pc);
   ASSERT_EQ(field.size(), 1u);
   ASSERT_EQ(potential.size(), 1u);
   EXPECT_EQ(field[0].x, Real{0});
@@ -220,9 +222,9 @@ TEST(BiotSavartNumerics,
     point.add(Vec3{point_x, 0, 0});
 
     const BiotSavartEvaluator eval;
-    const auto field = eval.evaluate_B(conductors, point);
-    const auto potential = eval.evaluate_A(conductors, point);
-    const auto gradient = eval.evaluate_grad_B(conductors, point);
+    const auto field = quasar::test::host_evaluate_B(eval, conductors, point);
+    const auto potential = quasar::test::host_evaluate_A(eval, conductors, point);
+    const auto gradient = quasar::test::host_evaluate_grad_B(eval, conductors, point);
     ASSERT_EQ(field.size(), 1u);
     ASSERT_EQ(potential.size(), 1u);
     ASSERT_EQ(gradient.size(), 1u);
@@ -262,9 +264,9 @@ TEST(BiotSavartNumerics, UnderflowedTransverseOffsetIsNotFalseSingular) {
   // Normalizing this geometry makes the nonzero y offset underflow.  It is an
   // unresolved finite-precision geometry, not a point on the ideal filament.
   const BiotSavartEvaluator eval;
-  EXPECT_THROW((void)eval.evaluate_B(cs, pc), std::overflow_error);
-  EXPECT_THROW((void)eval.evaluate_A(cs, pc), std::overflow_error);
-  EXPECT_THROW((void)eval.evaluate_grad_B(cs, pc), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pc), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_A(eval, cs, pc), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pc), std::overflow_error);
 }
 
 TEST(BiotSavartNumerics, FarFieldProductsDoNotOverflowBeforeFiniteFp64Result) {
@@ -280,9 +282,9 @@ TEST(BiotSavartNumerics, FarFieldProductsDoNotOverflowBeforeFiniteFp64Result) {
   pc.add(Vec3{distance, 0, 0});
 
   const BiotSavartEvaluator eval;
-  const auto field = eval.evaluate_B(cs, pc);
-  const auto potential = eval.evaluate_A(cs, pc);
-  const auto gradient = eval.evaluate_grad_B(cs, pc);
+  const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
+  const auto potential = quasar::test::host_evaluate_A(eval, cs, pc);
+  const auto gradient = quasar::test::host_evaluate_grad_B(eval, cs, pc);
 
   const Real inv_distance = Real{1} / distance;
   const Real inv_radius = inv_distance
@@ -317,9 +319,9 @@ TEST(BiotSavartNumerics, TinySegmentFarObserverKeepsFiniteCompensatedResults) {
   pc.add(Vec3{distance, 0, 0});
 
   const BiotSavartEvaluator eval;
-  const auto field = eval.evaluate_B(cs, pc);
-  const auto potential = eval.evaluate_A(cs, pc);
-  const auto gradient = eval.evaluate_grad_B(cs, pc);
+  const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
+  const auto potential = quasar::test::host_evaluate_A(eval, cs, pc);
+  const auto gradient = quasar::test::host_evaluate_grad_B(eval, cs, pc);
 
   const Real inv_distance = Real{1} / distance;
   const Real half_ratio = half_length * inv_distance;
@@ -353,9 +355,9 @@ TEST(BiotSavartNumerics, FarFieldProductsDoNotOverflowBeforeFiniteFp32Result) {
   pc.add(Vec3{distance, 0, 0});
 
   const BiotSavartEvaluatorF eval;
-  const auto field = eval.evaluate_B(cs, pc);
-  const auto potential = eval.evaluate_A(cs, pc);
-  const auto gradient = eval.evaluate_grad_B(cs, pc);
+  const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
+  const auto potential = quasar::test::host_evaluate_A(eval, cs, pc);
+  const auto gradient = quasar::test::host_evaluate_grad_B(eval, cs, pc);
 
   const Real inv_distance = Real{1} / distance;
   const Real inv_radius = inv_distance
@@ -395,9 +397,9 @@ TEST(BiotSavartNumerics, OutOfRangePartialSumsMayCancelToFiniteResults) {
   const Real current_b = (Real{0.6} * maximum) / b_per_amp;
   PointCloud point_b;
   point_b.add(Vec3{radius_b, 0, 0});
-  const auto expected_b = eval.evaluate_B(
+  const auto expected_b = quasar::test::host_evaluate_B(eval, 
       repeated_segment(a, b, current_b, 1, 0), point_b);
-  const auto cancelled_b = eval.evaluate_B(
+  const auto cancelled_b = quasar::test::host_evaluate_B(eval, 
       repeated_segment(a, b, current_b, 2, 1), point_b);
   ASSERT_TRUE(std::isfinite(cancelled_b[0].y));
   EXPECT_NEAR(cancelled_b[0].y / expected_b[0].y, Real{1}, Real{2e-14});
@@ -412,9 +414,9 @@ TEST(BiotSavartNumerics, OutOfRangePartialSumsMayCancelToFiniteResults) {
   const Real current_g = (Real{0.6} * maximum) / grad_per_amp;
   PointCloud point_g;
   point_g.add(Vec3{radius_g, 0, 0});
-  const auto expected_g = eval.evaluate_grad_B(
+  const auto expected_g = quasar::test::host_evaluate_grad_B(eval, 
       repeated_segment(a, b, current_g, 1, 0), point_g);
-  const auto cancelled_g = eval.evaluate_grad_B(
+  const auto cancelled_g = quasar::test::host_evaluate_grad_B(eval, 
       repeated_segment(a, b, current_g, 2, 1), point_g);
   ASSERT_TRUE(std::isfinite(cancelled_g[0].r1.x));
   EXPECT_NEAR(cancelled_g[0].r1.x / expected_g[0].r1.x,
@@ -427,9 +429,9 @@ TEST(BiotSavartNumerics, OutOfRangePartialSumsMayCancelToFiniteResults) {
   constexpr Real radius_a = Real{1e-300};
   PointCloud point_a;
   point_a.add(Vec3{radius_a, 0, 0});
-  const auto expected_a = eval.evaluate_A(
+  const auto expected_a = quasar::test::host_evaluate_A(eval, 
       repeated_segment(a, b, maximum, 1, 0), point_a);
-  const auto cancelled_a = eval.evaluate_A(
+  const auto cancelled_a = quasar::test::host_evaluate_A(eval, 
       repeated_segment(a, b, maximum, 8192, 8191), point_a);
   ASSERT_TRUE(std::isfinite(cancelled_a[0].z));
   EXPECT_NEAR(cancelled_a[0].z / expected_a[0].z, Real{1}, Real{2e-10});
@@ -449,9 +451,9 @@ TEST(BiotSavartNumerics, ScaledReductionPreservesSourceLinearityAtUnderflow) {
   // Each 1 A contribution is below half of DBL_TRUE_MIN, while their exact
   // sum rounds to DBL_TRUE_MIN.  Rounding each segment before reduction would
   // therefore make two coincident 1 A sources disagree with one 2 A source.
-  const auto separate = eval.evaluate_B(
+  const auto separate = quasar::test::host_evaluate_B(eval, 
       repeated_segment(a, b, Real{1}, 2, 0), point);
-  const auto combined = eval.evaluate_B(
+  const auto combined = quasar::test::host_evaluate_B(eval, 
       repeated_segment(a, b, Real{2}, 1, 0), point);
   ASSERT_EQ(separate.size(), 1u);
   ASSERT_EQ(combined.size(), 1u);
@@ -474,9 +476,9 @@ TEST(BiotSavartNumerics, ScaledReductionRetainsSmallTermBetweenLargeCancellation
   point.add(Vec3{radius, 0, 0});
   const BiotSavartEvaluator eval;
 
-  const auto expected = eval.evaluate_B(
+  const auto expected = quasar::test::host_evaluate_B(eval, 
       repeated_segment(a, b, Real{1}, 1, 0), point);
-  const auto cancelled = eval.evaluate_B(
+  const auto cancelled = quasar::test::host_evaluate_B(eval, 
       ordered_segment_currents(
           a, b, {large_current, Real{1}, -large_current}), point);
   ASSERT_EQ(cancelled.size(), 1u);
@@ -534,7 +536,7 @@ TEST(BiotSavartNumerics, LargeToroidReductionDoesNotExhaustExpansion) {
 
   PointCloud point;
   point.add(Vec3{Real{0.085}, 0, Real{-0.015}});
-  const auto field = BiotSavartEvaluator{}.evaluate_B(conductors, point);
+  const auto field = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, conductors, point);
 
   ASSERT_EQ(field.size(), 1u);
   EXPECT_TRUE(std::isfinite(field[0].x));
@@ -554,7 +556,7 @@ TEST(BiotSavartNumerics, ExteriorCollinearDiagonalHasExactlyZeroField) {
   PointCloud point;
   point.add(Vec3{2, 10, 0});
 
-  const auto field = BiotSavartEvaluator{}.evaluate_B(conductors, point);
+  const auto field = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, conductors, point);
   ASSERT_EQ(field.size(), 1u);
   EXPECT_EQ(field[0].x, Real{0});
   EXPECT_EQ(field[0].y, Real{0});
@@ -575,7 +577,7 @@ TEST(BiotSavartNumerics, ExtremeFiniteSegmentGradientAvoidsReciprocalOverflow) {
   point.add(Vec3{0, distance, 0});
 
   const auto gradient =
-      BiotSavartEvaluator{}.evaluate_grad_B(conductors, point);
+      quasar::test::host_evaluate_grad_B(BiotSavartEvaluator{}, conductors, point);
   ASSERT_EQ(gradient.size(), 1u);
   const Real entries[] = {
       gradient[0].r0.x, gradient[0].r0.y, gradient[0].r0.z,
@@ -603,7 +605,7 @@ TEST(BiotSavartEmpty, EmptyConductorSystemYieldsZeroField) {
   pc.add(Vec3{0, 0, 1});
   pc.add(Vec3{1, 2, 3});
 
-  const auto B = eval.evaluate_B(empty_cs, pc);
+  const auto B = quasar::test::host_evaluate_B(eval, empty_cs, pc);
   ASSERT_EQ(B.size(), 2u);
   for (const auto& b : B) {
     EXPECT_EQ(b.x, Real{0});
@@ -620,6 +622,6 @@ TEST(BiotSavartEmpty, EmptyPointCloudYieldsEmptyField) {
   const auto cs = make_straight_wire();
 
   PointCloud empty_pc;
-  const auto B = eval.evaluate_B(cs, empty_pc);
+  const auto B = quasar::test::host_evaluate_B(eval, cs, empty_pc);
   EXPECT_EQ(B.size(), 0u);
 }

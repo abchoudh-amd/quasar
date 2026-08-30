@@ -12,6 +12,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -71,21 +73,21 @@ TEST(VectorPotential, CurlMatchesBOnMixedSystem) {
 
   const BiotSavartEvaluator eval;
 
-  const auto B = eval.evaluate_B(cs, pc);
+  const auto B = quasar::test::host_evaluate_B(eval, cs, pc);
   ASSERT_EQ(B.size(), base_pts.size());
 
   // Central difference of A: 2 evaluations per direction. h ~ 1e-5 balances
   // O(h^2) truncation against O(eps/h) roundoff for double precision.
   constexpr Real h = Real{1e-5};
   const std::array<::quasar::Field<Vec3>, 3> A_plus{
-      eval.evaluate_A(cs, shifted_cloud(base_pts, 0, +h)),
-      eval.evaluate_A(cs, shifted_cloud(base_pts, 1, +h)),
-      eval.evaluate_A(cs, shifted_cloud(base_pts, 2, +h)),
+      quasar::test::host_evaluate_A(eval, cs, shifted_cloud(base_pts, 0, +h)),
+      quasar::test::host_evaluate_A(eval, cs, shifted_cloud(base_pts, 1, +h)),
+      quasar::test::host_evaluate_A(eval, cs, shifted_cloud(base_pts, 2, +h)),
   };
   const std::array<::quasar::Field<Vec3>, 3> A_minus{
-      eval.evaluate_A(cs, shifted_cloud(base_pts, 0, -h)),
-      eval.evaluate_A(cs, shifted_cloud(base_pts, 1, -h)),
-      eval.evaluate_A(cs, shifted_cloud(base_pts, 2, -h)),
+      quasar::test::host_evaluate_A(eval, cs, shifted_cloud(base_pts, 0, -h)),
+      quasar::test::host_evaluate_A(eval, cs, shifted_cloud(base_pts, 1, -h)),
+      quasar::test::host_evaluate_A(eval, cs, shifted_cloud(base_pts, 2, -h)),
   };
 
   for (std::size_t k = 0; k < base_pts.size(); ++k) {
@@ -125,7 +127,7 @@ TEST(VectorPotential, IsExactlyZeroForZeroCurrent) {
   PointCloud pc;
   pc.add(Vec3{0, 0, 1});
 
-  const auto a = BiotSavartEvaluator{}.evaluate_A(cs, pc);
+  const auto a = quasar::test::host_evaluate_A(BiotSavartEvaluator{}, cs, pc);
   ASSERT_EQ(a.size(), 1u);
   EXPECT_EQ(a[0].x, Real{0});
   EXPECT_EQ(a[0].y, Real{0});
@@ -142,8 +144,8 @@ TEST(VectorPotential, Fp32FarFieldLogarithmRetainsSignal) {
   PointCloud pc;
   pc.add(Vec3{0, Real{1e8}, 0});
 
-  const auto ad = BiotSavartEvaluator{}.evaluate_A(cs, pc);
-  const auto af = BiotSavartEvaluatorF{}.evaluate_A(cs, pc);
+  const auto ad = quasar::test::host_evaluate_A(BiotSavartEvaluator{}, cs, pc);
+  const auto af = quasar::test::host_evaluate_A(BiotSavartEvaluatorF{}, cs, pc);
   ASSERT_EQ(ad.size(), 1u);
   ASSERT_EQ(af.size(), 1u);
   EXPECT_GT(ad[0].x, Real{0});

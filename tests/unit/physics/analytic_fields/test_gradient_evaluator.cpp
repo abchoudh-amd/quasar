@@ -3,6 +3,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -23,7 +25,7 @@ TEST(GradientEvaluator, LinearFieldMatchesAnalytic) {
   pts.add(quasar::Vec3{0, 0, 0});
   pts.add(quasar::Vec3{1, 2, 3});
 
-  auto b = eval.evaluate_B(cs, pts);
+  auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 2u);
   // At origin -> b0.
   EXPECT_DOUBLE_EQ(b[0].x, 1.0);
@@ -45,7 +47,7 @@ TEST(GradientEvaluator, GradBIsConstantAndRegistered) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{5, 6, 7});
 
-  auto gb = eval.evaluate_grad_B(cs, pts);
+  auto gb = quasar::test::host_evaluate_grad_B(eval, cs, pts);
   ASSERT_EQ(gb.size(), 1u);
   EXPECT_DOUBLE_EQ(gb[0].r0.x, 2.0);
   EXPECT_DOUBLE_EQ(gb[0].r1.y, 3.0);
@@ -86,7 +88,7 @@ TEST(GradientEvaluator, ExtremeFiniteCoordinateCancellationDoesNotBecomeNaN) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{-largest, -largest, 0});
 
-  const auto b = eval.evaluate_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   EXPECT_TRUE(std::isfinite(b[0].x));
   EXPECT_EQ(b[0].x, 0.0);
@@ -106,7 +108,7 @@ TEST(GradientEvaluator, PreservesSmallDisplacementAtLargeTranslatedOrigin) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{point, 0, 0});
 
-  const auto b = eval.evaluate_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   EXPECT_EQ(point - origin, quasar::Real{2});
   EXPECT_EQ(b[0].x, point - origin);
@@ -124,7 +126,7 @@ TEST(GradientEvaluator, LargeCancellationPreservesTinyIndependentTerm) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{-largest, -largest, 0});
 
-  const auto b = eval.evaluate_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   EXPECT_EQ(b[0].x, tiniest);
 }
@@ -138,5 +140,5 @@ TEST(GradientEvaluator, ReportsUnrepresentableFieldInsteadOfReturningInfinity) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{largest, 0, 0});
-  EXPECT_THROW((void)eval.evaluate_B(cs, pts), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pts), std::overflow_error);
 }

@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 namespace {
@@ -102,8 +104,8 @@ TEST(FileGridEvaluator, RegisteredAndDefaultRequiresConfiguration) {
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{0, 0, 0});
-  EXPECT_THROW((void)eval.evaluate_B(source, points), std::invalid_argument);
-  EXPECT_THROW((void)eval.evaluate_grad_B(source, points), std::invalid_argument);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, source, points), std::invalid_argument);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, source, points), std::invalid_argument);
 }
 
 TEST(FileGridEvaluator, TextGridTrilinearInterpolationIsExactForLinearField) {
@@ -117,7 +119,7 @@ TEST(FileGridEvaluator, TextGridTrilinearInterpolationIsExactForLinearField) {
   PointCloud points;
   points.add(Vec3{10.125, -2.5, 5.0});
   points.add(Vec3{10.5, -2.0, 6.0});  // upper corner
-  const auto field = eval.evaluate_B(source, points);
+  const auto field = quasar::test::host_evaluate_B(eval, source, points);
   ASSERT_EQ(field.size(), 2u);
   expect_vec_near(field[0], linear_field(10.125, -2.5, 5.0));
   expect_vec_near(field[1], linear_field(10.5, -2.0, 6.0));
@@ -130,7 +132,7 @@ TEST(FileGridEvaluator, GradientMatchesPiecewiseTrilinearJacobian) {
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{10.25, -3.0, 4.0});
-  const auto gradient = eval.evaluate_grad_B(source, points);
+  const auto gradient = quasar::test::host_evaluate_grad_B(eval, source, points);
   ASSERT_EQ(gradient.size(), 1u);
   const Mat3x3 expected{Vec3{2.0, 3.0, -1.0},
                         Vec3{-4.0, 0.5, 5.0},
@@ -154,8 +156,8 @@ TEST(FileGridEvaluator, ExtremeScaleInterpolationAndGradientRemainFinite) {
   ConductorSystem source;
   PointCloud midpoint;
   midpoint.add(Vec3{max / 2, 0.5, 0.5});
-  expect_vec_near(wide.evaluate_B(source, midpoint)[0], Vec3{0, 0, 0});
-  expect_vec_near(wide.evaluate_grad_B(source, midpoint)[0].r1,
+  expect_vec_near(quasar::test::host_evaluate_B(wide, source, midpoint)[0], Vec3{0, 0, 0});
+  expect_vec_near(quasar::test::host_evaluate_grad_B(wide, source, midpoint)[0].r1,
                   Vec3{2, 0, 0});
 
   const double tiny = std::numeric_limits<double>::denorm_min();
@@ -168,7 +170,7 @@ TEST(FileGridEvaluator, ExtremeScaleInterpolationAndGradientRemainFinite) {
   });
   PointCloud lower_face;
   lower_face.add(Vec3{0, 0.5, 0.5});
-  expect_vec_near(narrow.evaluate_grad_B(source, lower_face)[0].r1,
+  expect_vec_near(quasar::test::host_evaluate_grad_B(narrow, source, lower_face)[0].r1,
                   Vec3{1, 0, 0});
 
   FileGridEvaluator constant;
@@ -179,7 +181,7 @@ TEST(FileGridEvaluator, ExtremeScaleInterpolationAndGradientRemainFinite) {
       // the subnormal spacing is materialized.
       {"values", repeat_x_line({Vec3{0, max, 0}, Vec3{0, max, 0}})},
   });
-  expect_vec_near(constant.evaluate_grad_B(source, lower_face)[0].r1,
+  expect_vec_near(quasar::test::host_evaluate_grad_B(constant, source, lower_face)[0].r1,
                   Vec3{0, 0, 0});
 }
 
@@ -216,9 +218,9 @@ TEST(FileGridEvaluator,
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{1.25, 2.0, 3.0});
-  const auto field = eval.evaluate_B(source, points);
+  const auto field = quasar::test::host_evaluate_B(eval, source, points);
   expect_vec_near(field[0], Vec3{1.0, 3.0, 4.0});
-  EXPECT_THROW((void)eval.evaluate_grad_B(source, points), std::runtime_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, source, points), std::runtime_error);
 }
 
 TEST(FileGridEvaluator,
@@ -237,8 +239,8 @@ TEST(FileGridEvaluator,
   ConductorSystem source;
   PointCloud point;
   point.add(Vec3{0, 0.25, 0.5});
-  expect_vec_near(eval.evaluate_B(source, point)[0], Vec3{0, 0.25, 0});
-  EXPECT_THROW((void)eval.evaluate_grad_B(source, point), std::runtime_error);
+  expect_vec_near(quasar::test::host_evaluate_B(eval, source, point)[0], Vec3{0, 0.25, 0});
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, source, point), std::runtime_error);
 }
 
 TEST(FileGridEvaluator, InternalKnotJacobianUsesRightHandCell) {
@@ -257,7 +259,7 @@ TEST(FileGridEvaluator, InternalKnotJacobianUsesRightHandCell) {
   PointCloud points;
   points.add(Vec3{1.0, 0.5, 0.5});
   points.add(Vec3{2.0, 0.5, 0.5});
-  const auto gradient = eval.evaluate_grad_B(source, points);
+  const auto gradient = quasar::test::host_evaluate_grad_B(eval, source, points);
   ASSERT_EQ(gradient.size(), 2u);
   // Interior knots select the positive-coordinate cell; the upper endpoint
   // selects the only adjacent cell on its left.  Both therefore see slope 2.
@@ -274,7 +276,7 @@ TEST(FileGridEvaluator, SingletonAxisDoesNotUseAnAbsolutePositionFloor) {
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{1.0e-15, 0, 0});
-  EXPECT_THROW((void)eval.evaluate_B(source, points), std::out_of_range);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, source, points), std::out_of_range);
 
   FileGridEvaluator translated;
   translated.configure({
@@ -285,7 +287,7 @@ TEST(FileGridEvaluator, SingletonAxisDoesNotUseAnAbsolutePositionFloor) {
   adjacent.add(Vec3{std::nextafter(1.0e16,
                                   std::numeric_limits<double>::infinity()),
                     0, 0});
-  EXPECT_THROW((void)translated.evaluate_B(source, adjacent), std::out_of_range);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(translated, source, adjacent), std::out_of_range);
 }
 
 TEST(FileGridEvaluator, ExtremeTranslatedCoordinatesUseAScaledIndexRatio) {
@@ -299,7 +301,7 @@ TEST(FileGridEvaluator, ExtremeTranslatedCoordinatesUseAScaledIndexRatio) {
   ConductorSystem source;
   PointCloud points;
   points.add(Vec3{max, 0, 0});
-  expect_vec_near(eval.evaluate_B(source, points)[0], Vec3{0, 2, 0});
+  expect_vec_near(quasar::test::host_evaluate_B(eval, source, points)[0], Vec3{0, 2, 0});
 }
 
 TEST(FileGridEvaluator, RejectsOutsideAndNonFiniteObservations) {
@@ -309,7 +311,7 @@ TEST(FileGridEvaluator, RejectsOutsideAndNonFiniteObservations) {
 
   PointCloud outside;
   outside.add(Vec3{9.9, -3.0, 4.0});
-  EXPECT_THROW((void)eval.evaluate_B(source, outside), std::out_of_range);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, source, outside), std::out_of_range);
 
   PointCloud nonfinite;
   EXPECT_THROW(nonfinite.add(Vec3{std::numeric_limits<double>::quiet_NaN(), 0, 0}),

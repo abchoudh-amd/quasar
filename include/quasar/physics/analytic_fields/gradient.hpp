@@ -15,11 +15,13 @@ class GradientEvaluator final : public numerics::IFieldEvaluator {
   // general region may carry current (curl(B) != 0).
   void configure(const numerics::EvaluatorParams& p) override;
 
-  Field<Vec3> evaluate_B(const core::IFieldSource&,
-                         const core::PointCloud& observations) const override;
+  core::DeviceVectorField evaluate_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
   bool provides_grad_B() const noexcept override { return true; }
-  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
-                                const core::PointCloud& observations) const override;
+  core::DeviceTensorField evaluate_grad_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
 
  private:
   Vec3 b0_{0, 0, 0};

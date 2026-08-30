@@ -11,9 +11,8 @@ API convenience, not a physical capability claim: an evaluator whose Jacobian
 is trustworthy must also override ``provides_grad_B()`` to return ``true``.
 It then registers with
 ``QUASAR_REGISTER_FIELD_EVALUATOR``. The methods take an axis-neutral
-``core::IFieldSource`` and a ``core::PointCloud``; an evaluator that needs a
-concrete source (e.g. Biot-Savart) downcasts it, while the analytic fields
-ignore the source entirely.
+``core::IFieldSource``; an evaluator that needs a concrete source (e.g.
+Biot-Savart) downcasts it, while the analytic fields ignore the source entirely.
 
 Analytic examples live under ``physics/analytic_fields``. The same registry is
 used by PIC's external-field sampler and by existing magnetic-field workflows.
@@ -21,6 +20,68 @@ Registry construction is followed by ``configure(EvaluatorParams)``. Numeric
 parameters are flat vectors; the file-grid loader uses ``origin``, ``spacing``,
 ``dims``, and flattened x-fastest ``values`` to keep file parsing in the Python
 deck boundary while leaving interpolation in the shared C++ evaluator.
+
+The evaluator interface is device-resident
+------------------------------------------
+
+Every ``evaluate_*`` method takes a ``core::DevicePointCloud`` and returns
+``core::DeviceVectorField`` (three SoA component planes) or
+``core::DeviceTensorField`` (nine component-major planes, entry ``(i, j)`` of
+point ``p`` at ``data()[(3 * i + j) * size() + p]``). Nothing on this interface
+touches host memory:
+
+.. code-block:: cpp
+
+   core::DeviceVectorField evaluate_B(
+       const core::IFieldSource& source,
+       const core::DevicePointCloud& observations) const override;
+
+This is not a style choice. An evaluator's output is normally consumed by
+another device stage -- the PIC external-field sampler writes it straight into
+a ``YeeField2D``, and the MHD background builder curls it -- so a host round
+trip between them is pure cost. The Biot-Savart kernel already computed into
+device SoA planes and then transposed them to host AoS purely to satisfy the
+old signature; that transpose is gone.
+
+**Writing the evaluator.** Do the arithmetic in a kernel under
+``src/backend/hip/<module>/``, declared through a per-physics launch ABI header
+(``include/quasar/physics/analytic_fields/kernels.hpp`` is the model). The class
+in ``src/physics/`` keeps only parameter validation, the launch, and the status
+check. A kernel cannot throw, so it reports failure by OR-ing bits into an
+``int*`` status word with an integer atomic -- exact and order-independent,
+hence independent of the launch geometry -- and the host turns that word into
+the exception with ``core::throw_on_evaluator_status``. The bit meanings
+(singular / not representable / non-finite point / outside grid) are documented
+on that function.
+
+**Range, not just precision.** The analytic evaluators used to carry their
+intermediates in host ``long double``, whose wider exponent let
+``moment_scale * mu0_over_4pi * inv_r^3`` be formed without overflowing on the
+way to a representable answer. A device has no ``long double``. Carry the
+extended range explicitly with ``numerics::ScaledValue`` and the exact-expansion
+reducers in ``include/quasar/numerics/scaled_arithmetic.hpp``; the device-side
+lift/multiply/collapse helpers are in
+``src/backend/hip/analytic_fields/scaled_device.hpp``. Any module using those
+reducers **must** be compiled ``-ffp-contract=off``: contraction turns the
+error-free two-sum silently back into a naive sum.
+
+**Crossing to the host.** ``.to_host()`` on either container downloads and, for
+the tensor, transposes into the ``Field<Vec3>`` / ``Field<Mat3x3>`` the CLIs and
+Python bindings speak. Call it at an output boundary and nowhere earlier. Tests
+use the wrappers in ``tests/unit/support/host_evaluate.hpp``, and test doubles
+derive from ``tests/unit/support/host_field_evaluator.hpp``, which implements
+the device interface around a host hook. Both live under ``tests/`` on purpose:
+on the interface they would give production code a one-token way to reintroduce
+the round trip.
+
+**Accuracy gate.** A ported evaluator ships with an equivalence test carrying
+its own ``long double`` oracle, asserting the device is no worse than a naive
+``double`` evaluation of the same closed form on a configuration where that
+formula cancels, plus bitwise reproducibility across repeated launches. See
+``tests/unit/physics/analytic_fields/test_analytic_device_accuracy.cpp``. A bare
+absolute tolerance is not sufficient: it cannot distinguish a correct port from
+one that is slightly wrong in a way that happens to be small on the chosen
+inputs.
 
 Deck and registry contract
 --------------------------

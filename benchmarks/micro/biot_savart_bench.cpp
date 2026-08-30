@@ -15,6 +15,7 @@
 // pairs touched per iteration, which makes the per-pair throughput
 // directly comparable across (N, M) configurations.
 
+#include "quasar/core/device_observations.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/magnetostatics/biot_savart.hpp"
 #include "quasar/physics/magnetostatics/conductor.hpp"
@@ -36,8 +37,9 @@ using ::quasar::magnetostatics::ObservationGrid;
 using ::quasar::magnetostatics::PointCloud;
 
 struct Fixture {
-  ConductorSystem cs;
-  PointCloud      pc;
+  ConductorSystem                cs;
+  PointCloud                     pc;
+  ::quasar::core::DevicePointCloud device_pc;
 };
 
 Fixture build(int N, int M) {
@@ -61,6 +63,11 @@ Fixture build(int N, int M) {
                    Real{0.4} / static_cast<Real>(side - 1 == 0 ? 1 : side - 1)};
   g.dims = {side, side, side};
   f.pc   = g.to_point_cloud();
+  // The evaluator now consumes device-resident points, so the upload happens
+  // once here rather than inside every timed iteration. That is the honest
+  // measurement: what the loop below times is the kernel, which is what the
+  // fixture varies N and M to stress.
+  f.device_pc = ::quasar::core::DevicePointCloud::upload(f.pc);
   return f;
 }
 
@@ -73,10 +80,10 @@ static void BM_BiotSavart_B(benchmark::State& state) {
   const BiotSavartEvaluator eval;
 
   // Warmup (kernel JIT, hipMalloc paths).
-  benchmark::DoNotOptimize(eval.evaluate_B(fx.cs, fx.pc));
+  benchmark::DoNotOptimize(eval.evaluate_B(fx.cs, fx.device_pc));
 
   for (auto _ : state) {
-    auto B = eval.evaluate_B(fx.cs, fx.pc);
+    auto B = eval.evaluate_B(fx.cs, fx.device_pc);
     benchmark::DoNotOptimize(B);
   }
 
@@ -98,10 +105,10 @@ static void BM_BiotSavart_gradB(benchmark::State& state) {
   const Fixture fx = build(N, M);
   const BiotSavartEvaluator eval;
 
-  benchmark::DoNotOptimize(eval.evaluate_grad_B(fx.cs, fx.pc));
+  benchmark::DoNotOptimize(eval.evaluate_grad_B(fx.cs, fx.device_pc));
 
   for (auto _ : state) {
-    auto G = eval.evaluate_grad_B(fx.cs, fx.pc);
+    auto G = eval.evaluate_grad_B(fx.cs, fx.device_pc);
     benchmark::DoNotOptimize(G);
   }
 

@@ -4,6 +4,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -83,7 +85,7 @@ TEST(CircularLoopOnAxis, MatchesClosedFormAtN256) {
   PointCloud pc;
   for (Real z : kZ) pc.add(Vec3{Real{0}, Real{0}, z});
 
-  const auto field = eval.evaluate_B(cs, pc);
+  const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
   ASSERT_EQ(field.size(), kZ.size());
 
   for (std::size_t i = 0; i < kZ.size(); ++i) {
@@ -116,7 +118,7 @@ TEST(CircularLoopOnAxis, ErrorConvergesQuadraticallyInN) {
       PointCloud pc;
       pc.add(Vec3{Real{0}, Real{0}, z});
 
-      const auto field = eval.evaluate_B(cs, pc);
+      const auto field = quasar::test::host_evaluate_B(eval, cs, pc);
       ASSERT_EQ(field.size(), 1u);
 
       const Real ref = circular_loop_axis_Bz_ref(kRadius, z, kCurrent);

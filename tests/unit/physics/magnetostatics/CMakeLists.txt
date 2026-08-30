@@ -15,6 +15,7 @@ foreach(_test_name IN LISTS _quasar_magnetostatics_host_tests)
   target_link_libraries(${_target}
     PRIVATE
       quasar::core
+      quasar_test_support
       GTest::gtest_main
   )
   add_test(
@@ -48,6 +49,7 @@ foreach(_test_name IN LISTS _quasar_magnetostatics_hip_tests)
   target_link_libraries(${_target}
     PRIVATE
       quasar::core
+      quasar_test_support
       GTest::gtest_main
   )
 

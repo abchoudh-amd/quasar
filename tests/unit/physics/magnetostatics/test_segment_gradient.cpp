@@ -12,6 +12,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -71,7 +73,7 @@ TEST(SegmentGradient, MatchesFiniteDifferenceAgainstBOnMixedSystem) {
   const BiotSavartEvaluator eval;
 
   // Analytic Jacobians.
-  const auto gradB = eval.evaluate_grad_B(cs, pc);
+  const auto gradB = quasar::test::host_evaluate_grad_B(eval, cs, pc);
   ASSERT_EQ(gradB.size(), base_pts.size());
 
   // Central difference: 2 evaluations per direction. h chosen so that
@@ -80,14 +82,14 @@ TEST(SegmentGradient, MatchesFiniteDifferenceAgainstBOnMixedSystem) {
   constexpr Real h = Real{1e-5};
 
   std::array<::quasar::Field<Vec3>, 3> B_plus{
-      eval.evaluate_B(cs, shifted_cloud(base_pts, 0, +h)),
-      eval.evaluate_B(cs, shifted_cloud(base_pts, 1, +h)),
-      eval.evaluate_B(cs, shifted_cloud(base_pts, 2, +h)),
+      quasar::test::host_evaluate_B(eval, cs, shifted_cloud(base_pts, 0, +h)),
+      quasar::test::host_evaluate_B(eval, cs, shifted_cloud(base_pts, 1, +h)),
+      quasar::test::host_evaluate_B(eval, cs, shifted_cloud(base_pts, 2, +h)),
   };
   std::array<::quasar::Field<Vec3>, 3> B_minus{
-      eval.evaluate_B(cs, shifted_cloud(base_pts, 0, -h)),
-      eval.evaluate_B(cs, shifted_cloud(base_pts, 1, -h)),
-      eval.evaluate_B(cs, shifted_cloud(base_pts, 2, -h)),
+      quasar::test::host_evaluate_B(eval, cs, shifted_cloud(base_pts, 0, -h)),
+      quasar::test::host_evaluate_B(eval, cs, shifted_cloud(base_pts, 1, -h)),
+      quasar::test::host_evaluate_B(eval, cs, shifted_cloud(base_pts, 2, -h)),
   };
 
   for (std::size_t k = 0; k < base_pts.size(); ++k) {
@@ -144,7 +146,7 @@ TEST(SegmentGradient, IsExactlyZeroForEmptySystem) {
   pc.add(Vec3{0, 0, 1});
 
   const BiotSavartEvaluator eval;
-  const auto g = eval.evaluate_grad_B(cs, pc);
+  const auto g = quasar::test::host_evaluate_grad_B(eval, cs, pc);
   ASSERT_EQ(g.size(), 1u);
   // Every entry should be exactly zero (coefficient is 0 from zero current).
   EXPECT_EQ(g[0].r0.x, Real{0}); EXPECT_EQ(g[0].r0.y, Real{0}); EXPECT_EQ(g[0].r0.z, Real{0});
@@ -168,7 +170,7 @@ TEST(SegmentGradient, JacobianRowSatisfiesDivBEqualsZero) {
   pc.add(Vec3{0.05, 0.02, -0.04});
   pc.add(Vec3{0.00, 0.00, 0.05});
 
-  const auto gradB = BiotSavartEvaluator{}.evaluate_grad_B(cs, pc);
+  const auto gradB = quasar::test::host_evaluate_grad_B(BiotSavartEvaluator{}, cs, pc);
   ASSERT_EQ(gradB.size(), 3u);
 
   for (std::size_t k = 0; k < gradB.size(); ++k) {

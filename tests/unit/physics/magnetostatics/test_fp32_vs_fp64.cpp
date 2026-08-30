@@ -13,6 +13,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -107,8 +109,8 @@ TEST(Fp32VsFp64, B_FieldAgreesAtSinglePrecisionTolerance) {
   const ConductorSystem cs = make_mixed_system();
   const PointCloud pc       = make_observation_cloud();
 
-  const auto B_d = BiotSavartEvaluator{}.evaluate_B(cs, pc);
-  const auto B_f = BiotSavartEvaluatorF{}.evaluate_B(cs, pc);
+  const auto B_d = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, cs, pc);
+  const auto B_f = quasar::test::host_evaluate_B(BiotSavartEvaluatorF{}, cs, pc);
   ASSERT_EQ(B_d.size(), B_f.size());
   ASSERT_EQ(B_d.size(), pc.size());
 
@@ -138,8 +140,8 @@ TEST(Fp32VsFp64, GradBAgreesAtSinglePrecisionTolerance) {
   const ConductorSystem cs = make_mixed_system();
   const PointCloud pc       = make_observation_cloud();
 
-  const auto G_d = BiotSavartEvaluator{}.evaluate_grad_B(cs, pc);
-  const auto G_f = BiotSavartEvaluatorF{}.evaluate_grad_B(cs, pc);
+  const auto G_d = quasar::test::host_evaluate_grad_B(BiotSavartEvaluator{}, cs, pc);
+  const auto G_f = quasar::test::host_evaluate_grad_B(BiotSavartEvaluatorF{}, cs, pc);
   ASSERT_EQ(G_d.size(), G_f.size());
   ASSERT_EQ(G_d.size(), pc.size());
 
@@ -167,8 +169,8 @@ TEST(Fp32VsFp64, EmptySystemReturnsZeroForBothPrecisions) {
   PointCloud pc;
   pc.add(Vec3{0, 0, 0});
 
-  const auto B_d = BiotSavartEvaluator{}.evaluate_B(cs, pc);
-  const auto B_f = BiotSavartEvaluatorF{}.evaluate_B(cs, pc);
+  const auto B_d = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, cs, pc);
+  const auto B_f = quasar::test::host_evaluate_B(BiotSavartEvaluatorF{}, cs, pc);
 
   ASSERT_EQ(B_d.size(), 1u);
   ASSERT_EQ(B_f.size(), 1u);
@@ -186,8 +188,8 @@ TEST(Fp32VsFp64, GradientRemainsFiniteAcrossSimilarityScales) {
     PointCloud pc;
     pc.add(Vec3{0, s, 0});
 
-    const auto gd = BiotSavartEvaluator{}.evaluate_grad_B(cs, pc);
-    const auto gf = BiotSavartEvaluatorF{}.evaluate_grad_B(cs, pc);
+    const auto gd = quasar::test::host_evaluate_grad_B(BiotSavartEvaluator{}, cs, pc);
+    const auto gf = quasar::test::host_evaluate_grad_B(BiotSavartEvaluatorF{}, cs, pc);
     ASSERT_EQ(gd.size(), 1u);
     ASSERT_EQ(gf.size(), 1u);
     const Real ref = std::sqrt(frob_sq(gd[0]));
@@ -216,7 +218,7 @@ TEST(Fp32VsFp64, CommonOriginPreservesRigidTranslation) {
     PointCloud pc;
     pc.add(Vec3{offset, 1, 0});
     BiotSavartEvaluatorF eval;
-    return std::pair{eval.evaluate_B(cs, pc), eval.evaluate_grad_B(cs, pc)};
+    return std::pair{quasar::test::host_evaluate_B(eval, cs, pc), quasar::test::host_evaluate_grad_B(eval, cs, pc)};
   };
 
   const auto [b0, g0] = evaluate(Real{0});

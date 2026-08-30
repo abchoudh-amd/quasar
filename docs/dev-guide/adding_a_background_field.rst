@@ -201,6 +201,17 @@ depends on the profile class and a new profile is a pure host/numerics addition.
 
 .. note::
 
+   ``IMhdBackgroundProfile`` is a different interface from
+   ``numerics::IFieldEvaluator`` and is still sampled on the host, as described
+   above. Only the evaluator axis moved to device SoA buffers (see
+   :doc:`adding_a_field_evaluator`). The inline-``conductors`` background path
+   is the one place the two meet: it obtains ``A`` from the Biot-Savart
+   evaluator, which now computes entirely on the device and is downloaded once
+   at the Python binding boundary before the discrete curl. Moving that
+   assembly, and the profile sampling itself, onto the device is separate work.
+
+.. note::
+
    The Python CLI leaves analytic ``uniform`` and ``linear_vacuum`` profiles in
    the native path above; ``profile_scale`` performs their SI conversion without
    destroying registry capability metadata. The standalone

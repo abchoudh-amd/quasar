@@ -2,6 +2,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 TEST(PicExternalField, UniformEvaluatorSuppliesB) {
@@ -9,6 +11,6 @@ TEST(PicExternalField, UniformEvaluatorSuppliesB) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{0, 0, 0});
-  auto b = eval.evaluate_B(cs, pts);
+  auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   EXPECT_DOUBLE_EQ(b[0].z, 2.0);
 }

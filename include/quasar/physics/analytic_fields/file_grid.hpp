@@ -24,19 +24,24 @@ class FileGridEvaluator final : public numerics::IFieldEvaluator {
   // embedding a NumPy/ZIP parser in the C++ core.
   void configure(const numerics::EvaluatorParams& params) override;
 
-  Field<Vec3> evaluate_B(const core::IFieldSource&,
-                         const core::PointCloud& observations) const override;
+  core::DeviceVectorField evaluate_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
   // A complete Jacobian is determined only when the configured map has at
   // least two nodes on every axis.  A singleton axis is one geometric plane,
   // not an assertion that the field is invariant normal to that plane.
   bool provides_grad_B() const noexcept override;
-  Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
-                                const core::PointCloud& observations) const override;
+  core::DeviceTensorField evaluate_grad_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const override;
 
   const std::string& path() const noexcept { return path_; }
   bool configured() const noexcept { return configured_; }
 
  private:
+  // Host staging only: the parsed deck or file contents on the way to the
+  // device. `values` is released once set_grid() has uploaded it, so the
+  // configured evaluator holds the map exactly once, on the device.
   struct GridData {
     Vec3 origin{};
     Vec3 spacing{Real{1}, Real{1}, Real{1}};
@@ -46,11 +51,16 @@ class FileGridEvaluator final : public numerics::IFieldEvaluator {
   };
 
   static GridData load_text_grid(const std::string& path);
-  static void validate_grid(const GridData& grid);
+  // Uploads the map, then runs the finiteness and solenoidality sweeps on the
+  // device. Cheap host checks that do not scale with the node count (finite
+  // origin/spacing, matching value count, non-collapsing coordinates) stay on
+  // the host, since they are scalar configuration math.
   void set_grid(GridData grid);
 
   std::string path_{};
   GridData grid_{};
+  // Device-resident node values, SoA. Length dims[0]*dims[1]*dims[2] each.
+  backend::DeviceBuffer<Real> vx_{}, vy_{}, vz_{};
   bool configured_{false};
 };
 

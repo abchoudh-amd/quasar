@@ -11,6 +11,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -83,7 +85,7 @@ TEST(PolylineConvergence, OffAxisErrorDecaysQuadraticallyInN) {
 
   // Reference: the highest-resolution polygon.
   const auto cs_ref = make_loop(kRefN);
-  const auto B_ref  = eval.evaluate_B(cs_ref, pc);
+  const auto B_ref  = quasar::test::host_evaluate_B(eval, cs_ref, pc);
   ASSERT_EQ(B_ref.size(), M);
 
   // Per-observation error series across N.
@@ -92,7 +94,7 @@ TEST(PolylineConvergence, OffAxisErrorDecaysQuadraticallyInN) {
 
   for (int N : kNs) {
     const auto cs = make_loop(N);
-    const auto B  = eval.evaluate_B(cs, pc);
+    const auto B  = quasar::test::host_evaluate_B(eval, cs, pc);
     ASSERT_EQ(B.size(), M);
     for (std::size_t k = 0; k < M; ++k) {
       const Vec3 diff = B[k] - B_ref[k];

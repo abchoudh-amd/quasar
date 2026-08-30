@@ -16,6 +16,7 @@ quasar_add_module(backend_hip SOURCES ${_quasar_backend_hip_sources})
 quasar_add_backend_src_include(backend_hip)
 
 add_subdirectory(magnetostatics)
+add_subdirectory(analytic_fields)
 add_subdirectory(pic)
 add_subdirectory(mhd)
 add_subdirectory(equilibrium)

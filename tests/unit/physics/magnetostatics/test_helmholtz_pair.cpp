@@ -16,6 +16,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -51,7 +53,7 @@ Real B_z_at(const BiotSavartEvaluator& eval, const ConductorSystem& cs,
             Real z) {
   PointCloud pc;
   pc.add(Vec3{0, 0, z});
-  return eval.evaluate_B(cs, pc)[0].z;
+  return quasar::test::host_evaluate_B(eval, cs, pc)[0].z;
 }
 
 }  // namespace
@@ -70,8 +72,8 @@ TEST(HelmholtzPair, FirstAndSecondDerivativesOfBzVanishAtMidpoint) {
   PointCloud pc_mid;
   pc_mid.add(Vec3{0, 0, 0});
 
-  const auto B    = eval.evaluate_B(cs, pc_mid);
-  const auto gradB = eval.evaluate_grad_B(cs, pc_mid);
+  const auto B    = quasar::test::host_evaluate_B(eval, cs, pc_mid);
+  const auto gradB = quasar::test::host_evaluate_grad_B(eval, cs, pc_mid);
   ASSERT_EQ(B.size(), 1u);
   ASSERT_EQ(gradB.size(), 1u);
 

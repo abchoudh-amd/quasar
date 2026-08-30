@@ -1,6 +1,7 @@
 #include "quasar/physics/pic/pic_solver.hpp"
 
 #include "quasar/backend/device.hpp"
+#include "quasar/core/device_observations.hpp"
 #include "quasar/core/observations.hpp"
 
 #include <algorithm>
@@ -400,20 +401,28 @@ void sample_external_field(numerics::IFieldEvaluator& evaluator,
       noncommensurate_probe_rotation();
   const bool provides_grad_b = evaluator.provides_grad_B();
 
+  // The evaluator interface is device-resident: it takes a DevicePointCloud and
+  // returns SoA planes. The sample-point construction and the covariance /
+  // parity / solenoidality checks below are still host loops, so each result is
+  // brought back with .to_host() here. Moving those loops onto the device (and
+  // deleting these downloads) is the remainder of this port.
+  const auto upload = [](const core::PointCloud& pts) {
+    return core::DevicePointCloud::upload(pts);
+  };
   const auto eval_e = [&](Offset o) {
     const auto points = yee_points(g, o.x, o.y, length_scale, plane);
-    auto values = evaluator.evaluate_E(source, points);
+    auto values = evaluator.evaluate_E(source, upload(points)).to_host();
     if (cylindrical) {
       const auto quarter_turn_points =
           rotated_cylindrical_points(points, plane, quarter_turn);
       const auto quarter_turn_values =
-          evaluator.evaluate_E(source, quarter_turn_points);
+          evaluator.evaluate_E(source, upload(quarter_turn_points)).to_host();
       enforce_cylindrical_covariance(
           values, quarter_turn_values, plane, "electric field", quarter_turn);
       const auto noncommensurate_points =
           rotated_cylindrical_points(points, plane, noncommensurate);
       const auto noncommensurate_values =
-          evaluator.evaluate_E(source, noncommensurate_points);
+          evaluator.evaluate_E(source, upload(noncommensurate_points)).to_host();
       enforce_cylindrical_covariance(
           values, noncommensurate_values, plane, "electric field",
           noncommensurate);
@@ -422,23 +431,25 @@ void sample_external_field(numerics::IFieldEvaluator& evaluator,
   };
   const auto eval_b = [&](Offset o) {
     const auto points = yee_points(g, o.x, o.y, length_scale, plane);
-    auto values = evaluator.evaluate_B(source, points);
+    const auto device_points = upload(points);
+    auto values = evaluator.evaluate_B(source, device_points).to_host();
     if (cylindrical) {
       if (provides_grad_b) {
-        const auto gradients = evaluator.evaluate_grad_B(source, points);
+        const auto gradients =
+            evaluator.evaluate_grad_B(source, device_points).to_host();
         enforce_continuous_magnetic_solenoidality(
             gradients, points.size());
       }
       const auto quarter_turn_points =
           rotated_cylindrical_points(points, plane, quarter_turn);
       const auto quarter_turn_values =
-          evaluator.evaluate_B(source, quarter_turn_points);
+          evaluator.evaluate_B(source, upload(quarter_turn_points)).to_host();
       enforce_cylindrical_covariance(
           values, quarter_turn_values, plane, "magnetic field", quarter_turn);
       const auto noncommensurate_points =
           rotated_cylindrical_points(points, plane, noncommensurate);
       const auto noncommensurate_values =
-          evaluator.evaluate_B(source, noncommensurate_points);
+          evaluator.evaluate_B(source, upload(noncommensurate_points)).to_host();
       enforce_cylindrical_covariance(
           values, noncommensurate_values, plane, "magnetic field",
           noncommensurate);

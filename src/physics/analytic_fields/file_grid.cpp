@@ -1,17 +1,18 @@
 #include "quasar/physics/analytic_fields/file_grid.hpp"
 
-#include "quasar/core/observations.hpp"
+#include "quasar/core/device_observations.hpp"
+#include "quasar/physics/analytic_fields/kernels.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <fstream>
-#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace quasar::analytic_fields {
 
@@ -36,127 +37,6 @@ std::size_t checked_product(std::array<std::size_t, 3> dims) {
   return product;
 }
 
-struct ScaledTerm {
-  long double mantissa{0.0L};
-  int exponent{0};
-};
-
-ScaledTerm scaled_factor(long double value) {
-  if (value == 0.0L) return {};
-  if (!std::isfinite(value)) {
-    throw std::overflow_error{
-        "FileGridEvaluator: intermediate factor is not representable"};
-  }
-  int exponent = 0;
-  const long double mantissa = std::frexp(value, &exponent);
-  return ScaledTerm{mantissa, exponent};
-}
-
-ScaledTerm scaled_product(std::initializer_list<ScaledTerm> factors) {
-  ScaledTerm product{1.0L, 0};
-  for (const ScaledTerm factor : factors) {
-    if (factor.mantissa == 0.0L) return {};
-    product.mantissa *= factor.mantissa;
-    product.exponent += factor.exponent;
-    int adjustment = 0;
-    product.mantissa = std::frexp(product.mantissa, &adjustment);
-    product.exponent += adjustment;
-  }
-  return product;
-}
-
-template <std::size_t Capacity>
-ScaledTerm scaled_sum(std::array<ScaledTerm, Capacity> terms,
-                      std::size_t count, bool absolute = false) {
-  std::array<ScaledTerm, Capacity> active{};
-  std::size_t active_count = 0;
-  for (std::size_t i = 0; i < count; ++i) {
-    if (terms[i].mantissa == 0.0L) continue;
-    if (absolute) terms[i].mantissa = std::abs(terms[i].mantissa);
-    active[active_count++] = terms[i];
-  }
-
-  // Combine equal-scale terms before smaller ones.  This preserves exact
-  // cancellation of large terms without first discarding a small residual,
-  // and never forms the potentially overflowing unscaled values.
-  while (active_count > 1) {
-    std::size_t first = 0;
-    for (std::size_t i = 1; i < active_count; ++i) {
-      if (active[i].exponent > active[first].exponent) first = i;
-    }
-    std::size_t second = first == 0 ? 1 : 0;
-    for (std::size_t i = 0; i < active_count; ++i) {
-      if (i != first && active[i].exponent > active[second].exponent) {
-        second = i;
-      }
-    }
-    const ScaledTerm a = active[first];
-    const ScaledTerm b = active[second];
-    const long double sum = a.mantissa
-        + std::scalbn(b.mantissa, b.exponent - a.exponent);
-
-    std::array<ScaledTerm, Capacity> remaining{};
-    std::size_t remaining_count = 0;
-    for (std::size_t i = 0; i < active_count; ++i) {
-      if (i != first && i != second) remaining[remaining_count++] = active[i];
-    }
-    if (sum != 0.0L) {
-      int adjustment = 0;
-      const long double mantissa = std::frexp(sum, &adjustment);
-      remaining[remaining_count++] =
-          ScaledTerm{mantissa, a.exponent + adjustment};
-    }
-    active = remaining;
-    active_count = remaining_count;
-  }
-  return active_count == 0 ? ScaledTerm{} : active[0];
-}
-
-Real checked_real(ScaledTerm value, const char* what) {
-  if (value.mantissa == 0.0L) return Real{0};
-  int max_exponent = 0;
-  const long double max_mantissa = std::frexp(
-      static_cast<long double>(std::numeric_limits<Real>::max()),
-      &max_exponent);
-  const long double magnitude = std::abs(value.mantissa);
-  if (value.exponent > max_exponent
-      || (value.exponent == max_exponent && magnitude > max_mantissa)) {
-    throw std::overflow_error{std::string{"FileGridEvaluator: "} + what
-                              + " is not representable"};
-  }
-  const Real result = std::scalbn(static_cast<Real>(value.mantissa),
-                                  value.exponent);
-  if (!std::isfinite(result)) {
-    throw std::overflow_error{std::string{"FileGridEvaluator: "} + what
-                              + " is not representable"};
-  }
-  return result;
-}
-
-ScaledTerm reciprocal_factor(Real value, long double sign) {
-  int exponent = 0;
-  const Real mantissa = std::frexp(value, &exponent);
-  return scaled_product(
-      {scaled_factor(sign / static_cast<long double>(mantissa)),
-       ScaledTerm{0.5L, 1 - exponent}});
-}
-
-bool magnitude_greater(ScaledTerm lhs, ScaledTerm rhs) noexcept {
-  if (lhs.mantissa == 0.0L) return false;
-  if (rhs.mantissa == 0.0L) return true;
-  if (lhs.exponent != rhs.exponent) return lhs.exponent > rhs.exponent;
-  return std::abs(lhs.mantissa) > std::abs(rhs.mantissa);
-}
-
-ScaledTerm difference_quotient(Real high, Real low, Real denominator) {
-  const std::array<ScaledTerm, 2> difference_terms{
-      scaled_factor(static_cast<long double>(high)),
-      scaled_factor(-static_cast<long double>(low))};
-  return scaled_product(
-      {scaled_sum(difference_terms, difference_terms.size()),
-       reciprocal_factor(denominator, 1.0L)});
-}
-
 Real grid_coordinate(Real origin, Real spacing, std::size_t index) {
   const Real coordinate = std::fma(static_cast<Real>(index), spacing, origin);
   if (!std::isfinite(coordinate)) {
@@ -179,89 +59,6 @@ bool dimension_fits_size_t(Real value) {
   return true;
 }
 
-struct AxisWeights {
-  std::size_t base{0};
-  int count{1};
-  std::array<long double, 2> weight{1.0L, 0.0L};
-  std::array<ScaledTerm, 2> derivative{};
-};
-
-AxisWeights weights_for_axis(Real coordinate, Real origin, Real spacing,
-                             std::size_t n, const char* axis) {
-  if (!std::isfinite(coordinate)) {
-    throw std::invalid_argument{std::string{"FileGridEvaluator: observation "}
-                                + axis + " coordinate must be finite"};
-  }
-  if (n == 1) {
-    // A singleton axis denotes one geometric plane, not an invariant
-    // direction.  Accepting nearby-but-distinct floating-point values silently
-    // projects observations onto the wrong plane, especially at large origins.
-    if (coordinate != origin) {
-      throw std::out_of_range{std::string{"FileGridEvaluator: observation "}
-                              + axis + " coordinate lies outside the field grid"};
-    }
-    return {};
-  }
-  const ScaledTerm scaled_u = difference_quotient(coordinate, origin, spacing);
-  const long double u = std::scalbn(scaled_u.mantissa, scaled_u.exponent);
-  const long double last = static_cast<long double>(n - 1);
-  const long double tolerance = 64.0L
-      * static_cast<long double>(std::numeric_limits<Real>::epsilon())
-      * std::max(1.0L, last);
-  if (!std::isfinite(u) || u < -tolerance || u > last + tolerance) {
-    throw std::out_of_range{std::string{"FileGridEvaluator: observation "}
-                            + axis + " coordinate lies outside the field grid"};
-  }
-  const long double clamped = std::clamp(u, 0.0L, last);
-  const std::size_t base = clamped >= last
-      ? n - 2
-      : static_cast<std::size_t>(std::floor(clamped));
-  const long double fraction = clamped - static_cast<long double>(base);
-  AxisWeights out;
-  out.base = base;
-  out.count = 2;
-  out.weight = {1.0L - fraction, fraction};
-  out.derivative = {reciprocal_factor(spacing, -1.0L),
-                    reciprocal_factor(spacing, 1.0L)};
-  return out;
-}
-
-std::size_t flat_index(const std::array<std::size_t, 3>& dims,
-                       std::size_t i, std::size_t j, std::size_t k) {
-  return i + dims[0] * (j + dims[1] * k);
-}
-
-template <class Grid, class WeightX, class WeightY, class WeightZ>
-Vec3 weighted_sum(const Grid& grid,
-                  const AxisWeights& x, const AxisWeights& y,
-                  const AxisWeights& z, WeightX wx, WeightY wy, WeightZ wz,
-                  const char* what) {
-  std::array<std::array<ScaledTerm, 8>, 3> terms{};
-  std::size_t count = 0;
-  for (int ck = 0; ck < z.count; ++ck) {
-    for (int cj = 0; cj < y.count; ++cj) {
-      for (int ci = 0; ci < x.count; ++ci) {
-        const ScaledTerm weight =
-            scaled_product({wx(x, ci), wy(y, cj), wz(z, ck)});
-        const Vec3 value = grid.values[flat_index(
-            grid.dims, x.base + static_cast<std::size_t>(ci),
-            y.base + static_cast<std::size_t>(cj),
-            z.base + static_cast<std::size_t>(ck))];
-        terms[0][count] = scaled_product(
-            {weight, scaled_factor(static_cast<long double>(value.x))});
-        terms[1][count] = scaled_product(
-            {weight, scaled_factor(static_cast<long double>(value.y))});
-        terms[2][count] = scaled_product(
-            {weight, scaled_factor(static_cast<long double>(value.z))});
-        ++count;
-      }
-    }
-  }
-  return Vec3{checked_real(scaled_sum(terms[0], count), what),
-              checked_real(scaled_sum(terms[1], count), what),
-              checked_real(scaled_sum(terms[2], count), what)};
-}
-
 }  // namespace
 
 FileGridEvaluator::FileGridEvaluator(std::string path) : path_{std::move(path)} {
@@ -273,126 +70,132 @@ bool FileGridEvaluator::provides_grad_B() const noexcept {
       && grid_.dims[2] > 1;
 }
 
-void FileGridEvaluator::validate_grid(const GridData& grid) {
-  if (!finite(grid.origin) || !finite(grid.spacing)
-      || !std::isfinite(grid.divergence_tolerance)
-      || grid.divergence_tolerance < Real{0}) {
+namespace {
+
+// Host-side, scalar-cost checks on the grid descriptor. These do not scale with
+// the node count -- they are configuration validation, not field arithmetic --
+// so they stay on the host. The two O(nodes) sweeps (value finiteness and
+// solenoidality) run on the device in set_grid() once the map is uploaded.
+void validate_grid_descriptor(const Vec3& origin, const Vec3& spacing,
+                              const std::array<std::size_t, 3>& dims,
+                              Real divergence_tolerance,
+                              std::size_t value_count) {
+  if (!finite(origin) || !finite(spacing)
+      || !std::isfinite(divergence_tolerance)
+      || divergence_tolerance < Real{0}) {
     throw std::invalid_argument{
         "FileGridEvaluator: origin, spacing, and divergence tolerance must be finite"};
   }
-  const std::size_t expected = checked_product(grid.dims);
-  if (grid.values.size() != expected) {
+  const std::size_t expected = checked_product(dims);
+  if (value_count != expected) {
     throw std::invalid_argument{
         "FileGridEvaluator: values length does not match nx*ny*nz"};
   }
-  for (const Vec3 value : grid.values) {
-    if (!finite(value)) {
-      throw std::invalid_argument{
-          "FileGridEvaluator: field values must have finite components"};
-    }
-  }
-  const Real origins[] = {grid.origin.x, grid.origin.y, grid.origin.z};
-  const Real spacings[] = {grid.spacing.x, grid.spacing.y, grid.spacing.z};
+  const Real origins[] = {origin.x, origin.y, origin.z};
+  const Real spacings[] = {spacing.x, spacing.y, spacing.z};
   for (int axis = 0; axis < 3; ++axis) {
     if (spacings[axis] < Real{0}
-        || (grid.dims[axis] > 1 && spacings[axis] <= Real{0})) {
+        || (dims[axis] > 1 && spacings[axis] <= Real{0})) {
       throw std::invalid_argument{
           "FileGridEvaluator: spacing must be positive on non-singleton axes"};
     }
-    if (grid.dims[axis] > 1) {
-      const Real first_next = grid_coordinate(
-          origins[axis], spacings[axis], std::size_t{1});
-      const Real upper = grid_coordinate(
-          origins[axis], spacings[axis], grid.dims[axis] - 1);
-      const Real upper_previous = grid_coordinate(
-          origins[axis], spacings[axis], grid.dims[axis] - 2);
+    if (dims[axis] > 1) {
+      const Real first_next =
+          grid_coordinate(origins[axis], spacings[axis], std::size_t{1});
+      const Real upper =
+          grid_coordinate(origins[axis], spacings[axis], dims[axis] - 1);
+      const Real upper_previous =
+          grid_coordinate(origins[axis], spacings[axis], dims[axis] - 2);
       if (first_next == origins[axis] || upper == upper_previous) {
         throw std::overflow_error{
             "FileGridEvaluator: adjacent grid coordinates collapse in host precision"};
       }
     }
   }
-
-  // A singleton axis denotes one sampled geometric plane.  Its missing normal
-  // derivative is undetermined, so neither the full Jacobian nor div(B) can be
-  // inferred by silently setting that derivative to zero.  Such maps remain
-  // valid B-only samplers; provides_grad_B() stays false and direct gradient
-  // requests are rejected below.
-  if (grid.dims[0] == 1 || grid.dims[1] == 1 || grid.dims[2] == 1) return;
-
-  // Componentwise trilinear interpolation does not automatically preserve
-  // div(B)=0. Its divergence is multi-affine inside each cell, so its extrema
-  // occur at cell vertices. Check those vertices and reject a map whose local
-  // monopole error exceeds the configured relative tolerance (plus a round-off
-  // allowance). This keeps mildly discretized solenoidal maps usable while
-  // preventing a grossly non-physical field from being silently accepted.
-  const std::size_t cells_x = grid.dims[0] > 1 ? grid.dims[0] - 1 : 1;
-  const std::size_t cells_y = grid.dims[1] > 1 ? grid.dims[1] - 1 : 1;
-  const std::size_t cells_z = grid.dims[2] > 1 ? grid.dims[2] - 1 : 1;
-  const int vertices_x = grid.dims[0] > 1 ? 2 : 1;
-  const int vertices_y = grid.dims[1] > 1 ? 2 : 1;
-  const int vertices_z = grid.dims[2] > 1 ? 2 : 1;
-  const long double relative_tolerance =
-      static_cast<long double>(grid.divergence_tolerance)
-      + 256.0L * static_cast<long double>(std::numeric_limits<Real>::epsilon());
-  for (std::size_t k = 0; k < cells_z; ++k) {
-    for (std::size_t j = 0; j < cells_y; ++j) {
-      for (std::size_t i = 0; i < cells_x; ++i) {
-        for (int vk = 0; vk < vertices_z; ++vk) {
-          for (int vj = 0; vj < vertices_y; ++vj) {
-            for (int vi = 0; vi < vertices_x; ++vi) {
-              std::array<ScaledTerm, 3> derivatives{};
-              if (grid.dims[0] > 1) {
-                const Vec3 lo = grid.values[flat_index(
-                    grid.dims, i, j + static_cast<std::size_t>(vj),
-                    k + static_cast<std::size_t>(vk))];
-                const Vec3 hi = grid.values[flat_index(
-                    grid.dims, i + 1, j + static_cast<std::size_t>(vj),
-                    k + static_cast<std::size_t>(vk))];
-                derivatives[0] =
-                    difference_quotient(hi.x, lo.x, grid.spacing.x);
-              }
-              if (grid.dims[1] > 1) {
-                const Vec3 lo = grid.values[flat_index(
-                    grid.dims, i + static_cast<std::size_t>(vi), j,
-                    k + static_cast<std::size_t>(vk))];
-                const Vec3 hi = grid.values[flat_index(
-                    grid.dims, i + static_cast<std::size_t>(vi), j + 1,
-                    k + static_cast<std::size_t>(vk))];
-                derivatives[1] =
-                    difference_quotient(hi.y, lo.y, grid.spacing.y);
-              }
-              if (grid.dims[2] > 1) {
-                const Vec3 lo = grid.values[flat_index(
-                    grid.dims, i + static_cast<std::size_t>(vi),
-                    j + static_cast<std::size_t>(vj), k)];
-                const Vec3 hi = grid.values[flat_index(
-                    grid.dims, i + static_cast<std::size_t>(vi),
-                    j + static_cast<std::size_t>(vj), k + 1)];
-                derivatives[2] =
-                    difference_quotient(hi.z, lo.z, grid.spacing.z);
-              }
-              const ScaledTerm divergence =
-                  scaled_sum(derivatives, derivatives.size());
-              const ScaledTerm scale =
-                  scaled_sum(derivatives, derivatives.size(), true);
-              const ScaledTerm threshold = scaled_product(
-                  {scale, scaled_factor(relative_tolerance)});
-              if (magnitude_greater(divergence, threshold)) {
-                throw std::invalid_argument{
-                    "FileGridEvaluator: trilinear field map is not solenoidal"};
-              }
-            }
-          }
-        }
-      }
-    }
-  }
 }
 
+// Pack the descriptor into the kernel POD. `derivative` selects which axis (if
+// any) contributes its derivative weights instead of its interpolation weights;
+// nullptr means none, which is the plain field sample.
+QuasarAfFileGridParams grid_params(const Vec3& origin, const Vec3& spacing,
+                                   const std::array<std::size_t, 3>& dims,
+                                   const int* derivative) {
+  QuasarAfFileGridParams params{};
+  const Real origins[3] = {origin.x, origin.y, origin.z};
+  const Real spacings[3] = {spacing.x, spacing.y, spacing.z};
+  for (int axis = 0; axis < 3; ++axis) {
+    params.origin[axis] = origins[axis];
+    params.spacing[axis] = spacings[axis];
+    if (dims[axis] > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::length_error{
+          "FileGridEvaluator: dimension exceeds the signed kernel-index limit"};
+    }
+    params.dims[axis] = static_cast<int>(dims[axis]);
+    params.derivative_axis[axis] = derivative == nullptr ? 0 : derivative[axis];
+  }
+  return params;
+}
+
+int checked_point_count(std::size_t n) {
+  if (n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::length_error{
+        "FileGridEvaluator: observation count exceeds the signed kernel-index limit"};
+  }
+  return static_cast<int>(n);
+}
+
+}  // namespace
+
 void FileGridEvaluator::set_grid(GridData grid) {
-  validate_grid(grid);
+  validate_grid_descriptor(grid.origin, grid.spacing, grid.dims,
+                           grid.divergence_tolerance, grid.values.size());
+
+  // Transpose the parsed AoS nodes into the three SoA planes the sampling
+  // kernel reads, then upload. This is the map's only host residency: the
+  // staging vector is released below.
+  const std::size_t count = grid.values.size();
+  std::vector<Real> plane(count);
+  backend::DeviceBuffer<Real> vx(count, backend::uninitialized);
+  backend::DeviceBuffer<Real> vy(count, backend::uninitialized);
+  backend::DeviceBuffer<Real> vz(count, backend::uninitialized);
+  if (count != 0) {
+    for (std::size_t i = 0; i < count; ++i) plane[i] = grid.values[i].x;
+    vx.copy_from_host(plane.data(), count);
+    for (std::size_t i = 0; i < count; ++i) plane[i] = grid.values[i].y;
+    vy.copy_from_host(plane.data(), count);
+    for (std::size_t i = 0; i < count; ++i) plane[i] = grid.values[i].z;
+    vz.copy_from_host(plane.data(), count);
+  }
+
+  // Node finiteness and trilinear solenoidality: both O(nodes), both on device.
+  // The round-off allowance on the tolerance is part of the contract, not
+  // tuning -- it keeps a mildly discretized but genuinely solenoidal map usable
+  // while still rejecting a grossly non-physical one.
+  const Real relative_tolerance =
+      grid.divergence_tolerance
+      + Real{256} * std::numeric_limits<Real>::epsilon();
+  backend::DeviceBuffer<int> status(1);
+  ::launch_analytic_file_grid_validate(
+      grid_params(grid.origin, grid.spacing, grid.dims, nullptr),
+      vx.device_ptr(), vy.device_ptr(), vz.device_ptr(), relative_tolerance,
+      status.device_ptr(), nullptr);
+  int host_status = 0;
+  status.copy_to_host(&host_status, 1);
+  if ((host_status & 16) != 0) {
+    throw std::invalid_argument{
+        "FileGridEvaluator: field values must have finite components"};
+  }
+  if ((host_status & 32) != 0) {
+    throw std::invalid_argument{
+        "FileGridEvaluator: trilinear field map is not solenoidal"};
+  }
+
+  grid.values.clear();
+  grid.values.shrink_to_fit();
   grid_ = std::move(grid);
+  vx_ = std::move(vx);
+  vy_ = std::move(vy);
+  vz_ = std::move(vz);
   configured_ = true;
 }
 
@@ -462,7 +265,10 @@ FileGridEvaluator::GridData FileGridEvaluator::load_text_grid(
     throw std::invalid_argument{
         "FileGridEvaluator: unexpected trailing data after field vectors"};
   }
-  validate_grid(grid);
+  // Descriptor-only here: the O(nodes) sweeps run on the device in set_grid(),
+  // and every caller of load_text_grid() feeds it straight into set_grid().
+  validate_grid_descriptor(grid.origin, grid.spacing, grid.dims,
+                           grid.divergence_tolerance, grid.values.size());
   return grid;
 }
 
@@ -513,31 +319,30 @@ void FileGridEvaluator::configure(const numerics::EvaluatorParams& params) {
   path_.clear();
 }
 
-Field<Vec3> FileGridEvaluator::evaluate_B(const core::IFieldSource&,
-                                          const core::PointCloud& observations) const {
+core::DeviceVectorField FileGridEvaluator::evaluate_B(
+    const core::IFieldSource&, const core::DevicePointCloud& observations) const {
   if (!configured_) {
     throw std::invalid_argument{"FileGridEvaluator: no field grid is configured"};
   }
-  Field<Vec3> out(observations.size());
-  const auto regular = [](const AxisWeights& a, int i) {
-    return scaled_factor(a.weight[i]);
-  };
-  const auto& points = observations.points();
-  for (std::size_t index = 0; index < points.size(); ++index) {
-    const AxisWeights x = weights_for_axis(
-        points[index].x, grid_.origin.x, grid_.spacing.x, grid_.dims[0], "x");
-    const AxisWeights y = weights_for_axis(
-        points[index].y, grid_.origin.y, grid_.spacing.y, grid_.dims[1], "y");
-    const AxisWeights z = weights_for_axis(
-        points[index].z, grid_.origin.z, grid_.spacing.z, grid_.dims[2], "z");
-    out[index] = weighted_sum(grid_, x, y, z, regular, regular, regular,
-                              "interpolated magnetic field");
-  }
+  const int M = checked_point_count(observations.size());
+  core::DeviceVectorField out(observations.size(), backend::uninitialized);
+  backend::DeviceBuffer<int> status(1);
+
+  ::launch_analytic_file_grid_sample(
+      grid_params(grid_.origin, grid_.spacing, grid_.dims, nullptr),
+      vx_.device_ptr(), vy_.device_ptr(), vz_.device_ptr(),
+      observations.x(), observations.y(), observations.z(), M,
+      out.x(), out.y(), out.z(), status.device_ptr(), nullptr);
+
+  int host_status = 0;
+  status.copy_to_host(&host_status, 1);
+  core::throw_on_evaluator_status(host_status, "FileGridEvaluator",
+                                  "interpolated magnetic field");
   return out;
 }
 
-Field<Mat3x3> FileGridEvaluator::evaluate_grad_B(const core::IFieldSource&,
-                                                 const core::PointCloud& observations) const {
+core::DeviceTensorField FileGridEvaluator::evaluate_grad_B(
+    const core::IFieldSource&, const core::DevicePointCloud& observations) const {
   if (!configured_) {
     throw std::invalid_argument{"FileGridEvaluator: no field grid is configured"};
   }
@@ -546,33 +351,35 @@ Field<Mat3x3> FileGridEvaluator::evaluate_grad_B(const core::IFieldSource&,
         "FileGridEvaluator: a full magnetic-field gradient requires at least "
         "two grid nodes on every axis; singleton axes are geometric planes"};
   }
-  Field<Mat3x3> out(observations.size());
-  const auto regular = [](const AxisWeights& a, int i) {
-    return scaled_factor(a.weight[i]);
-  };
-  const auto derivative = [](const AxisWeights& a, int i) {
-    return a.derivative[i];
-  };
-  const auto& points = observations.points();
-  for (std::size_t index = 0; index < points.size(); ++index) {
-    const AxisWeights x = weights_for_axis(
-        points[index].x, grid_.origin.x, grid_.spacing.x, grid_.dims[0], "x");
-    const AxisWeights y = weights_for_axis(
-        points[index].y, grid_.origin.y, grid_.spacing.y, grid_.dims[1], "y");
-    const AxisWeights z = weights_for_axis(
-        points[index].z, grid_.origin.z, grid_.spacing.z, grid_.dims[2], "z");
-    const Vec3 d_dx = weighted_sum(grid_, x, y, z, derivative, regular, regular,
-                                   "magnetic-field x derivative");
-    const Vec3 d_dy = weighted_sum(grid_, x, y, z, regular, derivative, regular,
-                                   "magnetic-field y derivative");
-    const Vec3 d_dz = weighted_sum(grid_, x, y, z, regular, regular, derivative,
-                                   "magnetic-field z derivative");
-    // Mat3x3 stores rows (field component) while each weighted derivative above
-    // is a column dB/dcoordinate.
-    out[index] = Mat3x3{Vec3{d_dx.x, d_dy.x, d_dz.x},
-                        Vec3{d_dx.y, d_dy.y, d_dz.y},
-                        Vec3{d_dx.z, d_dy.z, d_dz.z}};
+  const int M = checked_point_count(observations.size());
+  core::DeviceTensorField out(observations.size(), backend::uninitialized);
+  if (M == 0) return out;
+  backend::DeviceBuffer<int> status(1);
+
+  // One launch per gradient column. Column `axis` is dB/dcoordinate_axis, whose
+  // three components are tensor entries (0,axis), (1,axis) and (2,axis) --
+  // planes 0*3+axis, 1*3+axis and 2*3+axis of the component-major buffer. The
+  // sampling kernel writes three arbitrary output pointers, so it can fill
+  // those strided planes directly and the host never transposes anything.
+  const std::size_t n = observations.size();
+  for (int axis = 0; axis < 3; ++axis) {
+    int derivative[3] = {0, 0, 0};
+    derivative[axis] = 1;
+    Real* base = out.data();
+    ::launch_analytic_file_grid_sample(
+        grid_params(grid_.origin, grid_.spacing, grid_.dims, derivative),
+        vx_.device_ptr(), vy_.device_ptr(), vz_.device_ptr(),
+        observations.x(), observations.y(), observations.z(), M,
+        base + static_cast<std::size_t>(0 * 3 + axis) * n,
+        base + static_cast<std::size_t>(1 * 3 + axis) * n,
+        base + static_cast<std::size_t>(2 * 3 + axis) * n,
+        status.device_ptr(), nullptr);
   }
+
+  int host_status = 0;
+  status.copy_to_host(&host_status, 1);
+  core::throw_on_evaluator_status(host_status, "FileGridEvaluator",
+                                  "magnetic-field gradient");
   return out;
 }
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "quasar/core/field.hpp"
+#include "quasar/core/device_observations.hpp"
 #include "quasar/core/field_source.hpp"
 #include "quasar/core/observations.hpp"
 #include "quasar/core/registry.hpp"
@@ -68,11 +68,17 @@ inline Mat3x3 param_mat3x3(const EvaluatorParams& p, const std::string& key,
   return Mat3x3{Vec3{v[0], v[1], v[2]}, Vec3{v[3], v[4], v[5]}, Vec3{v[6], v[7], v[8]}};
 }
 
-// The evaluator's observation set is the axis-neutral core::PointCloud and its
-// source is the axis-neutral core::IFieldSource, so the numerics axis depends on
-// no concrete physics type. An evaluator that needs a specific source (e.g.
-// Biot-Savart) downcasts it; evaluators that ignore the source (the analytic
-// fields) name no physics type at all.
+// The evaluator's observation set is the axis-neutral core::DevicePointCloud
+// and its source is the axis-neutral core::IFieldSource, so the numerics axis
+// depends on no concrete physics type. An evaluator that needs a specific
+// source (e.g. Biot-Savart) downcasts it; evaluators that ignore the source
+// (the analytic fields) name no physics type at all.
+//
+// Every evaluate_* method takes and returns device-resident SoA planes. Nothing
+// on this interface touches host memory: an evaluator is a kernel launch plus a
+// status check. Callers that ultimately need host values (a CLI writing an
+// .npz, a Python binding, a test assertion) call .to_host() on the returned
+// container at that boundary and nowhere earlier.
 class IFieldEvaluator {
  public:
   virtual ~IFieldEvaluator() = default;
@@ -93,8 +99,9 @@ class IFieldEvaluator {
     reject_unknown_params(params, {}, "field evaluator");
   }
 
-  virtual Field<Vec3> evaluate_B(const core::IFieldSource& source,
-                                 const core::PointCloud& observations) const = 0;
+  virtual core::DeviceVectorField evaluate_B(
+      const core::IFieldSource& source,
+      const core::DevicePointCloud& observations) const = 0;
 
   // Capability query for a trustworthy field gradient.  The base
   // evaluate_grad_B implementation remains the exact zero Jacobian for simple
@@ -105,10 +112,13 @@ class IFieldEvaluator {
   // necessary.
   virtual bool provides_grad_B() const noexcept { return false; }
 
-  // Field gradient (grad B)_{ij} = dB_i/dp_j.
-  virtual Field<Mat3x3> evaluate_grad_B(const core::IFieldSource&,
-                                        const core::PointCloud& observations) const {
-    return Field<Mat3x3>(observations.size());
+  // Field gradient (grad B)_{ij} = dB_i/dp_j, as nine component-major device
+  // planes. The compatibility default allocates zeroed planes, which is the
+  // exact zero Jacobian -- no kernel launch needed.
+  virtual core::DeviceTensorField evaluate_grad_B(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const {
+    return core::DeviceTensorField(observations.size());
   }
 
   // Magnetic vector potential A, with B = curl A. Its gauge is evaluator- and
@@ -117,8 +127,8 @@ class IFieldEvaluator {
   // divergence-free MHD seed built from a discrete curl of A) must select an
   // evaluator that models it. Biot-Savart overrides with the closed-form
   // line-integral A.
-  virtual Field<Vec3> evaluate_A(const core::IFieldSource&,
-                                 const core::PointCloud&) const {
+  virtual core::DeviceVectorField evaluate_A(
+      const core::IFieldSource&, const core::DevicePointCloud&) const {
     throw std::runtime_error{
         "this field evaluator does not provide a vector potential A"};
   }
@@ -126,13 +136,12 @@ class IFieldEvaluator {
   // E field. Defaults to zero: the magnetostatic evaluators model no E field, so
   // a caller using one as a PIC external-field source contributes zero E.
   // Evaluators that model an E field (uniform with e0) override.
-  virtual Field<Vec3> evaluate_E(const core::IFieldSource&,
-                                 const core::PointCloud& observations) const {
-    Field<Vec3> out(observations.size());
-    for (std::size_t i = 0; i < out.size(); ++i) {
-      out[i] = Vec3{0, 0, 0};
-    }
-    return out;
+  virtual core::DeviceVectorField evaluate_E(
+      const core::IFieldSource&,
+      const core::DevicePointCloud& observations) const {
+    // Zeroed planes are the zero field; DeviceVectorField's default constructor
+    // zero-fills, so this needs no kernel either.
+    return core::DeviceVectorField(observations.size());
   }
 };
 

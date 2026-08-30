@@ -22,6 +22,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -70,7 +72,7 @@ TEST(InfiniteWireLimit, ApproachesMu0IOver2PiDAsLengthGrows) {
   for (std::size_t k = 0; k < ratios.size(); ++k) {
     const Real H = ratios[k] * d;
     const auto cs = make_symmetric_segment(H, I);
-    const auto B = eval.evaluate_B(cs, pc);
+    const auto B = quasar::test::host_evaluate_B(eval, cs, pc);
     ASSERT_EQ(B.size(), 1u);
 
     // Closed form for the finite segment: B_y = mu0 I / (4 pi d) * 2 H / sqrt(d^2 + H^2).

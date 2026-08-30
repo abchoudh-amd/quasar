@@ -431,6 +431,57 @@ interfaces may still change between entries.
   like the grid/plane/line observation kinds.
 
 ### Changed
+- Numerics/magnetostatics/analytic fields: **`IFieldEvaluator` is now
+  device-resident, and this is a breaking interface change.** `evaluate_B`,
+  `evaluate_E`, `evaluate_A` and `evaluate_grad_B` take a
+  `core::DevicePointCloud` and return `core::DeviceVectorField` (three SoA
+  component planes) or `core::DeviceTensorField` (nine component-major planes)
+  instead of host `Field<Vec3>` / `Field<Mat3x3>`. Callers that genuinely need
+  host values — the `quasar.coil` CLI, the Python bindings, tests — call
+  `.to_host()` at that boundary; callers that feed another device stage no
+  longer round-trip at all.
+
+  Biot–Savart got shorter rather than longer: it already computed into device
+  SoA planes and then transposed them to host AoS purely to satisfy the old
+  signature, and that staging is deleted. The four analytic evaluators
+  (`uniform`, `gradient`, `dipole`, `file_grid`) had no device path whatsoever
+  and are now kernels under the new `src/backend/hip/analytic_fields/` module,
+  reached through the launch ABI in
+  `include/quasar/physics/analytic_fields/kernels.hpp`. `FileGridEvaluator`
+  keeps its node values on the device from `configure()` onward, and its
+  O(nodes) finiteness and trilinear-solenoidality admissibility sweeps run there
+  too; only the scalar descriptor checks stayed on the host.
+
+  Since a kernel cannot throw, each reports failure by OR-ing bits into an `int`
+  status word with an integer atomic — exact and order-independent, so the
+  reported status does not depend on the launch geometry — which
+  `core::throw_on_evaluator_status` turns back into the same exception types the
+  host code raised.
+
+  The host evaluators carried their intermediates in `long double`, relying on
+  its wider exponent to form products like
+  `moment_scale * mu0_over_4pi * inv_r^3` without overflowing on the way to a
+  representable answer. A device has no `long double`, so the extended range is
+  now carried explicitly: the physics-neutral scaled-arithmetic toolkit was
+  factored out of `numerics/mhd_state.hpp` into
+  `include/quasar/numerics/scaled_arithmetic.hpp`, and the analytic kernels
+  reduce through its exact expansions. That is strictly better than what it
+  replaces for the cancelling cases — the dipole's zero-`B_z` cone, a gradient
+  field whose offset cancels its displacement term — where the old code used a
+  hand-rolled largest-exponent-pair merge. As everywhere else in this port, the
+  new module is compiled `-ffp-contract=off`; contraction silently degrades the
+  two-sum to a naive sum.
+
+  Verified by `tests/unit/physics/analytic_fields/test_analytic_device_accuracy.cpp`,
+  which builds its own `long double` oracle, asserts the device is no worse than
+  a naive `double` evaluation of the same closed form where that formula
+  cancels, and asserts bitwise reproducibility across repeated launches.
+
+  One deliberate non-change: `BiotSavartEvaluatorF`, the fp32 sibling, is not on
+  `IFieldEvaluator` and keeps its host `Field<Vec3f>` returns. Its only consumer
+  is the precision-comparison test, which is an output boundary; a float
+  `DeviceVectorField` for one test caller would be abstraction without a second
+  user.
 - PIC: the diagnostics no longer round-trip through the host. `alive_count` was
   already a device reduction; `total_kinetic_energy`, `total_em_energy` and
   `gauss_residual` each used to download all six field components and every

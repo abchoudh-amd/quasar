@@ -3,6 +3,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -14,7 +16,7 @@ TEST(UniformEvaluator, ReturnsConstantField) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{0, 0, 0});
   pts.add(quasar::Vec3{1, 0, 0});
-  auto b = eval.evaluate_B(cs, pts);
+  auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 2);
   EXPECT_DOUBLE_EQ(b[0].x, 1.0);
   EXPECT_DOUBLE_EQ(b[1].z, 3.0);
@@ -35,7 +37,7 @@ TEST(UniformEvaluator, RejectsNonFiniteFieldsAtomically) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{});
-  const auto b = eval.evaluate_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   EXPECT_EQ(b[0].x, 1.0);
   EXPECT_EQ(b[0].y, 2.0);

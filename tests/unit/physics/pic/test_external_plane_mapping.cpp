@@ -13,6 +13,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/pic/pic_solver.hpp"
 
+#include "host_field_evaluator.hpp"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -46,11 +48,11 @@ quasar::Real integer_power(quasar::Real value, int exponent) {
 // magnetic solenoidality: B=(x,y,0) has div(B)=2.  A cylindrical sampler must
 // reject it even though it has perfect axis parity and quarter-turn covariance.
 class AxisymmetricMonopoleEvaluator final
-    : public quasar::numerics::IFieldEvaluator {
+    : public quasar::test::HostFieldEvaluator {
  public:
   bool provides_grad_B() const noexcept override { return true; }
 
-  quasar::Field<quasar::Vec3> evaluate_B(
+  quasar::Field<quasar::Vec3> host_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Vec3> out(observations.size());
@@ -61,7 +63,7 @@ class AxisymmetricMonopoleEvaluator final
     return out;
   }
 
-  quasar::Field<quasar::Mat3x3> evaluate_grad_B(
+  quasar::Field<quasar::Mat3x3> host_grad_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Mat3x3> out(observations.size());
@@ -82,14 +84,14 @@ class AxisymmetricMonopoleEvaluator final
 // O(dz^4).  These fields pin that prescribed force-only fields are checked by
 // continuous Maxwell divergence, not rejected for ordinary stencil truncation.
 class NonlinearAxisymmetricEvaluator final
-    : public quasar::numerics::IFieldEvaluator {
+    : public quasar::test::HostFieldEvaluator {
  public:
   explicit NonlinearAxisymmetricEvaluator(int axial_power)
       : axial_power_{axial_power} {}
 
   bool provides_grad_B() const noexcept override { return true; }
 
-  quasar::Field<quasar::Vec3> evaluate_B(
+  quasar::Field<quasar::Vec3> host_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Vec3> out(observations.size());
@@ -104,7 +106,7 @@ class NonlinearAxisymmetricEvaluator final
     return out;
   }
 
-  quasar::Field<quasar::Mat3x3> evaluate_grad_B(
+  quasar::Field<quasar::Mat3x3> host_grad_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Mat3x3> out(observations.size());
@@ -130,11 +132,11 @@ class NonlinearAxisymmetricEvaluator final
 // A divergence-free m=4 axial field on an annulus.  It is covariant under a
 // quarter-turn but not under general rotations, so a C4-only check accepts it.
 class FourfoldAxialEvaluator final
-    : public quasar::numerics::IFieldEvaluator {
+    : public quasar::test::HostFieldEvaluator {
  public:
   bool provides_grad_B() const noexcept override { return true; }
 
-  quasar::Field<quasar::Vec3> evaluate_B(
+  quasar::Field<quasar::Vec3> host_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Vec3> out(observations.size());
@@ -146,7 +148,7 @@ class FourfoldAxialEvaluator final
     return out;
   }
 
-  quasar::Field<quasar::Mat3x3> evaluate_grad_B(
+  quasar::Field<quasar::Mat3x3> host_grad_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Mat3x3> out(observations.size());
@@ -165,15 +167,15 @@ class FourfoldAxialEvaluator final
 };
 
 class ElectricOnlyEvaluator final
-    : public quasar::numerics::IFieldEvaluator {
+    : public quasar::test::HostFieldEvaluator {
  public:
-  quasar::Field<quasar::Vec3> evaluate_B(
+  quasar::Field<quasar::Vec3> host_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     return quasar::Field<quasar::Vec3>{observations.size()};
   }
 
-  quasar::Field<quasar::Vec3> evaluate_E(
+  quasar::Field<quasar::Vec3> host_E(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Vec3> out(observations.size());
@@ -185,9 +187,9 @@ class ElectricOnlyEvaluator final
 };
 
 class NonzeroMagneticWithoutGradientEvaluator final
-    : public quasar::numerics::IFieldEvaluator {
+    : public quasar::test::HostFieldEvaluator {
  public:
-  quasar::Field<quasar::Vec3> evaluate_B(
+  quasar::Field<quasar::Vec3> host_B(
       const quasar::core::IFieldSource&,
       const quasar::core::PointCloud& observations) const override {
     quasar::Field<quasar::Vec3> out(observations.size());

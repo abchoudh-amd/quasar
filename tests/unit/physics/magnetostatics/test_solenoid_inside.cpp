@@ -17,6 +17,8 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -61,7 +63,7 @@ TEST(SolenoidInside, MidpointFieldMatchesMu0nI) {
   PointCloud pc;
   pc.add(Vec3{0, 0, 0});
 
-  const auto B = eval.evaluate_B(cs, pc);
+  const auto B = quasar::test::host_evaluate_B(eval, cs, pc);
   ASSERT_EQ(B.size(), 1u);
 
   // Surface-current reference for a finite solenoid of length L, radius R.
@@ -92,7 +94,7 @@ TEST(SolenoidInside, FarOutsideFieldIsMuchWeakerThanInside) {
   // 5x the solenoid length above the upper end -> well into the dipole tail.
   pc.add(Vec3{0, 0, kLength * Real{2.5}});
 
-  const auto B = eval.evaluate_B(cs, pc);
+  const auto B = quasar::test::host_evaluate_B(eval, cs, pc);
   ASSERT_EQ(B.size(), 1u);
 
   const Real n         = static_cast<Real>(kTurns) / kLength;

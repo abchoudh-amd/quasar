@@ -276,6 +276,13 @@ The :mod:`quasar.coil` package exposes the commonly used C++ surface:
    B    = eval_.evaluate_B(cs, obs)            # numpy (M, 3)
    gB   = eval_.evaluate_grad_B(cs, obs)       # numpy (M, 3, 3)
 
+The Python surface above is unchanged, but it is now a boundary rather than the
+native shape: the C++ ``IFieldEvaluator`` takes a ``core::DevicePointCloud`` and
+returns device-resident SoA planes, and these bindings upload the observation
+set, evaluate on the device, and download once into the NumPy array. A C++
+caller that feeds the result to another device stage keeps the planes and never
+makes that round trip. See :doc:`../dev-guide/adding_a_field_evaluator`.
+
 The C++ ``BiotSavartConfig`` carries an opaque
 ``quasar::backend::stream_t`` slot for chaining evaluation onto a pre-existing
 device stream. Python deliberately exposes only the default configuration; it

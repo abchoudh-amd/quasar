@@ -3,6 +3,8 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "host_evaluate.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -14,10 +16,10 @@ TEST(DipoleEvaluator, OnAxisFieldIsFinite) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{0, 0, 1});
-  auto b = eval.evaluate_B(cs, pts);
+  auto b = quasar::test::host_evaluate_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1);
   EXPECT_GT(b[0].z, 0.0);
-  const auto g = eval.evaluate_grad_B(cs, pts);
+  const auto g = quasar::test::host_evaluate_grad_B(eval, cs, pts);
   ASSERT_EQ(g.size(), 1u);
   const auto C = quasar::mu0_over_4pi;
   EXPECT_NEAR(g[0].r0.x,  3.0 * C, 1e-14 * C);
@@ -33,12 +35,12 @@ TEST(DipoleEvaluator, OriginSingularityIsReportedWithoutAZeroFieldCore) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(origin);
-  EXPECT_THROW((void)eval.evaluate_B(cs, pts), std::domain_error);
-  EXPECT_THROW((void)eval.evaluate_grad_B(cs, pts), std::domain_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pts), std::domain_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pts), std::domain_error);
 
   quasar::magnetostatics::PointCloud near;
   near.add(origin + quasar::Vec3{1e-16, 0, 0});
-  const auto b = eval.evaluate_B(cs, near);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, near);
   ASSERT_EQ(b.size(), 1u);
   EXPECT_TRUE(std::isfinite(b[0].x));
   EXPECT_TRUE(std::isfinite(b[0].y));
@@ -53,8 +55,8 @@ TEST(DipoleEvaluator, ZeroMomentHasNoSourceSingularity) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(origin);
 
-  const auto b = eval.evaluate_B(cs, pts);
-  const auto g = eval.evaluate_grad_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
+  const auto g = quasar::test::host_evaluate_grad_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   ASSERT_EQ(g.size(), 1u);
   EXPECT_EQ(b[0].x, 0.0);
@@ -70,8 +72,8 @@ TEST(DipoleEvaluator, ReportsUnrepresentableFieldInsteadOfReturningInfinity) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{std::numeric_limits<quasar::Real>::denorm_min(), 0, 0});
-  EXPECT_THROW((void)eval.evaluate_B(cs, pts), std::overflow_error);
-  EXPECT_THROW((void)eval.evaluate_grad_B(cs, pts), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_B(eval, cs, pts), std::overflow_error);
+  EXPECT_THROW((void)quasar::test::host_evaluate_grad_B(eval, cs, pts), std::overflow_error);
 }
 
 TEST(DipoleEvaluator, ExtremeFiniteCoordinateDifferenceDoesNotBecomeNaN) {
@@ -81,8 +83,8 @@ TEST(DipoleEvaluator, ExtremeFiniteCoordinateDifferenceDoesNotBecomeNaN) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{-largest, 0, 0});
-  const auto b = eval.evaluate_B(cs, pts);
-  const auto g = eval.evaluate_grad_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
+  const auto g = quasar::test::host_evaluate_grad_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   ASSERT_EQ(g.size(), 1u);
   EXPECT_TRUE(std::isfinite(b[0].x));
@@ -99,8 +101,8 @@ TEST(DipoleEvaluator, LargeMomentAndDistanceDoNotFalseUnderflowCoefficient) {
   quasar::magnetostatics::ConductorSystem cs;
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{0, 0, 1.0e106});
-  const auto b = eval.evaluate_B(cs, pts);
-  const auto g = eval.evaluate_grad_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
+  const auto g = quasar::test::host_evaluate_grad_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   ASSERT_EQ(g.size(), 1u);
   EXPECT_TRUE(std::isfinite(b[0].z));
@@ -119,8 +121,8 @@ TEST(DipoleEvaluator, TinyMomentAndDistanceDoNotFalseUnderflowCoefficient) {
   quasar::magnetostatics::PointCloud pts;
   pts.add(quasar::Vec3{0, 0, distance});
 
-  const auto b = eval.evaluate_B(cs, pts);
-  const auto g = eval.evaluate_grad_B(cs, pts);
+  const auto b = quasar::test::host_evaluate_B(eval, cs, pts);
+  const auto g = quasar::test::host_evaluate_grad_B(eval, cs, pts);
   ASSERT_EQ(b.size(), 1u);
   ASSERT_EQ(g.size(), 1u);
   EXPECT_TRUE(std::isfinite(b[0].z));
