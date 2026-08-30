@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -124,6 +125,21 @@ TEST(GsReduceDevice, MaxNormExcludesBoundary) {
 
   EXPECT_EQ(device_max_norm(g, f), Real{2.5});
   EXPECT_EQ(quasar::numerics::interior_max_norm(g, f), device_max_norm(g, f));
+}
+
+TEST(GsReduceDevice, MaxNormPropagatesInteriorNaN) {
+  const EllipticGrid g{37, 29, Real{0.5}, Real{2.0}, Real{-0.6}, Real{0.6}};
+  ScalarField f(g.size(), Real{2.5});
+  f[g.index(17, 13)] = std::numeric_limits<Real>::quiet_NaN();
+
+  EXPECT_TRUE(std::isnan(quasar::numerics::interior_max_norm(g, f)));
+  EXPECT_TRUE(std::isnan(device_max_norm(g, f)));
+
+  // Boundary data is excluded from this norm, even when it is non-finite.
+  f[g.index(17, 13)] = Real{2.5};
+  f[g.index(0, 0)] = std::numeric_limits<Real>::quiet_NaN();
+  EXPECT_EQ(quasar::numerics::interior_max_norm(g, f), Real{2.5});
+  EXPECT_EQ(device_max_norm(g, f), Real{2.5});
 }
 
 TEST(GsReduceDevice, CurrentIsNoLessAccurateThanHost) {

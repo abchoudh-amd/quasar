@@ -88,6 +88,8 @@ enum class GsStatus {
   converged,
   no_closed_surface,   // no O-point: nothing is confined
   axis_lost,           // axis left the domain or merged with an X-point
+  critical_point_overflow,  // fixed device result capacity was exhausted
+  numerical_failure,   // derived arithmetic became non-finite
   residual_stalled,    // iteration ceased making progress
   iteration_limit,     // ran out of iterations while still improving
 };
@@ -97,6 +99,9 @@ inline const char* to_string(GsStatus s) {
     case GsStatus::converged:         return "converged";
     case GsStatus::no_closed_surface: return "no_closed_surface";
     case GsStatus::axis_lost:         return "axis_lost";
+    case GsStatus::critical_point_overflow:
+      return "critical_point_overflow";
+    case GsStatus::numerical_failure: return "numerical_failure";
     case GsStatus::residual_stalled:  return "residual_stalled";
     case GsStatus::iteration_limit:   return "iteration_limit";
   }

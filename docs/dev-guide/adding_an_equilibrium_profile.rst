@@ -142,9 +142,11 @@ Failure is an answer
 
 A free-boundary equilibrium may legitimately not exist. ``GsResult`` therefore
 carries a ``GsStatus`` (``no_closed_surface``, ``axis_lost``,
-``residual_stalled``, ``iteration_limit``) plus the best-effort :math:`\psi`,
-rather than throwing -- the coil-design optimizer must be able to score a failed
-configuration and continue. Flux-surface diagnostics follow the same rule:
+``critical_point_overflow``, ``numerical_failure``, ``residual_stalled``,
+``iteration_limit``) plus the
+best-effort :math:`\psi`, rather than throwing -- the coil-design optimizer must
+be able to score a failed configuration and continue. Flux-surface diagnostics
+follow the same rule:
 open surfaces remain available with ``closed == false`` and are counted by
 ``n_open_surfaces``, but are excluded from the q profile and aggregate geometry;
 ``psi_n_boundary`` identifies the outermost closed surface used for those

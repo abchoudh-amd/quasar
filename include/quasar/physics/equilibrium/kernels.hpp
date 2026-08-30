@@ -436,6 +436,9 @@ struct GsCriticalResult {
   Real psi_axis{0};
   Real psi_boundary{0};
   bool has_closed_surface{false};
+  // Set when the search encountered NaN/Inf or overflow while evaluating the
+  // field. This is distinct from a finite field with no magnetic axis.
+  bool numerical_failure{false};
   // Set when the merge ran out of X-point capacity. The host has no such limit,
   // so this is the one place the device can diverge; it is reported rather than
   // silently truncated.
@@ -466,14 +469,37 @@ GsCriticalResult copy_critical_to_host(const GsCriticalScratch& scratch,
 
 // -- Source terms --------------------------------------------------------------
 
-// j_phi = r p'(psi_N) + FF'(psi_N) / (mu0 r), zero where psi_N >= 1.
-//
-// psi_N == 1 is outside the last closed surface, so no current is driven there.
+// Four-connected plasma component containing the selected magnetic axis. Graph
+// edges are admitted only when a derivative-informed reconstruction stays
+// strictly inside the separatrix, preventing off-grid X-points from bridging
+// otherwise disconnected lobes. The queue and mask are reusable across
+// nonlinear iterations.
+struct GsPlasmaMaskScratch {
+  GsPlasmaMaskScratch() = default;
+  explicit GsPlasmaMaskScratch(const EllipticGrid& g) { resize(g); }
+
+  void resize(const EllipticGrid& g);
+
+  backend::DeviceBuffer<int> mask{};
+  backend::DeviceBuffer<std::size_t> queue{};
+};
+
+void launch_gs_build_plasma_mask(const EllipticGrid& g, const Real* d_psi,
+                                 const GsDerivativeFields& derivatives,
+                                 Real axis_r, Real axis_z, Real psi_axis,
+                                 Real psi_boundary,
+                                 GsPlasmaMaskScratch& scratch,
+                                 stream_t stream);
+
+// j_phi = r p'(psi_N) + FF'(psi_N) / (mu0 r), restricted to the
+// axis-connected plasma mask. A scalar flux cutoff alone is insufficient at a
+// diverted X-point because the private-flux lobe can carry the same psi_N range.
 // The profile arrives as a flat POD rather than through IEquilibriumProfile:
 // see ProfileCoefficients for why the virtual interface cannot cross to device.
 void launch_gs_build_current(const EllipticGrid& g, const Real* d_psi,
                              const ProfileCoefficients& profile, Real psi_axis,
-                             Real psi_boundary, Real* d_j_phi,
+                             Real psi_boundary, const int* d_plasma_mask,
+                             Real* d_j_phi,
                              stream_t stream);
 
 // In-place scalar multiply over the whole field. Used to apply the I_p
@@ -493,7 +519,8 @@ void launch_gs_build_jacobian_diagonal(const EllipticGrid& g,
                                        const Real* d_psi,
                                        const ProfileCoefficients& profile,
                                        Real psi_axis, Real psi_boundary,
-                                       Real profile_scale, Real* d_jac,
+                                       Real profile_scale,
+                                       const int* d_plasma_mask, Real* d_jac,
                                        stream_t stream);
 
 // Superimpose the seeded plasma column: psi += sign * depth * (1 - s^2)^2 for

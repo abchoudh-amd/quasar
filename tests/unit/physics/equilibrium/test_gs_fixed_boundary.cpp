@@ -12,10 +12,15 @@
 #include "quasar/numerics/geometric_multigrid.hpp"
 #include "quasar/physics/equilibrium/critical_points.hpp"
 #include "quasar/physics/equilibrium/equilibrium_profile.hpp"
+#include "quasar/physics/equilibrium/flux_surfaces.hpp"
+#include "quasar/physics/equilibrium/kernels.hpp"
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -178,6 +183,199 @@ TEST(CriticalPoints, ReportsNoAxisForAMonotonicField) {
   EXPECT_FALSE(cps.axis.valid);
 }
 
+TEST(CriticalPoints, RejectsFluxFieldsWhoseSizeDoesNotMatchTheGrid) {
+  const EllipticGrid g = make_grid(33);
+  const ScalarField undersized(g.size() - 1, Real{0});
+
+  EXPECT_THROW((void)quasar::equilibrium::compute_derivatives(g, undersized),
+               std::invalid_argument);
+  EXPECT_THROW((void)quasar::equilibrium::find_critical_points(g, undersized),
+               std::invalid_argument);
+
+  const quasar::equilibrium::CriticalPointSet critical;
+  EXPECT_THROW(
+      (void)quasar::equilibrium::compute_field(
+          g, undersized, critical, [](Real) { return Real{1}; }),
+      std::invalid_argument);
+}
+
+TEST(CriticalPoints, RejectsNewtonCycleWhenIterationBudgetIsExhausted) {
+  const EllipticGrid g = make_grid(17);
+  const ScalarField psi(g.size(), Real{1});
+  quasar::equilibrium::DerivativeFields derivatives;
+  derivatives.d_r.assign(g.size(), Real{0});
+  derivatives.d_z.assign(g.size(), Real{0});
+  derivatives.d_rr.assign(g.size(), Real{0});
+  derivatives.d_zz.assign(g.size(), Real{1});
+  derivatives.d_rz.assign(g.size(), Real{0});
+  const Real origin = g.r(g.nr / 2);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      const Real x = (g.r(i) - origin) / g.dr();
+      derivatives.d_r[g.index(i, j)] = x * x * x - Real{2} * x + Real{2};
+      derivatives.d_rr[g.index(i, j)] =
+          (Real{3} * x * x - Real{2}) / g.dr();
+    }
+  }
+
+  const auto point = quasar::equilibrium::refine_critical_point(
+      g, psi, derivatives, origin, g.z(g.nz / 2));
+
+  EXPECT_FALSE(point.valid)
+      << "the exact Newton two-cycle x=0 -> 1 -> 0 was accepted after "
+         "exhausting the iteration budget";
+}
+
+TEST(CriticalPoints, RejectsOverflowedDerivativesFromFiniteField) {
+  const EllipticGrid g{33, 33, Real{0.9}, Real{1.1}, Real{-0.1}, Real{0.1}};
+  const Real amplitude =
+      Real{0.3} * std::numeric_limits<Real>::max();
+  ScalarField psi = quasar::numerics::make_field(g);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      const Real offset = g.r(i) - Real{1};
+      psi[g.index(i, j)] = amplitude * (offset * offset);
+      ASSERT_TRUE(std::isfinite(psi[g.index(i, j)]));
+    }
+  }
+
+  const auto cps = quasar::equilibrium::find_critical_points(g, psi);
+  EXPECT_FALSE(cps.axis.valid);
+  EXPECT_TRUE(cps.x_points.empty());
+}
+
+TEST(GsFluxSurfaces, RejectsNegativeDimensionsBeforeMutation) {
+  quasar::equilibrium::GsFluxSurfaces surfaces{0, 4};
+  ASSERT_EQ(surfaces.n_surfaces, 0);
+  ASSERT_EQ(surfaces.n_theta, 4);
+
+  EXPECT_THROW(surfaces.resize(-1, 8), std::invalid_argument);
+  EXPECT_THROW(surfaces.resize(8, -1), std::invalid_argument);
+
+  EXPECT_EQ(surfaces.n_surfaces, 0);
+  EXPECT_EQ(surfaces.n_theta, 4);
+  EXPECT_TRUE(surfaces.r.empty());
+  EXPECT_TRUE(surfaces.z.empty());
+  EXPECT_TRUE(surfaces.count.empty());
+  EXPECT_TRUE(surfaces.closed.empty());
+  EXPECT_TRUE(surfaces.q.empty());
+  EXPECT_TRUE(surfaces.area.empty());
+  EXPECT_TRUE(surfaces.volume.empty());
+  EXPECT_TRUE(surfaces.psi_n.empty());
+}
+
+TEST(PlasmaMask, BlocksAnOffGridSaddleBetweenFluxLobes) {
+  const EllipticGrid g{81, 41, Real{0.6}, Real{2.4}, Real{-0.5}, Real{0.5}};
+  // The separatrix saddle lies halfway between radial nodes 40 and 41. Both
+  // nodes pass a scalar psi_N < 1 cutoff, so only edge-aware connectivity can
+  // keep the two lobes separate.
+  constexpr Real center = Real{1.51125};
+  constexpr Real half_separation = Real{0.45};
+  constexpr Real axis_r = center - half_separation;
+  constexpr Real psi_axis = Real{0};
+  constexpr Real psi_boundary =
+      -half_separation * half_separation * half_separation * half_separation;
+
+  ScalarField psi = quasar::numerics::make_field(g);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      const Real x = g.r(i) - center;
+      const Real z = g.z(j);
+      const Real well = x * x - half_separation * half_separation;
+      psi[g.index(i, j)] = -(well * well + z * z);
+    }
+  }
+
+  constexpr int mid_j = 20;
+  constexpr int bridge_left_i = 40;
+  constexpr int bridge_right_i = 41;
+  ASSERT_EQ(center, Real{0.5}
+                        * (g.r(bridge_left_i) + g.r(bridge_right_i)));
+  EXPECT_LT(quasar::equilibrium::normalized_flux(
+                psi[g.index(bridge_left_i, mid_j)], psi_axis, psi_boundary),
+            Real{1});
+  EXPECT_LT(quasar::equilibrium::normalized_flux(
+                psi[g.index(bridge_right_i, mid_j)], psi_axis, psi_boundary),
+            Real{1});
+
+  const std::vector<int> mask =
+      quasar::equilibrium::axis_connected_plasma_mask(
+          g, psi, axis_r, Real{0}, psi_axis, psi_boundary);
+  EXPECT_EQ(mask[g.index(20, mid_j)], 1);
+  EXPECT_EQ(mask[g.index(60, mid_j)], 0);
+
+  std::size_t connected = 0;
+  for (const int value : mask) connected += value != 0 ? 1u : 0u;
+  EXPECT_EQ(connected, 310u);
+}
+
+TEST(PlasmaMask, RejectsAnOverflowedFluxSpan) {
+  const EllipticGrid g{17, 17, Real{0.6}, Real{2.4}, Real{-0.5}, Real{0.5}};
+  const ScalarField psi(g.size(), Real{0});
+  const Real limit = std::numeric_limits<Real>::max();
+
+  const std::vector<int> mask =
+      quasar::equilibrium::axis_connected_plasma_mask(
+          g, psi, Real{1.5}, Real{0}, -limit, limit);
+  for (const int value : mask) EXPECT_EQ(value, 0);
+}
+
+TEST(PlasmaMask, ValidatesGridAndPsiBeforeDeviceAccess) {
+  EllipticGrid malformed;
+  malformed.nr = -1;
+  malformed.nz = 9;
+  malformed.r_min = Real{0.4};
+  malformed.r_max = Real{1.8};
+  malformed.z_min = Real{-0.6};
+  malformed.z_max = Real{0.6};
+  const quasar::equilibrium::GsDerivativeFields derivatives;
+  quasar::equilibrium::GsPlasmaMaskScratch scratch;
+
+  try {
+    quasar::equilibrium::launch_gs_build_plasma_mask(
+        malformed, nullptr, derivatives, Real{1}, Real{0}, Real{0}, Real{1},
+        scratch, nullptr);
+    FAIL() << "malformed grid was accepted";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string{error.what()}.find("EllipticGrid"),
+              std::string::npos)
+        << "validation reached pointer or device storage before the grid";
+  }
+
+  const EllipticGrid valid = make_grid(9);
+  try {
+    quasar::equilibrium::launch_gs_build_plasma_mask(
+        valid, nullptr, derivatives, Real{1}, Real{0}, Real{0}, Real{1},
+        scratch, nullptr);
+    FAIL() << "null psi buffer was accepted";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string{error.what()}.find("psi buffer"), std::string::npos)
+        << "validation reached device storage before the input pointer";
+  }
+}
+
+TEST(PlasmaMask, ResizeRejectsMalformedAndOverflowedGridsBeforeAllocation) {
+  quasar::equilibrium::GsPlasmaMaskScratch scratch;
+
+  EllipticGrid malformed;
+  malformed.nr = -1;
+  malformed.nz = 9;
+  malformed.r_min = Real{0.4};
+  malformed.r_max = Real{1.8};
+  malformed.z_min = Real{-0.6};
+  malformed.z_max = Real{0.6};
+  EXPECT_THROW(scratch.resize(malformed), std::invalid_argument);
+  EXPECT_TRUE(scratch.mask.empty());
+  EXPECT_TRUE(scratch.queue.empty());
+
+  const int huge = std::numeric_limits<int>::max();
+  const EllipticGrid overflowed{huge, huge, Real{0.4}, Real{1.8},
+                                Real{-0.6}, Real{0.6}};
+  EXPECT_THROW(scratch.resize(overflowed), std::length_error);
+  EXPECT_TRUE(scratch.mask.empty());
+  EXPECT_TRUE(scratch.queue.empty());
+}
+
 TEST(NormalizedFlux, IsZeroOnAxisAndOneAtTheBoundary) {
   EXPECT_DOUBLE_EQ(
       quasar::equilibrium::normalized_flux(Real{-1}, Real{-1}, Real{0}), Real{0});
@@ -193,4 +391,54 @@ TEST(NormalizedFlux, IsZeroOnAxisAndOneAtTheBoundary) {
   // Degenerate normalization must not produce NaN.
   EXPECT_DOUBLE_EQ(
       quasar::equilibrium::normalized_flux(Real{1}, Real{2}, Real{2}), Real{1});
+}
+
+TEST(NormalizedFlux, RejectsNonFiniteAndOverflowedNormalization) {
+  const Real limit = std::numeric_limits<Real>::max();
+  const Real infinity = std::numeric_limits<Real>::infinity();
+  const Real nan = std::numeric_limits<Real>::quiet_NaN();
+  const Real tiny = std::numeric_limits<Real>::denorm_min();
+
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(nan, Real{0}, Real{1}),
+            Real{1});
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(infinity, Real{0}, Real{1}),
+            Real{1});
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(
+                Real{0}, nan, Real{1}),
+            Real{1});
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(
+                Real{0}, Real{0}, infinity),
+            Real{1});
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(
+                Real{0}, -limit, limit),
+            Real{1});
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(
+                limit, -limit, Real{0}),
+            Real{1});
+  EXPECT_EQ(quasar::equilibrium::normalized_flux(
+                -limit, Real{0}, tiny),
+            Real{1});
+}
+
+TEST(GsFluxSurfaces, RejectsMalformedGridBeforeDeviceAccess) {
+  EllipticGrid malformed;
+  malformed.nr = -1;
+  malformed.nz = 9;
+  malformed.r_min = Real{0.4};
+  malformed.r_max = Real{1.8};
+  malformed.z_min = Real{-0.6};
+  malformed.z_max = Real{0.6};
+
+  const quasar::equilibrium::GsMagneticField field;
+  quasar::equilibrium::GsFluxSurfaces surfaces;
+  try {
+    quasar::equilibrium::launch_gs_trace_surfaces(
+        malformed, nullptr, field, Real{1}, Real{0}, Real{0}, Real{1},
+        surfaces, nullptr);
+    FAIL() << "malformed grid was accepted";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string{error.what()}.find("EllipticGrid"),
+              std::string::npos)
+        << "validation reached pointer or device storage before the grid";
+  }
 }

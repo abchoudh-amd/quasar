@@ -32,6 +32,9 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace quasar::equilibrium {
 namespace {
@@ -208,14 +211,22 @@ dim3 grid_2d(int nx, int ny, dim3 block) {
 }  // namespace
 
 void GsCoilSet::upload(const std::vector<CoilFilament>& coils) {
-  count_ = static_cast<int>(coils.size());
-  if (count_ == 0) {
+  if (coils.size()
+      > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::length_error{"GsCoilSet: coil count exceeds INT_MAX"};
+  }
+
+  const int count = static_cast<int>(coils.size());
+  if (count == 0) {
     buffer_ = backend::DeviceBuffer<CoilFilament>{};
+    count_ = 0;
     return;
   }
-  buffer_ = backend::DeviceBuffer<CoilFilament>{coils.size(),
-                                                backend::uninitialized};
-  buffer_.copy_from_host(coils.data(), coils.size());
+  backend::DeviceBuffer<CoilFilament> buffer{coils.size(),
+                                              backend::uninitialized};
+  buffer.copy_from_host(coils.data(), coils.size());
+  buffer_ = std::move(buffer);
+  count_ = count;
 }
 
 void launch_gs_apply_coil_boundary(const EllipticGrid& g,

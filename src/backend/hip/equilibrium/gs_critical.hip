@@ -30,6 +30,7 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <limits>
 
 namespace quasar::equilibrium {
 namespace {
@@ -68,8 +69,14 @@ GridView view_of(const EllipticGrid& g) {
 
 __device__ inline Real sample_bilinear_dev(const GridView& g, const Real* f,
                                            Real r, Real z) {
+  if (!isfinite(r) || !isfinite(z)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   Real fi = (r - g.r_min) / g.dr;
   Real fj = (z - g.z_min) / g.dz;
+  if (!isfinite(fi) || !isfinite(fj)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   fi = fmin(fmax(fi, Real{0}), static_cast<Real>(g.nr - 1));
   fj = fmin(fmax(fj, Real{0}), static_cast<Real>(g.nz - 1));
   int i = min(static_cast<int>(fi), g.nr - 2);
@@ -98,6 +105,8 @@ __device__ inline CriticalPoint refine_dev(const GridView& g, const Real* psi,
   CriticalPoint cp{};
   Real r = r0;
   Real z = z0;
+  if (!isfinite(r) || !isfinite(z)) return cp;
+  bool converged = false;
 
   for (int it = 0; it < max_iter; ++it) {
     const Real gr  = sample_bilinear_dev(g, d.d_r, r, z);
@@ -105,31 +114,54 @@ __device__ inline CriticalPoint refine_dev(const GridView& g, const Real* psi,
     const Real hrr = sample_bilinear_dev(g, d.d_rr, r, z);
     const Real hzz = sample_bilinear_dev(g, d.d_zz, r, z);
     const Real hrz = sample_bilinear_dev(g, d.d_rz, r, z);
+    if (!isfinite(gr) || !isfinite(gz) || !isfinite(hrr)
+        || !isfinite(hzz) || !isfinite(hrz)) {
+      return cp;
+    }
 
     const Real det = hrr * hzz - hrz * hrz;
-    if (fabs(det) < Real{1e-30}) return cp;  // degenerate: report failure
+    if (!isfinite(det) || fabs(det) < Real{1e-30}) {
+      return cp;  // degenerate or overflowed: report failure
+    }
 
     Real dr = -(hzz * gr - hrz * gz) / det;
     Real dz = -(-hrz * gr + hrr * gz) / det;
+    if (!isfinite(dr) || !isfinite(dz)) return cp;
 
     dr = fmin(fmax(dr, -g.dr), g.dr);
     dz = fmin(fmax(dz, -g.dz), g.dz);
 
     r += dr;
     z += dz;
+    if (!isfinite(r) || !isfinite(z)) return cp;
     if (r <= g.r_min || r >= g.r_max || z <= g.z_min || z >= g.z_max) return cp;
 
-    if (fabs(dr) < Real{1e-13} * g.dr && fabs(dz) < Real{1e-13} * g.dz) break;
+    if (fabs(dr) < Real{1e-13} * g.dr && fabs(dz) < Real{1e-13} * g.dz) {
+      converged = true;
+      break;
+    }
   }
 
+  if (!converged) return cp;
+
+  const Real gr = sample_bilinear_dev(g, d.d_r, r, z);
+  const Real gz = sample_bilinear_dev(g, d.d_z, r, z);
   const Real hrr = sample_bilinear_dev(g, d.d_rr, r, z);
   const Real hzz = sample_bilinear_dev(g, d.d_zz, r, z);
   const Real hrz = sample_bilinear_dev(g, d.d_rz, r, z);
+  if (!isfinite(gr) || !isfinite(gz) || !isfinite(hrr)
+      || !isfinite(hzz) || !isfinite(hrz)) {
+    return cp;
+  }
   const Real det = hrr * hzz - hrz * hrz;
+  if (!isfinite(det) || fabs(det) < Real{1e-30}) return cp;
+
+  const Real refined_psi = sample_bilinear_dev(g, psi, r, z);
+  if (!isfinite(refined_psi)) return cp;
 
   cp.r = r;
   cp.z = z;
-  cp.psi = sample_bilinear_dev(g, psi, r, z);
+  cp.psi = refined_psi;
   cp.kind = det > Real{0} ? CriticalKind::o_point : CriticalKind::x_point;
   cp.valid = true;
   return cp;
@@ -139,25 +171,38 @@ __device__ inline CriticalPoint refine_dev(const GridView& g, const Real* psi,
 // from zero": a bare sign-change test fires on roundoff wherever the field is
 // locally flat, which produced eleven spurious X-points on a smooth seeded state
 // in the host implementation.
-__global__ void grad_scale_kernel(GridView g, const Real* __restrict__ d_r,
-                                  const Real* __restrict__ d_z,
+__global__ void grad_scale_kernel(GridView g, const Real* __restrict__ psi,
+                                  DerivView d,
                                   Real* __restrict__ partial) {
   __shared__ Real sdata[kThreads];
   const unsigned tid = threadIdx.x;
 
-  const int w = g.nr - 2 * kMargin;
-  const int h = g.nz - 2 * kMargin;
-  const std::size_t n = static_cast<std::size_t>(w > 0 ? w : 0)
-                      * static_cast<std::size_t>(h > 0 ? h : 0);
+  const std::size_t n =
+      static_cast<std::size_t>(g.nr) * static_cast<std::size_t>(g.nz);
 
   Real acc = Real{0};
   for (std::size_t t = blockIdx.x * blockDim.x + tid; t < n;
        t += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
-    const int i = kMargin + static_cast<int>(t % static_cast<std::size_t>(w));
-    const int j = kMargin + static_cast<int>(t / static_cast<std::size_t>(w));
-    const Real gr = d_r[g.index(i, j)];
-    const Real gz = d_z[g.index(i, j)];
-    acc = fmax(acc, sqrt(gr * gr + gz * gz));
+    const int i = static_cast<int>(t % static_cast<std::size_t>(g.nr));
+    const int j = static_cast<int>(t / static_cast<std::size_t>(g.nr));
+    const Real gr = d.d_r[t];
+    const Real gz = d.d_z[t];
+    if (!isfinite(psi[t]) || !isfinite(gr) || !isfinite(gz)
+        || !isfinite(d.d_rr[t]) || !isfinite(d.d_zz[t])
+        || !isfinite(d.d_rz[t])) {
+      acc = std::numeric_limits<Real>::infinity();
+      continue;
+    }
+    if (i < kMargin || j < kMargin || i >= g.nr - kMargin
+        || j >= g.nz - kMargin) {
+      continue;
+    }
+    const Real gradient_norm = hypot(gr, gz);
+    if (!isfinite(gradient_norm)) {
+      acc = std::numeric_limits<Real>::infinity();
+    } else {
+      acc = fmax(acc, gradient_norm);
+    }
   }
   sdata[tid] = acc;
   __syncthreads();
@@ -199,14 +244,35 @@ __global__ void candidate_kernel(GridView g, const Real* __restrict__ psi,
   if (i < kMargin || j < kMargin || i >= g.nr - kMargin || j >= g.nz - kMargin) {
     return;
   }
+  if (!isfinite(grad_scale[0])) return;
 
-  // Discrete critical point: both derivative components change sign across the
-  // node in their respective directions.
-  const Real gr_m = d.d_r[g.index(i - 1, j)];
-  const Real gr_p = d.d_r[g.index(i + 1, j)];
-  const Real gz_m = d.d_z[g.index(i, j - 1)];
-  const Real gz_p = d.d_z[g.index(i, j + 1)];
-  if (gr_m * gr_p > Real{0} || gz_m * gz_p > Real{0}) return;
+  // Either gradient component's zero contour may cross the cell in any
+  // orientation. Use the complete 3x3 range for both components so a rotated
+  // saddle is seeded even when dpsi/dr varies only in z (and vice versa).
+  Real gr_min = std::numeric_limits<Real>::infinity();
+  Real gr_max = -std::numeric_limits<Real>::infinity();
+  Real gz_min = std::numeric_limits<Real>::infinity();
+  Real gz_max = -std::numeric_limits<Real>::infinity();
+  bool finite_neighbourhood = true;
+  for (int dj = -1; dj <= 1; ++dj) {
+    for (int di = -1; di <= 1; ++di) {
+      const std::size_t neighbour = g.index(i + di, j + dj);
+      const Real gr_value = d.d_r[neighbour];
+      const Real gz_value = d.d_z[neighbour];
+      if (!isfinite(gr_value) || !isfinite(gz_value)) {
+        finite_neighbourhood = false;
+        continue;
+      }
+      gr_min = fmin(gr_min, gr_value);
+      gr_max = fmax(gr_max, gr_value);
+      gz_min = fmin(gz_min, gz_value);
+      gz_max = fmax(gz_max, gz_value);
+    }
+  }
+  if (!finite_neighbourhood || gr_min > Real{0} || gr_max < Real{0}
+      || gz_min > Real{0} || gz_max < Real{0}) {
+    return;
+  }
 
   const CriticalPoint cp = refine_dev(g, psi, d, g.r(i), g.z(j), 40);
   if (!cp.valid) return;
@@ -215,7 +281,13 @@ __global__ void candidate_kernel(GridView g, const Real* __restrict__ psi,
   // field's overall variation.
   const Real gr = sample_bilinear_dev(g, d.d_r, cp.r, cp.z);
   const Real gz = sample_bilinear_dev(g, d.d_z, cp.r, cp.z);
-  if (sqrt(gr * gr + gz * gz) > Real{1e-3} * grad_scale[0]) return;
+  if (!isfinite(gr) || !isfinite(gz)) return;
+  const Real gradient_norm = hypot(gr, gz);
+  const Real grad_tolerance = Real{1e-3} * grad_scale[0];
+  if (!isfinite(gradient_norm) || !isfinite(grad_tolerance)
+      || gradient_norm > grad_tolerance) {
+    return;
+  }
 
   candidates[k] = cp;
 }
@@ -225,10 +297,16 @@ __global__ void candidate_kernel(GridView g, const Real* __restrict__ psi,
 // the axis and psi_boundary with the host's tie-breaking.
 __global__ void finalize_kernel(GridView g, const Real* __restrict__ psi,
                                 const CriticalPoint* __restrict__ candidates,
+                                const Real* __restrict__ grad_scale,
                                 GsCriticalResult* __restrict__ out) {
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
   GsCriticalResult res{};
+  if (!isfinite(grad_scale[0])) {
+    res.numerical_failure = true;
+    *out = res;
+    return;
+  }
 
   // O-points are merged into a local buffer; X-points go straight into the
   // result, which is what the host's `out.x_points = raw_x` does.
@@ -279,10 +357,20 @@ __global__ void finalize_kernel(GridView g, const Real* __restrict__ psi,
   // Axis: the O-point furthest in psi from the domain edge value. Strict `>`
   // so ties go to the earliest in scan order, matching the host.
   const Real edge_psi = psi[g.index(0, g.nz / 2)];
+  if (!isfinite(edge_psi)) {
+    res.numerical_failure = true;
+    *out = res;
+    return;
+  }
   int best = 0;
   Real best_depth = Real{-1};
   for (int k = 0; k < n_o; ++k) {
     const Real depth = fabs(o_points[k].psi - edge_psi);
+    if (!isfinite(depth)) {
+      res.numerical_failure = true;
+      *out = res;
+      return;
+    }
     if (depth > best_depth) {
       best_depth = depth;
       best = k;
@@ -297,6 +385,11 @@ __global__ void finalize_kernel(GridView g, const Real* __restrict__ psi,
   Real best_gap = Real{0};
   for (int k = 0; k < res.n_x; ++k) {
     const Real gap = fabs(res.x_points[k].psi - res.psi_axis);
+    if (!isfinite(gap)) {
+      res.numerical_failure = true;
+      *out = res;
+      return;
+    }
     if (!found || gap < best_gap) {
       found = true;
       best_gap = gap;
@@ -316,8 +409,14 @@ __global__ void finalize_kernel(GridView g, const Real* __restrict__ psi,
       for (int i = 0; i < g.nr; ++i) {
         if (!g.on_boundary(i, j)) continue;
         const Real v = psi[g.index(i, j)];
-        if (fabs(v - res.psi_axis) < gap) {
-          gap = fabs(v - res.psi_axis);
+        const Real candidate_gap = fabs(v - res.psi_axis);
+        if (!isfinite(v) || !isfinite(candidate_gap)) {
+          res.numerical_failure = true;
+          *out = res;
+          return;
+        }
+        if (candidate_gap < gap) {
+          gap = candidate_gap;
           limit = v;
         }
       }
@@ -349,17 +448,18 @@ void launch_gs_find_critical_points(const EllipticGrid& g, const Real* d_psi,
   auto* s = static_cast<hipStream_t>(stream);
   const GridView gv = view_of(g);
 
-  const int w = g.nr - 2 * kMargin;
-  const int h = g.nz - 2 * kMargin;
-  const std::size_t n_inset = static_cast<std::size_t>(w > 0 ? w : 0)
-                            * static_cast<std::size_t>(h > 0 ? h : 0);
-  unsigned blocks = static_cast<unsigned>((n_inset + kThreads - 1) / kThreads);
+  unsigned blocks = static_cast<unsigned>(
+      (g.size() + kThreads - 1) / kThreads);
   if (blocks == 0) blocks = 1;
   if (blocks > 512) blocks = 512;  // partial buffer is 1024 wide
 
+  const DerivView dv{derivatives.d_r.device_ptr(), derivatives.d_z.device_ptr(),
+                     derivatives.d_rr.device_ptr(),
+                     derivatives.d_zz.device_ptr(),
+                     derivatives.d_rz.device_ptr()};
+
   hipLaunchKernelGGL(grad_scale_kernel, dim3{blocks}, dim3{kThreads}, 0, s, gv,
-                     derivatives.d_r.device_ptr(), derivatives.d_z.device_ptr(),
-                     scratch.grad_scale.device_ptr());
+                     d_psi, dv, scratch.grad_scale.device_ptr());
   QUASAR_HIP_CHECK(hipGetLastError());
 
   // Result lands at the far end of the same buffer, past the block partials.
@@ -368,11 +468,6 @@ void launch_gs_find_critical_points(const EllipticGrid& g, const Real* d_psi,
                      scratch.grad_scale.device_ptr(), grad_scale_out, blocks);
   QUASAR_HIP_CHECK(hipGetLastError());
 
-  const DerivView dv{derivatives.d_r.device_ptr(), derivatives.d_z.device_ptr(),
-                     derivatives.d_rr.device_ptr(),
-                     derivatives.d_zz.device_ptr(),
-                     derivatives.d_rz.device_ptr()};
-
   const dim3 block{kBlock2D, kBlock2D};
   hipLaunchKernelGGL(candidate_kernel, grid_2d(g.nr, g.nz, block), block, 0, s,
                      gv, d_psi, dv, grad_scale_out,
@@ -380,7 +475,7 @@ void launch_gs_find_critical_points(const EllipticGrid& g, const Real* d_psi,
   QUASAR_HIP_CHECK(hipGetLastError());
 
   hipLaunchKernelGGL(finalize_kernel, dim3{1}, dim3{1}, 0, s, gv, d_psi,
-                     scratch.candidates.device_ptr(),
+                     scratch.candidates.device_ptr(), grad_scale_out,
                      scratch.result.device_ptr());
   QUASAR_HIP_CHECK(hipGetLastError());
 }

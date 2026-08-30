@@ -23,6 +23,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -221,6 +222,28 @@ TEST(GsMultigridDevice, DefectCorrectionMatchesHost) {
   const ScalarField dev = download(d_x, g.size());
   EXPECT_EQ(bitwise_mismatches(host, dev), 0u)
       << "max |host - device| = " << max_abs_difference(host, dev);
+}
+
+TEST(GsMultigridDevice, DefectCorrectionReportsNonfiniteResidual) {
+  const EllipticGrid g{33, 33, Real{0.3}, Real{2.0}, Real{-0.8}, Real{0.8}};
+  ScalarField b = rhs_field(g);
+  b[g.index(g.nr / 2, g.nz / 2)] =
+      std::numeric_limits<Real>::quiet_NaN();
+
+  auto d_x = upload(initial_guess(g));
+  auto d_b = upload(b);
+  quasar::equilibrium::GsOperatorScratch op{g};
+  quasar::equilibrium::GsReduceScratch red{g};
+  quasar::equilibrium::GsDeviceMultigrid mg{g};
+  quasar::equilibrium::GsDefectCorrectionConfig cfg;
+
+  const auto report = quasar::equilibrium::launch_gs_solve_defect_corrected(
+      g, d_x.device_ptr(), d_b.device_ptr(), mg, op, red, cfg, nullptr);
+
+  EXPECT_FALSE(report.converged);
+  EXPECT_EQ(report.iterations, 0);
+  EXPECT_TRUE(std::isnan(report.initial_residual));
+  EXPECT_TRUE(std::isnan(report.final_residual));
 }
 
 }  // namespace

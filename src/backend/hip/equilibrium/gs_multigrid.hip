@@ -35,6 +35,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 
@@ -397,6 +398,10 @@ GsDefectCorrectionReport launch_gs_solve_defect_corrected(
   rep.initial_residual = copy_scalar_to_host(reduce_scratch, stream);
   rep.final_residual = rep.initial_residual;
 
+  if (!std::isfinite(rep.initial_residual)
+      || rep.initial_residual < Real{0}) {
+    return rep;
+  }
   if (rep.initial_residual == Real{0}) {
     rep.converged = true;
     return rep;
@@ -419,6 +424,10 @@ GsDefectCorrectionReport launch_gs_solve_defect_corrected(
     rep.final_residual = copy_scalar_to_host(reduce_scratch, stream);
     rep.iterations = it;
 
+    if (!std::isfinite(rep.final_residual)
+        || rep.final_residual < Real{0}) {
+      break;
+    }
     if (rep.final_residual <= cfg.tolerance * rep.initial_residual) {
       rep.converged = true;
       break;

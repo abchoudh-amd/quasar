@@ -37,7 +37,9 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace quasar::equilibrium {
 namespace {
@@ -96,9 +98,18 @@ __device__ inline std::size_t interior_index(std::size_t t, int nr) {
   return i + static_cast<std::size_t>(nr) * j;
 }
 
+__device__ inline Real max_propagating_nan(Real a, Real b) {
+  if (isnan(a) || isnan(b)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
+  return fmax(a, b);
+}
+
 __device__ inline void block_max_reduce(Real* sdata, unsigned tid) {
   for (unsigned s = kThreads / 2; s > 0; s >>= 1) {
-    if (tid < s) sdata[tid] = fmax(sdata[tid], sdata[tid + s]);
+    if (tid < s) {
+      sdata[tid] = max_propagating_nan(sdata[tid], sdata[tid + s]);
+    }
     __syncthreads();
   }
 }
@@ -112,7 +123,7 @@ __global__ void max_abs_pass1(const Real* __restrict__ f,
   Real acc = Real{0};
   for (std::size_t t = blockIdx.x * blockDim.x + tid; t < n_int;
        t += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
-    acc = fmax(acc, fabs(f[interior_index(t, nr)]));
+    acc = max_propagating_nan(acc, fabs(f[interior_index(t, nr)]));
   }
   sdata[tid] = acc;
   __syncthreads();
@@ -128,7 +139,7 @@ __global__ void max_abs_pass2(const Real* __restrict__ partial,
 
   Real acc = Real{0};
   for (unsigned k = tid; k < n_partial; k += kThreads) {
-    acc = fmax(acc, partial[k]);
+    acc = max_propagating_nan(acc, partial[k]);
   }
   sdata[tid] = acc;
   __syncthreads();

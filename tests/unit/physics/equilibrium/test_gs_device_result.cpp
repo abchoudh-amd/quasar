@@ -82,6 +82,8 @@ void expect_same_metadata(const GsResult& a, const GsResult& b) {
   EXPECT_EQ(a.critical.psi_axis, b.critical.psi_axis);
   EXPECT_EQ(a.critical.psi_boundary, b.critical.psi_boundary);
   EXPECT_EQ(a.critical.has_closed_surface, b.critical.has_closed_surface);
+  EXPECT_EQ(a.critical.critical_point_overflow,
+            b.critical.critical_point_overflow);
   ASSERT_EQ(a.critical.x_points.size(), b.critical.x_points.size());
   for (std::size_t i = 0; i < a.critical.x_points.size(); ++i) {
     EXPECT_EQ(a.critical.x_points[i].kind, b.critical.x_points[i].kind);
@@ -133,6 +135,7 @@ TEST(GsDeviceResult, CopiesKnownDeviceFieldsAndMetadataWithoutASecondSolve) {
   device.critical.psi_axis = Real{-0.7};
   device.critical.psi_boundary = Real{-0.2};
   device.critical.has_closed_surface = true;
+  device.critical.critical_point_overflow = true;
   device.achieved_current = Real{9.5e5};
   device.profile_scale = Real{1.75};
   device.profile_coefficients.n_p = 2;
@@ -162,6 +165,7 @@ TEST(GsDeviceResult, CopiesKnownDeviceFieldsAndMetadataWithoutASecondSolve) {
   EXPECT_EQ(host.critical.psi_axis, Real{-0.7});
   EXPECT_EQ(host.critical.psi_boundary, Real{-0.2});
   EXPECT_TRUE(host.critical.has_closed_surface);
+  EXPECT_TRUE(host.critical.critical_point_overflow);
   EXPECT_EQ(host.achieved_current, Real{9.5e5});
   EXPECT_EQ(host.profile_scale, Real{1.75});
   EXPECT_EQ(host.profile_coefficients.n_p, 2);

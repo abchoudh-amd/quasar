@@ -34,6 +34,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace quasar::equilibrium {
 namespace {
@@ -43,7 +44,6 @@ inline constexpr unsigned kBlock1D = 128;
 inline constexpr Real kPi = Real{3.14159265358979323846};
 
 // Ray-marching resolution, matching the host's trace_surface.
-inline constexpr int kNTheta = 128;
 inline constexpr int kNSteps = 4000;
 
 struct GridView {
@@ -69,8 +69,14 @@ GridView view_of(const EllipticGrid& g) {
 
 __device__ inline Real sample_bilinear_dev(const GridView& g, const Real* f,
                                            Real r, Real z) {
+  if (!isfinite(r) || !isfinite(z)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   Real fi = (r - g.r_min) / g.dr;
   Real fj = (z - g.z_min) / g.dz;
+  if (!isfinite(fi) || !isfinite(fj)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   fi = fmin(fmax(fi, Real{0}), static_cast<Real>(g.nr - 1));
   fj = fmin(fmax(fj, Real{0}), static_cast<Real>(g.nz - 1));
   int i = min(static_cast<int>(fi), g.nr - 2);
@@ -85,9 +91,15 @@ __device__ inline Real sample_bilinear_dev(const GridView& g, const Real* f,
 
 __device__ inline Real normalized_flux_dev(Real psi, Real psi_axis,
                                            Real psi_bdry) {
+  if (!isfinite(psi) || !isfinite(psi_axis) || !isfinite(psi_bdry)) {
+    return Real{1};
+  }
   const Real denom = psi_bdry - psi_axis;
-  if (denom == Real{0}) return Real{1};
-  const Real n = (psi - psi_axis) / denom;
+  if (denom == Real{0} || !isfinite(denom)) return Real{1};
+  const Real numerator = psi - psi_axis;
+  if (!isfinite(numerator)) return Real{1};
+  const Real n = numerator / denom;
+  if (!isfinite(n)) return Real{1};
   return fmin(fmax(n, Real{0}), Real{1});
 }
 
@@ -368,17 +380,28 @@ dim3 grid_2d(int nx, int ny, dim3 block) {
               (static_cast<unsigned>(ny) + block.y - 1) / block.y);
 }
 
-std::size_t checked_surface_storage(int n_surfaces, int n_theta) {
-  if (n_surfaces <= 0 || n_theta <= 0) {
+std::size_t checked_surface_allocation(int n_surfaces, int n_theta) {
+  if (n_surfaces < 0 || n_theta < 0) {
     throw std::invalid_argument{
-        "flux-surface tracing requires positive surface and ray counts"};
+        "flux-surface dimensions must be non-negative"};
   }
   const auto surfaces = static_cast<std::size_t>(n_surfaces);
   const auto theta = static_cast<std::size_t>(n_theta);
-  if (surfaces > std::numeric_limits<std::size_t>::max() / theta) {
+  if (surfaces != 0
+      && theta > std::numeric_limits<std::size_t>::max() / surfaces) {
     throw std::length_error{"flux-surface output size overflows size_t"};
   }
   return surfaces * theta;
+}
+
+std::size_t checked_surface_storage(int n_surfaces, int n_theta) {
+  const std::size_t points =
+      checked_surface_allocation(n_surfaces, n_theta);
+  if (n_surfaces == 0 || n_theta == 0) {
+    throw std::invalid_argument{
+        "flux-surface tracing requires positive surface and ray counts"};
+  }
+  return points;
 }
 
 template <class T>
@@ -403,6 +426,7 @@ void require_owner(const backend::DeviceBuffer<T>& buffer, int expected,
 std::size_t validate_trace_storage(const EllipticGrid& g, const Real* d_psi,
                                    const GsMagneticField& field,
                                    const GsFluxSurfaces& out) {
+  g.validate();
   if (d_psi == nullptr) {
     throw std::invalid_argument{"flux-surface psi buffer must not be null"};
   }
@@ -491,24 +515,43 @@ void GsMagneticField::resize(const EllipticGrid& g) {
 }
 
 void GsFluxSurfaces::resize(int n_surfaces_in, int n_theta_in) {
+  const std::size_t points =
+      checked_surface_allocation(n_surfaces_in, n_theta_in);
+  const std::size_t surfaces = static_cast<std::size_t>(n_surfaces_in);
+
+  backend::DeviceBuffer<Real> next_r{points};
+  backend::DeviceBuffer<Real> next_z{points};
+  backend::DeviceBuffer<int> next_count{surfaces};
+  backend::DeviceBuffer<int> next_closed{surfaces};
+  backend::DeviceBuffer<Real> next_q{surfaces};
+  backend::DeviceBuffer<Real> next_area{surfaces};
+  backend::DeviceBuffer<Real> next_volume{surfaces};
+  backend::DeviceBuffer<Real> next_psi_n{surfaces};
+
+  r = std::move(next_r);
+  z = std::move(next_z);
+  count = std::move(next_count);
+  closed = std::move(next_closed);
+  q = std::move(next_q);
+  area = std::move(next_area);
+  volume = std::move(next_volume);
+  psi_n = std::move(next_psi_n);
   n_surfaces = n_surfaces_in;
   n_theta = n_theta_in;
-  const std::size_t n = static_cast<std::size_t>(n_surfaces) * n_theta;
-  r = backend::DeviceBuffer<Real>{n};
-  z = backend::DeviceBuffer<Real>{n};
-  count = backend::DeviceBuffer<int>{static_cast<std::size_t>(n_surfaces)};
-  closed = backend::DeviceBuffer<int>{static_cast<std::size_t>(n_surfaces)};
-  q = backend::DeviceBuffer<Real>{static_cast<std::size_t>(n_surfaces)};
-  area = backend::DeviceBuffer<Real>{static_cast<std::size_t>(n_surfaces)};
-  volume = backend::DeviceBuffer<Real>{static_cast<std::size_t>(n_surfaces)};
-  psi_n = backend::DeviceBuffer<Real>{static_cast<std::size_t>(n_surfaces)};
 }
 
 void launch_gs_integrate_f_profile(const ProfileCoefficients& profile,
                                    Real f_vacuum, Real psi_axis, Real psi_bdry,
                                    Real profile_scale, int samples,
                                    Real* d_f_table, stream_t stream) {
-  if (samples < 2) samples = 2;
+  if (samples < 2) {
+    throw std::invalid_argument{
+        "launch_gs_integrate_f_profile: samples must be at least two"};
+  }
+  if (d_f_table == nullptr) {
+    throw std::invalid_argument{
+        "launch_gs_integrate_f_profile: output pointer must not be null"};
+  }
   hipLaunchKernelGGL(integrate_f_kernel, dim3{1}, dim3{1}, 0,
                      static_cast<hipStream_t>(stream), profile, f_vacuum,
                      psi_axis, psi_bdry, profile_scale, samples, d_f_table);

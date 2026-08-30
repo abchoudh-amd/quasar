@@ -282,6 +282,9 @@ TEST(GsStatusStrings, CoverEveryEnumerator) {
   EXPECT_STREQ(to_string(GsStatus::converged), "converged");
   EXPECT_STREQ(to_string(GsStatus::no_closed_surface), "no_closed_surface");
   EXPECT_STREQ(to_string(GsStatus::axis_lost), "axis_lost");
+  EXPECT_STREQ(to_string(GsStatus::critical_point_overflow),
+               "critical_point_overflow");
+  EXPECT_STREQ(to_string(GsStatus::numerical_failure), "numerical_failure");
   EXPECT_STREQ(to_string(GsStatus::residual_stalled), "residual_stalled");
   EXPECT_STREQ(to_string(GsStatus::iteration_limit), "iteration_limit");
 }

@@ -33,7 +33,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -152,6 +154,28 @@ TEST(GsContourDevice, NegativeFProfileMatchesHostBitExactly) {
   }
 }
 
+TEST(GsContourDevice, FProfileRejectsUndersizedTables) {
+  const PolynomialProfile profile;
+  const auto coefficients = quasar::equilibrium::to_coefficients(profile);
+
+  for (const int samples : {0, 1}) {
+    EXPECT_THROW((void)quasar::equilibrium::integrate_f_profile(
+                     profile, kFVacuum, Real{0}, Real{1}, Real{1}, samples),
+                 std::invalid_argument)
+        << "samples = " << samples;
+    EXPECT_THROW(quasar::equilibrium::launch_gs_integrate_f_profile(
+                     coefficients, kFVacuum, Real{0}, Real{1}, Real{1},
+                     samples, nullptr, nullptr),
+                 std::invalid_argument)
+        << "samples = " << samples;
+  }
+
+  EXPECT_THROW(quasar::equilibrium::launch_gs_integrate_f_profile(
+                   coefficients, kFVacuum, Real{0}, Real{1}, Real{1}, 2,
+                   nullptr, nullptr),
+               std::invalid_argument);
+}
+
 TEST(GsContourDevice, MagneticFieldMatchesHostBitExactly) {
   const Fixture fx;
   ASSERT_TRUE(fx.result.critical.axis.valid);
@@ -193,6 +217,77 @@ TEST(GsContourDevice, MagneticFieldMatchesHostBitExactly) {
   EXPECT_EQ(bitwise_mismatches(host.b_poloidal,
                                download(dev.b_poloidal, g.size())), 0u)
       << "b_poloidal";
+}
+
+TEST(GsContourDevice, InvalidNormalizedFluxUsesBoundaryFValue) {
+  const EllipticGrid g{9, 9, Real{0.4}, Real{1.8}, Real{-0.6}, Real{0.6}};
+  quasar::equilibrium::GsDerivativeFields derivatives{g};
+  quasar::equilibrium::GsMagneticField field{g};
+  const std::vector<Real> f_table{Real{2}, Real{3}, Real{7}};
+  DeviceBuffer<Real> d_f{f_table.size()};
+  d_f.copy_from_host(f_table.data(), f_table.size());
+
+  const Real limit = std::numeric_limits<Real>::max();
+  const Real infinity = std::numeric_limits<Real>::infinity();
+  const Real nan = std::numeric_limits<Real>::quiet_NaN();
+  const Real tiny = std::numeric_limits<Real>::denorm_min();
+  struct Case {
+    Real psi;
+    Real axis;
+    Real boundary;
+  };
+  const Case cases[] = {
+      {nan, Real{0}, Real{1}},
+      {infinity, Real{0}, Real{1}},
+      {Real{0}, nan, Real{1}},
+      {Real{0}, Real{0}, infinity},
+      {Real{0}, -limit, limit},
+      {limit, -limit, Real{0}},
+      {-limit, Real{0}, tiny},
+  };
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(testing::Message{}
+                 << "psi=" << test_case.psi << " axis=" << test_case.axis
+                 << " boundary=" << test_case.boundary);
+    const ScalarField psi(g.size(), test_case.psi);
+    DeviceBuffer<Real> d_psi{psi.size()};
+    d_psi.copy_from_host(psi.data(), psi.size());
+    quasar::equilibrium::launch_gs_compute_field(
+        g, d_psi.device_ptr(), derivatives, d_f.device_ptr(),
+        static_cast<int>(f_table.size()), test_case.axis, test_case.boundary,
+        field, nullptr);
+    quasar::backend::device_synchronize(nullptr);
+
+    const std::vector<Real> b_phi = download(field.b_phi, g.size());
+    for (int j = 0; j < g.nz; ++j) {
+      for (int i = 0; i < g.nr; ++i) {
+        EXPECT_EQ(b_phi[g.index(i, j)], f_table.back() / g.r(i));
+      }
+    }
+  }
+}
+
+TEST(GsContourDevice, NonFiniteAxisCannotReachBilinearIndexCast) {
+  const EllipticGrid g{9, 9, Real{0.4}, Real{1.8}, Real{-0.6}, Real{0.6}};
+  const ScalarField psi(g.size(), Real{0});
+  DeviceBuffer<Real> d_psi{psi.size()};
+  d_psi.copy_from_host(psi.data(), psi.size());
+  quasar::equilibrium::GsMagneticField field{g};
+  quasar::equilibrium::GsFluxSurfaces surfaces{1, 4};
+
+  quasar::equilibrium::launch_gs_trace_surfaces(
+      g, d_psi.device_ptr(), field,
+      std::numeric_limits<Real>::quiet_NaN(), Real{0}, Real{1}, Real{0},
+      surfaces, nullptr);
+  quasar::backend::device_synchronize(nullptr);
+
+  int count = -1;
+  int closed = -1;
+  surfaces.count.copy_to_host(&count, 1);
+  surfaces.closed.copy_to_host(&closed, 1);
+  EXPECT_EQ(count, 0);
+  EXPECT_EQ(closed, 0);
 }
 
 TEST(GsContourDevice, TracedSurfacesAndDiagnosticsMatchHost) {

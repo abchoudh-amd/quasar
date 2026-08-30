@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -79,6 +80,12 @@ DeviceBuffer<Real> upload(const ScalarField& f) {
   DeviceBuffer<Real> d{f.size()};
   d.copy_from_host(f.data(), f.size());
   return d;
+}
+
+DeviceBuffer<int> upload_mask(const std::vector<int>& mask) {
+  DeviceBuffer<int> device{mask.size()};
+  device.copy_from_host(mask.data(), mask.size());
+  return device;
 }
 
 ScalarField download(const DeviceBuffer<Real>& d, std::size_t n) {
@@ -158,10 +165,11 @@ TEST(GsSourceDevice, BuildCurrentMatchesHostBitExactly) {
   }
 
   auto d_psi = upload(psi);
+  auto d_mask = upload_mask(std::vector<int>(g.size(), 1));
   DeviceBuffer<Real> d_j{g.size()};
   quasar::equilibrium::launch_gs_build_current(
       g, d_psi.device_ptr(), quasar::equilibrium::to_coefficients(profile),
-      psi_axis, psi_boundary, d_j.device_ptr(), nullptr);
+      psi_axis, psi_boundary, d_mask.device_ptr(), d_j.device_ptr(), nullptr);
   quasar::backend::device_synchronize(nullptr);
   const ScalarField dev = download(d_j, g.size());
 
@@ -206,10 +214,12 @@ TEST(GsSourceDevice, JacobianDiagonalMatchesHostBitExactly) {
   }
 
   auto d_psi = upload(psi);
+  auto d_mask = upload_mask(std::vector<int>(g.size(), 1));
   DeviceBuffer<Real> d_jac{g.size()};
   quasar::equilibrium::launch_gs_build_jacobian_diagonal(
       g, d_psi.device_ptr(), quasar::equilibrium::to_coefficients(profile),
-      psi_axis, psi_boundary, profile_scale, d_jac.device_ptr(), nullptr);
+      psi_axis, psi_boundary, profile_scale, d_mask.device_ptr(),
+      d_jac.device_ptr(), nullptr);
   quasar::backend::device_synchronize(nullptr);
 
   EXPECT_EQ(bitwise_mismatches(host, download(d_jac, g.size())), 0u);
@@ -225,15 +235,17 @@ TEST(GsSourceDevice, DegenerateFluxSpanProducesNoCurrentOrJacobian) {
   const ProfileCoefficients pod = quasar::equilibrium::to_coefficients(profile);
 
   auto d_psi = upload(psi);
+  auto d_mask = upload_mask(std::vector<int>(g.size(), 1));
   DeviceBuffer<Real> d_j{g.size()};
   DeviceBuffer<Real> d_jac{g.size()};
 
   quasar::equilibrium::launch_gs_build_current(g, d_psi.device_ptr(), pod,
                                                Real{0.5}, Real{0.5},
+                                               d_mask.device_ptr(),
                                                d_j.device_ptr(), nullptr);
   quasar::equilibrium::launch_gs_build_jacobian_diagonal(
       g, d_psi.device_ptr(), pod, Real{0.5}, Real{0.5}, Real{1},
-      d_jac.device_ptr(), nullptr);
+      d_mask.device_ptr(), d_jac.device_ptr(), nullptr);
   quasar::backend::device_synchronize(nullptr);
 
   for (const Real v : download(d_j, g.size())) {
@@ -244,6 +256,147 @@ TEST(GsSourceDevice, DegenerateFluxSpanProducesNoCurrentOrJacobian) {
     ASSERT_TRUE(std::isfinite(v));
     EXPECT_EQ(v, Real{0});
   }
+}
+
+TEST(GsSourceDevice, InvalidNormalizedFluxProducesNoCurrentOrJacobian) {
+  const EllipticGrid g{9, 9, Real{0.4}, Real{1.8}, Real{-0.6}, Real{0.6}};
+  const ProfileCoefficients profile =
+      quasar::equilibrium::to_coefficients(test_profile());
+  auto d_mask = upload_mask(std::vector<int>(g.size(), 1));
+  DeviceBuffer<Real> d_j{g.size()};
+  DeviceBuffer<Real> d_jac{g.size()};
+
+  const Real limit = std::numeric_limits<Real>::max();
+  const Real infinity = std::numeric_limits<Real>::infinity();
+  const Real nan = std::numeric_limits<Real>::quiet_NaN();
+  const Real tiny = std::numeric_limits<Real>::denorm_min();
+  struct Case {
+    Real psi;
+    Real axis;
+    Real boundary;
+  };
+  const Case cases[] = {
+      {nan, Real{0}, Real{1}},
+      {infinity, Real{0}, Real{1}},
+      {Real{0}, nan, Real{1}},
+      {Real{0}, Real{0}, infinity},
+      {Real{0}, -limit, limit},
+      {limit, -limit, Real{0}},
+      {-limit, Real{0}, tiny},
+  };
+
+  for (const Case& test_case : cases) {
+    SCOPED_TRACE(testing::Message{}
+                 << "psi=" << test_case.psi << " axis=" << test_case.axis
+                 << " boundary=" << test_case.boundary);
+    const ScalarField psi(g.size(), test_case.psi);
+    auto d_psi = upload(psi);
+    quasar::equilibrium::launch_gs_build_current(
+        g, d_psi.device_ptr(), profile, test_case.axis, test_case.boundary,
+        d_mask.device_ptr(), d_j.device_ptr(), nullptr);
+    quasar::equilibrium::launch_gs_build_jacobian_diagonal(
+        g, d_psi.device_ptr(), profile, test_case.axis, test_case.boundary,
+        Real{1}, d_mask.device_ptr(), d_jac.device_ptr(), nullptr);
+    quasar::backend::device_synchronize(nullptr);
+
+    for (const Real value : download(d_j, g.size())) EXPECT_EQ(value, Real{0});
+    for (const Real value : download(d_jac, g.size())) {
+      EXPECT_EQ(value, Real{0});
+    }
+  }
+}
+
+TEST(GsSourceDevice, PlasmaMaskBlocksAnOffGridSaddleBetweenFluxLobes) {
+  const EllipticGrid g{81, 41, Real{0.6}, Real{2.4}, Real{-0.5}, Real{0.5}};
+  // The saddle lies halfway between radial nodes 40 and 41. Both endpoint
+  // values are inside the scalar cutoff, so a node-only BFS crosses this edge.
+  constexpr Real center = Real{1.51125};
+  constexpr Real half_separation = Real{0.45};
+  constexpr Real axis_r = center - half_separation;
+  constexpr Real axis_z = Real{0};
+  constexpr Real psi_axis = Real{0};
+  constexpr Real psi_boundary =
+      -half_separation * half_separation * half_separation * half_separation;
+
+  ScalarField psi = quasar::numerics::make_field(g);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      const Real x = g.r(i) - center;
+      const Real z = g.z(j);
+      const Real well = x * x - half_separation * half_separation;
+      psi[g.index(i, j)] = -(well * well + z * z);
+    }
+  }
+
+  const std::vector<int> host_mask =
+      quasar::equilibrium::axis_connected_plasma_mask(
+          g, psi, axis_r, axis_z, psi_axis, psi_boundary);
+  const int left_i = 20;
+  const int right_i = 60;
+  const int mid_j = 20;
+  const int bridge_left_i = 40;
+  const int bridge_right_i = 41;
+  ASSERT_EQ(center, Real{0.5}
+                        * (g.r(bridge_left_i) + g.r(bridge_right_i)));
+  EXPECT_LT(quasar::equilibrium::normalized_flux(
+                psi[g.index(bridge_left_i, mid_j)], psi_axis, psi_boundary),
+            Real{1});
+  EXPECT_LT(quasar::equilibrium::normalized_flux(
+                psi[g.index(bridge_right_i, mid_j)], psi_axis, psi_boundary),
+            Real{1});
+  EXPECT_EQ(host_mask[g.index(left_i, mid_j)], 1);
+  EXPECT_EQ(host_mask[g.index(right_i, mid_j)], 0);
+
+  auto d_psi = upload(psi);
+  quasar::equilibrium::GsDerivativeFields derivatives{g};
+  quasar::equilibrium::GsOperatorScratch operator_scratch{g};
+  quasar::equilibrium::launch_gs_compute_derivatives(
+      g, d_psi.device_ptr(), derivatives, operator_scratch, nullptr);
+  quasar::equilibrium::GsPlasmaMaskScratch scratch{g};
+  quasar::equilibrium::launch_gs_build_plasma_mask(
+      g, d_psi.device_ptr(), derivatives, axis_r, axis_z, psi_axis,
+      psi_boundary, scratch, nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  std::vector<int> device_mask(g.size(), 0);
+  scratch.mask.copy_to_host(device_mask.data(), device_mask.size());
+  EXPECT_EQ(device_mask, host_mask);
+
+  DeviceBuffer<Real> d_current{g.size()};
+  quasar::equilibrium::launch_gs_build_current(
+      g, d_psi.device_ptr(),
+      quasar::equilibrium::to_coefficients(test_profile()), psi_axis,
+      psi_boundary, scratch.mask.device_ptr(), d_current.device_ptr(), nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  const ScalarField current = download(d_current, g.size());
+  EXPECT_NE(current[g.index(left_i, mid_j)], Real{0});
+  EXPECT_EQ(current[g.index(right_i, mid_j)], Real{0});
+}
+
+TEST(GsSourceDevice, PlasmaMaskRejectsOverflowedFluxSpanIdentically) {
+  const EllipticGrid g{17, 17, Real{0.6}, Real{2.4}, Real{-0.5}, Real{0.5}};
+  const ScalarField psi(g.size(), Real{0});
+  const Real limit = std::numeric_limits<Real>::max();
+  const Real psi_axis = -limit;
+  const Real psi_boundary = limit;
+  ASSERT_TRUE(std::isfinite(psi_axis));
+  ASSERT_TRUE(std::isfinite(psi_boundary));
+  ASSERT_FALSE(std::isfinite(psi_boundary - psi_axis));
+
+  const std::vector<int> host_mask =
+      quasar::equilibrium::axis_connected_plasma_mask(
+          g, psi, Real{1.5}, Real{0}, psi_axis, psi_boundary);
+  for (const int value : host_mask) EXPECT_EQ(value, 0);
+
+  auto d_psi = upload(psi);
+  quasar::equilibrium::GsDerivativeFields derivatives{g};
+  quasar::equilibrium::GsPlasmaMaskScratch scratch{g};
+  quasar::equilibrium::launch_gs_build_plasma_mask(
+      g, d_psi.device_ptr(), derivatives, Real{1.5}, Real{0}, psi_axis,
+      psi_boundary, scratch, nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  std::vector<int> device_mask(g.size(), 1);
+  scratch.mask.copy_to_host(device_mask.data(), device_mask.size());
+  EXPECT_EQ(device_mask, host_mask);
 }
 
 TEST(GsSourceDevice, FieldHelpersMatchHost) {

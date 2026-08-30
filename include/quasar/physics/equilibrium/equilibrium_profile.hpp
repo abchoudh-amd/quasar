@@ -82,6 +82,18 @@ class PolynomialProfile final : public IEquilibriumProfile {
       throw std::invalid_argument{
           "PolynomialProfile: coefficient lists must be non-empty"};
     }
+    for (const Real coefficient : p_coeffs_) {
+      if (!std::isfinite(coefficient)) {
+        throw std::invalid_argument{
+            "PolynomialProfile: pressure coefficients must be finite"};
+      }
+    }
+    for (const Real coefficient : f_coeffs_) {
+      if (!std::isfinite(coefficient)) {
+        throw std::invalid_argument{
+            "PolynomialProfile: toroidal-field coefficients must be finite"};
+      }
+    }
   }
 
   Real dp_dpsi(Real psi_n) const override { return horner(p_coeffs_, psi_n); }
@@ -145,16 +157,31 @@ struct ProfileCoefficients {
 inline ProfileCoefficients to_coefficients(const PolynomialProfile& profile) {
   const auto& p = profile.p_coefficients();
   const auto& f = profile.f_coefficients();
-  if (static_cast<int>(p.size()) > ProfileCoefficients::kMaxCoefficients
-      || static_cast<int>(f.size()) > ProfileCoefficients::kMaxCoefficients) {
+  constexpr std::size_t capacity =
+      static_cast<std::size_t>(ProfileCoefficients::kMaxCoefficients);
+  if (p.size() > capacity || f.size() > capacity) {
     throw std::invalid_argument{
         "to_coefficients: profile exceeds ProfileCoefficients::kMaxCoefficients"};
   }
   ProfileCoefficients out;
   out.n_p = static_cast<int>(p.size());
   out.n_f = static_cast<int>(f.size());
-  for (int k = 0; k < out.n_p; ++k) out.p_coeffs[k] = p[static_cast<std::size_t>(k)];
-  for (int k = 0; k < out.n_f; ++k) out.f_coeffs[k] = f[static_cast<std::size_t>(k)];
+  for (int k = 0; k < out.n_p; ++k) {
+    const Real coefficient = p[static_cast<std::size_t>(k)];
+    if (!std::isfinite(coefficient)) {
+      throw std::invalid_argument{
+          "to_coefficients: pressure coefficients must be finite"};
+    }
+    out.p_coeffs[k] = coefficient;
+  }
+  for (int k = 0; k < out.n_f; ++k) {
+    const Real coefficient = f[static_cast<std::size_t>(k)];
+    if (!std::isfinite(coefficient)) {
+      throw std::invalid_argument{
+          "to_coefficients: toroidal-field coefficients must be finite"};
+    }
+    out.f_coeffs[k] = coefficient;
+  }
   return out;
 }
 

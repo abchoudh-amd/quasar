@@ -36,6 +36,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 namespace quasar::equilibrium {
@@ -91,7 +92,10 @@ inline std::vector<Real> integrate_f_profile(const IEquilibriumProfile& prof,
                                              Real f_vacuum, Real psi_axis,
                                              Real psi_bdry, Real profile_scale,
                                              int samples = 257) {
-  if (samples < 2) samples = 2;
+  if (samples < 2) {
+    throw std::invalid_argument{
+        "integrate_f_profile: samples must be at least two"};
+  }
   std::vector<Real> f2(static_cast<std::size_t>(samples), Real{0});
   const Real dpn = Real{1} / static_cast<Real>(samples - 1);
   const Real scale = Real{2} * (psi_bdry - psi_axis) * profile_scale;

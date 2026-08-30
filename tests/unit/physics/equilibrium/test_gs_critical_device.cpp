@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -108,6 +109,20 @@ ScalarField symmetric_double(const EllipticGrid& g) {
   return psi;
 }
 
+ScalarField many_critical_points(const EllipticGrid& g) {
+  constexpr Real pi = Real{3.14159265358979323846};
+  ScalarField psi = quasar::numerics::make_field(g);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      const Real x = (g.r(i) - g.r_min) / (g.r_max - g.r_min);
+      const Real y = (g.z(j) - g.z_min) / (g.z_max - g.z_min);
+      psi[g.index(i, j)] =
+          std::cos(Real{12} * pi * x) * std::cos(Real{12} * pi * y);
+    }
+  }
+  return psi;
+}
+
 void compare_case(const EllipticGrid& g, const ScalarField& psi,
                   const char* label, bool require_x_point) {
   SCOPED_TRACE(label);
@@ -118,6 +133,7 @@ void compare_case(const EllipticGrid& g, const ScalarField& psi,
 
   ASSERT_TRUE(host.axis.valid) << "host found no axis: case is not exercising "
                                   "the search";
+  EXPECT_FALSE(dev.numerical_failure);
   EXPECT_FALSE(dev.x_point_overflow);
 
   expect_same_point(host.axis, dev.axis, "axis");
@@ -159,6 +175,82 @@ TEST(GsCriticalDevice, NonSquareGridMatchesHost) {
   compare_case(g, well_and_saddle(g), "non-square grid", false);
 }
 
+TEST(GsCriticalDevice, FindsRotatedOffGridSaddle) {
+  const EllipticGrid g{97, 81, Real{0.7}, Real{2.3}, Real{-0.6}, Real{0.6}};
+  constexpr Real saddle_r = Real{1.503};
+  constexpr Real saddle_z = Real{0.007};
+  ScalarField psi = quasar::numerics::make_field(g);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      psi[g.index(i, j)] =
+          (g.r(i) - saddle_r) * (g.z(j) - saddle_z);
+    }
+  }
+
+  const CriticalPointSet host =
+      quasar::equilibrium::find_critical_points(g, psi);
+  const GsCriticalResult dev = run_device(g, psi);
+
+  ASSERT_EQ(host.x_points.size(), 1u);
+  ASSERT_EQ(dev.n_x, 1);
+  EXPECT_FALSE(dev.numerical_failure);
+  EXPECT_FALSE(dev.x_point_overflow);
+  expect_same_point(host.x_points.front(), dev.x_points[0], "rotated saddle");
+  EXPECT_NEAR(host.x_points.front().r, saddle_r, Real{1e-12});
+  EXPECT_NEAR(host.x_points.front().z, saddle_z, Real{1e-12});
+}
+
+TEST(GsCriticalDevice, ReportsFixedCapacityOverflow) {
+  const EllipticGrid g{257, 257, Real{0.4}, Real{2.4}, Real{-1}, Real{1}};
+  const ScalarField psi = many_critical_points(g);
+
+  const CriticalPointSet host =
+      quasar::equilibrium::find_critical_points(g, psi);
+  ASSERT_GT(host.x_points.size(),
+            static_cast<std::size_t>(GsCriticalResult::kMaxXPoints));
+
+  const GsCriticalResult dev = run_device(g, psi);
+  EXPECT_FALSE(dev.numerical_failure);
+  EXPECT_TRUE(dev.x_point_overflow);
+  EXPECT_EQ(dev.n_x, GsCriticalResult::kMaxXPoints);
+}
+
+TEST(GsCriticalDevice, ExtremeFiniteFieldRejectsOverflowedDerivatives) {
+  const EllipticGrid g{33, 33, Real{0.9}, Real{1.1}, Real{-0.1}, Real{0.1}};
+  const Real amplitude =
+      Real{0.3} * std::numeric_limits<Real>::max();
+  ScalarField psi = quasar::numerics::make_field(g);
+  for (int j = 0; j < g.nz; ++j) {
+    for (int i = 0; i < g.nr; ++i) {
+      const Real offset = g.r(i) - Real{1};
+      psi[g.index(i, j)] = amplitude * (offset * offset);
+      ASSERT_TRUE(std::isfinite(psi[g.index(i, j)]));
+    }
+  }
+
+  const CriticalPointSet host =
+      quasar::equilibrium::find_critical_points(g, psi);
+  EXPECT_FALSE(host.axis.valid);
+  EXPECT_TRUE(host.x_points.empty());
+
+  const GsCriticalResult dev = run_device(g, psi);
+  EXPECT_FALSE(dev.axis.valid);
+  EXPECT_EQ(dev.n_x, 0);
+  EXPECT_FALSE(dev.x_point_overflow);
+  EXPECT_TRUE(dev.numerical_failure);
+}
+
+TEST(GsCriticalDevice, ReportsNonfiniteInputAsNumericalFailure) {
+  const EllipticGrid g{33, 33, Real{0.9}, Real{1.1}, Real{-0.1}, Real{0.1}};
+  ScalarField psi = single_well(g);
+  psi[g.index(7, 11)] = std::numeric_limits<Real>::quiet_NaN();
+
+  const GsCriticalResult dev = run_device(g, psi);
+  EXPECT_TRUE(dev.numerical_failure);
+  EXPECT_FALSE(dev.axis.valid);
+  EXPECT_EQ(dev.n_x, 0);
+}
+
 // A monotone field has no interior extremum at all. Both paths must report no
 // axis rather than inventing one -- this is the "vacuum field has no O-point"
 // condition the solver relies on to detect an unconfined state.
@@ -176,6 +268,7 @@ TEST(GsCriticalDevice, MonotoneFieldReportsNoAxis) {
   const GsCriticalResult dev = run_device(g, psi);
 
   ASSERT_FALSE(host.axis.valid) << "monotone field should have no axis";
+  EXPECT_FALSE(dev.numerical_failure);
   EXPECT_FALSE(dev.axis.valid);
   EXPECT_EQ(host.has_closed_surface, dev.has_closed_surface);
 }

@@ -13,14 +13,20 @@
 // checked, that is the port gate against the pre-port recorded equilibrium.
 
 #include "quasar/numerics/elliptic_grid.hpp"
+#include "quasar/numerics/gs_operator_l6.hpp"
+#include "quasar/physics/equilibrium/critical_points.hpp"
 #include "quasar/physics/equilibrium/equilibrium_profile.hpp"
+#include "quasar/physics/equilibrium/free_boundary.hpp"
 #include "quasar/physics/equilibrium/gs_solver.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -33,6 +39,7 @@ using quasar::equilibrium::GsSolver;
 using quasar::equilibrium::GsStatus;
 using quasar::equilibrium::PolynomialProfile;
 using quasar::numerics::EllipticGrid;
+using quasar::numerics::ScalarField;
 
 Real peak_magnitude(const std::vector<Real>& a) {
   Real m = Real{0};
@@ -47,6 +54,61 @@ std::size_t bitwise_mismatches(const std::vector<Real>& a,
     if (std::memcmp(&a[k], &b[k], sizeof(Real)) != 0) ++n;
   }
   return n;
+}
+
+void expect_same_critical_points(
+    const quasar::equilibrium::CriticalPointSet& expected,
+    const quasar::equilibrium::CriticalPointSet& actual) {
+  EXPECT_EQ(actual.axis.kind, expected.axis.kind);
+  EXPECT_EQ(actual.axis.r, expected.axis.r);
+  EXPECT_EQ(actual.axis.z, expected.axis.z);
+  EXPECT_EQ(actual.axis.psi, expected.axis.psi);
+  EXPECT_EQ(actual.axis.valid, expected.axis.valid);
+  EXPECT_EQ(actual.psi_axis, expected.psi_axis);
+  EXPECT_EQ(actual.psi_boundary, expected.psi_boundary);
+  EXPECT_EQ(actual.has_closed_surface, expected.has_closed_surface);
+  EXPECT_EQ(actual.critical_point_overflow,
+            expected.critical_point_overflow);
+  ASSERT_EQ(actual.x_points.size(), expected.x_points.size());
+  for (std::size_t k = 0; k < expected.x_points.size(); ++k) {
+    EXPECT_EQ(actual.x_points[k].kind, expected.x_points[k].kind);
+    EXPECT_EQ(actual.x_points[k].r, expected.x_points[k].r);
+    EXPECT_EQ(actual.x_points[k].z, expected.x_points[k].z);
+    EXPECT_EQ(actual.x_points[k].psi, expected.x_points[k].psi);
+    EXPECT_EQ(actual.x_points[k].valid, expected.x_points[k].valid);
+  }
+}
+
+ScalarField initial_seeded_flux(const GsConfig& cfg) {
+  const EllipticGrid& g = cfg.grid;
+  ScalarField psi;
+  quasar::equilibrium::evaluate_coil_field(g, cfg.coils, psi);
+
+  const Real r_center = cfg.seed.r_center > Real{0}
+                            ? cfg.seed.r_center
+                            : g.r_min + Real{0.5} * (g.r_max - g.r_min);
+  const Real z_center = cfg.seed.z_center != Real{0}
+                            ? cfg.seed.z_center
+                            : g.z_min + Real{0.5} * (g.z_max - g.z_min);
+  const Real minor_radius = cfg.seed.minor_radius > Real{0}
+                                ? cfg.seed.minor_radius
+                                : Real{0.25} * std::min(g.r_max - g.r_min,
+                                                        g.z_max - g.z_min);
+  const Real depth = cfg.seed.depth * quasar::equilibrium::kMu0
+                   * std::abs(cfg.plasma_current);
+  const Real sign = cfg.plasma_current >= Real{0} ? Real{1} : Real{-1};
+
+  for (int j = 1; j < g.nz - 1; ++j) {
+    for (int i = 1; i < g.nr - 1; ++i) {
+      const Real dr = (g.r(i) - r_center) / minor_radius;
+      const Real dz = (g.z(j) - z_center) / minor_radius;
+      const Real s2 = dr * dr + dz * dz;
+      if (s2 >= Real{1}) continue;
+      const Real weight = Real{1} - s2;
+      psi[g.index(i, j)] += depth * weight * weight * sign;
+    }
+  }
+  return psi;
 }
 
 // The reference deck's coil set, which is known to confine.
@@ -106,9 +168,13 @@ TEST(GsSolverInvariants, FailedSolveRetainsPartialFields) {
       CoilFilament{Real{0.42}, Real{0.0}, Real{-1.2e5}},
   };
 
-  const GsResult res = GsSolver{cfg, make_profile()}.solve();
+  const PolynomialProfile profile{
+      std::vector<Real>{Real{1}, Real{-1}},
+      std::vector<Real>{Real{1}, Real{-1}}};
+  const GsResult res =
+      GsSolver{cfg, std::make_shared<PolynomialProfile>(profile)}.solve();
 
-  ASSERT_NE(res.status, GsStatus::converged)
+  ASSERT_EQ(res.status, GsStatus::axis_lost)
       << "this configuration is supposed to fail; the test proves nothing "
          "if it converges";
   EXPECT_GT(peak_magnitude(res.j_phi), Real{1})
@@ -117,6 +183,168 @@ TEST(GsSolverInvariants, FailedSolveRetainsPartialFields) {
       << "partial psi was discarded on the failure path";
   for (const Real v : res.j_phi) ASSERT_TRUE(std::isfinite(v));
   for (const Real v : res.psi) ASSERT_TRUE(std::isfinite(v));
+
+  ASSERT_FALSE(res.residual_history.empty());
+  const std::vector<int> mask =
+      quasar::equilibrium::axis_connected_plasma_mask(
+          cfg.grid, res.psi, res.critical.axis.r, res.critical.axis.z,
+          res.critical.psi_axis, res.critical.psi_boundary);
+  ScalarField expected_current = quasar::numerics::make_field(cfg.grid);
+  for (int j = 1; j < cfg.grid.nz - 1; ++j) {
+    for (int i = 1; i < cfg.grid.nr - 1; ++i) {
+      const std::size_t k = cfg.grid.index(i, j);
+      if (mask[k] == 0) continue;
+      const Real psi_n = quasar::equilibrium::normalized_flux(
+          res.psi[k], res.critical.psi_axis, res.critical.psi_boundary);
+      if (psi_n >= Real{1}) continue;
+      const Real r = cfg.grid.r(i);
+      Real current = r * profile.dp_dpsi(psi_n)
+                   + profile.ff_prime(psi_n)
+                         / (quasar::equilibrium::kMu0 * r);
+      expected_current[k] = res.profile_scale * current;
+    }
+  }
+  EXPECT_EQ(bitwise_mismatches(expected_current, res.j_phi), 0u)
+      << "failure returned psi from a different iteration than its current "
+         "and metadata";
+}
+
+// An iteration-limit exit returns the state that was actually evaluated: its
+// interior is the current Picard iterate, its boundary was generated from the
+// returned current, and its residual was measured before any subsequent
+// interior update. Critical points are intentionally those of the pre-boundary
+// iterate; only boundary nodes change during the free-boundary refresh.
+TEST(GsSolverInvariants, OneIterationReturnsTheEvaluatedPicardState) {
+  GsConfig cfg = base_config(33, 33);
+  cfg.max_iterations = 1;
+  const PolynomialProfile profile{
+      std::vector<Real>{Real{1}, Real{-1}},
+      std::vector<Real>{Real{1}, Real{-1}}};
+
+  const GsResult res =
+      GsSolver{cfg, std::make_shared<PolynomialProfile>(profile)}.solve();
+  ASSERT_EQ(res.status, GsStatus::iteration_limit);
+  ASSERT_EQ(res.iterations, 1);
+  ASSERT_EQ(res.residual_history.size(), 1u);
+  EXPECT_EQ(res.residual, Real{1});
+  EXPECT_EQ(res.residual_history.front(), Real{1});
+
+  const ScalarField initial = initial_seeded_flux(cfg);
+  const auto expected_critical =
+      quasar::equilibrium::find_critical_points(cfg.grid, initial);
+  ASSERT_TRUE(expected_critical.axis.valid);
+  expect_same_critical_points(expected_critical, res.critical);
+
+  const std::vector<int> mask =
+      quasar::equilibrium::axis_connected_plasma_mask(
+          cfg.grid, res.psi, res.critical.axis.r, res.critical.axis.z,
+          res.critical.psi_axis, res.critical.psi_boundary);
+  ScalarField expected_current = quasar::numerics::make_field(cfg.grid);
+  for (int j = 1; j < cfg.grid.nz - 1; ++j) {
+    for (int i = 1; i < cfg.grid.nr - 1; ++i) {
+      const std::size_t k = cfg.grid.index(i, j);
+      if (mask[k] == 0) continue;
+      const Real psi_n = quasar::equilibrium::normalized_flux(
+          res.psi[k], res.critical.psi_axis, res.critical.psi_boundary);
+      if (psi_n >= Real{1}) continue;
+      const Real r = cfg.grid.r(i);
+      Real current = r * profile.dp_dpsi(psi_n)
+                   + profile.ff_prime(psi_n)
+                         / (quasar::equilibrium::kMu0 * r);
+      current *= res.profile_scale;
+      expected_current[k] = current;
+    }
+  }
+  EXPECT_EQ(bitwise_mismatches(expected_current, res.j_phi), 0u)
+      << "returned current does not match returned interior psi and metadata";
+
+  ScalarField expected_state = initial;
+  quasar::equilibrium::apply_coil_boundary(cfg.grid, cfg.coils,
+                                            expected_state);
+  quasar::equilibrium::add_plasma_boundary(cfg.grid, res.j_phi,
+                                            expected_state);
+  EXPECT_EQ(bitwise_mismatches(expected_state, res.psi), 0u)
+      << "returned psi is not the boundary-refreshed state evaluated by the "
+         "solver";
+
+  ScalarField rhs = quasar::numerics::make_field(cfg.grid);
+  for (int j = 1; j < cfg.grid.nz - 1; ++j) {
+    for (int i = 1; i < cfg.grid.nr - 1; ++i) {
+      const std::size_t k = cfg.grid.index(i, j);
+      rhs[k] = -quasar::equilibrium::kMu0 * cfg.grid.r(i) * res.j_phi[k];
+    }
+  }
+  ScalarField residual;
+  quasar::numerics::gs_residual_l6(cfg.grid, res.psi, rhs, residual);
+  const Real absolute_residual =
+      quasar::numerics::interior_max_norm(cfg.grid, residual);
+  EXPECT_TRUE(std::isfinite(absolute_residual));
+  EXPECT_GT(absolute_residual, Real{0});
+  // The first nonlinear residual is its own normalization denominator.
+  EXPECT_EQ(absolute_residual / absolute_residual, res.residual);
+}
+
+TEST(GsSolverInvariants, ReportsCurrentNormalizationOverflow) {
+  GsConfig cfg = base_config(33, 33);
+  cfg.max_iterations = 1;
+  const Real tiny = std::numeric_limits<Real>::min() / Real{100};
+  const auto profile = std::make_shared<PolynomialProfile>(
+      std::vector<Real>{Real{0}}, std::vector<Real>{tiny});
+
+  const GsResult res = GsSolver{cfg, profile}.solve();
+
+  EXPECT_EQ(res.status, GsStatus::numerical_failure);
+  EXPECT_TRUE(res.residual_history.empty());
+  EXPECT_TRUE(std::isfinite(res.profile_scale));
+  for (const Real value : res.psi) EXPECT_TRUE(std::isfinite(value));
+  for (const Real value : res.j_phi) EXPECT_TRUE(std::isfinite(value));
+}
+
+TEST(GsSolverInvariants, ReportsNonFiniteRawCurrentAsNumericalFailure) {
+  GsConfig cfg = base_config(33, 33);
+  cfg.max_iterations = 1;
+  const Real limit = std::numeric_limits<Real>::max();
+  const auto profile = std::make_shared<PolynomialProfile>(
+      std::vector<Real>{limit}, std::vector<Real>{Real{0}});
+
+  const GsResult res = GsSolver{cfg, profile}.solve();
+
+  EXPECT_EQ(res.status, GsStatus::numerical_failure);
+  EXPECT_TRUE(res.residual_history.empty());
+  EXPECT_TRUE(res.critical.axis.valid);
+  EXPECT_EQ(peak_magnitude(res.j_phi), Real{0});
+  for (const Real value : res.psi) EXPECT_TRUE(std::isfinite(value));
+}
+
+TEST(GsSolverInvariants, ReportsOverflowedResolvedSeedAsNumericalFailure) {
+  GsConfig cfg = base_config(33, 33);
+  cfg.coils.clear();
+  cfg.plasma_current = std::numeric_limits<Real>::max();
+  cfg.seed.depth = std::numeric_limits<Real>::max();
+
+  const GsResult res = GsSolver{cfg, make_profile()}.solve();
+
+  EXPECT_EQ(res.status, GsStatus::numerical_failure);
+  EXPECT_EQ(res.iterations, 0);
+  EXPECT_TRUE(res.residual_history.empty());
+  EXPECT_EQ(peak_magnitude(res.psi), Real{0});
+  EXPECT_EQ(peak_magnitude(res.j_phi), Real{0});
+}
+
+TEST(GsSolverInvariants, DefaultSeedCenterDoesNotOverflowFiniteGridExtents) {
+  const Real limit = std::numeric_limits<Real>::max();
+  GsConfig cfg = base_config(33, 33);
+  cfg.grid = EllipticGrid{33, 33, Real{0.5} * limit, Real{0.75} * limit,
+                          Real{0.5} * limit, Real{0.75} * limit};
+  cfg.coils.clear();
+  cfg.max_iterations = 1;
+
+  const GsResult res = GsSolver{cfg, make_profile()}.solve();
+
+  EXPECT_NE(res.status, GsStatus::numerical_failure);
+  EXPECT_GT(peak_magnitude(res.psi), Real{0})
+      << "the default radial center overflowed and the seed was not added";
+  for (const Real value : res.psi) EXPECT_TRUE(std::isfinite(value));
 }
 
 // Picard relaxation changes the path to the solution, not the solution. A
@@ -203,6 +431,96 @@ TEST(GsSolverInvariants, RejectsMalformedConfiguration) {
   GsConfig zero_current = base_config(33, 33);
   zero_current.plasma_current = Real{0};
   EXPECT_THROW(GsSolver(zero_current, make_profile()), std::invalid_argument);
+
+  const Real inf = std::numeric_limits<Real>::infinity();
+  const Real nan = std::numeric_limits<Real>::quiet_NaN();
+  const auto expect_invalid = [&](const GsConfig& cfg) {
+    EXPECT_THROW((void)GsSolver(cfg, make_profile()), std::invalid_argument);
+  };
+
+  for (const Real value : {inf, -inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.plasma_current = value;
+    expect_invalid(cfg);
+  }
+  for (const int value : {0, -1}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.max_iterations = value;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {Real{0}, Real{-1}, inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.tolerance = value;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {Real{0}, Real{-0.1}, Real{1.1}, inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.picard_relaxation = value;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {Real{-1}, inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.newton_residual_threshold = value;
+    expect_invalid(cfg);
+    cfg = base_config(33, 33);
+    cfg.newton_geometry_tolerance = value;
+    expect_invalid(cfg);
+  }
+
+  {
+    GsConfig cfg = base_config(33, 33);
+    cfg.seed.r_center = cfg.grid.r_max;
+    expect_invalid(cfg);
+    cfg = base_config(33, 33);
+    cfg.seed.z_center = cfg.grid.z_min;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {Real{-1}, inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.seed.r_center = value;
+    expect_invalid(cfg);
+    cfg = base_config(33, 33);
+    cfg.seed.minor_radius = value;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.seed.z_center = value;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {Real{0}, Real{-1}, inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.seed.depth = value;
+    expect_invalid(cfg);
+  }
+
+  for (const Real value : {Real{0}, Real{-1}, inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.coils.front().r = value;
+    expect_invalid(cfg);
+  }
+  for (const Real value : {inf, nan}) {
+    GsConfig cfg = base_config(33, 33);
+    cfg.coils.front().z = value;
+    expect_invalid(cfg);
+    cfg = base_config(33, 33);
+    cfg.coils.front().current = value;
+    expect_invalid(cfg);
+  }
+
+  EXPECT_THROW((void)EllipticGrid(33, 33, Real{0.3}, inf, Real{-0.8},
+                                  Real{0.8}),
+               std::invalid_argument);
+  EXPECT_THROW((void)EllipticGrid(33, 33, Real{0.3}, Real{1.9}, nan,
+                                  Real{0.8}),
+               std::invalid_argument);
+
+  EXPECT_THROW((void)PolynomialProfile(std::vector<Real>{nan},
+                                       std::vector<Real>{Real{1}}),
+               std::invalid_argument);
+  EXPECT_THROW((void)PolynomialProfile(std::vector<Real>{Real{1}},
+                                       std::vector<Real>{inf}),
+               std::invalid_argument);
 
   // Below the two-sided Pade closure width, the sixth-order operator cannot be
   // formed at all.
