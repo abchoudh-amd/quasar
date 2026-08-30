@@ -28,6 +28,7 @@
 #include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/interface_states.hpp"
+#include "quasar/numerics/mhd_state.hpp"
 #include "quasar/numerics/radial_tables.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
@@ -510,6 +511,76 @@ void launch_mhd_fill_ghosts_field(MhdField2D<Real>& u, int side, int mode, strea
 // Apply the identical staggered magnetic closure directly to a static
 // background field. This avoids staging all three B0 arrays through host
 // memory after an internal halo exchange.
+// -- Prescribed-background validation ----------------------------------------
+//
+// A supplied B0 must be discretely divergence-free, compatible with the
+// configured homogeneous boundary closure, and -- when the deck or the profile
+// asserts it -- discretely curl-free. These sweeps touch every padded cell, so
+// they run on device; the host keeps only the final comparison against the
+// tolerance and the throw, which is what turns a number into a diagnosable
+// error message.
+//
+// Each result deliberately reports a MEASURED defect plus flags rather than a
+// bare pass/fail. The caller needs the distinction: a non-finite sample, a
+// resolved divergence, and a divergence explained entirely by representation
+// roundoff are three different situations with three different messages, and
+// collapsing them on device would throw away the information the message needs.
+struct MhdBackgroundSolenoidalResult {
+  // Largest residual and the largest directional scale it is judged against,
+  // both as scaled values so a thin annulus at a large radius survives. The
+  // ratio is formed on the host by numerics::normalized_scaled_ratio.
+  quasar::numerics::ScaledValue residual_linf{};
+  quasar::numerics::ScaledValue directional_scale_linf{};
+  // Any b0x/b0y/b0z sample in padded storage was not finite.
+  int nonfinite_sample{0};
+};
+
+struct MhdBackgroundCurlFreeResult {
+  // Poloidal curl defect at interior corners, already normalized.
+  Real relative_linf{Real{0}};
+  // The curl components that must vanish exactly rather than to a tolerance:
+  // stored-value differences of the out-of-plane component, and (on an
+  // axis-touching cylindrical grid) the out-of-plane component itself. A
+  // regular axisymmetric curl-free field on a domain containing r=0 has no
+  // toroidal component at all; the formal annular solution Bphi=C/r is
+  // singular there and represents a distributional axial current, so this is
+  // not a tolerance question.
+  int single_derivative_is_zero{1};
+  // A cylindrical interior face was at negative radius.
+  int negative_interior_radius{0};
+};
+
+// One bit per closure rule, ordered so the host reports the same rule the
+// sequential sweep would have reported first.
+enum MhdBackgroundBoundaryRule : unsigned {
+  mhd_background_rule_periodic_x = 1u << 0,
+  mhd_background_rule_axis_parity = 1u << 1,
+  mhd_background_rule_axis_constraint = 1u << 2,
+  mhd_background_rule_x_wall_parity = 1u << 3,
+  mhd_background_rule_x_wall_normal = 1u << 4,
+  mhd_background_rule_periodic_y = 1u << 5,
+  mhd_background_rule_y_wall_parity = 1u << 6,
+  mhd_background_rule_y_wall_normal = 1u << 7,
+};
+
+struct MhdBackgroundBoundaryResult {
+  unsigned violated_rules{0};
+};
+
+// `field_modes` holds the four boundary mode codes in side order
+// (x_lo, x_hi, y_lo, y_hi): 0 = ignored, 1 = periodic, 2 = wall, 3 = axis.
+MhdBackgroundSolenoidalResult launch_mhd_validate_background_solenoidal(
+    const MhdBackgroundField<Real>& b0, Grid2D grid, int cylindrical,
+    stream_t stream);
+
+MhdBackgroundBoundaryResult launch_mhd_validate_background_boundaries(
+    const MhdBackgroundField<Real>& b0, Grid2D grid,
+    const int field_modes[4], stream_t stream);
+
+MhdBackgroundCurlFreeResult launch_mhd_validate_background_curl_free(
+    const MhdBackgroundField<Real>& b0, Grid2D grid, int cylindrical,
+    stream_t stream);
+
 void launch_mhd_fill_ghosts_background(MhdBackgroundField<Real>& b0, int side,
                                        int mode, stream_t stream);
 

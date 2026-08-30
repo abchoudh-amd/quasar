@@ -11,6 +11,7 @@
 
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/grid.hpp"
+#include "quasar/numerics/mhd_background_metrics.hpp"
 #include "quasar/numerics/mhd_state.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
@@ -45,6 +46,17 @@ inline dim3 mhd_grid_2d(const quasar::Grid2D& g, dim3 block) {
 
 // Shared-memory tree reduction of `sdata` (length kThreadsPerBlock) to its max,
 // left in sdata[0]. tid is the linear thread index within the block.
+// The scaled-arithmetic metrics below used to be duplicated here verbatim. They
+// now come from the shared numerics header, which is also what the background
+// validation sweeps use -- one definition, so the divb diagnostic and the
+// background check cannot drift apart.
+using quasar::numerics::scaled_abs_less_equal_power_of_two;
+using quasar::numerics::scaled_annular_radial_divergence;
+using quasar::numerics::scaled_annular_radial_roundoff;
+using quasar::numerics::scaled_directional_derivative;
+using quasar::numerics::scaled_directional_roundoff;
+using quasar::numerics::scaled_ulp;
+
 __device__ inline void block_max_reduce(double* sdata, unsigned tid) {
   for (unsigned stride = kThreadsPerBlock / 2; stride > 0; stride >>= 1) {
     if (tid < stride) {
@@ -532,79 +544,10 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_divb_linf_kernel(
   }
 }
 
-__device__ inline quasar::numerics::ScaledValue
-scaled_directional_derivative(
-    Real upper, Real lower, Real spacing) {
-  const quasar::numerics::ScaledValue difference =
-      quasar::numerics::scaled_difference_to_value(upper, lower);
-  quasar::numerics::ScaledProductQuotientAccumulator<1> derivative;
-  quasar::numerics::append_scaled_value_quotient(
-      derivative, difference, Real{1}, spacing, Real{1});
-  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(
-      derivative);
-}
 
-__device__ inline quasar::numerics::ScaledValue scaled_ulp(Real value) {
-  if (!std::isfinite(value)) {
-    return quasar::numerics::ScaledValue{
-        std::numeric_limits<Real>::infinity(), 0};
-  }
-  const Real magnitude = fabs(value);
-  if (magnitude < std::numeric_limits<Real>::min()) {
-    int exponent = 0;
-    const Real mantissa = frexp(
-        std::numeric_limits<Real>::denorm_min(), &exponent);
-    return quasar::numerics::ScaledValue{mantissa, exponent};
-  }
-  int exponent = 0;
-  (void)frexp(magnitude, &exponent);
-  return quasar::numerics::ScaledValue{
-      Real{0.5}, exponent - std::numeric_limits<Real>::digits + 1};
-}
 
-__device__ inline quasar::numerics::ScaledValue
-scaled_directional_roundoff(
-    Real upper, Real lower, Real spacing) {
-  quasar::numerics::ScaledProductQuotientAccumulator<2> uncertainty;
-  quasar::numerics::append_scaled_value_quotient(
-      uncertainty, scaled_ulp(upper), Real{1}, spacing, Real{1});
-  quasar::numerics::append_scaled_value_quotient(
-      uncertainty, scaled_ulp(lower), Real{1}, spacing, Real{1});
-  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(
-      uncertainty);
-}
 
-// (B_hi-B_lo)/dr cancels a local offset, while
-// (B_hi+B_lo)/(2*r_c) retains the physical B_r/r curvature of a constant
-// radial field. Both remain scaled through their final directional sum.
-__device__ inline quasar::numerics::ScaledValue
-scaled_annular_radial_divergence(
-    Real upper, Real lower, Real spacing, Real radius) {
-  quasar::numerics::ScaledProductQuotientAccumulator<4> radial;
-  quasar::numerics::append_scaled_product_quotient(
-      radial, upper, Real{1}, spacing, Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      radial, lower, Real{-1}, spacing, Real{1});
-  quasar::numerics::append_scaled_product_quotient(
-      radial, upper, Real{1}, Real{2}, radius);
-  quasar::numerics::append_scaled_product_quotient(
-      radial, lower, Real{1}, Real{2}, radius);
-  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(radial);
-}
 
-__device__ inline quasar::numerics::ScaledValue
-scaled_annular_radial_roundoff(
-    Real upper, Real lower, Real spacing, Real radius) {
-  Real q = Real{0.5} * (spacing / radius);
-  if (q > Real{1}) q = Real{1};
-  quasar::numerics::ScaledProductQuotientAccumulator<2> uncertainty;
-  quasar::numerics::append_scaled_value_quotient(
-      uncertainty, scaled_ulp(upper), Real{1} + q, spacing, Real{1});
-  quasar::numerics::append_scaled_value_quotient(
-      uncertainty, scaled_ulp(lower), Real{1} - q, spacing, Real{1});
-  return quasar::numerics::finish_scaled_product_quotient_sum_to_value(
-      uncertainty);
-}
 
 struct DirectionalNormParts {
   quasar::numerics::ScaledValue residual;
@@ -614,6 +557,33 @@ struct DirectionalNormParts {
 // Return the signed residual and sum of absolute directional contributions as
 // separate scaled values. The inputs have already cancelled Cartesian field
 // offsets, so neither norm can be diluted by a large DC field.
+// NOT the shared numerics::residual_is_roundoff_explained. The live-field
+// divergence diagnostic takes two extra arguments -- the directional scale and
+// whether the solver owns the state -- because it must distinguish a defect in
+// a field the solver produced itself from one in a field an external caller
+// wrote. Same name, deliberately different question.
+__device__ inline bool residual_is_roundoff_explained(
+    const quasar::numerics::ScaledValue& lhs,
+    const quasar::numerics::ScaledValue& rhs,
+    const quasar::numerics::ScaledValue& residual,
+    const quasar::numerics::ScaledValue& uncertainty,
+    const quasar::numerics::ScaledValue& scale,
+    bool solver_owned) {
+  if (solver_owned) {
+    return scaled_abs_less_equal_power_of_two(
+        residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
+  }
+  if (lhs.mantissa == Real{0} || rhs.mantissa == Real{0} ||
+      signbit(lhs.mantissa) == signbit(rhs.mantissa)) {
+    return false;
+  }
+  if (!scaled_abs_less_equal_power_of_two(residual, scale, -1)) {
+    return false;
+  }
+  return scaled_abs_less_equal_power_of_two(
+      residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
+}
+
 __device__ inline DirectionalNormParts directional_norm_parts(
     const quasar::numerics::ScaledValue& lhs,
     const quasar::numerics::ScaledValue& rhs) {
@@ -646,41 +616,7 @@ __device__ inline DirectionalNormParts directional_norm_parts(
   return DirectionalNormParts{residual, scale};
 }
 
-__device__ inline bool scaled_abs_less_equal_power_of_two(
-    const quasar::numerics::ScaledValue& lhs,
-    const quasar::numerics::ScaledValue& rhs, int rhs_exponent_shift) {
-  if (!(std::isfinite(lhs.mantissa) && std::isfinite(rhs.mantissa))) {
-    return false;
-  }
-  if (lhs.mantissa == Real{0}) return true;
-  if (rhs.mantissa == Real{0}) return false;
-  const int shifted_rhs_exponent = rhs.exponent + rhs_exponent_shift;
-  return lhs.exponent < shifted_rhs_exponent ||
-      (lhs.exponent == shifted_rhs_exponent &&
-       fabs(lhs.mantissa) <= fabs(rhs.mantissa));
-}
 
-__device__ inline bool residual_is_roundoff_explained(
-    const quasar::numerics::ScaledValue& lhs,
-    const quasar::numerics::ScaledValue& rhs,
-    const quasar::numerics::ScaledValue& residual,
-    const quasar::numerics::ScaledValue& uncertainty,
-    const quasar::numerics::ScaledValue& scale,
-    bool solver_owned) {
-  if (solver_owned) {
-    return scaled_abs_less_equal_power_of_two(
-        residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
-  }
-  if (lhs.mantissa == Real{0} || rhs.mantissa == Real{0} ||
-      signbit(lhs.mantissa) == signbit(rhs.mantissa)) {
-    return false;
-  }
-  if (!scaled_abs_less_equal_power_of_two(residual, scale, -1)) {
-    return false;
-  }
-  return scaled_abs_less_equal_power_of_two(
-      residual, uncertainty, kDiscreteSolenoidalRoundoffUlpShift);
-}
 
 // Accumulate the two global L-infinity norms needed by
 //   ||d_1+d_2||_inf / || |d_1|+|d_2| ||_inf.

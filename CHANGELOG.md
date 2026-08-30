@@ -464,6 +464,37 @@ interfaces may still change between entries.
   `diagnostics_hip.hip` is compiled `-ffp-contract=off`. This is load-bearing:
   contraction does not perturb the two-sum slightly, it silently turns the
   compensated sum back into a naive one.
+- MHD: prescribed-background validation runs on device. Checking that a supplied
+  B0 is discretely divergence-free, compatible with the configured homogeneous
+  closure, and (when asserted) discretely curl-free used to download all three
+  padded components and sweep the grid on the host — including in
+  `ensure_background_solenoidal()`, which did it lazily on every first use. The
+  sweeps are now `launch_mhd_validate_background_{solenoidal,boundaries,curl_free}`
+  (`src/backend/hip/mhd/mhd_background_validate.hip`); the host keeps the
+  comparison against the tolerance and the throw.
+
+  The scaled-arithmetic metrics these checks are defined in moved to
+  `include/quasar/numerics/mhd_background_metrics.hpp` as `QUASAR_HOST_DEVICE`.
+  They had already been duplicated once — `mhd_reduce.hip` carried its own device
+  copies for the live div(B) diagnostic — so there were two definitions of the
+  same discrete solenoidality criterion that could drift. There is now one.
+  (`residual_is_roundoff_explained` deliberately remains separate in
+  `mhd_reduce.hip`: its six-argument form asks a different question, namely
+  whether the solver owns the state it is judging.)
+
+  Ordering change worth knowing: the constructor now uploads B0 and then
+  validates the device buffers, where it previously validated the host vectors
+  first. The sweep therefore reads exactly the bytes the solver will use.
+
+  These are equality ports, not accuracy-ordering ones — every reduction here is
+  a maximum, which is associative and rounds nothing. The kernels reproduce
+  `std::max`'s NaN behaviour rather than `fmax`'s, so a NaN defect is dropped and
+  an infinite one propagates exactly as before. Boolean outcomes use integer
+  atomics, which are exact and order-independent; the no-floating-point-atomics
+  rule is unaffected. `mhd_background_validate.hip` is compiled
+  `-ffp-contract=off` because the check compares a residual against the
+  representation roundoff of its own operands, and contraction moves those two
+  by different amounts.
 - Testing: long-running tests are now labelled `slow` and excluded from the
   default `ctest` presets, so `ctest --preset <name>` completes in minutes
   instead of over an hour. Only `python_test_examples` currently carries the
