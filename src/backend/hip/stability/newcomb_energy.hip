@@ -67,7 +67,9 @@ void require_owner(const backend::DeviceBuffer<T>& buffer, int expected,
 }
 
 BasisShape validate_basis(const ChebyshevBasis& basis) {
-  if (basis.order < 1 || basis.n_nodes != basis.order + 1
+  if (basis.order < 1
+      || static_cast<long long>(basis.n_nodes)
+             != static_cast<long long>(basis.order) + 1LL
       || basis.n_domains < 1) {
     throw std::invalid_argument{
         "cylindrical Newcomb operations require a non-empty Chebyshev basis "

@@ -11,6 +11,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace quasar::stability {
 namespace {
@@ -327,6 +328,13 @@ __global__ void validate_build_kernel(
     const Real* __restrict__ f_lambda,
     const Real* __restrict__ ff_lambda,
     const Real* __restrict__ density,
+    const Real* __restrict__ g_lambda_lambda,
+    const Real* __restrict__ g_lambda_theta,
+    const Real* __restrict__ g_theta_theta,
+    const Real* __restrict__ g_phi_phi,
+    const Real* __restrict__ jacobian,
+    const Real* __restrict__ b_theta,
+    const Real* __restrict__ b_phi,
     const Real* __restrict__ j_theta,
     const Real* __restrict__ j_phi, int* __restrict__ status) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
@@ -379,7 +387,12 @@ __global__ void validate_build_kernel(
           || !isfinite(rt) || !isfinite(zt) || !isfinite(direct_j)
           || !isfinite(stored_jacobian[k])
           || fabs(stored_jacobian[k] - direct_j) > tolerance * scale
-          || !isfinite(j_theta[k]) || !isfinite(j_phi[k])) {
+          || !isfinite(g_lambda_lambda[k])
+          || !isfinite(g_lambda_theta[k])
+          || !isfinite(g_theta_theta[k]) || !isfinite(g_phi_phi[k])
+          || !isfinite(jacobian[k]) || !isfinite(b_theta[k])
+          || !isfinite(b_phi[k]) || !isfinite(j_theta[k])
+          || !isfinite(j_phi[k])) {
         *status = static_cast<int>(BuildStatus::invalid_geometry);
         return;
       }
@@ -397,8 +410,14 @@ __device__ inline void cubic_lagrange_weights(Real x, Real* weights) {
 __device__ inline Real sample_field_cubic(const GridView& grid,
                                           const Real* field, Real r,
                                           Real z) {
+  if (!isfinite(r) || !isfinite(z)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   Real fi = (r - grid.r_min) / grid.dr;
   Real fj = (z - grid.z_min) / grid.dz;
+  if (!isfinite(fi) || !isfinite(fj)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   fi = fmin(fmax(fi, Real{0}), static_cast<Real>(grid.nr - 1));
   fj = fmin(fmax(fj, Real{0}), static_cast<Real>(grid.nz - 1));
 
@@ -580,23 +599,46 @@ void ToroidalEquilibriumFields::resize(int n_lambda_in, int n_theta_in) {
       radial, static_cast<std::size_t>(n_theta_in),
       "ToroidalEquilibriumFields storage overflows size_t");
 
-  pressure = backend::DeviceBuffer<Real>{radial};
-  pressure_lambda = backend::DeviceBuffer<Real>{radial};
-  f = backend::DeviceBuffer<Real>{radial};
-  f_squared = backend::DeviceBuffer<Real>{radial};
-  f_lambda = backend::DeviceBuffer<Real>{radial};
-  ff_lambda = backend::DeviceBuffer<Real>{radial};
-  density = backend::DeviceBuffer<Real>{radial};
+  // Complete every arithmetic check before asking the backend to allocate.
+  // This makes extreme dimensions deterministic even without a HIP device.
+  (void)backend::detail::checked_buffer_bytes<Real>(radial);
+  (void)backend::detail::checked_buffer_bytes<Real>(geometry);
 
-  g_lambda_lambda = backend::DeviceBuffer<Real>{geometry};
-  g_lambda_theta = backend::DeviceBuffer<Real>{geometry};
-  g_theta_theta = backend::DeviceBuffer<Real>{geometry};
-  g_phi_phi = backend::DeviceBuffer<Real>{geometry};
-  jacobian = backend::DeviceBuffer<Real>{geometry};
-  b_theta = backend::DeviceBuffer<Real>{geometry};
-  b_phi = backend::DeviceBuffer<Real>{geometry};
-  j_theta = backend::DeviceBuffer<Real>{geometry};
-  j_phi = backend::DeviceBuffer<Real>{geometry};
+  backend::DeviceBuffer<Real> next_pressure{radial};
+  backend::DeviceBuffer<Real> next_pressure_lambda{radial};
+  backend::DeviceBuffer<Real> next_f{radial};
+  backend::DeviceBuffer<Real> next_f_squared{radial};
+  backend::DeviceBuffer<Real> next_f_lambda{radial};
+  backend::DeviceBuffer<Real> next_ff_lambda{radial};
+  backend::DeviceBuffer<Real> next_density{radial};
+
+  backend::DeviceBuffer<Real> next_g_lambda_lambda{geometry};
+  backend::DeviceBuffer<Real> next_g_lambda_theta{geometry};
+  backend::DeviceBuffer<Real> next_g_theta_theta{geometry};
+  backend::DeviceBuffer<Real> next_g_phi_phi{geometry};
+  backend::DeviceBuffer<Real> next_jacobian{geometry};
+  backend::DeviceBuffer<Real> next_b_theta{geometry};
+  backend::DeviceBuffer<Real> next_b_phi{geometry};
+  backend::DeviceBuffer<Real> next_j_theta{geometry};
+  backend::DeviceBuffer<Real> next_j_phi{geometry};
+
+  pressure = std::move(next_pressure);
+  pressure_lambda = std::move(next_pressure_lambda);
+  f = std::move(next_f);
+  f_squared = std::move(next_f_squared);
+  f_lambda = std::move(next_f_lambda);
+  ff_lambda = std::move(next_ff_lambda);
+  density = std::move(next_density);
+
+  g_lambda_lambda = std::move(next_g_lambda_lambda);
+  g_lambda_theta = std::move(next_g_lambda_theta);
+  g_theta_theta = std::move(next_g_theta_theta);
+  g_phi_phi = std::move(next_g_phi_phi);
+  jacobian = std::move(next_jacobian);
+  b_theta = std::move(next_b_theta);
+  b_phi = std::move(next_b_phi);
+  j_theta = std::move(next_j_theta);
+  j_phi = std::move(next_j_phi);
 
   n_lambda = n_lambda_in;
   n_theta = n_theta_in;
@@ -659,8 +701,12 @@ void launch_build_toroidal_equilibrium(
       out.pressure.device_ptr(), out.pressure_lambda.device_ptr(),
       out.f.device_ptr(), out.f_squared.device_ptr(),
       out.f_lambda.device_ptr(), out.ff_lambda.device_ptr(),
-      out.density.device_ptr(), out.j_theta.device_ptr(),
-      out.j_phi.device_ptr(), device_status.device_ptr());
+      out.density.device_ptr(), out.g_lambda_lambda.device_ptr(),
+      out.g_lambda_theta.device_ptr(), out.g_theta_theta.device_ptr(),
+      out.g_phi_phi.device_ptr(), out.jacobian.device_ptr(),
+      out.b_theta.device_ptr(), out.b_phi.device_ptr(),
+      out.j_theta.device_ptr(), out.j_phi.device_ptr(),
+      device_status.device_ptr());
   QUASAR_HIP_CHECK(hipGetLastError());
 
   backend::device_synchronize(stream);

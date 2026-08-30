@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -19,11 +22,15 @@ using quasar::equilibrium::CriticalKind;
 using quasar::equilibrium::CriticalPoint;
 using quasar::equilibrium::GsConfig;
 using quasar::equilibrium::GsDeviceResult;
+using quasar::equilibrium::GsFluxSurfaces;
+using quasar::equilibrium::GsMagneticField;
 using quasar::equilibrium::GsSolver;
 using quasar::equilibrium::GsStatus;
 using quasar::equilibrium::PolynomialProfile;
 using quasar::numerics::EllipticGrid;
 using quasar::stability::ModeSolveStatus;
+using quasar::stability::ChebyshevBasis;
+using quasar::stability::FluxCoordinateGrid;
 using quasar::stability::StabilityClassification;
 using quasar::stability::StabilityConfig;
 using quasar::stability::StabilityProfiles;
@@ -93,6 +100,23 @@ GsDeviceResult circular_device_equilibrium() {
   return result;
 }
 
+GsDeviceResult metadata_only_device_equilibrium() {
+  GsDeviceResult result;
+  result.status = GsStatus::converged;
+  result.grid = EllipticGrid{3, 3, Real{1}, Real{3}, Real{-1}, Real{1}};
+  result.critical.axis = CriticalPoint{
+      CriticalKind::o_point, Real{2}, Real{0}, Real{1}, true};
+  result.critical.psi_axis = Real{1};
+  result.critical.psi_boundary = Real{0};
+  result.critical.has_closed_surface = true;
+  result.profile_scale = Real{1};
+  result.profile_coefficients.n_p = 1;
+  result.profile_coefficients.p_coeffs[0] = Real{0};
+  result.profile_coefficients.n_f = 1;
+  result.profile_coefficients.f_coeffs[0] = Real{0};
+  return result;
+}
+
 GsDeviceResult solved_gs_device_equilibrium() {
   GsConfig config;
   config.grid = EllipticGrid{33, 33, Real{0.3}, Real{1.9},
@@ -133,6 +157,61 @@ TEST(StabilitySolver, RejectsMalformedConfiguration) {
                std::invalid_argument);
 }
 
+TEST(StabilitySolver, RejectsExtremeResolutionWithoutSignedOverflow) {
+  StabilityConfig config = small_config();
+  config.m_max = std::numeric_limits<int>::max();
+  config.n_theta = std::numeric_limits<int>::max();
+  EXPECT_THROW((void)StabilitySolver(config, constant_profiles()),
+               std::invalid_argument);
+
+  config = small_config();
+  config.minimum_radial_domains = 2;
+  config.chebyshev_order = std::numeric_limits<int>::max() / 2;
+  EXPECT_THROW((void)StabilitySolver(config, constant_profiles()),
+               std::length_error);
+}
+
+TEST(StabilityStorage, RejectsInvalidShapesBeforeDeviceAllocation) {
+  ChebyshevBasis basis;
+  EXPECT_THROW(basis.resize(-1, 1), std::invalid_argument);
+  EXPECT_THROW(basis.resize(1, -1), std::invalid_argument);
+  EXPECT_THROW(basis.resize(0, 1), std::invalid_argument);
+  EXPECT_THROW(basis.resize(1, 0), std::invalid_argument);
+  EXPECT_EQ(basis.order, 0);
+  EXPECT_EQ(basis.n_nodes, 0);
+  EXPECT_EQ(basis.n_domains, 0);
+
+  EXPECT_THROW(basis.resize(std::numeric_limits<int>::max(), 1),
+               std::length_error);
+  EXPECT_THROW(basis.resize(std::numeric_limits<int>::max() - 1,
+                            std::numeric_limits<int>::max()),
+               std::length_error);
+
+  FluxCoordinateGrid coordinates;
+  EXPECT_THROW(coordinates.resize(-1, 1), std::invalid_argument);
+  EXPECT_THROW(coordinates.resize(1, -1), std::invalid_argument);
+  EXPECT_EQ(coordinates.n_psi, 0);
+  EXPECT_EQ(coordinates.n_theta, 0);
+  EXPECT_THROW(coordinates.resize(std::numeric_limits<int>::max(),
+                                  std::numeric_limits<int>::max()),
+               std::length_error);
+}
+
+TEST(StabilityStorage, RejectsUnrepresentableSpectralBasisMetadataOnHost) {
+  ChebyshevBasis basis;
+  basis.order = std::numeric_limits<int>::max();
+  basis.n_nodes = std::numeric_limits<int>::min();
+  basis.n_domains = 2;
+
+  const EllipticGrid grid{4, 4, Real{1}, Real{2}, Real{-1}, Real{1}};
+  GsFluxSurfaces surfaces;
+  GsMagneticField field;
+  FluxCoordinateGrid coordinates;
+  EXPECT_THROW(quasar::stability::launch_build_spectral_flux_coordinates(
+                   grid, surfaces, field, basis, coordinates, nullptr),
+               std::invalid_argument);
+}
+
 TEST(StabilitySolver, PropagatesFailedEquilibriumWithoutLaunchingKernels) {
   GsDeviceResult equilibrium;
   equilibrium.status = GsStatus::residual_stalled;
@@ -153,6 +232,96 @@ TEST(StabilitySolver, PropagatesFailedEquilibriumWithoutLaunchingKernels) {
   EXPECT_FALSE(mode.summary.stiffness_condition.has_value());
   EXPECT_FALSE(mode.summary.inertia_condition.has_value());
   EXPECT_FALSE(mode.summary.eigen_status.has_value());
+}
+
+TEST(StabilitySolver,
+     RejectsMalformedEquilibriumMetadataBeforeLaunchingKernels) {
+  const StabilitySolver solver{small_config(), constant_profiles()};
+  const auto expect_rejected = [&](auto mutate, std::string_view reason) {
+    GsDeviceResult equilibrium = metadata_only_device_equilibrium();
+    mutate(equilibrium);
+    try {
+      (void)solver.solve_mode(equilibrium, 1);
+      ADD_FAILURE() << "malformed equilibrium metadata was accepted";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string_view{error.what()}.find(reason),
+                std::string_view::npos)
+          << error.what();
+    }
+  };
+
+  expect_rejected([](GsDeviceResult& value) { value.critical.axis.valid = false; },
+                  "magnetic axis");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.axis.kind = CriticalKind::x_point;
+      },
+      "magnetic axis");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.axis.r = std::numeric_limits<Real>::quiet_NaN();
+      },
+      "magnetic axis");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.axis.z = std::numeric_limits<Real>::infinity();
+      },
+      "magnetic axis");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.axis.psi =
+            std::numeric_limits<Real>::quiet_NaN();
+      },
+      "magnetic axis");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.axis.r = value.grid.r_min;
+      },
+      "magnetic axis");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.has_closed_surface = false;
+      },
+      "closed flux surface");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.critical_point_overflow = true;
+      },
+      "closed flux surface");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.psi_axis =
+            std::numeric_limits<Real>::quiet_NaN();
+      },
+      "flux normalization");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.psi_boundary =
+            std::numeric_limits<Real>::infinity();
+      },
+      "flux normalization");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.axis.psi = value.critical.psi_axis + Real{1};
+      },
+      "magnetic-axis flux");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.psi_boundary = value.critical.psi_axis;
+      },
+      "normalization span");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.critical.psi_axis = std::numeric_limits<Real>::max();
+        value.critical.axis.psi = value.critical.psi_axis;
+        value.critical.psi_boundary = -std::numeric_limits<Real>::max();
+      },
+      "normalization span");
+  expect_rejected(
+      [](GsDeviceResult& value) {
+        value.profile_scale = std::numeric_limits<Real>::quiet_NaN();
+      },
+      "profile scale");
 }
 
 TEST(StabilitySolver, SolvesAndScansAnAxisExcludedCircularDeviceEquilibrium) {

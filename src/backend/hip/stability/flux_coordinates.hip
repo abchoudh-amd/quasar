@@ -89,8 +89,14 @@ GridView view_of(const EllipticGrid& g) {
 // convergence of that spectral representation.
 __device__ inline Real sample_field(const GridView& g, const Real* f, Real r,
                                     Real z) {
+  if (!isfinite(r) || !isfinite(z)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   Real fi = (r - g.r_min) / g.dr;
   Real fj = (z - g.z_min) / g.dz;
+  if (!isfinite(fi) || !isfinite(fj)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   fi = fmin(fmax(fi, Real{0}), static_cast<Real>(g.nr - 1));
   fj = fmin(fmax(fj, Real{0}), static_cast<Real>(g.nz - 1));
   int i = min(static_cast<int>(fi), g.nr - 2);
@@ -120,8 +126,14 @@ __device__ inline void cubic_lagrange_weights(Real x, Real* w) {
 
 __device__ inline Real sample_field_cubic(const GridView& g, const Real* f,
                                           Real r, Real z) {
+  if (!isfinite(r) || !isfinite(z)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   Real fi = (r - g.r_min) / g.dr;
   Real fj = (z - g.z_min) / g.dz;
+  if (!isfinite(fi) || !isfinite(fj)) {
+    return std::numeric_limits<Real>::quiet_NaN();
+  }
   fi = fmin(fmax(fi, Real{0}), static_cast<Real>(g.nr - 1));
   fj = fmin(fmax(fj, Real{0}), static_cast<Real>(g.nz - 1));
 
@@ -144,6 +156,18 @@ __device__ inline Real sample_field_cubic(const GridView& g, const Real* f,
     value += wz[jj] * row;
   }
   return value;
+}
+
+__device__ inline void invalidate_surface(std::size_t output_base,
+                                          int n_theta, int surface,
+                                          Real* out_r, Real* out_z,
+                                          Real* out_q, int* out_valid) {
+  out_valid[surface] = 0;
+  out_q[surface] = Real{0};
+  for (int j = 0; j < n_theta; ++j) {
+    out_r[output_base + j] = Real{0};
+    out_z[output_base + j] = Real{0};
+  }
 }
 
 // Stage 1 and 2, fused: walk the contour accumulating theta*, then resample.
@@ -169,13 +193,9 @@ __global__ void build_surface_kernel(
   const std::size_t obase = static_cast<std::size_t>(s) * n_theta;
   const int n = surf_count[s];
 
-  if (surf_closed[s] == 0 || n < 4) {
-    out_valid[s] = 0;
-    out_q[s] = Real{0};
-    for (int j = 0; j < n_theta; ++j) {
-      out_r[obase + j] = Real{0};
-      out_z[obase + j] = Real{0};
-    }
+  if (surf_closed[s] != 1 || n < 4 || n > n_contour
+      || !isfinite(surf_psi_n[s])) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
     return;
   }
 
@@ -183,17 +203,46 @@ __global__ void build_surface_kernel(
   // scratch_theta[k] holds the running integral of B_phi/(r B_pol) dl up to
   // contour point k, with entry 0 equal to zero and entry n the full circuit.
   Real acc = Real{0};
+  bool malformed = false;
   scratch_theta[cbase] = Real{0};
   for (int k = 0; k < n; ++k) {
     const int m = (k + 1) % n;
-    const Real dr = surf_r[cbase + m] - surf_r[cbase + k];
-    const Real dz = surf_z[cbase + m] - surf_z[cbase + k];
+    const Real r0 = surf_r[cbase + k];
+    const Real z0 = surf_z[cbase + k];
+    const Real r1 = surf_r[cbase + m];
+    const Real z1 = surf_z[cbase + m];
+    if (!isfinite(r0) || !isfinite(z0) || !isfinite(r1)
+        || !isfinite(z1)) {
+      malformed = true;
+      break;
+    }
+    const Real dr = r1 - r0;
+    const Real dz = z1 - z0;
     const Real dl = sqrt(dr * dr + dz * dz);
-    const Real rm = Real{0.5} * (surf_r[cbase + k] + surf_r[cbase + m]);
-    const Real zm = Real{0.5} * (surf_z[cbase + k] + surf_z[cbase + m]);
+    const Real rm = Real{0.5} * (r0 + r1);
+    const Real zm = Real{0.5} * (z0 + z1);
+    if (!isfinite(dl) || !isfinite(rm) || !isfinite(zm)
+        || !(rm > Real{0})) {
+      malformed = true;
+      break;
+    }
     const Real bp = sample_field(g, b_pol, rm, zm);
     const Real bt = sample_field(g, b_phi, rm, zm);
-    if (bp > Real{0}) acc += bt / (rm * bp) * dl;
+    if (!isfinite(bp) || !isfinite(bt) || !(bp > Real{0})) {
+      malformed = true;
+      break;
+    }
+    const Real denominator = rm * bp;
+    if (!isfinite(denominator) || !(denominator > Real{0})) {
+      malformed = true;
+      break;
+    }
+    const Real increment = bt / denominator * dl;
+    acc += increment;
+    if (!isfinite(increment) || !isfinite(acc)) {
+      malformed = true;
+      break;
+    }
     if (k + 1 < n) scratch_theta[cbase + k + 1] = acc;
   }
   const Real total = acc;
@@ -202,23 +251,32 @@ __global__ void build_surface_kernel(
   // recomputed here so theta* and q come from one accumulation rather than two
   // that could disagree at the last bits and leave theta* not quite reaching
   // 2*pi.
-  const Real q = total / (Real{2} * kPi);
-  out_q[s] = q;
-
-  if (!(fabs(total) > Real{0})) {
-    out_valid[s] = 0;
-    for (int j = 0; j < n_theta; ++j) {
-      out_r[obase + j] = Real{0};
-      out_z[obase + j] = Real{0};
-    }
+  if (malformed || !isfinite(total) || !(fabs(total) > Real{0})) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
     return;
   }
 
   // Normalize to [0, 2*pi). Dividing by the measured total rather than by
   // 2*pi*q guarantees theta* closes exactly on the circuit even where the
   // contour is coarsely resolved.
+  const Real q = total / (Real{2} * kPi);
   const Real norm = Real{2} * kPi / total;
-  for (int k = 0; k < n; ++k) scratch_theta[cbase + k] *= norm;
+  if (!isfinite(q) || q == Real{0} || !isfinite(norm)) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
+    return;
+  }
+  for (int k = 0; k < n; ++k) {
+    const Real normalized = scratch_theta[cbase + k] * norm;
+    if (!isfinite(normalized)) {
+      malformed = true;
+      break;
+    }
+    scratch_theta[cbase + k] = normalized;
+  }
+  if (malformed) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
+    return;
+  }
 
   // -- Stage 2: resample (r, z) at uniform theta* ----------------------------
   // theta* is monotone in k (the integrand is single-signed on a well-formed
@@ -236,11 +294,22 @@ __global__ void build_surface_kernel(
     const Real span = t1 - t0;
     const Real frac = span > Real{0} ? (target - t0) / span : Real{0};
 
-    out_r[obase + j] = surf_r[cbase + k]
-                     + frac * (surf_r[cbase + k1] - surf_r[cbase + k]);
-    out_z[obase + j] = surf_z[cbase + k]
-                     + frac * (surf_z[cbase + k1] - surf_z[cbase + k]);
+    const Real resampled_r = surf_r[cbase + k]
+                           + frac * (surf_r[cbase + k1] - surf_r[cbase + k]);
+    const Real resampled_z = surf_z[cbase + k]
+                           + frac * (surf_z[cbase + k1] - surf_z[cbase + k]);
+    if (!isfinite(frac) || !isfinite(resampled_r) || !isfinite(resampled_z)) {
+      malformed = true;
+      break;
+    }
+    out_r[obase + j] = resampled_r;
+    out_z[obase + j] = resampled_z;
   }
+  if (malformed) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
+    return;
+  }
+  out_q[s] = q;
   out_valid[s] = 1;
 }
 
@@ -265,44 +334,80 @@ __global__ void build_spectral_surface_kernel(
   const std::size_t obase = static_cast<std::size_t>(s) * n_theta;
   const int n = surf_count[s];
 
-  if (surf_closed[s] == 0 || n < 4) {
-    out_valid[s] = 0;
-    out_q[s] = Real{0};
-    for (int j = 0; j < n_theta; ++j) {
-      out_r[obase + j] = Real{0};
-      out_z[obase + j] = Real{0};
-    }
+  if (surf_closed[s] != 1 || n < 4 || n > n_contour
+      || !isfinite(surf_psi_n[s])) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
     return;
   }
 
   Real acc = Real{0};
+  bool malformed = false;
   scratch_theta[cbase] = Real{0};
   for (int k = 0; k < n; ++k) {
     const int m = (k + 1) % n;
-    const Real dr = surf_r[cbase + m] - surf_r[cbase + k];
-    const Real dz = surf_z[cbase + m] - surf_z[cbase + k];
+    const Real r0 = surf_r[cbase + k];
+    const Real z0 = surf_z[cbase + k];
+    const Real r1 = surf_r[cbase + m];
+    const Real z1 = surf_z[cbase + m];
+    if (!isfinite(r0) || !isfinite(z0) || !isfinite(r1)
+        || !isfinite(z1)) {
+      malformed = true;
+      break;
+    }
+    const Real dr = r1 - r0;
+    const Real dz = z1 - z0;
     const Real dl = sqrt(dr * dr + dz * dz);
-    const Real rm = Real{0.5} * (surf_r[cbase + k] + surf_r[cbase + m]);
-    const Real zm = Real{0.5} * (surf_z[cbase + k] + surf_z[cbase + m]);
+    const Real rm = Real{0.5} * (r0 + r1);
+    const Real zm = Real{0.5} * (z0 + z1);
+    if (!isfinite(dl) || !isfinite(rm) || !isfinite(zm)
+        || !(rm > Real{0})) {
+      malformed = true;
+      break;
+    }
     const Real bp = sample_field_cubic(g, b_pol, rm, zm);
     const Real bt = sample_field_cubic(g, b_phi, rm, zm);
-    if (bp > Real{0}) acc += bt / (rm * bp) * dl;
+    if (!isfinite(bp) || !isfinite(bt) || !(bp > Real{0})) {
+      malformed = true;
+      break;
+    }
+    const Real denominator = rm * bp;
+    if (!isfinite(denominator) || !(denominator > Real{0})) {
+      malformed = true;
+      break;
+    }
+    const Real increment = bt / denominator * dl;
+    acc += increment;
+    if (!isfinite(increment) || !isfinite(acc)) {
+      malformed = true;
+      break;
+    }
     if (k + 1 < n) scratch_theta[cbase + k + 1] = acc;
   }
   const Real total = acc;
-  out_q[s] = total / (Real{2} * kPi);
 
-  if (!(fabs(total) > Real{0})) {
-    out_valid[s] = 0;
-    for (int j = 0; j < n_theta; ++j) {
-      out_r[obase + j] = Real{0};
-      out_z[obase + j] = Real{0};
-    }
+  if (malformed || !isfinite(total) || !(fabs(total) > Real{0})) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
     return;
   }
 
+  const Real q = total / (Real{2} * kPi);
   const Real norm = Real{2} * kPi / total;
-  for (int k = 0; k < n; ++k) scratch_theta[cbase + k] *= norm;
+  if (!isfinite(q) || q == Real{0} || !isfinite(norm)) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
+    return;
+  }
+  for (int k = 0; k < n; ++k) {
+    const Real normalized = scratch_theta[cbase + k] * norm;
+    if (!isfinite(normalized)) {
+      malformed = true;
+      break;
+    }
+    scratch_theta[cbase + k] = normalized;
+  }
+  if (malformed) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
+    return;
+  }
 
   int k = 0;
   for (int j = 0; j < n_theta; ++j) {
@@ -317,11 +422,22 @@ __global__ void build_spectral_surface_kernel(
     const Real span = t1 - t0;
     const Real frac = span > Real{0} ? (target - t0) / span : Real{0};
 
-    out_r[obase + j] = surf_r[cbase + k]
-                     + frac * (surf_r[cbase + k1] - surf_r[cbase + k]);
-    out_z[obase + j] = surf_z[cbase + k]
-                     + frac * (surf_z[cbase + k1] - surf_z[cbase + k]);
+    const Real resampled_r = surf_r[cbase + k]
+                           + frac * (surf_r[cbase + k1] - surf_r[cbase + k]);
+    const Real resampled_z = surf_z[cbase + k]
+                           + frac * (surf_z[cbase + k1] - surf_z[cbase + k]);
+    if (!isfinite(frac) || !isfinite(resampled_r) || !isfinite(resampled_z)) {
+      malformed = true;
+      break;
+    }
+    out_r[obase + j] = resampled_r;
+    out_z[obase + j] = resampled_z;
   }
+  if (malformed) {
+    invalidate_surface(obase, n_theta, s, out_r, out_z, out_q, out_valid);
+    return;
+  }
+  out_q[s] = q;
   out_valid[s] = 1;
 }
 
@@ -568,22 +684,47 @@ __global__ void straightness_kernel(GridView g, const Real* __restrict__ r,
   if (i >= n_psi) return;
 
   out[i] = Real{0};
-  if (valid[i] == 0 || q[i] == Real{0}) return;
+  if (valid[i] == 0) return;
+  constexpr Real maximum = std::numeric_limits<Real>::max();
+  if (valid[i] != 1 || !isfinite(q[i]) || q[i] == Real{0}) {
+    out[i] = maximum;
+    return;
+  }
 
   Real worst = Real{0};
   for (int j = 0; j < n_theta; ++j) {
     const std::size_t k = static_cast<std::size_t>(i) * n_theta + j;
     const Real rr = r[k];
+    if (!isfinite(rr) || !isfinite(z[k]) || !isfinite(dr_dtheta[k])
+        || !isfinite(dz_dtheta[k]) || !(rr > Real{0})) {
+      out[i] = maximum;
+      return;
+    }
     const Real bp = sample_field(g, b_pol, rr, z[k]);
     const Real bt = sample_field(g, b_phi, rr, z[k]);
-    if (!(bp > Real{0})) continue;
+    if (!isfinite(bp) || !isfinite(bt) || !(bp > Real{0})) {
+      out[i] = maximum;
+      return;
+    }
 
     // Poloidal arc length per unit theta*, then the toroidal advance per unit
     // theta* the local field produces.
     const Real dl_dtheta = sqrt(dr_dtheta[k] * dr_dtheta[k]
                               + dz_dtheta[k] * dz_dtheta[k]);
-    const Real dphi_dtheta = bt / (rr * bp) * dl_dtheta;
-    worst = fmax(worst, fabs(dphi_dtheta - q[i]) / fabs(q[i]));
+    const Real denominator = rr * bp;
+    if (!isfinite(dl_dtheta) || !isfinite(denominator)
+        || !(denominator > Real{0})) {
+      out[i] = maximum;
+      return;
+    }
+    const Real dphi_dtheta = bt / denominator * dl_dtheta;
+    const Real relative_deviation =
+        fabs(dphi_dtheta - q[i]) / fabs(q[i]);
+    if (!isfinite(dphi_dtheta) || !isfinite(relative_deviation)) {
+      out[i] = maximum;
+      return;
+    }
+    worst = fmax(worst, relative_deviation);
   }
   out[i] = worst;
 }
@@ -620,6 +761,183 @@ void require_owner(const backend::DeviceBuffer<T>& buffer, int expected,
   }
 }
 
+struct LegacyGeometryShape {
+  int n_surfaces{0};
+  int n_contour{0};
+  int n_theta{0};
+  int owner{-1};
+  std::size_t contour_points{0};
+  std::size_t geometry_points{0};
+};
+
+LegacyGeometryShape validate_legacy_geometry(
+    const EllipticGrid& g, const equilibrium::GsFluxSurfaces& surfaces,
+    const equilibrium::GsMagneticField& field,
+    const FluxCoordinateGrid& out) {
+  g.validate();
+  if (surfaces.n_surfaces < 1 || surfaces.n_theta < 4) {
+    throw std::invalid_argument{
+        "GsFluxSurfaces must contain at least one contour with at least four "
+        "points"};
+  }
+  if (out.n_psi != surfaces.n_surfaces || out.n_theta < 3) {
+    throw std::invalid_argument{
+        "FluxCoordinateGrid must contain every flux surface and at least "
+        "three angular points"};
+  }
+
+  const std::size_t n_surfaces =
+      static_cast<std::size_t>(surfaces.n_surfaces);
+  const std::size_t contour_points = checked_product(
+      n_surfaces, static_cast<std::size_t>(surfaces.n_theta),
+      "legacy flux-surface storage overflows size_t");
+  const std::size_t geometry_points = checked_product(
+      n_surfaces, static_cast<std::size_t>(out.n_theta),
+      "legacy flux-coordinate storage overflows size_t");
+
+  require_size(surfaces.r, contour_points, "GsFluxSurfaces::r");
+  require_size(surfaces.z, contour_points, "GsFluxSurfaces::z");
+  require_size(surfaces.count, n_surfaces, "GsFluxSurfaces::count");
+  require_size(surfaces.closed, n_surfaces, "GsFluxSurfaces::closed");
+  require_size(surfaces.psi_n, n_surfaces, "GsFluxSurfaces::psi_n");
+
+  require_size(field.b_poloidal, g.size(), "GsMagneticField::b_poloidal");
+  require_size(field.b_phi, g.size(), "GsMagneticField::b_phi");
+
+  require_size(out.psi_n, n_surfaces, "FluxCoordinateGrid::psi_n");
+  require_size(out.q, n_surfaces, "FluxCoordinateGrid::q");
+  require_size(out.valid, n_surfaces, "FluxCoordinateGrid::valid");
+  require_size(out.r, geometry_points, "FluxCoordinateGrid::r");
+  require_size(out.z, geometry_points, "FluxCoordinateGrid::z");
+  require_size(out.dr_dpsi, geometry_points,
+               "FluxCoordinateGrid::dr_dpsi");
+  require_size(out.dz_dpsi, geometry_points,
+               "FluxCoordinateGrid::dz_dpsi");
+  require_size(out.dr_dtheta, geometry_points,
+               "FluxCoordinateGrid::dr_dtheta");
+  require_size(out.dz_dtheta, geometry_points,
+               "FluxCoordinateGrid::dz_dtheta");
+  require_size(out.jacobian, geometry_points,
+               "FluxCoordinateGrid::jacobian");
+  require_size(out.g_psipsi, geometry_points,
+               "FluxCoordinateGrid::g_psipsi");
+  require_size(out.g_psitheta, geometry_points,
+               "FluxCoordinateGrid::g_psitheta");
+  require_size(out.g_thetatheta, geometry_points,
+               "FluxCoordinateGrid::g_thetatheta");
+
+  const int owner = surfaces.r.owner_device();
+  if (owner < 0) {
+    throw std::invalid_argument{
+        "legacy flux-coordinate inputs are not device-resident"};
+  }
+  require_owner(surfaces.z, owner, "GsFluxSurfaces::z");
+  require_owner(surfaces.count, owner, "GsFluxSurfaces::count");
+  require_owner(surfaces.closed, owner, "GsFluxSurfaces::closed");
+  require_owner(surfaces.psi_n, owner, "GsFluxSurfaces::psi_n");
+  require_owner(field.b_poloidal, owner, "GsMagneticField::b_poloidal");
+  require_owner(field.b_phi, owner, "GsMagneticField::b_phi");
+  require_owner(out.psi_n, owner, "FluxCoordinateGrid::psi_n");
+  require_owner(out.q, owner, "FluxCoordinateGrid::q");
+  require_owner(out.valid, owner, "FluxCoordinateGrid::valid");
+  require_owner(out.r, owner, "FluxCoordinateGrid::r");
+  require_owner(out.z, owner, "FluxCoordinateGrid::z");
+  require_owner(out.dr_dpsi, owner, "FluxCoordinateGrid::dr_dpsi");
+  require_owner(out.dz_dpsi, owner, "FluxCoordinateGrid::dz_dpsi");
+  require_owner(out.dr_dtheta, owner, "FluxCoordinateGrid::dr_dtheta");
+  require_owner(out.dz_dtheta, owner, "FluxCoordinateGrid::dz_dtheta");
+  require_owner(out.jacobian, owner, "FluxCoordinateGrid::jacobian");
+  require_owner(out.g_psipsi, owner, "FluxCoordinateGrid::g_psipsi");
+  require_owner(out.g_psitheta, owner, "FluxCoordinateGrid::g_psitheta");
+  require_owner(out.g_thetatheta, owner,
+                "FluxCoordinateGrid::g_thetatheta");
+  if (backend::current_device() != owner) {
+    throw std::invalid_argument{
+        "legacy flux-coordinate storage is not on the current device"};
+  }
+
+  return LegacyGeometryShape{surfaces.n_surfaces, surfaces.n_theta,
+                             out.n_theta, owner, contour_points,
+                             geometry_points};
+}
+
+struct StraightnessShape {
+  int n_psi{0};
+  int n_theta{0};
+  int owner{-1};
+};
+
+StraightnessShape validate_straightness(
+    const FluxCoordinateGrid& coords, const EllipticGrid& g,
+    const equilibrium::GsMagneticField& field, const Real* d_deviation) {
+  g.validate();
+  if (d_deviation == nullptr) {
+    throw std::invalid_argument{
+        "straightness output must be a non-null device pointer"};
+  }
+  if (coords.n_psi < 1 || coords.n_theta < 1) {
+    throw std::invalid_argument{
+        "straightness check requires non-empty flux coordinates"};
+  }
+
+  const std::size_t radial_points =
+      static_cast<std::size_t>(coords.n_psi);
+  const std::size_t geometry_points = checked_product(
+      radial_points, static_cast<std::size_t>(coords.n_theta),
+      "straightness coordinate storage overflows size_t");
+
+  require_size(coords.psi_n, radial_points, "FluxCoordinateGrid::psi_n");
+  require_size(coords.q, radial_points, "FluxCoordinateGrid::q");
+  require_size(coords.valid, radial_points, "FluxCoordinateGrid::valid");
+  require_size(coords.r, geometry_points, "FluxCoordinateGrid::r");
+  require_size(coords.z, geometry_points, "FluxCoordinateGrid::z");
+  require_size(coords.dr_dpsi, geometry_points,
+               "FluxCoordinateGrid::dr_dpsi");
+  require_size(coords.dz_dpsi, geometry_points,
+               "FluxCoordinateGrid::dz_dpsi");
+  require_size(coords.dr_dtheta, geometry_points,
+               "FluxCoordinateGrid::dr_dtheta");
+  require_size(coords.dz_dtheta, geometry_points,
+               "FluxCoordinateGrid::dz_dtheta");
+  require_size(coords.jacobian, geometry_points,
+               "FluxCoordinateGrid::jacobian");
+  require_size(coords.g_psipsi, geometry_points,
+               "FluxCoordinateGrid::g_psipsi");
+  require_size(coords.g_psitheta, geometry_points,
+               "FluxCoordinateGrid::g_psitheta");
+  require_size(coords.g_thetatheta, geometry_points,
+               "FluxCoordinateGrid::g_thetatheta");
+  require_size(field.b_poloidal, g.size(), "GsMagneticField::b_poloidal");
+  require_size(field.b_phi, g.size(), "GsMagneticField::b_phi");
+
+  const int owner = coords.psi_n.owner_device();
+  if (owner < 0) {
+    throw std::invalid_argument{
+        "straightness inputs are not device-resident"};
+  }
+  require_owner(coords.q, owner, "FluxCoordinateGrid::q");
+  require_owner(coords.valid, owner, "FluxCoordinateGrid::valid");
+  require_owner(coords.r, owner, "FluxCoordinateGrid::r");
+  require_owner(coords.z, owner, "FluxCoordinateGrid::z");
+  require_owner(coords.dr_dpsi, owner, "FluxCoordinateGrid::dr_dpsi");
+  require_owner(coords.dz_dpsi, owner, "FluxCoordinateGrid::dz_dpsi");
+  require_owner(coords.dr_dtheta, owner, "FluxCoordinateGrid::dr_dtheta");
+  require_owner(coords.dz_dtheta, owner, "FluxCoordinateGrid::dz_dtheta");
+  require_owner(coords.jacobian, owner, "FluxCoordinateGrid::jacobian");
+  require_owner(coords.g_psipsi, owner, "FluxCoordinateGrid::g_psipsi");
+  require_owner(coords.g_psitheta, owner, "FluxCoordinateGrid::g_psitheta");
+  require_owner(coords.g_thetatheta, owner,
+                "FluxCoordinateGrid::g_thetatheta");
+  require_owner(field.b_poloidal, owner, "GsMagneticField::b_poloidal");
+  require_owner(field.b_phi, owner, "GsMagneticField::b_phi");
+  if (backend::current_device() != owner) {
+    throw std::invalid_argument{
+        "straightness inputs are not on the current device"};
+  }
+
+  return StraightnessShape{coords.n_psi, coords.n_theta, owner};
+}
+
 struct SpectralGeometryShape {
   int n_local{0};
   int n_contour{0};
@@ -639,7 +957,9 @@ SpectralGeometryShape validate_spectral_geometry(
         "spectral flux coordinates require at least four field-grid nodes "
         "per axis for cubic interpolation"};
   }
-  if (basis.order < 1 || basis.n_nodes != basis.order + 1
+  if (basis.order < 1
+      || static_cast<long long>(basis.n_nodes)
+             != static_cast<long long>(basis.order) + 1LL
       || basis.n_domains < 1) {
     throw std::invalid_argument{
         "spectral flux coordinates require a non-empty Chebyshev basis with "
@@ -758,10 +1078,20 @@ SpectralGeometryShape validate_spectral_geometry(
 }  // namespace
 
 void FluxCoordinateGrid::resize(int n_psi_in, int n_theta_in) {
-  n_psi = n_psi_in;
-  n_theta = n_theta_in;
-  const std::size_t n = static_cast<std::size_t>(n_psi) * n_theta;
-  const std::size_t s = static_cast<std::size_t>(n_psi);
+  if (n_psi_in < 0 || n_theta_in < 0) {
+    throw std::invalid_argument{
+        "FluxCoordinateGrid dimensions must be non-negative"};
+  }
+  const std::size_t s = static_cast<std::size_t>(n_psi_in);
+  const std::size_t n = checked_product(
+      s, static_cast<std::size_t>(n_theta_in),
+      "FluxCoordinateGrid storage overflows size_t");
+
+  // Preflight byte counts before mutating either buffers or shape metadata.
+  // This keeps extreme dimensions deterministic and host-safe.
+  (void)backend::detail::checked_buffer_bytes<Real>(s);
+  (void)backend::detail::checked_buffer_bytes<int>(s);
+  (void)backend::detail::checked_buffer_bytes<Real>(n);
 
   psi_n = backend::DeviceBuffer<Real>{s};
   q = backend::DeviceBuffer<Real>{s};
@@ -777,6 +1107,9 @@ void FluxCoordinateGrid::resize(int n_psi_in, int n_theta_in) {
   g_psipsi = backend::DeviceBuffer<Real>{n};
   g_psitheta = backend::DeviceBuffer<Real>{n};
   g_thetatheta = backend::DeviceBuffer<Real>{n};
+
+  n_psi = n_psi_in;
+  n_theta = n_theta_in;
 }
 
 void launch_build_flux_coordinates(const EllipticGrid& g,
@@ -784,31 +1117,35 @@ void launch_build_flux_coordinates(const EllipticGrid& g,
                                    const equilibrium::GsMagneticField& field,
                                    Real /*axis_r*/, Real /*axis_z*/,
                                    FluxCoordinateGrid& out, stream_t stream) {
+  const LegacyGeometryShape shape =
+      validate_legacy_geometry(g, surfaces, field, out);
   auto* s = static_cast<hipStream_t>(stream);
-  const int n_surfaces = surfaces.n_surfaces;
-  const int n_contour = surfaces.n_theta;
 
   backend::DeviceBuffer<Real> scratch{
-      static_cast<std::size_t>(n_surfaces) * n_contour};
+      shape.contour_points, backend::uninitialized,
+      backend::on_device(shape.owner)};
 
   const dim3 sblock{kBlock1D};
-  const dim3 sgrid{(static_cast<unsigned>(n_surfaces) + kBlock1D - 1) / kBlock1D};
+  const dim3 sgrid{
+      (static_cast<unsigned>(shape.n_surfaces) + kBlock1D - 1) / kBlock1D};
   hipLaunchKernelGGL(build_surface_kernel, sgrid, sblock, 0, s, view_of(g),
                      surfaces.r.device_ptr(), surfaces.z.device_ptr(),
                      surfaces.count.device_ptr(), surfaces.closed.device_ptr(),
                      surfaces.psi_n.device_ptr(),
                      field.b_poloidal.device_ptr(), field.b_phi.device_ptr(),
-                     n_surfaces, n_contour, out.n_theta, out.r.device_ptr(),
+                     shape.n_surfaces, shape.n_contour, shape.n_theta,
+                     out.r.device_ptr(),
                      out.z.device_ptr(), out.q.device_ptr(),
                      out.psi_n.device_ptr(), out.valid.device_ptr(),
                      scratch.device_ptr());
   QUASAR_HIP_CHECK(hipGetLastError());
 
   const dim3 mblock{kBlock2D, kBlock2D};
-  hipLaunchKernelGGL(metric_kernel, grid_2d(out.n_theta, out.n_psi, mblock),
+  hipLaunchKernelGGL(metric_kernel,
+                     grid_2d(shape.n_theta, shape.n_surfaces, mblock),
                      mblock, 0, s, out.r.device_ptr(), out.z.device_ptr(),
-                     out.psi_n.device_ptr(), out.valid.device_ptr(), out.n_psi,
-                     out.n_theta, out.dr_dpsi.device_ptr(),
+                     out.psi_n.device_ptr(), out.valid.device_ptr(),
+                     shape.n_surfaces, shape.n_theta, out.dr_dpsi.device_ptr(),
                      out.dz_dpsi.device_ptr(), out.dr_dtheta.device_ptr(),
                      out.dz_dtheta.device_ptr(), out.jacobian.device_ptr(),
                      out.g_psipsi.device_ptr(), out.g_psitheta.device_ptr(),
@@ -901,14 +1238,17 @@ void launch_check_straightness(const FluxCoordinateGrid& coords,
                                const EllipticGrid& g,
                                const equilibrium::GsMagneticField& field,
                                Real* d_deviation, stream_t stream) {
+  const StraightnessShape shape =
+      validate_straightness(coords, g, field, d_deviation);
   const dim3 block{kBlock1D};
-  const dim3 grid{(static_cast<unsigned>(coords.n_psi) + kBlock1D - 1) / kBlock1D};
+  const dim3 grid{
+      (static_cast<unsigned>(shape.n_psi) + kBlock1D - 1) / kBlock1D};
   hipLaunchKernelGGL(straightness_kernel, grid, block, 0,
                      static_cast<hipStream_t>(stream), view_of(g),
                      coords.r.device_ptr(), coords.z.device_ptr(),
                      coords.dr_dtheta.device_ptr(),
                      coords.dz_dtheta.device_ptr(), coords.q.device_ptr(),
-                     coords.valid.device_ptr(), coords.n_psi, coords.n_theta,
+                     coords.valid.device_ptr(), shape.n_psi, shape.n_theta,
                      field.b_poloidal.device_ptr(), field.b_phi.device_ptr(),
                      d_deviation);
   QUASAR_HIP_CHECK(hipGetLastError());

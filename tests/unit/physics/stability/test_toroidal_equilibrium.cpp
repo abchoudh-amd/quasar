@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -177,6 +178,44 @@ DensityProfileCoefficients positive_density() {
   density.coefficients[1] = Real{0.25};
   density.coefficients[2] = Real{0.1};
   return density;
+}
+
+void expect_empty(const ToroidalEquilibriumFields& fields) {
+  const DeviceBuffer<Real>* const buffers[] = {
+      &fields.pressure,
+      &fields.pressure_lambda,
+      &fields.f,
+      &fields.f_squared,
+      &fields.f_lambda,
+      &fields.ff_lambda,
+      &fields.density,
+      &fields.g_lambda_lambda,
+      &fields.g_lambda_theta,
+      &fields.g_theta_theta,
+      &fields.g_phi_phi,
+      &fields.jacobian,
+      &fields.b_theta,
+      &fields.b_phi,
+      &fields.j_theta,
+      &fields.j_phi,
+  };
+  for (const DeviceBuffer<Real>* buffer : buffers) EXPECT_TRUE(buffer->empty());
+  EXPECT_EQ(fields.n_lambda, 0);
+  EXPECT_EQ(fields.n_theta, 0);
+  EXPECT_EQ(fields.signed_flux_scale, Real{0});
+}
+
+TEST(ToroidalEquilibrium, ResizeRejectsInvalidSizesBeforeAllocation) {
+  ToroidalEquilibriumFields fields;
+
+  EXPECT_THROW(fields.resize(-1, 1), std::invalid_argument);
+  EXPECT_THROW(fields.resize(1, -1), std::invalid_argument);
+  expect_empty(fields);
+
+  constexpr int maximum_dimension = std::numeric_limits<int>::max();
+  EXPECT_THROW(fields.resize(maximum_dimension, maximum_dimension),
+               std::length_error);
+  expect_empty(fields);
 }
 
 TEST(ToroidalEquilibrium,
@@ -347,6 +386,43 @@ TEST(ToroidalEquilibrium, RejectsNonpositiveDensityAndToroidalFieldSquared) {
   }
 }
 
+TEST(ToroidalEquilibrium, RejectsNonfiniteGeneratedGeometry) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP() << "no HIP runtime";
+
+  CoordinateHostData host;
+  host.n_lambda = 1;
+  host.n_theta = 1;
+  host.lambda = {Real{0.5}};
+  host.q = {Real{1}};
+  host.valid = {1};
+  const Real radius =
+      Real{2} * std::sqrt(std::numeric_limits<Real>::max());
+  const Real radial_scale = Real{1} / radius;
+  host.r = {radius};
+  host.z = {Real{0}};
+  host.r_lambda = {radial_scale};
+  host.z_lambda = {Real{0}};
+  host.r_theta = {Real{0}};
+  host.z_theta = {Real{1}};
+  host.jacobian = {radius * radial_scale};
+  host.g_ll_contravariant = {Real{1}};
+  host.g_lt_contravariant = {Real{0}};
+  host.g_tt_contravariant = {Real{1}};
+
+  FluxCoordinateGrid coords = to_device(host);
+  ToroidalEquilibriumFields fields{host.n_lambda, host.n_theta};
+  try {
+    quasar::stability::launch_build_toroidal_equilibrium(
+        coords, analytic_profile(), Real{2}, Real{0}, Real{1}, Real{2},
+        positive_density(), fields, nullptr);
+    FAIL() << "overflowed generated metric was accepted";
+  } catch (const quasar::stability::ToroidalEquilibriumValidationError& error) {
+    EXPECT_EQ(error.status(),
+              quasar::stability::ToroidalEquilibriumValidationStatus::
+                  invalid_geometry);
+  }
+}
+
 CoordinateHostData constructed_pest_coordinates(const EllipticGrid& grid) {
   CoordinateHostData host;
   host.n_lambda = 2;
@@ -459,6 +535,19 @@ TEST(ToroidalGeometryValidation,
     EXPECT_NEAR(reversed_q[static_cast<std::size_t>(s)], Real{2}, Real{2e-14});
     EXPECT_NEAR(reversed_s[static_cast<std::size_t>(s)], Real{2}, Real{2e-14});
   }
+
+  auto malformed_z = host.z;
+  malformed_z[0] = std::numeric_limits<Real>::quiet_NaN();
+  upload(coords.z, malformed_z);
+  quasar::stability::launch_validate_toroidal_geometry(
+      coords, grid, field, equilibrium, validation, nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  const auto malformed_summary =
+      quasar::stability::summarize_toroidal_geometry_validation(validation,
+                                                                nullptr);
+  EXPECT_FALSE(malformed_summary.ok());
+  EXPECT_EQ(malformed_summary.invalid_surface_count, 1);
+  EXPECT_EQ(malformed_summary.first_invalid_surface, 0);
 }
 
 TEST(ToroidalGeometryValidationSummary,

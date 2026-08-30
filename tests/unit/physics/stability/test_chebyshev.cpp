@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -88,6 +89,39 @@ std::vector<Real> sample(const Basis& b, int d, Real (*f)(Real)) {
   std::vector<Real> v(static_cast<std::size_t>(b.n_nodes));
   for (int i = 0; i < b.n_nodes; ++i) v[static_cast<std::size_t>(i)] = f(b.node(d, i));
   return v;
+}
+
+TEST(Chebyshev, RejectsMalformedLaunchShapesBeforeDeviceAccess) {
+  RadialDomains domains{};
+  ChebyshevBasis basis{};
+
+  EXPECT_THROW(quasar::stability::launch_build_chebyshev_basis(
+                   nullptr, basis, nullptr),
+               std::invalid_argument);
+  EXPECT_THROW(quasar::stability::launch_build_chebyshev_basis(
+                   &domains, basis, nullptr),
+               std::invalid_argument);
+
+  basis.order = std::numeric_limits<int>::max();
+  basis.n_nodes = std::numeric_limits<int>::min();
+  basis.n_domains = 1;
+  EXPECT_THROW(quasar::stability::launch_build_chebyshev_basis(
+                   &domains, basis, nullptr),
+               std::invalid_argument);
+
+  basis.order = 1;
+  basis.n_nodes = 2;
+  basis.n_domains = RadialDomains::kMaxDomains + 1;
+  EXPECT_THROW(quasar::stability::launch_build_chebyshev_basis(
+                   &domains, basis, nullptr),
+               std::invalid_argument);
+
+  // The dimensions are now internally consistent, but all three buffers are
+  // empty. Exact-size validation must reject them before querying a device.
+  basis.n_domains = 1;
+  EXPECT_THROW(quasar::stability::launch_build_chebyshev_basis(
+                   &domains, basis, nullptr),
+               std::invalid_argument);
 }
 
 // Nodes must include both endpoints exactly, since interface continuity is

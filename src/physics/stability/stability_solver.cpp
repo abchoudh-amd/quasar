@@ -60,10 +60,18 @@ void validate_config(const StabilityConfig& config,
       || config.minimum_radial_domains <= 0
       || config.minimum_radial_domains > RadialDomains::kMaxDomains
       || config.chebyshev_order <= 0 || config.m_max < 0
-      || config.n_theta < 4 * config.m_max + 1
+      || static_cast<long long>(config.n_theta)
+             < 4LL * static_cast<long long>(config.m_max) + 1LL
       || config.f_profile_samples < 2) {
     throw std::invalid_argument{
         "StabilitySolver: invalid spectral or tracing resolution"};
+  }
+  const long long minimum_radial_nodes =
+      static_cast<long long>(config.minimum_radial_domains)
+      * (static_cast<long long>(config.chebyshev_order) + 1LL);
+  if (minimum_radial_nodes > std::numeric_limits<int>::max()) {
+    throw std::length_error{
+        "StabilitySolver: local radial node count does not fit in int"};
   }
   if (!finite_nonnegative(config.minimum_domain_width)
       || config.minimum_domain_width
@@ -96,6 +104,46 @@ void validate_config(const StabilityConfig& config,
 
 void validate_equilibrium_contract(const GsDeviceResult& gs) {
   gs.grid.validate();
+  const auto& critical = gs.critical;
+  if (!critical.axis.valid
+      || critical.axis.kind != equilibrium::CriticalKind::o_point
+      || !std::isfinite(critical.axis.r)
+      || !std::isfinite(critical.axis.z)
+      || !std::isfinite(critical.axis.psi)
+      || !(critical.axis.r > gs.grid.r_min)
+      || !(critical.axis.r < gs.grid.r_max)
+      || !(critical.axis.z > gs.grid.z_min)
+      || !(critical.axis.z < gs.grid.z_max)) {
+    throw std::invalid_argument{
+        "StabilitySolver: Grad--Shafranov result lacks a valid finite "
+        "interior magnetic axis"};
+  }
+  if (!critical.has_closed_surface || critical.critical_point_overflow) {
+    throw std::invalid_argument{
+        "StabilitySolver: Grad--Shafranov result lacks a trustworthy closed "
+        "flux surface"};
+  }
+  if (!std::isfinite(critical.psi_axis)
+      || !std::isfinite(critical.psi_boundary)) {
+    throw std::invalid_argument{
+        "StabilitySolver: Grad--Shafranov flux normalization is non-finite"};
+  }
+  if (critical.axis.psi != critical.psi_axis) {
+    throw std::invalid_argument{
+        "StabilitySolver: Grad--Shafranov magnetic-axis flux metadata is "
+        "inconsistent"};
+  }
+  const Real flux_span = critical.psi_boundary - critical.psi_axis;
+  if (!std::isfinite(flux_span) || flux_span == Real{0}) {
+    throw std::invalid_argument{
+        "StabilitySolver: Grad--Shafranov flux normalization span must be "
+        "finite and nonzero"};
+  }
+  if (!std::isfinite(gs.profile_scale)) {
+    throw std::invalid_argument{
+        "StabilitySolver: Grad--Shafranov profile scale must be finite"};
+  }
+
   const std::size_t expected = gs.grid.size();
   if (gs.psi.size() != expected || gs.j_phi.size() != expected) {
     throw std::invalid_argument{
@@ -206,6 +254,7 @@ RationalSurfaces relevant_rational_surfaces(
     Real lambda_outer) {
   RationalSurfaces filtered{};
   filtered.overflow = source.overflow;
+  filtered.has_rational_interval = source.has_rational_interval;
   const int count = std::clamp(source.count, 0,
                                RationalSurfaces::kMaxRational);
   for (int k = 0; k < count; ++k) {
@@ -263,7 +312,8 @@ ModeEigenResult solve_prepared_mode(
   DeviceBuffer<RationalSurfaces> device_rational{
       1, backend::on_device(owner)};
   launch_locate_rational_surfaces(prepared.probe_coordinates, n_toroidal,
-                                  device_rational.device_ptr(), stream);
+                                  config.m_max, device_rational.device_ptr(),
+                                  stream);
   RationalSurfaces raw_rational{};
   device_rational.copy_to_host_async(&raw_rational, 1, stream);
   backend::device_synchronize(stream);
@@ -278,7 +328,7 @@ ModeEigenResult solve_prepared_mode(
   // continuum interface conditions for the two tangential components have not
   // yet been derived.  Do not turn that experimental admissible space into an
   // optimizer-facing stability classification.
-  if (rational.count != 0) {
+  if (rational.has_rational_interval || rational.count != 0) {
     result.summary.status = ModeSolveStatus::unsupported_rational_topology;
     return result;
   }
@@ -299,11 +349,21 @@ ModeEigenResult solve_prepared_mode(
   }
 
   ChebyshevBasis basis{config.chebyshev_order, domains.n_domains};
+  const std::size_t n_lambda_size = backend::detail::checked_size_product(
+      static_cast<std::size_t>(basis.n_domains),
+      static_cast<std::size_t>(basis.n_nodes),
+      "StabilitySolver: local radial node count overflows size_t");
+  if (n_lambda_size
+      > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::length_error{
+        "StabilitySolver: local radial node count does not fit in int"};
+  }
+  const int n_lambda = static_cast<int>(n_lambda_size);
+
   launch_build_chebyshev_basis(device_domains.device_ptr(), basis, stream);
   SpectralDofLayout layout{domains, config.chebyshev_order, config.m_max,
                            config.n_theta};
 
-  const int n_lambda = basis.n_domains * basis.n_nodes;
   GsFluxSurfaces spectral_surfaces{n_lambda, config.contour_points};
   equilibrium::launch_gs_trace_surfaces_at(
       gs.grid, gs.psi.device_ptr(), prepared.field, gs.critical.axis.r,
@@ -389,22 +449,34 @@ ModeEigenResult solve_prepared_mode(
   eigensystem.eigenvalues.copy_to_host_async(
       eigenvalues.data(), eigenvalues.size(), stream);
   backend::device_synchronize(stream);
+  if (eigenvalues.empty()
+      || !std::all_of(eigenvalues.begin(), eigenvalues.end(),
+                      [](Real value) { return std::isfinite(value); })) {
+    eigensystem.status = numerics::GeneralizedEigenStatus::nonfinite_result;
+    result.summary.eigen_status = eigensystem.status;
+    result.summary.status = ModeSolveStatus::eigensolver_failed;
+    result.eigensystem = std::move(eigensystem);
+    return result;
+  }
   const Real minimum = eigenvalues.front();
   const Real spectral_scale = std::max(
       std::abs(eigenvalues.front()), std::abs(eigenvalues.back()));
   const Real threshold = config.eigenvalue_absolute_tolerance
                        + config.eigenvalue_relative_tolerance * spectral_scale;
+  const bool threshold_unresolved =
+      !std::isfinite(spectral_scale) || !std::isfinite(threshold);
 
   result.summary.minimum_omega_squared = minimum;
   result.summary.maximum_absolute_omega_squared = spectral_scale;
   result.summary.eigenvalue_resolution_threshold = threshold;
   result.summary.growth_rate =
-      minimum < -threshold ? std::sqrt(-minimum) : Real{0};
-  const bool mass_unresolved =
-      !result.summary.inertia_condition->ok()
+      !threshold_unresolved && minimum < -threshold ? std::sqrt(-minimum)
+                                                    : Real{0};
+  const bool classification_unresolved =
+      threshold_unresolved || !result.summary.inertia_condition->ok()
       || result.summary.inertia_condition->digits_lost
              > config.maximum_mass_digits_lost;
-  if (mass_unresolved) {
+  if (classification_unresolved) {
     result.summary.classification = StabilityClassification::unresolved;
   } else if (minimum < -threshold) {
     result.summary.classification = StabilityClassification::unstable;

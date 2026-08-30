@@ -25,7 +25,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -147,6 +149,209 @@ Real deviation_in_band(const Fixture& fx, Real lo, Real hi, int* counted) {
   }
   if (counted) *counted = n;
   return worst;
+}
+
+TEST(FluxCoordinates, RejectsMalformedLaunchShapesBeforeDeviceAccess) {
+  EllipticGrid grid{3, 3, Real{0.5}, Real{1.5}, Real{-0.5}, Real{0.5}};
+  quasar::equilibrium::GsFluxSurfaces surfaces{};
+  quasar::equilibrium::GsMagneticField field{};
+  quasar::stability::FluxCoordinateGrid coords{};
+  const auto launch = [&] {
+    quasar::stability::launch_build_flux_coordinates(
+        grid, surfaces, field, Real{1}, Real{0}, coords, nullptr);
+  };
+
+  EXPECT_THROW(launch(), std::invalid_argument);
+
+  surfaces.n_surfaces = 1;
+  surfaces.n_theta = 3;
+  EXPECT_THROW(launch(), std::invalid_argument);
+
+  surfaces.n_theta = 4;
+  coords.n_psi = 2;
+  coords.n_theta = 3;
+  EXPECT_THROW(launch(), std::invalid_argument);
+
+  coords.n_psi = 1;
+  coords.n_theta = 2;
+  EXPECT_THROW(launch(), std::invalid_argument);
+
+  // The metadata is now valid, but every buffer is still empty. The shape
+  // check must reject that state before querying a device or launching work.
+  coords.n_theta = 3;
+  EXPECT_THROW(launch(), std::invalid_argument);
+
+  Real host_output = Real{0};
+  EXPECT_THROW(quasar::stability::launch_check_straightness(
+                   coords, grid, field, nullptr, nullptr),
+               std::invalid_argument);
+  EXPECT_THROW(quasar::stability::launch_check_straightness(
+                   coords, grid, field, &host_output, nullptr),
+               std::invalid_argument);
+}
+
+TEST(FluxCoordinates, InvalidatesMalformedSurfaceMetadataAndCoordinates) {
+  Fixture fixture;
+  ASSERT_TRUE(fixture.ok()) << "equilibrium did not converge";
+
+  const auto before = download_int(fixture.coords.valid, kNSurfaces);
+  const auto found = std::find(before.begin(), before.end(), 1);
+  ASSERT_NE(found, before.end()) << "no valid surface available for mutation";
+  const int surface = static_cast<int>(found - before.begin());
+
+  const auto original_contour_r = download(
+      fixture.surfaces.r,
+      static_cast<std::size_t>(kNSurfaces) * fixture.n_contour);
+  auto contour_r = original_contour_r;
+  contour_r[static_cast<std::size_t>(surface) * fixture.n_contour] =
+      std::numeric_limits<Real>::quiet_NaN();
+  fixture.surfaces.r.copy_from_host(contour_r.data(), contour_r.size());
+
+  const auto rebuilt_validity = [&] {
+    quasar::stability::launch_build_flux_coordinates(
+        fixture.grid, fixture.surfaces, fixture.field,
+        fixture.result.critical.axis.r, fixture.result.critical.axis.z,
+        fixture.coords, nullptr);
+    quasar::backend::device_synchronize(nullptr);
+    return download_int(fixture.coords.valid, kNSurfaces);
+  };
+  EXPECT_EQ(rebuilt_validity()[static_cast<std::size_t>(surface)], 0);
+
+  fixture.surfaces.r.copy_from_host(original_contour_r.data(),
+                                    original_contour_r.size());
+  auto counts = download_int(fixture.surfaces.count, kNSurfaces);
+  const auto original_counts = counts;
+  counts[static_cast<std::size_t>(surface)] = fixture.n_contour + 1;
+  fixture.surfaces.count.copy_from_host(counts.data(), counts.size());
+  EXPECT_EQ(rebuilt_validity()[static_cast<std::size_t>(surface)], 0);
+
+  fixture.surfaces.count.copy_from_host(original_counts.data(),
+                                        original_counts.size());
+  const auto original_psi_n =
+      download(fixture.surfaces.psi_n, kNSurfaces);
+  auto psi_n = original_psi_n;
+  psi_n[static_cast<std::size_t>(surface)] =
+      std::numeric_limits<Real>::quiet_NaN();
+  fixture.surfaces.psi_n.copy_from_host(psi_n.data(), psi_n.size());
+  EXPECT_EQ(rebuilt_validity()[static_cast<std::size_t>(surface)], 0);
+
+  fixture.surfaces.psi_n.copy_from_host(original_psi_n.data(),
+                                        original_psi_n.size());
+  ASSERT_EQ(rebuilt_validity()[static_cast<std::size_t>(surface)], 1);
+
+  DeviceBuffer<Real> deviation{static_cast<std::size_t>(kNSurfaces)};
+  const auto check_straightness = [&] {
+    quasar::stability::launch_check_straightness(
+        fixture.coords, fixture.grid, fixture.field, deviation.device_ptr(),
+        nullptr);
+    quasar::backend::device_synchronize(nullptr);
+    return download(deviation, kNSurfaces);
+  };
+
+  auto q = download(fixture.coords.q, kNSurfaces);
+  q[static_cast<std::size_t>(surface)] = Real{0};
+  fixture.coords.q.copy_from_host(q.data(), q.size());
+  EXPECT_EQ(check_straightness()[static_cast<std::size_t>(surface)],
+            std::numeric_limits<Real>::max());
+
+  q[static_cast<std::size_t>(surface)] =
+      std::numeric_limits<Real>::quiet_NaN();
+  fixture.coords.q.copy_from_host(q.data(), q.size());
+  EXPECT_EQ(check_straightness()[static_cast<std::size_t>(surface)],
+            std::numeric_limits<Real>::max());
+
+  auto validity = download_int(fixture.coords.valid, kNSurfaces);
+  validity[static_cast<std::size_t>(surface)] = 0;
+  fixture.coords.valid.copy_from_host(validity.data(), validity.size());
+  EXPECT_EQ(check_straightness()[static_cast<std::size_t>(surface)], Real{0});
+}
+
+TEST(FluxCoordinates, RejectsASingleZeroPoloidalFieldSample) {
+  Fixture fixture;
+  ASSERT_TRUE(fixture.ok()) << "equilibrium did not converge";
+
+  const auto initial_valid = download_int(fixture.coords.valid, kNSurfaces);
+  const auto found = std::find(initial_valid.begin(), initial_valid.end(), 1);
+  ASSERT_NE(found, initial_valid.end()) << "no valid surface available";
+  const int surface = static_cast<int>(found - initial_valid.begin());
+  const std::size_t base =
+      static_cast<std::size_t>(surface) * fixture.n_contour;
+
+  auto b_pol = download(fixture.field.b_poloidal, fixture.grid.size());
+  const auto original_b_pol = b_pol;
+  const int i = fixture.grid.nr / 2;
+  const int j = fixture.grid.nz / 2;
+  for (const int jj : {j, j + 1}) {
+    for (const int ii : {i, i + 1}) {
+      b_pol[fixture.grid.index(ii, jj)] = Real{0};
+    }
+  }
+  fixture.field.b_poloidal.copy_from_host(b_pol.data(), b_pol.size());
+
+  auto contour_r = download(
+      fixture.surfaces.r,
+      static_cast<std::size_t>(kNSurfaces) * fixture.n_contour);
+  auto contour_z = download(
+      fixture.surfaces.z,
+      static_cast<std::size_t>(kNSurfaces) * fixture.n_contour);
+  const auto original_contour_r = contour_r;
+  const auto original_contour_z = contour_z;
+  const Real sample_r =
+      Real{0.5} * (fixture.grid.r(i) + fixture.grid.r(i + 1));
+  const Real sample_z =
+      Real{0.5} * (fixture.grid.z(j) + fixture.grid.z(j + 1));
+  contour_r[base] = sample_r;
+  contour_z[base] = fixture.grid.z(j);
+  contour_r[base + 1] = sample_r;
+  contour_z[base + 1] = fixture.grid.z(j + 1);
+  fixture.surfaces.r.copy_from_host(contour_r.data(), contour_r.size());
+  fixture.surfaces.z.copy_from_host(contour_z.data(), contour_z.size());
+
+  quasar::stability::launch_build_flux_coordinates(
+      fixture.grid, fixture.surfaces, fixture.field,
+      fixture.result.critical.axis.r, fixture.result.critical.axis.z,
+      fixture.coords, nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  EXPECT_EQ(download_int(fixture.coords.valid, kNSurfaces)
+                [static_cast<std::size_t>(surface)],
+            0);
+
+  fixture.field.b_poloidal.copy_from_host(original_b_pol.data(),
+                                           original_b_pol.size());
+  fixture.surfaces.r.copy_from_host(original_contour_r.data(),
+                                    original_contour_r.size());
+  fixture.surfaces.z.copy_from_host(original_contour_z.data(),
+                                    original_contour_z.size());
+  quasar::stability::launch_build_flux_coordinates(
+      fixture.grid, fixture.surfaces, fixture.field,
+      fixture.result.critical.axis.r, fixture.result.critical.axis.z,
+      fixture.coords, nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  ASSERT_EQ(download_int(fixture.coords.valid, kNSurfaces)
+                [static_cast<std::size_t>(surface)],
+            1);
+
+  fixture.field.b_poloidal.copy_from_host(b_pol.data(), b_pol.size());
+  auto coordinate_r = download(
+      fixture.coords.r,
+      static_cast<std::size_t>(kNSurfaces) * kNThetaStar);
+  auto coordinate_z = download(
+      fixture.coords.z,
+      static_cast<std::size_t>(kNSurfaces) * kNThetaStar);
+  const std::size_t coordinate =
+      static_cast<std::size_t>(surface) * kNThetaStar;
+  coordinate_r[coordinate] = sample_r;
+  coordinate_z[coordinate] = sample_z;
+  fixture.coords.r.copy_from_host(coordinate_r.data(), coordinate_r.size());
+  fixture.coords.z.copy_from_host(coordinate_z.data(), coordinate_z.size());
+
+  DeviceBuffer<Real> deviation{static_cast<std::size_t>(kNSurfaces)};
+  quasar::stability::launch_check_straightness(
+      fixture.coords, fixture.grid, fixture.field, deviation.device_ptr(),
+      nullptr);
+  quasar::backend::device_synchronize(nullptr);
+  EXPECT_EQ(download(deviation, kNSurfaces)[static_cast<std::size_t>(surface)],
+            std::numeric_limits<Real>::max());
 }
 
 // THE test. If this passes, theta* is a straight-field-line angle; if it fails,

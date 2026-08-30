@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -345,6 +346,59 @@ TEST(SpectralFluxCoordinates, RejectsShapeAndOrderingMismatches) {
                    fixture.grid, fixture.surfaces, fixture.field,
                    fixture.basis, fixture.coords, nullptr),
                std::invalid_argument);
+}
+
+TEST(SpectralFluxCoordinates,
+     InvalidatesDomainContainingANonfiniteContourCoordinate) {
+  SyntheticGeometry fixture;
+  auto contour_r = download(fixture.surfaces.r);
+  contour_r[0] = std::numeric_limits<Real>::quiet_NaN();
+  fixture.surfaces.r.copy_from_host(contour_r.data(), contour_r.size());
+
+  fixture.build();
+  const auto valid = download(fixture.coords.valid);
+  for (int surface = 0; surface < kNodes; ++surface) {
+    EXPECT_EQ(valid[static_cast<std::size_t>(surface)], 0);
+  }
+  for (int surface = kNodes; surface < kLocal; ++surface) {
+    EXPECT_EQ(valid[static_cast<std::size_t>(surface)], 1);
+  }
+}
+
+TEST(SpectralFluxCoordinates,
+     InvalidatesDomainContainingASingleZeroPoloidalFieldSample) {
+  SyntheticGeometry fixture;
+
+  std::vector<Real> b_pol(fixture.grid.size());
+  std::vector<Real> b_phi(fixture.grid.size());
+  for (int j = 0; j < fixture.grid.nz; ++j) {
+    for (int i = 0; i < fixture.grid.nr; ++i) {
+      const Real r = fixture.grid.r(i);
+      const std::size_t k = fixture.grid.index(i, j);
+      b_pol[k] = r - fixture.grid.r_min;
+      b_phi[k] = r * b_pol[k];
+    }
+  }
+  fixture.field.b_poloidal.copy_from_host(b_pol.data(), b_pol.size());
+  fixture.field.b_phi.copy_from_host(b_phi.data(), b_phi.size());
+
+  auto contour_r = download(fixture.surfaces.r);
+  auto contour_z = download(fixture.surfaces.z);
+  contour_r[0] = fixture.grid.r_min;
+  contour_z[0] = fixture.grid.z(1);
+  contour_r[1] = fixture.grid.r_min;
+  contour_z[1] = fixture.grid.z(2);
+  fixture.surfaces.r.copy_from_host(contour_r.data(), contour_r.size());
+  fixture.surfaces.z.copy_from_host(contour_z.data(), contour_z.size());
+
+  fixture.build();
+  const auto valid = download(fixture.coords.valid);
+  for (int surface = 0; surface < kNodes; ++surface) {
+    EXPECT_EQ(valid[static_cast<std::size_t>(surface)], 0);
+  }
+  for (int surface = kNodes; surface < kLocal; ++surface) {
+    EXPECT_EQ(valid[static_cast<std::size_t>(surface)], 1);
+  }
 }
 
 TEST(SpectralFluxCoordinates, InvalidatesAnEntireCoupledChebyshevDomain) {

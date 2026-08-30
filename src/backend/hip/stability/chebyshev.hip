@@ -41,11 +41,81 @@
 #include <hip/hip_runtime.h>
 
 #include <cstddef>
+#include <limits>
+#include <stdexcept>
+#include <string>
 
 namespace quasar::stability {
 namespace {
 
 inline constexpr Real kPi = Real{3.14159265358979323846};
+
+template <class T>
+void require_size(const backend::DeviceBuffer<T>& buffer,
+                  std::size_t expected, const char* name) {
+  if (buffer.size() != expected) {
+    throw std::invalid_argument{std::string{name} + " has size "
+                                + std::to_string(buffer.size())
+                                + "; expected " + std::to_string(expected)};
+  }
+}
+
+template <class T>
+void require_owner(const backend::DeviceBuffer<T>& buffer, int expected,
+                   const char* name) {
+  if (buffer.owner_device() != expected) {
+    throw std::invalid_argument{std::string{name}
+                                + " is allocated on a different device"};
+  }
+}
+
+struct BasisLaunchShape {
+  int n_nodes{0};
+  int n_domains{0};
+};
+
+BasisLaunchShape validate_basis_launch(const RadialDomains* d_domains,
+                                       const ChebyshevBasis& out) {
+  if (d_domains == nullptr) {
+    throw std::invalid_argument{
+        "Chebyshev basis domains must be a non-null device pointer"};
+  }
+  if (out.order < 1
+      || static_cast<long long>(out.n_nodes)
+             != static_cast<long long>(out.order) + 1LL
+      || out.n_domains < 1
+      || out.n_domains > RadialDomains::kMaxDomains) {
+    throw std::invalid_argument{
+        "Chebyshev basis launch requires order >= 1, n_nodes == order + 1, "
+        "and a supported positive domain count"};
+  }
+
+  const std::size_t n_nodes = static_cast<std::size_t>(out.n_nodes);
+  const std::size_t n_domains = static_cast<std::size_t>(out.n_domains);
+  const std::size_t n_local = backend::detail::checked_size_product(
+      n_domains, n_nodes, "Chebyshev basis node count overflows size_t");
+  const std::size_t n_diff = backend::detail::checked_size_product(
+      n_local, n_nodes,
+      "Chebyshev basis differentiation storage overflows size_t");
+
+  require_size(out.nodes, n_local, "ChebyshevBasis::nodes");
+  require_size(out.weights, n_local, "ChebyshevBasis::weights");
+  require_size(out.diff, n_diff, "ChebyshevBasis::diff");
+
+  const int owner = out.nodes.owner_device();
+  if (owner < 0) {
+    throw std::invalid_argument{
+        "Chebyshev basis storage is not device-resident"};
+  }
+  require_owner(out.weights, owner, "ChebyshevBasis::weights");
+  require_owner(out.diff, owner, "ChebyshevBasis::diff");
+  if (backend::current_device() != owner) {
+    throw std::invalid_argument{
+        "Chebyshev basis storage is not on the current device"};
+  }
+
+  return BasisLaunchShape{out.n_nodes, out.n_domains};
+}
 
 // Reference-interval node: x_i = cos(pi i / N), descending from +1 to -1.
 //
@@ -168,24 +238,51 @@ __global__ void build_basis_kernel(const RadialDomains* __restrict__ domains,
 }  // namespace
 
 void ChebyshevBasis::resize(int order_in, int n_domains_in) {
-  order = order_in;
-  n_nodes = order_in + 1;
-  n_domains = n_domains_in;
+  if (order_in <= 0 || n_domains_in <= 0) {
+    throw std::invalid_argument{
+        "ChebyshevBasis dimensions must be positive"};
+  }
 
-  const std::size_t nn = static_cast<std::size_t>(n_domains) * n_nodes;
+  const std::size_t nodes_per_domain =
+      static_cast<std::size_t>(order_in) + 1;
+  if (nodes_per_domain
+      > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::length_error{
+        "ChebyshevBasis node count does not fit in int"};
+  }
+  const std::size_t nn = backend::detail::checked_size_product(
+      static_cast<std::size_t>(n_domains_in), nodes_per_domain,
+      "ChebyshevBasis node storage overflows size_t");
+  const std::size_t diff_size = backend::detail::checked_size_product(
+      nn, nodes_per_domain,
+      "ChebyshevBasis differentiation storage overflows size_t");
+
+  // Complete every arithmetic check before asking the backend to allocate.
+  // In particular, an extreme but non-negative order must fail as a size
+  // contract violation even on a host with no visible HIP device.
+  (void)backend::detail::checked_buffer_bytes<Real>(nn);
+  (void)backend::detail::checked_buffer_bytes<Real>(diff_size);
+
   nodes = backend::DeviceBuffer<Real>{nn};
   weights = backend::DeviceBuffer<Real>{nn};
-  diff = backend::DeviceBuffer<Real>{nn * static_cast<std::size_t>(n_nodes)};
+  diff = backend::DeviceBuffer<Real>{diff_size};
+
+  order = order_in;
+  n_nodes = static_cast<int>(nodes_per_domain);
+  n_domains = n_domains_in;
 }
 
 void launch_build_chebyshev_basis(const RadialDomains* d_domains,
                                   ChebyshevBasis& out, stream_t stream) {
-  const unsigned threads = out.n_nodes < 256 ? static_cast<unsigned>(out.n_nodes)
-                                             : 256u;
+  const BasisLaunchShape shape = validate_basis_launch(d_domains, out);
+  const unsigned threads = shape.n_nodes < 256
+                               ? static_cast<unsigned>(shape.n_nodes)
+                               : 256u;
   hipLaunchKernelGGL(build_basis_kernel,
-                     dim3{static_cast<unsigned>(out.n_domains)}, dim3{threads},
+                     dim3{static_cast<unsigned>(shape.n_domains)},
+                     dim3{threads},
                      0, static_cast<hipStream_t>(stream), d_domains,
-                     out.n_nodes, out.nodes.device_ptr(),
+                     shape.n_nodes, out.nodes.device_ptr(),
                      out.weights.device_ptr(), out.diff.device_ptr());
   QUASAR_HIP_CHECK(hipGetLastError());
 }

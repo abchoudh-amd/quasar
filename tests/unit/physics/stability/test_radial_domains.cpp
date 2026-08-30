@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -53,10 +54,12 @@ FluxCoordinateGrid synthetic(const std::vector<Real>& q_values,
   return c;
 }
 
-RationalSurfaces locate(const FluxCoordinateGrid& c, int n_toroidal) {
+RationalSurfaces locate(
+    const FluxCoordinateGrid& c, int n_toroidal,
+    int m_max = RationalSurfaces::kMaxRational) {
   DeviceBuffer<RationalSurfaces> d{1};
-  quasar::stability::launch_locate_rational_surfaces(c, n_toroidal,
-                                                     d.device_ptr(), nullptr);
+  quasar::stability::launch_locate_rational_surfaces(
+      c, n_toroidal, m_max, d.device_ptr(), nullptr);
   quasar::backend::device_synchronize(nullptr);
   RationalSurfaces h{};
   d.copy_to_host(&h, 1);
@@ -86,6 +89,68 @@ std::vector<Real> linear_q(int n, Real q0, Real q1) {
         q0 + (q1 - q0) * static_cast<Real>(i) / static_cast<Real>(n - 1);
   }
   return q;
+}
+
+TEST(RadialDomains, RejectsMalformedLaunchContractsBeforeDeviceAccess) {
+  FluxCoordinateGrid coords{};
+  RationalSurfaces rational{};
+  RadialDomains domains{};
+
+  EXPECT_THROW(quasar::stability::launch_locate_rational_surfaces(
+                   coords, 1, 4, nullptr, nullptr),
+               std::invalid_argument);
+  EXPECT_THROW(quasar::stability::launch_locate_rational_surfaces(
+                   coords, 1, -1, &rational, nullptr),
+               std::invalid_argument);
+  EXPECT_THROW(quasar::stability::launch_locate_rational_surfaces(
+                   coords, 1, 4, &rational, nullptr),
+               std::invalid_argument);
+
+  coords.n_psi = 1;
+  EXPECT_THROW(quasar::stability::launch_locate_rational_surfaces(
+                   coords, 1, 4, &rational, nullptr),
+               std::invalid_argument);
+
+  // The sample count is now useful, but the three arrays read by the kernel
+  // are still empty. Exact-size validation must fail before device discovery.
+  coords.n_psi = 2;
+  EXPECT_THROW(quasar::stability::launch_locate_rational_surfaces(
+                   coords, 1, 4, &rational, nullptr),
+               std::invalid_argument);
+
+  EXPECT_THROW(quasar::stability::launch_build_radial_domains(
+                   nullptr, Real{0}, Real{1}, 1, Real{0}, &domains, nullptr),
+               std::invalid_argument);
+  EXPECT_THROW(quasar::stability::launch_build_radial_domains(
+                   &rational, Real{0}, Real{1}, 1, Real{0}, nullptr, nullptr),
+               std::invalid_argument);
+
+  const auto launch_domains = [&](Real lo, Real hi, int count, Real width) {
+    quasar::stability::launch_build_radial_domains(
+        &rational, lo, hi, count, width, &domains, nullptr);
+  };
+  EXPECT_THROW(launch_domains(std::numeric_limits<Real>::quiet_NaN(), Real{1},
+                              1, Real{0}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{0}, std::numeric_limits<Real>::infinity(),
+                              1, Real{0}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{1}, Real{1}, 1, Real{0}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{1}, Real{0}, 1, Real{0}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{0}, Real{1}, 0, Real{0}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{0}, Real{1},
+                              RadialDomains::kMaxDomains + 1, Real{0}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{0}, Real{1}, 1, Real{-1}),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{0}, Real{1}, 1,
+                              std::numeric_limits<Real>::quiet_NaN()),
+               std::invalid_argument);
+  EXPECT_THROW(launch_domains(Real{0}, Real{1}, 1, Real{1}),
+               std::invalid_argument);
 }
 
 TEST(RadialDomains, LocatesIntegerResonancesOnALinearProfile) {
@@ -177,6 +242,37 @@ TEST(RadialDomains, ToroidalModeZeroHasNoResonances) {
   const RationalSurfaces r = locate(c, 0);
   EXPECT_EQ(r.count, 0);
   EXPECT_FALSE(r.overflow);
+}
+
+TEST(RadialDomains, ReportsConstantRationalIntervalAsUnsupportedTopology) {
+  const auto c = synthetic({Real{2}, Real{2}});
+  const RationalSurfaces r = locate(c, 1, 2);
+
+  EXPECT_EQ(r.count, 0);
+  EXPECT_FALSE(r.overflow);
+  EXPECT_TRUE(r.has_rational_interval);
+
+  const RadialDomains d = layout(r, Real{0}, Real{1}, 2, Real{1e-3});
+  EXPECT_TRUE(d.overflow);
+  EXPECT_EQ(d.n_domains, 0);
+}
+
+TEST(RadialDomains, IgnoresConstantRationalIntervalOutsideHarmonicBasis) {
+  const auto c = synthetic({Real{2}, Real{2}});
+  const RationalSurfaces r = locate(c, 1, 1);
+
+  EXPECT_EQ(r.count, 0);
+  EXPECT_FALSE(r.overflow);
+  EXPECT_FALSE(r.has_rational_interval);
+}
+
+TEST(RadialDomains, IrrelevantHighHarmonicsDoNotConsumeLocatorCapacity) {
+  const auto c = synthetic(linear_q(101, Real{1}, Real{2}));
+  const RationalSurfaces r = locate(c, 100, 4);
+
+  EXPECT_EQ(r.count, 0);
+  EXPECT_FALSE(r.overflow);
+  EXPECT_FALSE(r.has_rational_interval);
 }
 
 TEST(RadialDomains, InvalidSurfacesAreSkipped) {

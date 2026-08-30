@@ -152,7 +152,9 @@ ProblemShape validate_shape(const ChebyshevBasis& basis,
                             const FluxCoordinateGrid& coords,
                             const ToroidalEquilibriumFields& equilibrium,
                             const SpectralDofLayout& layout) {
-  if (basis.order <= 0 || basis.n_nodes != basis.order + 1
+  if (basis.order <= 0
+      || static_cast<long long>(basis.n_nodes)
+             != static_cast<long long>(basis.order) + 1LL
       || basis.n_domains <= 0 || domains.n_domains != basis.n_domains) {
     throw std::invalid_argument{
         "toroidal assembly requires a valid Chebyshev/domain layout"};

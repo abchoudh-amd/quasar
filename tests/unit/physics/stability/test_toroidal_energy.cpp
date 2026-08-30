@@ -236,6 +236,27 @@ TEST(ToroidalEnergyStorage, ReportsDenseArithmeticOverflowWithoutThrowing) {
   EXPECT_EQ(bytes, 0u);
 }
 
+TEST(ToroidalEnergyAssembly,
+     RejectsUnrepresentableBasisNodeMetadataOnHost) {
+  ChebyshevBasis basis;
+  basis.order = std::numeric_limits<int>::max();
+  basis.n_nodes = std::numeric_limits<int>::min();
+  basis.n_domains = 2;
+
+  const RadialDomains domains =
+      make_toroidal_domains(/*n_domains=*/2, kNoResonantHarmonic);
+  const SpectralDofLayout layout{
+      domains, std::numeric_limits<int>::max(), /*m_max=*/0, /*n_theta=*/1};
+  FluxCoordinateGrid coordinates;
+  ToroidalEquilibriumFields equilibrium;
+  ToroidalMatrixPair matrices;
+  EXPECT_THROW(
+      quasar::stability::launch_assemble_fixed_boundary_toroidal_matrices(
+          basis, domains, coordinates, equilibrium, layout,
+          ToroidalAssemblyConfig{}, matrices, nullptr),
+      std::invalid_argument);
+}
+
 TEST(ToroidalEnergyAssembly, RejectsAxisAndAxisymmetricToroidalMode) {
   if (!quasar::backend::has_hip_runtime()) GTEST_SKIP();
   ConstantToroidalProblem problem;

@@ -28,15 +28,104 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cmath>
 #include <cstddef>
+#include <stdexcept>
+#include <string>
 
 namespace quasar::stability {
 namespace {
 
+template <class T>
+void require_size(const backend::DeviceBuffer<T>& buffer,
+                  std::size_t expected, const char* name) {
+  if (buffer.size() != expected) {
+    throw std::invalid_argument{std::string{name} + " has size "
+                                + std::to_string(buffer.size())
+                                + "; expected " + std::to_string(expected)};
+  }
+}
+
+template <class T>
+void require_owner(const backend::DeviceBuffer<T>& buffer, int expected,
+                   const char* name) {
+  if (buffer.owner_device() != expected) {
+    throw std::invalid_argument{std::string{name}
+                                + " is allocated on a different device"};
+  }
+}
+
+int validate_rational_surface_launch(const FluxCoordinateGrid& coords,
+                                     int m_max,
+                                     const RationalSurfaces* d_out) {
+  if (d_out == nullptr) {
+    throw std::invalid_argument{
+        "rational-surface output must be a non-null device pointer"};
+  }
+  if (m_max < 0) {
+    throw std::invalid_argument{
+        "locate_rational_surfaces: m_max must be non-negative"};
+  }
+  if (coords.n_psi < 2) {
+    throw std::invalid_argument{
+        "rational-surface location requires at least two flux surfaces"};
+  }
+
+  const std::size_t n_psi = static_cast<std::size_t>(coords.n_psi);
+  (void)backend::detail::checked_buffer_bytes<Real>(n_psi);
+  (void)backend::detail::checked_buffer_bytes<int>(n_psi);
+  require_size(coords.psi_n, n_psi, "FluxCoordinateGrid::psi_n");
+  require_size(coords.q, n_psi, "FluxCoordinateGrid::q");
+  require_size(coords.valid, n_psi, "FluxCoordinateGrid::valid");
+
+  const int owner = coords.psi_n.owner_device();
+  if (owner < 0) {
+    throw std::invalid_argument{
+        "rational-surface inputs are not device-resident"};
+  }
+  require_owner(coords.q, owner, "FluxCoordinateGrid::q");
+  require_owner(coords.valid, owner, "FluxCoordinateGrid::valid");
+  if (backend::current_device() != owner) {
+    throw std::invalid_argument{
+        "rational-surface inputs are not on the current device"};
+  }
+
+  return coords.n_psi;
+}
+
+void validate_radial_domain_launch(const RationalSurfaces* d_rational,
+                                   Real psi_lo, Real psi_hi,
+                                   int min_domains, Real min_width,
+                                   const RadialDomains* d_out) {
+  if (d_rational == nullptr) {
+    throw std::invalid_argument{
+        "radial-domain rational surfaces must be a non-null device pointer"};
+  }
+  if (d_out == nullptr) {
+    throw std::invalid_argument{
+        "radial-domain output must be a non-null device pointer"};
+  }
+  if (!std::isfinite(psi_lo) || !std::isfinite(psi_hi)
+      || !(psi_hi > psi_lo)) {
+    throw std::invalid_argument{
+        "radial-domain bounds must be finite and strictly increasing"};
+  }
+  if (min_domains < 1 || min_domains > RadialDomains::kMaxDomains) {
+    throw std::invalid_argument{
+        "radial-domain minimum count must be positive and supported"};
+  }
+  if (!std::isfinite(min_width) || min_width < Real{0}
+      || min_width >= psi_hi - psi_lo) {
+    throw std::invalid_argument{
+        "radial-domain minimum width must be finite, non-negative, and "
+        "smaller than the domain span"};
+  }
+}
+
 __global__ void locate_rational_kernel(const Real* __restrict__ psi_n,
                                        const Real* __restrict__ q,
                                        const int* __restrict__ valid,
-                                       int n_psi, int n_toroidal,
+                                       int n_psi, int n_toroidal, int m_max,
                                        RationalSurfaces* __restrict__ out) {
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
@@ -55,7 +144,20 @@ __global__ void locate_rational_kernel(const Real* __restrict__ psi_n,
     if (valid[i] == 0 || valid[i + 1] == 0) continue;
     const Real q0 = q[i];
     const Real q1 = q[i + 1];
-    if (q0 == q1) continue;
+    if (!isfinite(q0) || !isfinite(q1)) {
+      res.overflow = true;
+      break;
+    }
+    if (q0 == q1) {
+      const Real scaled = q0 * n_real;
+      const Real candidate = nearbyint(scaled);
+      const Real harmonic_limit = static_cast<Real>(m_max);
+      if (isfinite(scaled) && candidate >= -harmonic_limit
+          && candidate <= harmonic_limit && q0 == candidate / n_real) {
+        res.has_rational_interval = true;
+      }
+      continue;
+    }
 
     // Poloidal numbers whose resonance could lie in this interval. Scanning the
     // bracketed range rather than a fixed window keeps this correct for a
@@ -64,12 +166,15 @@ __global__ void locate_rational_kernel(const Real* __restrict__ psi_n,
     // Multiplication by a negative n reverses the interval.  Form the bounds
     // after multiplication so n and -n locate the same physical surfaces
     // with opposite poloidal-mode labels.
-    const Real lo = fmin(q0 * n_real, q1 * n_real);
-    const Real hi = fmax(q0 * n_real, q1 * n_real);
+    const Real harmonic_limit = static_cast<Real>(m_max);
+    const Real lo = fmax(fmin(q0 * n_real, q1 * n_real), -harmonic_limit);
+    const Real hi = fmin(fmax(q0 * n_real, q1 * n_real), harmonic_limit);
+    if (lo > hi) continue;
     const int m_lo = static_cast<int>(ceil(lo));
     const int m_hi = static_cast<int>(floor(hi));
 
-    for (int m = m_lo; m <= m_hi; ++m) {
+    for (long long harmonic = m_lo; harmonic <= m_hi; ++harmonic) {
+      const int m = static_cast<int>(harmonic);
       const Real target = static_cast<Real>(m) / n_real;
       // Half-open in q so a resonance sitting exactly on a surface is claimed
       // by one interval only, never both.
@@ -114,6 +219,11 @@ __global__ void build_domains_kernel(const RationalSurfaces* __restrict__ ration
   if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
   RadialDomains d{};
+  if (rational->has_rational_interval) {
+    d.overflow = true;
+    *out = d;
+    return;
+  }
   if (!(psi_hi > psi_lo)) {
     *out = d;
     return;
@@ -223,12 +333,13 @@ __global__ void build_domains_kernel(const RationalSurfaces* __restrict__ ration
 }  // namespace
 
 void launch_locate_rational_surfaces(const FluxCoordinateGrid& coords,
-                                     int n_toroidal, RationalSurfaces* d_out,
-                                     stream_t stream) {
+                                     int n_toroidal, int m_max,
+                                     RationalSurfaces* d_out, stream_t stream) {
+  const int n_psi = validate_rational_surface_launch(coords, m_max, d_out);
   hipLaunchKernelGGL(locate_rational_kernel, dim3{1}, dim3{1}, 0,
                      static_cast<hipStream_t>(stream),
                      coords.psi_n.device_ptr(), coords.q.device_ptr(),
-                     coords.valid.device_ptr(), coords.n_psi, n_toroidal,
+                     coords.valid.device_ptr(), n_psi, n_toroidal, m_max,
                      d_out);
   QUASAR_HIP_CHECK(hipGetLastError());
 }
@@ -237,6 +348,8 @@ void launch_build_radial_domains(const RationalSurfaces* d_rational,
                                  Real psi_lo, Real psi_hi, int min_domains,
                                  Real min_width, RadialDomains* d_out,
                                  stream_t stream) {
+  validate_radial_domain_launch(d_rational, psi_lo, psi_hi, min_domains,
+                                min_width, d_out);
   hipLaunchKernelGGL(build_domains_kernel, dim3{1}, dim3{1}, 0,
                      static_cast<hipStream_t>(stream), d_rational, psi_lo,
                      psi_hi, min_domains, min_width, d_out);

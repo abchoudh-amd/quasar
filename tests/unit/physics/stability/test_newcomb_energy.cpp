@@ -763,4 +763,16 @@ TEST(CylindricalNewcomb, RejectsInvalidModesAndStorageShapes) {
                std::invalid_argument);
 }
 
+TEST(CylindricalNewcomb, RejectsUnrepresentableBasisNodeMetadataOnHost) {
+  ChebyshevBasis basis;
+  basis.order = std::numeric_limits<int>::max();
+  basis.n_nodes = std::numeric_limits<int>::min();
+  basis.n_domains = 2;
+
+  EXPECT_THROW(
+      (void)quasar::stability::cylindrical_newcomb_fixed_boundary_dof_count(
+          basis),
+      std::invalid_argument);
+}
+
 }  // namespace

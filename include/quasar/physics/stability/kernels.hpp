@@ -143,6 +143,9 @@ struct RationalSurfaces {
   int  m[kMaxRational]{};      // poloidal number at each resonance
   int  count{0};
   bool overflow{false};
+  // True when q is constant at m/n across a finite radial interval.  Such a
+  // continuum cannot be represented by a list of isolated breakpoints.
+  bool has_rational_interval{false};
 };
 
 struct RadialDomains {
@@ -172,15 +175,17 @@ struct RadialDomains {
   bool overflow{false};
 };
 
-// Locate every psi_n where q = m/n, by scanning adjacent surfaces for a
-// crossing and interpolating within the bracketing pair.
+// Locate every psi_n where q = m/n for |m| <= m_max, by scanning adjacent
+// surfaces for a crossing and interpolating within the bracketing pair.
+// Constant intervals that are themselves rational are reported through
+// RationalSurfaces::has_rational_interval rather than approximated by one cut.
 //
 // Single-threaded: the output is an ordered list built by a sequential scan,
 // and the count is a running index. Parallelizing would need a prefix sum over
 // a handful of entries to produce the same ordering.
 void launch_locate_rational_surfaces(const FluxCoordinateGrid& coords,
-                                     int n_toroidal, RationalSurfaces* d_out,
-                                     stream_t stream);
+                                     int n_toroidal, int m_max,
+                                     RationalSurfaces* d_out, stream_t stream);
 
 // Lay out Chebyshev subintervals, breaking at each rational surface.
 //
