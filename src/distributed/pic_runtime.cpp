@@ -32,6 +32,18 @@
 namespace quasar::distributed {
 namespace {
 
+// Collapse a device charge reduction into a plain long double. The kernel
+// returns a mantissa/exponent pair so that products of an extreme charge and
+// weight never underflow before they are summed; by the time a whole species
+// has been folded the total is an ordinary magnitude again, which is what the
+// cross-rank Allreduce below expects.
+long double scaled_sum_to_long_double(const pic::PicScaledSum& sum) {
+  if (!sum.initialized) return 0.0L;
+  const long double total = static_cast<long double>(sum.sum)
+                          + static_cast<long double>(sum.correction);
+  return std::scalbn(total, sum.exponent);
+}
+
 struct ComponentExtent {
   std::size_t nx{0};
   std::size_t ny{0};
@@ -2560,17 +2572,16 @@ void PicTileRuntime::initialize_global_background() {
       });
   auto tasks = pic_worker_tasks(*runtime_, worker_epoch_, solvers_.size(),
       [this, &local_charge, &local_absolute]
-      (std::size_t local, WorkerContext&) {
+      (std::size_t local, WorkerContext& context) {
+    // Per-species device reduction instead of a full particle snapshot per
+    // endpoint. Only the per-species subtotals are folded on the host; the
+    // cross-rank Allreduce below is unchanged and still runs in long double,
+    // because it sums a handful of rank totals rather than particles.
     for (const auto& species : PicTileAccess::species(*solvers_[local])) {
-      const auto snapshot = species.to_host();
-      for (std::size_t particle = 0; particle < snapshot.x.size(); ++particle) {
-        if (snapshot.alive[particle] == 0) continue;
-        const long double contribution =
-            static_cast<long double>(species.charge()) *
-            static_cast<long double>(snapshot.weight[particle]);
-        local_charge[local] += contribution;
-        local_absolute[local] += std::fabs(contribution);
-      }
+      const auto totals =
+          pic::launch_pic_total_charge(species, context.compute_stream.get());
+      local_charge[local] += scaled_sum_to_long_double(totals.net);
+      local_absolute[local] += scaled_sum_to_long_double(totals.absolute);
     }
   });
   require_worker_success(*workers_, *runtime_, worker_epoch_,

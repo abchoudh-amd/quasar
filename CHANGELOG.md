@@ -431,6 +431,39 @@ interfaces may still change between entries.
   like the grid/plane/line observation kinds.
 
 ### Changed
+- PIC: the diagnostics no longer round-trip through the host. `alive_count` was
+  already a device reduction; `total_kinetic_energy`, `total_em_energy` and
+  `gauss_residual` each used to download all six field components and every
+  particle record and reduce them in `long double` on the CPU. They are now
+  device reductions (`src/backend/hip/pic/diagnostics_hip.hip`), as is the
+  one-time neutralizing-background charge sum in
+  `EmPic2D3V::initialize_neutralizing_background` and its distributed
+  counterpart. What remains on the host is a three-scalar epilogue that
+  normalizes the result and chooses which exception to raise; its cost no
+  longer depends on the grid or particle count.
+
+  The reductions follow the standard set by the Grad–Shafranov port: a
+  deterministic double-double (Knuth two-sum) tree with no floating-point
+  atomics, now factored into `src/backend/hip/reduction_detail.hpp` and shared
+  with `gs_reduce.hip`. Because the summed terms span an enormous dynamic range
+  — an electron mass times a macroparticle weight times a cell volume — each
+  term is carried as a mantissa and a binary exponent rather than being
+  multiplied out, which is the device form of the host `ScaledPositiveSum` that
+  was deleted (`src/backend/hip/scaled_reduction_detail.hpp`).
+
+  This is not bit-for-bit with the deleted host code, and cannot be: `long
+  double` has no device equivalent and a parallel tree does not sum in host
+  order. Accuracy is instead pinned by
+  `tests/unit/physics/pic/test_diagnostics_reduction_accuracy.cpp`, which builds
+  its own long-double oracle and requires the device result to be within a few
+  ulps of it, to be at least an order of magnitude better than a naive double
+  sum, and to be bitwise reproducible across launches. Compensated accumulation
+  in double is worth roughly 106 bits of effective mantissa, so the narrower
+  base type is not a downgrade against the old long-double accumulator.
+
+  `diagnostics_hip.hip` is compiled `-ffp-contract=off`. This is load-bearing:
+  contraction does not perturb the two-sum slightly, it silently turns the
+  compensated sum back into a naive one.
 - Testing: long-running tests are now labelled `slow` and excluded from the
   default `ctest` presets, so `ctest --preset <name>` completes in minutes
   instead of over an hour. Only `python_test_examples` currently carries the

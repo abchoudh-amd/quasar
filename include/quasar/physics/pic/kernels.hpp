@@ -109,6 +109,80 @@ ParticleSpecies::HostSnapshot extract_pic_departing_particles(
     ParticleSpecies& species, int include_x_high, int include_y_high,
     backend::stream_t stream);
 
+// -- Diagnostic reductions ---------------------------------------------------
+//
+// The energy and Gauss-law diagnostics sum strictly positive terms whose
+// individual factors span an enormous dynamic range (a mass of 1e-31 times a
+// weight of 1e10 times a cell volume). Forming those products in double
+// underflows, so each term is carried as a mantissa and a binary exponent and
+// the sum is accumulated in that frame. This POD is that accumulator crossing
+// back from the device.
+//
+// The reduction is O(cells) or O(particles) and runs entirely on device. Only
+// the final normalization to a Real stays on the host, because it must decide
+// between throwing std::domain_error (a field sample was not finite) and
+// std::overflow_error (the total is not representable) -- see
+// src/physics/pic/diagnostics.cpp. That epilogue reads three scalars, not data.
+struct PicScaledSum {
+  // Running sum and its Kahan compensation, both in units of 2^exponent.
+  Real sum{Real{0}};
+  Real correction{Real{0}};
+  int exponent{0};
+  bool initialized{false};
+  // A factor was negative or non-finite: the total is meaningless.
+  bool invalid{false};
+  // A sampled field value was not finite. Reported separately from `invalid`
+  // because the caller raises a different, more specific exception.
+  bool nonfinite_input{false};
+};
+
+// Sum of 0.5*m*|v|^2*w over live particles. Skips dead slots.
+PicScaledSum launch_pic_kinetic_energy(const ParticleSpecies& species,
+                                       backend::stream_t stream);
+
+// Sum of |field|^2 times each staggered sample's own control volume, i.e.
+// twice the Yee electromagnetic energy. Components are NOT collocated before
+// squaring: averaging first would erase a checkerboard mode, which is not the
+// Yee energy norm. `periodic_x`/`periodic_y` select the half-width edge
+// weights; `cylindrical` selects annular control volumes.
+PicScaledSum launch_pic_field_energy(const YeeField2D<Real>& fields,
+                                     Grid2D grid, int periodic_x,
+                                     int periodic_y, int cylindrical,
+                                     backend::stream_t stream);
+
+// Volume-weighted sum of (div(E)-rho)^2 and the matching total volume; the
+// caller forms the RMS from the pair. Kept as two sums rather than one ratio
+// so the host can distinguish an unrepresentable numerator from a degenerate
+// domain volume.
+struct PicGaussResidualSums {
+  PicScaledSum weighted_square;
+  PicScaledSum volume;
+};
+
+PicGaussResidualSums launch_pic_gauss_residual(
+    const YeeField2D<Real>& fields, const ScalarGrid2D<Real>& charge,
+    int fdtd_order, int periodic_x, int periodic_y, int cylindrical,
+    backend::stream_t stream);
+
+// Net and absolute charge carried by one species' live particles.
+//
+// Both are needed together: the net charge sets the neutralizing background,
+// and the doubly-periodic neutrality check is only meaningful as the ratio of
+// the two. Computing them in one pass also guarantees they see identical
+// particle state.
+struct PicChargeTotals {
+  // Signed sum of charge*weight. Unlike the energy sums this one is expected
+  // to cancel to near zero, which is exactly why it is accumulated with
+  // compensation in a shared exponent frame rather than naively.
+  PicScaledSum net;
+  // Sum of |charge*weight|, the scale against which a residual net charge is
+  // judged negligible.
+  PicScaledSum absolute;
+};
+
+PicChargeTotals launch_pic_total_charge(const ParticleSpecies& species,
+                                        backend::stream_t stream);
+
 }  // namespace quasar::pic
 
 // The field-data ABI is phrased in quasar::Real (and YeeField2D<Real> /

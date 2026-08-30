@@ -28,12 +28,18 @@
 // Neither reduction uses a floating-point atomic. Both finish on device via a
 // second single-block pass over the block partials, so the result can stay
 // resident for device-side control flow without a host round trip.
+//
+// The primitives all three properties rest on (two_sum, the double-double
+// accumulator, the block folds) now live in backend/hip/reduction_detail.hpp so
+// the PIC and MHD reductions share exactly this machinery rather than growing
+// near-copies of it. The -ffp-contract=off requirement travels with them.
 
 #include "quasar/backend/device.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
 #include "quasar/physics/equilibrium/kernels.hpp"
 
 #include "backend/hip/hip_check.hpp"
+#include "backend/hip/reduction_detail.hpp"
 
 #include <hip/hip_runtime.h>
 
@@ -44,49 +50,16 @@
 namespace quasar::equilibrium {
 namespace {
 
-inline constexpr unsigned kThreads = 256;
-// Cap on the first-pass block count so the second pass is always a single
-// block. 256 threads folding 1024 partials is four elements each.
-inline constexpr unsigned kMaxBlocks = 1024;
+namespace hd = ::quasar::backend::hip_detail;
 
-// Error-free transformation: s = fl(a+b) and e = the exact rounding error, so
-// that a + b == s + e exactly in real arithmetic. Knuth's two-sum; it needs no
-// assumption about the relative magnitudes of a and b.
-//
-// This depends on -ffp-contract=off (set for the whole equilibrium HIP module).
-// The identity holds only if each operation below rounds separately: if the
-// compiler contracts any of these into an FMA the intermediate is computed at
-// higher precision, `e` stops being the exact residual, and the compensation
-// silently degrades to noise. The flag is documented in the module CMakeLists
-// as protecting the bit-exactness of the line solve; it is protecting this too.
-__device__ inline void two_sum(Real a, Real b, Real& s, Real& e) {
-  s = a + b;
-  const Real bb = s - a;
-  e = (a - (s - bb)) + (b - bb);
-}
+using hd::Acc;
+using hd::acc_add;
+using hd::acc_merge;
+using hd::acc_value;
+using hd::max_propagating_nan;
 
-// Double-double accumulator: `hi` carries the running sum, `lo` the accumulated
-// rounding error.
-struct Acc {
-  Real hi;
-  Real lo;
-};
-
-__device__ inline void acc_add(Acc& a, Real x) {
-  Real s, e;
-  two_sum(a.hi, x, s, e);
-  a.hi = s;
-  a.lo += e;
-}
-
-__device__ inline void acc_merge(Acc& a, const Acc& b) {
-  Real s, e;
-  two_sum(a.hi, b.hi, s, e);
-  a.hi = s;
-  a.lo += e + b.lo;
-}
-
-__device__ inline Real acc_value(const Acc& a) { return a.hi + a.lo; }
+inline constexpr unsigned kThreads = hd::kReduceThreads;
+inline constexpr unsigned kMaxBlocks = hd::kReduceMaxBlocks;
 
 // Interior index decomposition. The reductions run over interior nodes only, so
 // the flat reduction index `t` in [0, n_int) maps to grid node
@@ -98,20 +71,8 @@ __device__ inline std::size_t interior_index(std::size_t t, int nr) {
   return i + static_cast<std::size_t>(nr) * j;
 }
 
-__device__ inline Real max_propagating_nan(Real a, Real b) {
-  if (isnan(a) || isnan(b)) {
-    return std::numeric_limits<Real>::quiet_NaN();
-  }
-  return fmax(a, b);
-}
-
 __device__ inline void block_max_reduce(Real* sdata, unsigned tid) {
-  for (unsigned s = kThreads / 2; s > 0; s >>= 1) {
-    if (tid < s) {
-      sdata[tid] = max_propagating_nan(sdata[tid], sdata[tid + s]);
-    }
-    __syncthreads();
-  }
+  hd::block_max_reduce<kThreads>(sdata, tid);
 }
 
 __global__ void max_abs_pass1(const Real* __restrict__ f,
@@ -167,16 +128,7 @@ __global__ void sum_pass1(const Real* __restrict__ f, Real* __restrict__ p_hi,
   s_lo[tid] = a.lo;
   __syncthreads();
 
-  for (unsigned s = kThreads / 2; s > 0; s >>= 1) {
-    if (tid < s) {
-      Acc x{s_hi[tid], s_lo[tid]};
-      const Acc y{s_hi[tid + s], s_lo[tid + s]};
-      acc_merge(x, y);
-      s_hi[tid] = x.hi;
-      s_lo[tid] = x.lo;
-    }
-    __syncthreads();
-  }
+  hd::block_acc_reduce<kThreads>(s_hi, s_lo, tid);
   if (tid == 0) {
     p_hi[blockIdx.x] = s_hi[0];
     p_lo[blockIdx.x] = s_lo[0];
@@ -200,16 +152,7 @@ __global__ void sum_pass2(const Real* __restrict__ p_hi,
   s_lo[tid] = a.lo;
   __syncthreads();
 
-  for (unsigned s = kThreads / 2; s > 0; s >>= 1) {
-    if (tid < s) {
-      Acc x{s_hi[tid], s_lo[tid]};
-      const Acc y{s_hi[tid + s], s_lo[tid + s]};
-      acc_merge(x, y);
-      s_hi[tid] = x.hi;
-      s_lo[tid] = x.lo;
-    }
-    __syncthreads();
-  }
+  hd::block_acc_reduce<kThreads>(s_hi, s_lo, tid);
   // The cell-area weight is applied once at the very end rather than per
   // element, matching the host (which sums bare values then multiplies) and
   // avoiding nr*nz extra roundings.
@@ -217,9 +160,7 @@ __global__ void sum_pass2(const Real* __restrict__ p_hi,
 }
 
 unsigned block_count(std::size_t n_int) {
-  const std::size_t want = (n_int + kThreads - 1) / kThreads;
-  if (want == 0) return 1u;
-  return want > kMaxBlocks ? kMaxBlocks : static_cast<unsigned>(want);
+  return hd::reduce_block_count(n_int);
 }
 
 }  // namespace

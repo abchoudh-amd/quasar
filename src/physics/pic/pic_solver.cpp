@@ -308,6 +308,18 @@ class ScaledCompensatedSum {
   long double correction_{0.0L};
 };
 
+// Bring a device reduction result into the host accumulator's frame. The
+// kernel's sum and its Kahan correction are added in long double so the
+// compensation it accumulated is not thrown away at the boundary.
+ScaledLongValue to_scaled_long(const PicScaledSum& sum) {
+  if (!sum.initialized) return {};
+  const long double total = static_cast<long double>(sum.sum)
+                          + static_cast<long double>(sum.correction);
+  if (total == 0.0L) return {};
+  int adjustment = 0;
+  return {std::frexp(total, &adjustment), sum.exponent + adjustment};
+}
+
 bool is_cylindrical(const std::string& geometry) { return geometry == "cylindrical"; }
 
 int current_ghost_mode(const boundary::IFieldBoundary& boundary,
@@ -851,19 +863,15 @@ void EmPic2D3V::initialize_neutralizing_background() {
   const bool periodic_torus = periodic_x_ && periodic_y_;
   ScaledLongValue total_charge{};
   if (cfg_.neutralizing_background || periodic_torus) {
+    // Per-species device reduction, combined across species on the host. The
+    // O(particles) work is on the GPU; only the handful of per-species
+    // subtotals are folded here, which is why this stays a host loop.
     ScaledCompensatedSum particle_charge;
     ScaledCompensatedSum absolute_particle_charge;
     for (const auto& s : species_) {
-      const auto snap = s.to_host();
-      for (std::size_t p = 0; p < snap.weight.size(); ++p) {
-        if (snap.alive[p] == 0) continue;
-        auto contribution = scaled_long_product({
-            static_cast<long double>(s.charge()),
-            static_cast<long double>(snap.weight[p])});
-        particle_charge.add(contribution);
-        contribution.mantissa = std::fabs(contribution.mantissa);
-        absolute_particle_charge.add(contribution);
-      }
+      const PicChargeTotals totals = launch_pic_total_charge(s, nullptr);
+      particle_charge.add(to_scaled_long(totals.net));
+      absolute_particle_charge.add(to_scaled_long(totals.absolute));
     }
     total_charge = particle_charge.normalized();
 
