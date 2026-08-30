@@ -27,10 +27,11 @@
 namespace quasar::test {
 
 // Templated on the evaluator so a test can hand the same generic lambda both
-// BiotSavartEvaluator (device SoA, fp64) and BiotSavartEvaluatorF (host, fp32)
-// and compare them -- which is exactly what the precision-comparison tests do.
-// The fp32 sibling is not an IFieldEvaluator and already returns host values, so
-// for it these are pass-throughs.
+// BiotSavartEvaluator (device SoA planes out, fp64) and BiotSavartEvaluatorF
+// (host Field<Vec3f> out, fp32) and compare them -- which is exactly what the
+// precision-comparison tests do. Both now take device-resident points, so the
+// upload is common; only the fp32 sibling's return type differs, and it is
+// already a host value.
 template <class Eval>
 inline constexpr bool is_device_evaluator_v =
     std::is_base_of_v<numerics::IFieldEvaluator, std::decay_t<Eval>>;
@@ -38,45 +39,48 @@ inline constexpr bool is_device_evaluator_v =
 template <class Eval, class Source>
 auto host_evaluate_B(const Eval& evaluator, const Source& source,
                      const core::PointCloud& points) {
+  const core::DevicePointCloud device_points =
+      core::DevicePointCloud::upload(points);
   if constexpr (is_device_evaluator_v<Eval>) {
-    return evaluator.evaluate_B(source, core::DevicePointCloud::upload(points))
-        .to_host();
+    return evaluator.evaluate_B(source, device_points).to_host();
   } else {
-    return evaluator.evaluate_B(source, points);
+    return evaluator.evaluate_B(source, device_points);
   }
 }
 
 template <class Eval, class Source>
 auto host_evaluate_E(const Eval& evaluator, const Source& source,
                      const core::PointCloud& points) {
+  const core::DevicePointCloud device_points =
+      core::DevicePointCloud::upload(points);
   if constexpr (is_device_evaluator_v<Eval>) {
-    return evaluator.evaluate_E(source, core::DevicePointCloud::upload(points))
-        .to_host();
+    return evaluator.evaluate_E(source, device_points).to_host();
   } else {
-    return evaluator.evaluate_E(source, points);
+    return evaluator.evaluate_E(source, device_points);
   }
 }
 
 template <class Eval, class Source>
 auto host_evaluate_A(const Eval& evaluator, const Source& source,
                      const core::PointCloud& points) {
+  const core::DevicePointCloud device_points =
+      core::DevicePointCloud::upload(points);
   if constexpr (is_device_evaluator_v<Eval>) {
-    return evaluator.evaluate_A(source, core::DevicePointCloud::upload(points))
-        .to_host();
+    return evaluator.evaluate_A(source, device_points).to_host();
   } else {
-    return evaluator.evaluate_A(source, points);
+    return evaluator.evaluate_A(source, device_points);
   }
 }
 
 template <class Eval, class Source>
 auto host_evaluate_grad_B(const Eval& evaluator, const Source& source,
                           const core::PointCloud& points) {
+  const core::DevicePointCloud device_points =
+      core::DevicePointCloud::upload(points);
   if constexpr (is_device_evaluator_v<Eval>) {
-    return evaluator
-        .evaluate_grad_B(source, core::DevicePointCloud::upload(points))
-        .to_host();
+    return evaluator.evaluate_grad_B(source, device_points).to_host();
   } else {
-    return evaluator.evaluate_grad_B(source, points);
+    return evaluator.evaluate_grad_B(source, device_points);
   }
 }
 

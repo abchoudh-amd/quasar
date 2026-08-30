@@ -8,6 +8,8 @@
 
 #include "host_evaluate.hpp"
 
+#include "filament_fixture.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -29,10 +31,10 @@ namespace {
 // +z, carrying current I.
 ConductorSystem make_finite_segment_system(Real L, Real I) {
   ConductorSystem cs;
-  cs.add({/*name=*/"segment",
+  cs.add(quasar::test::filament(/*name=*/"segment",
           /*current_A=*/I,
           /*points=*/{Vec3{Real{0}, Real{0}, -L / Real{2}},
-                      Vec3{Real{0}, Real{0}, +L / Real{2}}}});
+                      Vec3{Real{0}, Real{0}, +L / Real{2}}}));
   return cs;
 }
 

@@ -14,6 +14,8 @@
 
 namespace quasar::core {
 
+class DevicePointCloud;
+
 // Structure-of-arrays representation of the observation points.
 struct PointSoA {
   std::vector<Real> px, py, pz;
@@ -56,6 +58,11 @@ struct ObservationGrid {
   Vec3       point_at(int i, int j, int k) const;
   PointCloud to_point_cloud() const;
   PointSoA   to_point_soa()   const;
+  // Expands the description straight into device SoA planes, which is what the
+  // field evaluators consume. Agrees with point_at() bit for bit. Prefer this
+  // over to_point_cloud(): the host forms do the same arithmetic on the CPU and
+  // then pay an upload.
+  DevicePointCloud to_device_point_cloud() const;
 
   static void validate(const ObservationGrid& g);
 };
@@ -74,6 +81,7 @@ struct PlaneSlice {
   Vec3       point_at(int i, int j) const;
   PointCloud to_point_cloud() const;
   PointSoA   to_point_soa()   const;
+  DevicePointCloud to_device_point_cloud() const;
 
   static void validate(const PlaneSlice& s);
 };
@@ -89,6 +97,7 @@ struct LineProbe {
   Vec3       point_at(int i) const;
   PointCloud to_point_cloud() const;
   PointSoA   to_point_soa()   const;
+  DevicePointCloud to_device_point_cloud() const;
 
   static void validate(const LineProbe& l);
 };

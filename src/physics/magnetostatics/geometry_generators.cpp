@@ -1,7 +1,10 @@
 #include "quasar/physics/magnetostatics/geometry.hpp"
 
+#include "quasar/backend/device.hpp"
+#include "quasar/backend/memory.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/physics/magnetostatics/conductor.hpp"
+#include "quasar/physics/magnetostatics/kernels.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +25,9 @@ struct Basis {
   Vec3 v;
 };
 
+// One orthonormal frame per generator call, built from one axis vector. Scalar
+// configuration math: it does not scale with the vertex count, so it stays on
+// the host.
 Basis make_basis(Vec3 axis_input, const std::string& gen) {
   if (!std::isfinite(axis_input.x) || !std::isfinite(axis_input.y)
       || !std::isfinite(axis_input.z)) {
@@ -56,7 +62,7 @@ void check_segment_count(const std::string& gen, int n, int minimum = 1) {
   }
 }
 
-// Upper bound on generated filament vertices, guarding the reserve()/loop below
+// Upper bound on generated filament vertices, guarding the allocation below
 // against signed-int overflow from a hostile or typo'd deck (n_turns *
 // n_segments_per_turn is computed in size_t here, not int).
 constexpr std::size_t kMaxFilamentPoints = std::size_t{1} << 26;  // ~67M vertices
@@ -99,6 +105,11 @@ constexpr Real kMaterialComponent =
       + " is not representable at the requested center"};
 }
 
+// Host counterparts of the device resolvability checks, retained for the few
+// scalar corner points a racetrack computes outside its arc kernels. The device
+// versions in src/backend/hip/magnetostatics/geometry_hip.hip are the ones that
+// run per vertex; these are the same algorithm at a handful of call sites.
+//
 // Form a requested local displacement without silently losing a material
 // component to underflow.  Components smaller than a few ulp of the full
 // direction are immaterial (and include the expected sin(pi) residue), while
@@ -166,22 +177,96 @@ Vec3 translated_point(Vec3 origin, Vec3 offset, Real local_scale,
   return point;
 }
 
-void append_point(Filament& f, Vec3 p, const std::string& gen) {
+int checked_vertex_count(const std::string& gen, std::size_t n) {
+  if (n > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::invalid_argument{gen + ": generated vertex count exceeds the limit"};
+  }
+  return static_cast<int>(n);
+}
+
+void write_vec3(double (&destination)[3], Vec3 v) {
+  const Real components[3] = {v.x, v.y, v.z};
+  for (int c = 0; c < 3; ++c) destination[c] = components[c];
+}
+
+// Every generator kernel reports through the same status word, and each raises
+// the same three exceptions from it. `radial` and `axial` name the dimension a
+// bit refers to, matching the messages the host loops used. What is lost
+// relative to those loops is the index of the offending vertex: an OR-reduced
+// predicate does not carry one.
+void check_generator_status(int flags, const std::string& gen,
+                            const std::string& radial,
+                            const std::string& axial = {}) {
+  if ((flags & 1) != 0) throw_unresolved(gen, radial);
+  if ((flags & 2) != 0) throw_unresolved(gen, axial);
+  if ((flags & 4) != 0) {
+    throw std::invalid_argument{gen + ": generated coordinate overflowed"};
+  }
+}
+
+// Allocates the device planes, runs one generator launch into them, and applies
+// the status contract above.
+template <class Launch>
+FilamentPoints generate(std::size_t n, const std::string& gen,
+                        const std::string& radial, const std::string& axial,
+                        Launch&& launch) {
+  FilamentPoints points(n);
+  if (n == 0) return points;
+  backend::DeviceBuffer<int> status(1);
+  launch(points, status);
+  int flags = 0;
+  status.copy_to_host(&flags, 1);
+  check_generator_status(flags, gen, radial, axial);
+  return points;
+}
+
+void validate_segments(const FilamentPoints& points, const std::string& gen) {
+  if (points.size() < 2) return;
+  backend::DeviceBuffer<int> status(1);
+  ::launch_ms_validate_segments(
+      points.x(), points.y(), points.z(),
+      checked_vertex_count(gen, points.size()), status.device_ptr(), nullptr);
+  int flags = 0;
+  status.copy_to_host(&flags, 1);
+  if ((flags & 1) != 0) {
+    throw std::invalid_argument{
+        gen + ": generated a zero-length segment in host precision"};
+  }
+}
+
+// Writes one scalar corner point into the device planes. Three coordinates, not
+// a sweep, so the arithmetic that produced them is ordinary host configuration
+// math and only the store crosses to the device.
+void write_vertex(FilamentPoints& points, std::size_t index, Vec3 p,
+                  const std::string& gen) {
   if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
     throw std::invalid_argument{gen + ": generated coordinate overflowed"};
   }
-  f.points.push_back(p);
+  const Real components[3] = {p.x, p.y, p.z};
+  Real* const planes[3] = {points.x(), points.y(), points.z()};
+  for (int c = 0; c < 3; ++c) {
+    backend::device_memcpy_h2d(planes[c] + index, &components[c], sizeof(Real));
+  }
 }
 
-void validate_segments(const Filament& f, const std::string& gen) {
-  for (std::size_t i = 1; i < f.points.size(); ++i) {
-    const Vec3& a = f.points[i - 1];
-    const Vec3& b = f.points[i];
-    if (a.x == b.x && a.y == b.y && a.z == b.z) {
-      throw std::invalid_argument{
-          gen + ": generated a zero-length segment in host precision"};
-    }
-  }
+// Shared arc-kernel parameter block. theta_k = bias + scale * index_k / divisor,
+// with index_k = k + offset, reduced modulo `modulus` when that is nonzero.
+QuasarMsArcParams arc_params(Vec3 centre, const Basis& b, Real radius,
+                             Real theta_bias, Real theta_scale,
+                             int index_offset, int index_modulus,
+                             int theta_divisor) {
+  QuasarMsArcParams params{};
+  write_vec3(params.centre, centre);
+  write_vec3(params.u, b.u);
+  write_vec3(params.v, b.v);
+  params.radius = radius;
+  params.theta_bias = theta_bias;
+  params.theta_scale = theta_scale;
+  params.index_offset = index_offset;
+  params.index_modulus = index_modulus;
+  params.theta_divisor = theta_divisor;
+  params.material_component = kMaterialComponent;
+  return params;
 }
 
 }  // namespace
@@ -195,27 +280,23 @@ Filament circular_loop(Vec3 center, Vec3 axis, Real radius_m,
   check_finite("circular_loop", "center.z", center.z);
   check_radius("circular_loop", radius_m);
   check_finite("circular_loop", "current_A", current_A);
-  check_point_count("circular_loop", static_cast<std::size_t>(n_segments) + 1u);
+  const std::size_t n_points = static_cast<std::size_t>(n_segments) + 1u;
+  check_point_count("circular_loop", n_points);
   const Basis b = make_basis(axis, "circular_loop");
 
-  Filament f{std::move(name), current_A, {}};
-  f.points.reserve(static_cast<std::size_t>(n_segments) + 1u);
-  for (int k = 0; k < n_segments; ++k) {
-    const Real theta = Real{2} * pi * static_cast<Real>(k)
-                                    / static_cast<Real>(n_segments);
-    const Vec3 radial_direction =
-        std::cos(theta) * b.u + std::sin(theta) * b.v;
-    const Vec3 radial = scaled_direction(
-        radius_m, radial_direction, "circular_loop", "radius");
-    append_point(f, translated_point(center, radial, radius_m,
-                                     "circular_loop", "radius"),
-                 "circular_loop");
-  }
+  const QuasarMsArcParams params = arc_params(
+      center, b, radius_m, Real{0}, Real{2} * pi, 0, 0, n_segments);
+  FilamentPoints points = generate(
+      n_points, "circular_loop", "radius", {},
+      [&](FilamentPoints& out, backend::DeviceBuffer<int>& status) {
+        ::launch_ms_arc_points(params, n_segments, out.x(), out.y(), out.z(),
+                               status.device_ptr(), nullptr);
+      });
   // Copy, rather than recompute at 2*pi: closure is bitwise exact and cannot
   // create a microscopic extra segment from sin(2*pi) round-off.
-  f.points.push_back(f.points.front());
-  validate_segments(f, "circular_loop");
-  return f;
+  points.copy_vertex(0, n_points - 1);
+  validate_segments(points, "circular_loop");
+  return Filament{std::move(name), current_A, std::move(points)};
 }
 
 Filament helix(Vec3 center, Vec3 axis, Real radius_m, Real pitch_m,
@@ -249,31 +330,27 @@ Filament helix(Vec3 center, Vec3 axis, Real radius_m, Real pitch_m,
     throw_unresolved("helix", "axial half-length");
   }
 
-  Filament f{std::move(name), current_A, {}};
-  f.points.reserve(n_total + 1u);
-  for (std::size_t k = 0; k <= n_total; ++k) {
-    const Real fraction = static_cast<Real>(k) / static_cast<Real>(n_total);
-    const Real axial_distance = std::lerp(-half_length, half_length, fraction);
-    const Vec3 axial_offset = scaled_direction(
-        axial_distance, b.axis_hat, "helix", "axial position");
-    const Vec3 turn_center = translated_point(
-        center, axial_offset, std::abs(axial_distance),
-        "helix", "axial position");
-    // Radial phase is periodic. Reducing the integer index before converting to
-    // an angle prevents argument-reduction drift after many turns.
-    const std::size_t phase = k % static_cast<std::size_t>(n_segments_per_turn);
-    const Real theta = Real{2} * pi * static_cast<Real>(phase)
-                     / static_cast<Real>(n_segments_per_turn);
-    const Vec3 radial_direction =
-        std::cos(theta) * b.u + std::sin(theta) * b.v;
-    const Vec3 radial = scaled_direction(
-        radius_m, radial_direction, "helix", "radius");
-    append_point(f, translated_point(turn_center, radial, radius_m,
-                                     "helix", "radius"),
-                 "helix");
-  }
-  validate_segments(f, "helix");
-  return f;
+  QuasarMsHelixParams params{};
+  write_vec3(params.centre, center);
+  write_vec3(params.axis, b.axis_hat);
+  write_vec3(params.u, b.u);
+  write_vec3(params.v, b.v);
+  params.radius = radius_m;
+  params.half_length = half_length;
+  params.n_total = static_cast<long long>(n_total);
+  params.segments_per_turn = n_segments_per_turn;
+  params.material_component = kMaterialComponent;
+
+  const std::size_t n_points = n_total + 1u;
+  const int count = checked_vertex_count("helix", n_points);
+  FilamentPoints points = generate(
+      n_points, "helix", "radius", "axial position",
+      [&](FilamentPoints& out, backend::DeviceBuffer<int>& status) {
+        ::launch_ms_helix_points(params, count, out.x(), out.y(), out.z(),
+                                 status.device_ptr(), nullptr);
+      });
+  validate_segments(points, "helix");
+  return Filament{std::move(name), current_A, std::move(points)};
 }
 
 Filament solenoid(Vec3 center, Vec3 axis, Real radius_m, Real length_m,
@@ -318,6 +395,9 @@ Filament racetrack(Vec3 center, Vec3 axis,
   if (half_length == Real{0}) {
     throw_unresolved("racetrack", "straight half-length");
   }
+  // Four scalar frame points and two corners. None of these scale with
+  // n_arc_segments, so they are configuration math and stay on the host; only
+  // the two arcs are swept.
   const Vec3 right_offset = scaled_direction(
       half_length, b.u, "racetrack", "straight length");
   const Vec3 left_offset = scaled_direction(
@@ -327,56 +407,46 @@ Filament racetrack(Vec3 center, Vec3 axis,
   const Vec3 left_center = translated_point(
       center, left_offset, half_length, "racetrack", "straight length");
 
-  Filament f{std::move(name), current_A, {}};
-  f.points.reserve(n_points);
-
   // Start at bottom-right corner (transition: bottom straight -> right arc).
   const Vec3 bottom_radial = scaled_direction(
       -R, b.v, "racetrack", "arc radius");
   const Vec3 bottom_right = translated_point(
       right_center, bottom_radial, R, "racetrack", "arc radius");
-  append_point(f, bottom_right, "racetrack");
-
-  // Right semicircular arc: theta in (-pi/2, +pi/2], CCW looking down `axis`.
-  for (int k = 1; k <= n_arc_segments; ++k) {
-    const Real theta = -pi / Real{2}
-                       + pi * static_cast<Real>(k)
-                              / static_cast<Real>(n_arc_segments);
-    const Vec3 radial_direction =
-        std::cos(theta) * b.u + std::sin(theta) * b.v;
-    const Vec3 radial = scaled_direction(
-        R, radial_direction, "racetrack", "arc radius");
-    append_point(f, translated_point(right_center, radial, R,
-                                     "racetrack", "arc radius"),
-                 "racetrack");
-  }
-
   // Top straight: top-right corner -> top-left corner.
   const Vec3 top_radial = scaled_direction(
       R, b.v, "racetrack", "arc radius");
-  append_point(f, translated_point(left_center, top_radial, R,
-                                   "racetrack", "arc radius"),
-               "racetrack");
+  const Vec3 top_left = translated_point(
+      left_center, top_radial, R, "racetrack", "arc radius");
 
+  // Right semicircular arc: theta in (-pi/2, +pi/2], CCW looking down `axis`.
+  const QuasarMsArcParams right_arc = arc_params(
+      right_center, b, R, -pi / Real{2}, pi, 1, 0, n_arc_segments);
   // Left semicircular arc: theta in (pi/2, 3*pi/2].
-  for (int k = 1; k <= n_arc_segments; ++k) {
-    const Real theta = pi / Real{2}
-                       + pi * static_cast<Real>(k)
-                              / static_cast<Real>(n_arc_segments);
-    const Vec3 radial_direction =
-        std::cos(theta) * b.u + std::sin(theta) * b.v;
-    const Vec3 radial = scaled_direction(
-        R, radial_direction, "racetrack", "arc radius");
-    append_point(f, translated_point(left_center, radial, R,
-                                     "racetrack", "arc radius"),
-                 "racetrack");
-  }
+  const QuasarMsArcParams left_arc = arc_params(
+      left_center, b, R, pi / Real{2}, pi, 1, 0, n_arc_segments);
 
+  const std::size_t left_arc_base =
+      static_cast<std::size_t>(n_arc_segments) + 2u;
+  FilamentPoints points = generate(
+      n_points, "racetrack", "arc radius", {},
+      [&](FilamentPoints& out, backend::DeviceBuffer<int>& status) {
+        ::launch_ms_arc_points(right_arc, n_arc_segments, out.x() + 1,
+                               out.y() + 1, out.z() + 1, status.device_ptr(),
+                               nullptr);
+        ::launch_ms_arc_points(
+            left_arc, n_arc_segments, out.x() + left_arc_base,
+            out.y() + left_arc_base, out.z() + left_arc_base,
+            status.device_ptr(), nullptr);
+      });
+
+  write_vertex(points, 0, bottom_right, "racetrack");
+  write_vertex(points, static_cast<std::size_t>(n_arc_segments) + 1u, top_left,
+               "racetrack");
   // Bottom straight closes back to start.
-  append_point(f, bottom_right, "racetrack");
+  write_vertex(points, n_points - 1, bottom_right, "racetrack");
 
-  validate_segments(f, "racetrack");
-  return f;
+  validate_segments(points, "racetrack");
+  return Filament{std::move(name), current_A, std::move(points)};
 }
 
 Filament polygon(Vec3 center, Vec3 axis, Real circumradius_m, int n_sides,
@@ -395,6 +465,9 @@ Filament generic_polyline(std::vector<Vec3> points, Real current_A,
     throw std::invalid_argument{"generic_polyline: needs at least 2 points"};
   }
   check_point_count("generic_polyline", points.size());
+  // These coordinates came from a deck, not from a calculation, so they are
+  // validated here and uploaded rather than generated. The loop is over data
+  // the host already holds.
   for (std::size_t i = 0; i < points.size(); ++i) {
     if (!std::isfinite(points[i].x) || !std::isfinite(points[i].y)
         || !std::isfinite(points[i].z)) {
@@ -408,7 +481,7 @@ Filament generic_polyline(std::vector<Vec3> points, Real current_A,
           "generic_polyline: consecutive points must be distinct"};
     }
   }
-  return Filament{std::move(name), current_A, std::move(points)};
+  return Filament{std::move(name), current_A, FilamentPoints::upload(points)};
 }
 
 }  // namespace quasar::magnetostatics

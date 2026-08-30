@@ -27,39 +27,6 @@ namespace quasar::magnetostatics {
 
 namespace {
 
-// Provides an upload-ready const T* for a host-side std::vector<Real>. When T is
-// Real (double) it aliases the source directly (no copy); for float it owns a
-// narrowed copy. Stored at function scope so the pointer stays valid across the
-// async H2D copy until the stream sync.
-template <class T>
-class UploadSrc {
- public:
-  explicit UploadSrc(const std::vector<Real>& src, Real origin = Real{0},
-                     const char* label = "input") {
-    if constexpr (std::is_same_v<T, Real>) {
-      view_ = &src;
-    } else {
-      owned_.reserve(src.size());
-      for (Real v : src) {
-        const T narrowed = static_cast<T>(v - origin);
-        if (!std::isfinite(narrowed)) {
-          throw std::invalid_argument{
-              std::string{"BiotSavartEvaluatorF: "} + label
-              + " is not representable after fp32 origin shifting"};
-        }
-        owned_.push_back(narrowed);
-      }
-      view_ = &owned_;
-    }
-  }
-  const T* data() const noexcept { return view_->data(); }
-  const T& operator[](std::size_t i) const noexcept { return (*view_)[i]; }
-
- private:
-  std::vector<T> owned_{};
-  const std::vector<T>* view_{nullptr};
-};
-
 int checked_kernel_count(std::size_t n, const char* what) {
   constexpr auto max_count = static_cast<std::size_t>(std::numeric_limits<int>::max());
   if (n > max_count) {
@@ -129,59 +96,6 @@ void dispatch_launch_gradB(const T* ax, const T* ay, const T* az,
   }
 }
 
-// Device-resident conductor segments (a/b endpoints plus current).
-//
-// The observation points are NOT part of this any more. In the fp64 path they
-// arrive already on the device as a core::DevicePointCloud -- that is the point
-// of the SoA interface, and it is what lets a caller evaluate the same coil at
-// the same points repeatedly without re-uploading either. Only the fp32 sibling
-// still uploads points, because it narrows them against a shared origin.
-template <class T>
-struct UploadedSegments {
-  using DeviceBuffer = ::quasar::backend::DeviceBuffer<T>;
-  DeviceBuffer ax, ay, az, bx, by, bz, I;
-  int N{0};
-
-  UploadedSegments(const SegmentSoA& seg, int n_segments,
-                   Real ox, Real oy, Real oz, stream_t stream)
-      : ax(seg.n_segments()), ay(seg.n_segments()), az(seg.n_segments()),
-        bx(seg.n_segments()), by(seg.n_segments()), bz(seg.n_segments()),
-        I(seg.n_segments()), N(n_segments) {
-    const UploadSrc<T> s_ax{seg.ax, ox, "segment x-coordinate"};
-    const UploadSrc<T> s_ay{seg.ay, oy, "segment y-coordinate"};
-    const UploadSrc<T> s_az{seg.az, oz, "segment z-coordinate"};
-    const UploadSrc<T> s_bx{seg.bx, ox, "segment x-coordinate"};
-    const UploadSrc<T> s_by{seg.by, oy, "segment y-coordinate"};
-    const UploadSrc<T> s_bz{seg.bz, oz, "segment z-coordinate"};
-    const UploadSrc<T> s_I{seg.I, Real{0}, "current"};
-
-    if constexpr (!std::is_same_v<T, Real>) {
-      for (std::size_t i = 0; i < seg.n_segments(); ++i) {
-        if (s_ax[i] == s_bx[i] && s_ay[i] == s_by[i] && s_az[i] == s_bz[i]) {
-          throw std::invalid_argument{
-              "BiotSavartEvaluatorF: a segment collapses after fp32 narrowing"};
-        }
-      }
-    }
-    ax.copy_from_host_async(s_ax.data(), N, stream);
-    ay.copy_from_host_async(s_ay.data(), N, stream);
-    az.copy_from_host_async(s_az.data(), N, stream);
-    bx.copy_from_host_async(s_bx.data(), N, stream);
-    by.copy_from_host_async(s_by.data(), N, stream);
-    bz.copy_from_host_async(s_bz.data(), N, stream);
-    I.copy_from_host_async(s_I.data(), N, stream);
-    // The host UploadSrc buffers must outlive the async copies (the copies are on
-    // `stream`). For the narrowed-float path UploadSrc::owned_ is a ctor-local that
-    // dies at scope exit, so we must sync the upload here before it is freed. For
-    // the identity Real path UploadSrc aliases the caller's SoA, which outlives
-    // this ctor, so the upload can stay queued -- the subsequent kernel + readback
-    // already serialize on the same stream -- and we skip the extra sync.
-    if constexpr (!std::is_same_v<T, Real>) {
-      ::quasar::backend::device_synchronize(stream);
-    }
-  }
-};
-
 // Downcast the axis-neutral source to the conductor system this evaluator needs.
 const ConductorSystem& as_conductors(const core::IFieldSource& source) {
   const auto* cs = dynamic_cast<const ConductorSystem*>(&source);
@@ -196,14 +110,6 @@ const ConductorSystem& as_conductors(const core::IFieldSource& source) {
 //
 // Every one of these is: validate, upload the coil, launch, read back one
 // status int. The outputs stay where the kernel wrote them.
-
-int prepare_segments(const SegmentSoA& seg) {
-  // Validate every public SoA plane before sizing a device buffer from only the
-  // leading component. Otherwise a shorter plane would be read past its host
-  // allocation by the asynchronous upload.
-  seg.validate();
-  return checked_kernel_count(seg.n_segments(), "segment count");
-}
 
 int check_status(const ::quasar::backend::DeviceBuffer<int>& d_status,
                  stream_t stream, const char* singular_message,
@@ -227,23 +133,25 @@ core::DeviceVectorField BiotSavartEvaluator::evaluate_B(
     const core::IFieldSource& source,
     const core::DevicePointCloud& obs) const {
   using ::quasar::backend::DeviceBuffer;
-  const SegmentSoA& seg = as_conductors(source).segments_soa();
-  const int N = prepare_segments(seg);
+  // The conductor system flattens and validates its segments on the device and
+  // caches the result, so there is nothing to upload here: both operands are
+  // already resident.
+  const DeviceSegmentSoA& seg = as_conductors(source).device_segments();
+  const int N = checked_kernel_count(seg.n_segments(), "segment count");
   const int M = checked_kernel_count(obs.size(), "observation count");
 
   // No segments or no points means no field; the kernel would not write, so the
   // zero-filled default constructor is the answer.
   if (N == 0 || M == 0) return core::DeviceVectorField(obs.size());
 
-  const UploadedSegments<Real> in{seg, N, Real{0}, Real{0}, Real{0}, cfg_.stream};
   // The kernel writes every observation-point entry, so skip the zero-fill.
   core::DeviceVectorField out(obs.size(), ::quasar::backend::uninitialized);
   DeviceBuffer<int> d_status(1);  // zero-initialized bit field
 
   dispatch_launch_B<Real>(
-      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
-      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
-      in.I.device_ptr(), N,
+      seg.ax.device_ptr(), seg.ay.device_ptr(), seg.az.device_ptr(),
+      seg.bx.device_ptr(), seg.by.device_ptr(), seg.bz.device_ptr(),
+      seg.I.device_ptr(), N,
       obs.x(), obs.y(), obs.z(), M,
       out.x(), out.y(), out.z(), d_status.device_ptr(), cfg_.stream);
 
@@ -259,20 +167,22 @@ core::DeviceVectorField BiotSavartEvaluator::evaluate_A(
     const core::IFieldSource& source,
     const core::DevicePointCloud& obs) const {
   using ::quasar::backend::DeviceBuffer;
-  const SegmentSoA& seg = as_conductors(source).segments_soa();
-  const int N = prepare_segments(seg);
+  // The conductor system flattens and validates its segments on the device and
+  // caches the result, so there is nothing to upload here: both operands are
+  // already resident.
+  const DeviceSegmentSoA& seg = as_conductors(source).device_segments();
+  const int N = checked_kernel_count(seg.n_segments(), "segment count");
   const int M = checked_kernel_count(obs.size(), "observation count");
 
   if (N == 0 || M == 0) return core::DeviceVectorField(obs.size());
 
-  const UploadedSegments<Real> in{seg, N, Real{0}, Real{0}, Real{0}, cfg_.stream};
   core::DeviceVectorField out(obs.size(), ::quasar::backend::uninitialized);
   DeviceBuffer<int> d_status(1);
 
   dispatch_launch_A<Real>(
-      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
-      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
-      in.I.device_ptr(), N,
+      seg.ax.device_ptr(), seg.ay.device_ptr(), seg.az.device_ptr(),
+      seg.bx.device_ptr(), seg.by.device_ptr(), seg.bz.device_ptr(),
+      seg.I.device_ptr(), N,
       obs.x(), obs.y(), obs.z(), M,
       out.x(), out.y(), out.z(), d_status.device_ptr(), cfg_.stream);
 
@@ -288,22 +198,24 @@ core::DeviceTensorField BiotSavartEvaluator::evaluate_grad_B(
     const core::IFieldSource& source,
     const core::DevicePointCloud& obs) const {
   using ::quasar::backend::DeviceBuffer;
-  const SegmentSoA& seg = as_conductors(source).segments_soa();
-  const int N = prepare_segments(seg);
+  // The conductor system flattens and validates its segments on the device and
+  // caches the result, so there is nothing to upload here: both operands are
+  // already resident.
+  const DeviceSegmentSoA& seg = as_conductors(source).device_segments();
+  const int N = checked_kernel_count(seg.n_segments(), "segment count");
   const int M = checked_kernel_count(obs.size(), "observation count");
 
   if (N == 0 || M == 0) return core::DeviceTensorField(obs.size());
 
-  const UploadedSegments<Real> in{seg, N, Real{0}, Real{0}, Real{0}, cfg_.stream};
   // The gradient kernel already writes the component-major 9*M layout that
   // DeviceTensorField documents, so it fills the container directly.
   core::DeviceTensorField out(obs.size(), ::quasar::backend::uninitialized);
   DeviceBuffer<int> d_status(1);
 
   dispatch_launch_gradB<Real>(
-      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
-      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
-      in.I.device_ptr(), N,
+      seg.ax.device_ptr(), seg.ay.device_ptr(), seg.az.device_ptr(),
+      seg.bx.device_ptr(), seg.by.device_ptr(), seg.bz.device_ptr(),
+      seg.I.device_ptr(), N,
       obs.x(), obs.y(), obs.z(), M,
       out.data(), d_status.device_ptr(), cfg_.stream);
 
@@ -320,55 +232,83 @@ core::DeviceTensorField BiotSavartEvaluator::evaluate_grad_B(
 // This one is deliberately NOT on IFieldEvaluator: it exists so a test can put
 // the fp32 and fp64 answers side by side, and its results are fp32 host values
 // at that comparison boundary. It therefore keeps the host staging the fp64
-// path just shed -- there is no DeviceVectorField in float, and inventing one
-// for a single test consumer would be abstraction without a second user.
+// path shed -- there is no DeviceVectorField in float, and inventing one for a
+// single test consumer would be abstraction without a second user.
 //
-// It also still uploads its own observation points, because it narrows them
-// against an origin shared with the segments: a rigid translation (x=0 to
-// x=1e8 m) must be invisible to the narrowing rather than collapsing a short
-// segment into one float coordinate. A DevicePointCloud is fp64 and carries no
-// such origin, so it cannot serve this path.
+// The narrowing itself is on the device. Both operands arrive as fp64 device
+// planes, and a common double-precision origin is subtracted before the cast so
+// a rigid translation (x=0 to x=1e8 m) is invisible to the narrowing rather
+// than collapsing a short segment into one float coordinate. That origin is the
+// first segment endpoint, which is three scalars read back from the device.
 
 namespace {
 
-struct UploadedPointsF {
+struct NarrowedF {
+  ::quasar::backend::DeviceBuffer<float> ax, ay, az, bx, by, bz, I;
   ::quasar::backend::DeviceBuffer<float> px, py, pz;
-  int M{0};
+};
 
-  UploadedPointsF(const PointSoA& pts, int n_points, Real ox, Real oy, Real oz,
-                  stream_t stream)
-      : px(pts.n_points()), py(pts.n_points()), pz(pts.n_points()),
-        M(n_points) {
-    const UploadSrc<float> s_px{pts.px, ox, "observation x-coordinate"};
-    const UploadSrc<float> s_py{pts.py, oy, "observation y-coordinate"};
-    const UploadSrc<float> s_pz{pts.pz, oz, "observation z-coordinate"};
-    px.copy_from_host_async(s_px.data(), M, stream);
-    py.copy_from_host_async(s_py.data(), M, stream);
-    pz.copy_from_host_async(s_pz.data(), M, stream);
-    ::quasar::backend::device_synchronize(stream);
+// Reads one element from a device plane. Three of these per evaluation, to
+// establish the fp32 origin; not a sweep.
+Real first_element(const ::quasar::backend::DeviceBuffer<Real>& plane) {
+  Real value = Real{0};
+  plane.copy_to_host(&value, 1);
+  return value;
+}
+
+NarrowedF narrow_inputs(const DeviceSegmentSoA& seg,
+                        const core::DevicePointCloud& obs, int N, int M,
+                        stream_t stream) {
+  using ::quasar::backend::DeviceBuffer;
+  using ::quasar::backend::uninitialized;
+
+  const Real ox = first_element(seg.ax);
+  const Real oy = first_element(seg.ay);
+  const Real oz = first_element(seg.az);
+
+  NarrowedF out{
+      DeviceBuffer<float>(N, uninitialized), DeviceBuffer<float>(N, uninitialized),
+      DeviceBuffer<float>(N, uninitialized), DeviceBuffer<float>(N, uninitialized),
+      DeviceBuffer<float>(N, uninitialized), DeviceBuffer<float>(N, uninitialized),
+      DeviceBuffer<float>(N, uninitialized), DeviceBuffer<float>(M, uninitialized),
+      DeviceBuffer<float>(M, uninitialized), DeviceBuffer<float>(M, uninitialized)};
+
+  DeviceBuffer<int> segment_status(1);
+  ::launch_ms_narrow_segments(
+      seg.ax.device_ptr(), seg.ay.device_ptr(), seg.az.device_ptr(),
+      seg.bx.device_ptr(), seg.by.device_ptr(), seg.bz.device_ptr(),
+      seg.I.device_ptr(), N, ox, oy, oz,
+      out.ax.device_ptr(), out.ay.device_ptr(), out.az.device_ptr(),
+      out.bx.device_ptr(), out.by.device_ptr(), out.bz.device_ptr(),
+      out.I.device_ptr(), segment_status.device_ptr(), stream);
+
+  DeviceBuffer<int> point_status(1);
+  ::launch_ms_narrow_points(
+      obs.x(), obs.y(), obs.z(), M, ox, oy, oz,
+      out.px.device_ptr(), out.py.device_ptr(), out.pz.device_ptr(),
+      point_status.device_ptr(), stream);
+
+  int segment_flags = 0;
+  int point_flags = 0;
+  segment_status.copy_to_host_async(&segment_flags, 1, stream);
+  point_status.copy_to_host_async(&point_flags, 1, stream);
+  ::quasar::backend::device_synchronize(stream);
+
+  if ((segment_flags & 1) != 0) {
+    throw std::invalid_argument{
+        "BiotSavartEvaluatorF: segment coordinate is not representable after "
+        "fp32 origin shifting"};
   }
-};
-
-struct InputsF {
-  UploadedSegments<float> segments;
-  UploadedPointsF points;
-
-  InputsF(const SegmentSoA& seg, const PointSoA& pts, int N, int M,
-          stream_t stream)
-      : segments(seg, N, seg.ax.front(), seg.ay.front(), seg.az.front(), stream),
-        points(pts, M, seg.ax.front(), seg.ay.front(), seg.az.front(), stream) {}
-};
-
-struct CountsF {
-  int N;
-  int M;
-};
-
-CountsF checked_counts_f(const SegmentSoA& seg, const PointSoA& pts) {
-  seg.validate();
-  pts.validate();
-  return {checked_kernel_count(seg.n_segments(), "segment count"),
-          checked_kernel_count(pts.n_points(), "observation count")};
+  if ((point_flags & 1) != 0) {
+    throw std::invalid_argument{
+        "BiotSavartEvaluatorF: observation coordinate is not representable "
+        "after fp32 origin shifting"};
+  }
+  if ((segment_flags & 2) != 0) {
+    throw std::invalid_argument{
+        "BiotSavartEvaluatorF: a segment collapses after fp32 narrowing"};
+  }
+  return out;
 }
 
 }  // namespace
@@ -376,14 +316,12 @@ CountsF checked_counts_f(const SegmentSoA& seg, const PointSoA& pts) {
 BiotSavartEvaluatorF::BiotSavartEvaluatorF() = default;
 BiotSavartEvaluatorF::BiotSavartEvaluatorF(BiotSavartConfig cfg) : cfg_{cfg} {}
 
-Field<Vec3f> BiotSavartEvaluatorF::evaluate_B(const ConductorSystem& cs,
-                                               const PointCloud&      obs) const {
+Field<Vec3f> BiotSavartEvaluatorF::evaluate_B(
+    const ConductorSystem& cs, const core::DevicePointCloud& obs) const {
   using ::quasar::backend::DeviceBuffer;
-  const SegmentSoA& seg = cs.segments_soa();
-  const PointSoA    pts = obs.to_point_soa();
-  const CountsF counts = checked_counts_f(seg, pts);
-  const int N = counts.N;
-  const int M = counts.M;
+  const DeviceSegmentSoA& seg = cs.device_segments();
+  const int N = checked_kernel_count(seg.n_segments(), "segment count");
+  const int M = checked_kernel_count(obs.size(), "observation count");
 
   Field<Vec3f> result(static_cast<std::size_t>(M));
   if (N == 0 || M == 0) {
@@ -393,19 +331,17 @@ Field<Vec3f> BiotSavartEvaluatorF::evaluate_B(const ConductorSystem& cs,
     return result;
   }
 
-  const InputsF in{seg, pts, N, M, cfg_.stream};
+  const NarrowedF in = narrow_inputs(seg, obs, N, M, cfg_.stream);
   DeviceBuffer<float> d_Bx(M, ::quasar::backend::uninitialized);
   DeviceBuffer<float> d_By(M, ::quasar::backend::uninitialized);
   DeviceBuffer<float> d_Bz(M, ::quasar::backend::uninitialized);
   DeviceBuffer<int> d_status(1);
 
   dispatch_launch_B<float>(
-      in.segments.ax.device_ptr(), in.segments.ay.device_ptr(),
-      in.segments.az.device_ptr(), in.segments.bx.device_ptr(),
-      in.segments.by.device_ptr(), in.segments.bz.device_ptr(),
-      in.segments.I.device_ptr(), N,
-      in.points.px.device_ptr(), in.points.py.device_ptr(),
-      in.points.pz.device_ptr(), M,
+      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
+      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
+      in.I.device_ptr(), N,
+      in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_Bx.device_ptr(), d_By.device_ptr(), d_Bz.device_ptr(),
       d_status.device_ptr(), cfg_.stream);
 
@@ -426,14 +362,12 @@ Field<Vec3f> BiotSavartEvaluatorF::evaluate_B(const ConductorSystem& cs,
   return result;
 }
 
-Field<Vec3f> BiotSavartEvaluatorF::evaluate_A(const ConductorSystem& cs,
-                                               const PointCloud&      obs) const {
+Field<Vec3f> BiotSavartEvaluatorF::evaluate_A(
+    const ConductorSystem& cs, const core::DevicePointCloud& obs) const {
   using ::quasar::backend::DeviceBuffer;
-  const SegmentSoA& seg = cs.segments_soa();
-  const PointSoA    pts = obs.to_point_soa();
-  const CountsF counts = checked_counts_f(seg, pts);
-  const int N = counts.N;
-  const int M = counts.M;
+  const DeviceSegmentSoA& seg = cs.device_segments();
+  const int N = checked_kernel_count(seg.n_segments(), "segment count");
+  const int M = checked_kernel_count(obs.size(), "observation count");
 
   Field<Vec3f> result(static_cast<std::size_t>(M));
   if (N == 0 || M == 0) {
@@ -443,19 +377,17 @@ Field<Vec3f> BiotSavartEvaluatorF::evaluate_A(const ConductorSystem& cs,
     return result;
   }
 
-  const InputsF in{seg, pts, N, M, cfg_.stream};
+  const NarrowedF in = narrow_inputs(seg, obs, N, M, cfg_.stream);
   DeviceBuffer<float> d_Ax(M, ::quasar::backend::uninitialized);
   DeviceBuffer<float> d_Ay(M, ::quasar::backend::uninitialized);
   DeviceBuffer<float> d_Az(M, ::quasar::backend::uninitialized);
   DeviceBuffer<int> d_status(1);
 
   dispatch_launch_A<float>(
-      in.segments.ax.device_ptr(), in.segments.ay.device_ptr(),
-      in.segments.az.device_ptr(), in.segments.bx.device_ptr(),
-      in.segments.by.device_ptr(), in.segments.bz.device_ptr(),
-      in.segments.I.device_ptr(), N,
-      in.points.px.device_ptr(), in.points.py.device_ptr(),
-      in.points.pz.device_ptr(), M,
+      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
+      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
+      in.I.device_ptr(), N,
+      in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_Ax.device_ptr(), d_Ay.device_ptr(), d_Az.device_ptr(),
       d_status.device_ptr(), cfg_.stream);
 
@@ -477,13 +409,11 @@ Field<Vec3f> BiotSavartEvaluatorF::evaluate_A(const ConductorSystem& cs,
 }
 
 Field<Mat3x3f> BiotSavartEvaluatorF::evaluate_grad_B(
-    const ConductorSystem& cs, const PointCloud& obs) const {
+    const ConductorSystem& cs, const core::DevicePointCloud& obs) const {
   using ::quasar::backend::DeviceBuffer;
-  const SegmentSoA& seg = cs.segments_soa();
-  const PointSoA    pts = obs.to_point_soa();
-  const CountsF counts = checked_counts_f(seg, pts);
-  const int N = counts.N;
-  const int M = counts.M;
+  const DeviceSegmentSoA& seg = cs.device_segments();
+  const int N = checked_kernel_count(seg.n_segments(), "segment count");
+  const int M = checked_kernel_count(obs.size(), "observation count");
 
   Field<Mat3x3f> result(static_cast<std::size_t>(M));
   if (N == 0 || M == 0) {
@@ -491,19 +421,17 @@ Field<Mat3x3f> BiotSavartEvaluatorF::evaluate_grad_B(
     return result;
   }
 
-  const InputsF in{seg, pts, N, M, cfg_.stream};
+  const NarrowedF in = narrow_inputs(seg, obs, N, M, cfg_.stream);
   const std::size_t gradient_values =
       checked_staging_size(M, 9, "gradient staging size");
   DeviceBuffer<float> d_G(gradient_values, ::quasar::backend::uninitialized);
   DeviceBuffer<int> d_status(1);
 
   dispatch_launch_gradB<float>(
-      in.segments.ax.device_ptr(), in.segments.ay.device_ptr(),
-      in.segments.az.device_ptr(), in.segments.bx.device_ptr(),
-      in.segments.by.device_ptr(), in.segments.bz.device_ptr(),
-      in.segments.I.device_ptr(), N,
-      in.points.px.device_ptr(), in.points.py.device_ptr(),
-      in.points.pz.device_ptr(), M,
+      in.ax.device_ptr(), in.ay.device_ptr(), in.az.device_ptr(),
+      in.bx.device_ptr(), in.by.device_ptr(), in.bz.device_ptr(),
+      in.I.device_ptr(), N,
+      in.px.device_ptr(), in.py.device_ptr(), in.pz.device_ptr(), M,
       d_G.device_ptr(), d_status.device_ptr(), cfg_.stream);
 
   std::vector<float> hG(gradient_values);

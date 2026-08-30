@@ -1,5 +1,8 @@
 #include "quasar/core/observations.hpp"
 
+#include "quasar/backend/memory.hpp"
+#include "quasar/core/device_observations.hpp"
+#include "quasar/core/observation_kernels.hpp"
 #include "quasar/core/types.hpp"
 
 #include <algorithm>
@@ -430,6 +433,99 @@ PointSoA LineProbe::to_point_soa() const {
     soa.pz[static_cast<std::size_t>(i)] = p.z;
   }
   return soa;
+}
+
+// ---------------------------------------------------------------------------
+// Device expansion
+// ---------------------------------------------------------------------------
+//
+// A structured observation set is a description, not data: it expands to one
+// point per lattice site through a short affine formula. Doing that on the host
+// and uploading the result was the last per-point host arithmetic in front of
+// the device-resident field evaluators, so it happens on the device instead.
+//
+// The host to_point_cloud()/to_point_soa() forms remain because a caller may
+// genuinely want host coordinates (a deck echo, a test), but a caller feeding an
+// evaluator should use these.
+
+namespace {
+
+// The three launchers share their whole epilogue: allocate the planes, zero a
+// status word, launch, and turn an overflow bit into the same exception the
+// host checked_coordinate() raised.
+template <class Launch>
+DevicePointCloud expand_on_device(std::size_t n, const std::string& kind,
+                                  Launch&& launch) {
+  DevicePointCloud points(n);
+  if (n == 0) return points;
+  backend::DeviceBuffer<int> status(1);
+  launch(points, status);
+  int flags = 0;
+  status.copy_to_host(&flags, 1);
+  if ((flags & 1) != 0) throw_bad(kind, "generated coordinate overflowed");
+  return points;
+}
+
+}  // namespace
+
+DevicePointCloud ObservationGrid::to_device_point_cloud() const {
+  validate(*this);
+  QuasarObsGridParams params{};
+  const Real origin_components[3] = {origin.x, origin.y, origin.z};
+  const Real spacing_components[3] = {spacing.x, spacing.y, spacing.z};
+  for (int axis = 0; axis < 3; ++axis) {
+    params.origin[axis] = origin_components[axis];
+    params.spacing[axis] = spacing_components[axis];
+    params.dims[axis] = dims[static_cast<std::size_t>(axis)];
+  }
+  return expand_on_device(
+      size(), "ObservationGrid",
+      [&](DevicePointCloud& points, backend::DeviceBuffer<int>& status) {
+        ::launch_observation_grid_points(params, points.x(), points.y(),
+                                         points.z(), status.device_ptr(),
+                                         nullptr);
+      });
+}
+
+DevicePointCloud PlaneSlice::to_device_point_cloud() const {
+  validate(*this);
+  QuasarObsPlaneParams params{};
+  const Real origin_components[3] = {origin.x, origin.y, origin.z};
+  const Real u_components[3] = {u_step.x, u_step.y, u_step.z};
+  const Real v_components[3] = {v_step.x, v_step.y, v_step.z};
+  for (int axis = 0; axis < 3; ++axis) {
+    params.origin[axis] = origin_components[axis];
+    params.u_step[axis] = u_components[axis];
+    params.v_step[axis] = v_components[axis];
+  }
+  params.nu = nu;
+  params.nv = nv;
+  return expand_on_device(
+      size(), "PlaneSlice",
+      [&](DevicePointCloud& points, backend::DeviceBuffer<int>& status) {
+        ::launch_observation_plane_points(params, points.x(), points.y(),
+                                          points.z(), status.device_ptr(),
+                                          nullptr);
+      });
+}
+
+DevicePointCloud LineProbe::to_device_point_cloud() const {
+  validate(*this);
+  QuasarObsLineParams params{};
+  const Real start_components[3] = {start.x, start.y, start.z};
+  const Real end_components[3] = {end.x, end.y, end.z};
+  for (int axis = 0; axis < 3; ++axis) {
+    params.start[axis] = start_components[axis];
+    params.end[axis] = end_components[axis];
+  }
+  params.n_points = n_points;
+  return expand_on_device(
+      size(), "LineProbe",
+      [&](DevicePointCloud& points, backend::DeviceBuffer<int>& status) {
+        ::launch_observation_line_points(params, points.x(), points.y(),
+                                         points.z(), status.device_ptr(),
+                                         nullptr);
+      });
 }
 
 }  // namespace quasar::core

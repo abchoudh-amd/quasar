@@ -24,6 +24,8 @@
 
 #include "host_evaluate.hpp"
 
+#include "filament_fixture.hpp"
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -43,9 +45,9 @@ namespace {
 
 ConductorSystem make_symmetric_segment(Real half_length, Real current_A) {
   ConductorSystem cs;
-  cs.add({/*name=*/"long_wire",
+  cs.add(quasar::test::filament(/*name=*/"long_wire",
           /*current_A=*/current_A,
-          /*points=*/{Vec3{0, 0, -half_length}, Vec3{0, 0, +half_length}}});
+          /*points=*/{Vec3{0, 0, -half_length}, Vec3{0, 0, +half_length}}));
   return cs;
 }
 

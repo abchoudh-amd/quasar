@@ -36,14 +36,14 @@ TEST(CircularLoop, ProducesClosedRingOnCorrectCircle) {
   const Filament fil = circular_loop(center, axis, R, N, Real{2.0}, "loop_test");
   ASSERT_EQ(fil.points.size(), static_cast<std::size_t>(N) + 1u);
 
-  for (const auto& p : fil.points) {
+  for (const auto& p : fil.points.to_host()) {
     const Vec3 r = p - center;
     EXPECT_NEAR(r.z, Real{0}, Real{1e-14});
     EXPECT_NEAR(std::sqrt(r.x * r.x + r.y * r.y), R, Real{1e-14});
   }
-  EXPECT_EQ(fil.points.front().x, fil.points.back().x);
-  EXPECT_EQ(fil.points.front().y, fil.points.back().y);
-  EXPECT_EQ(fil.points.front().z, fil.points.back().z);
+  EXPECT_EQ(fil.points.to_host().front().x, fil.points.to_host().back().x);
+  EXPECT_EQ(fil.points.to_host().front().y, fil.points.to_host().back().y);
+  EXPECT_EQ(fil.points.to_host().front().z, fil.points.to_host().back().z);
 
   EXPECT_EQ(fil.current_A, Real{2.0});
   EXPECT_EQ(fil.name, "loop_test");
@@ -70,7 +70,7 @@ TEST(CircularLoop, NormalizesExtremeFiniteAxisWithoutOverflow) {
   const auto fil = circular_loop({0,0,0}, {largest, largest, largest},
                                  Real{1}, 8, Real{1});
   ASSERT_EQ(fil.points.size(), 9u);
-  for (const Vec3 p : fil.points) {
+  for (const Vec3 p : fil.points.to_host()) {
     EXPECT_TRUE(std::isfinite(p.x));
     EXPECT_TRUE(std::isfinite(p.y));
     EXPECT_TRUE(std::isfinite(p.z));
@@ -106,15 +106,15 @@ TEST(Helix, AdvancesByPitchPerTurnAndKeepsRadiusConstant) {
   ASSERT_EQ(fil.points.size(), static_cast<std::size_t>(N) + 1u);
 
   const Real total = static_cast<Real>(turns) * pitch;
-  EXPECT_NEAR(fil.points.front().z, -total / Real{2}, Real{1e-12});
-  EXPECT_NEAR(fil.points.back ().z, +total / Real{2}, Real{1e-12});
+  EXPECT_NEAR(fil.points.to_host().front().z, -total / Real{2}, Real{1e-12});
+  EXPECT_NEAR(fil.points.to_host().back ().z, +total / Real{2}, Real{1e-12});
 
-  for (const auto& p : fil.points) {
+  for (const auto& p : fil.points.to_host()) {
     EXPECT_NEAR(std::sqrt(p.x * p.x + p.y * p.y), R, Real{1e-12});
   }
 
-  EXPECT_NEAR(fil.points[n_per].z - fil.points[0].z, pitch, Real{1e-12});
-  EXPECT_NEAR(fil.points[2 * n_per].z - fil.points[0].z, Real{2} * pitch,
+  EXPECT_NEAR(fil.points.to_host()[n_per].z - fil.points.to_host()[0].z, pitch, Real{1e-12});
+  EXPECT_NEAR(fil.points.to_host()[2 * n_per].z - fil.points.to_host()[0].z, Real{2} * pitch,
               Real{1e-12});
 }
 
@@ -142,7 +142,7 @@ TEST(Solenoid, EquivalentToHelixWithPitchEqLengthOverTurns) {
 
   ASSERT_EQ(a.points.size(), b.points.size());
   for (std::size_t i = 0; i < a.points.size(); ++i) {
-    EXPECT_LT(dist(a.points[i], b.points[i]), Real{1e-14});
+    EXPECT_LT(dist(a.points.to_host()[i], b.points.to_host()[i]), Real{1e-14});
   }
 }
 
@@ -161,11 +161,11 @@ TEST(Racetrack, HasExpectedVertexCountAndPerimeter) {
   const Filament fil = racetrack({0,0,0}, {0,0,1}, L, R, n_arc, Real{1}, "rt");
   ASSERT_EQ(fil.points.size(), static_cast<std::size_t>(2 * n_arc + 3));
 
-  EXPECT_LT(dist(fil.points.front(), fil.points.back()), Real{1e-14});
+  EXPECT_LT(dist(fil.points.to_host().front(), fil.points.to_host().back()), Real{1e-14});
 
   Real perim = Real{0};
   for (std::size_t i = 0; i + 1 < fil.points.size(); ++i) {
-    perim += dist(fil.points[i], fil.points[i + 1]);
+    perim += dist(fil.points.to_host()[i], fil.points.to_host()[i + 1]);
   }
   const Real exact = Real{2} * L + Real{2} * pi * R;
   // n_arc=8 polygon-approximation underestimate ~0.25%; allow 1% slack.
@@ -192,7 +192,7 @@ TEST(Polygon, HasEqualSideLengthsAndClosesBack) {
 
   const Real side_expected = Real{2} * R * std::sin(pi / static_cast<Real>(N));
   for (std::size_t i = 0; i + 1 < fil.points.size(); ++i) {
-    EXPECT_NEAR(dist(fil.points[i], fil.points[i + 1]), side_expected,
+    EXPECT_NEAR(dist(fil.points.to_host()[i], fil.points.to_host()[i + 1]), side_expected,
                 Real{1e-12});
   }
 }
@@ -215,7 +215,7 @@ TEST(GenericPolyline, PassesThroughGivenVertices) {
   const Filament fil = generic_polyline(pts, Real{2.5}, "gp");
   ASSERT_EQ(fil.points.size(), pts.size());
   for (std::size_t i = 0; i < pts.size(); ++i) {
-    EXPECT_LT(dist(fil.points[i], pts[i]), Real{1e-14});
+    EXPECT_LT(dist(fil.points.to_host()[i], pts[i]), Real{1e-14});
   }
   EXPECT_EQ(fil.current_A, Real{2.5});
   EXPECT_EQ(fil.name, "gp");
@@ -254,4 +254,68 @@ TEST(GeometryGenerators, OutputsAreValidForConductorSystemFlattening) {
 
   const auto soa = cs.to_segments_soa();
   EXPECT_GT(soa.n_segments(), 0u);
+}
+
+// The generators moved from a host loop to a device kernel. The host code was
+// deleted, so these tests carry their own reference: the same closed form,
+// evaluated here, compared exactly rather than to a tolerance.
+//
+// Exact comparison is the point. A tolerance would accept a kernel that formed
+// the angle by accumulating an increment instead of rebuilding it from the
+// integer index, and that difference only becomes visible after many turns --
+// which is precisely the case the generators were written to survive.
+
+TEST(GeometryGenerators, CircularLoopVerticesMatchTheClosedFormExactly) {
+  const Vec3 center{Real{0.25}, Real{-1.5}, Real{3.0}};
+  const Vec3 axis{Real{0}, Real{0}, Real{1}};
+  const Real R = Real{0.35};
+  const int N = 64;
+
+  const Filament fil = circular_loop(center, axis, R, N, Real{1});
+  const std::vector<Vec3> vertices = fil.points.to_host();
+  ASSERT_EQ(vertices.size(), static_cast<std::size_t>(N) + 1u);
+
+  // make_basis picks ref = +x here (|axis_hat.x| < 0.9), so
+  // u = normalized(cross(+x, +z)) = -y and v = cross(+z, -y) = +x.
+  const Vec3 u{Real{0}, Real{-1}, Real{0}};
+  const Vec3 v{Real{1}, Real{0}, Real{0}};
+  for (int k = 0; k < N; ++k) {
+    const Real theta = Real{2} * quasar::pi * static_cast<Real>(k)
+                     / static_cast<Real>(N);
+    const Vec3 direction = std::cos(theta) * u + std::sin(theta) * v;
+    const Vec3 expected = center + R * direction;
+    EXPECT_EQ(vertices[static_cast<std::size_t>(k)].x, expected.x) << "k=" << k;
+    EXPECT_EQ(vertices[static_cast<std::size_t>(k)].y, expected.y) << "k=" << k;
+    EXPECT_EQ(vertices[static_cast<std::size_t>(k)].z, expected.z) << "k=" << k;
+  }
+  // Closure is a copy of vertex 0, not a recomputation at 2*pi.
+  EXPECT_EQ(vertices.back().x, vertices.front().x);
+  EXPECT_EQ(vertices.back().y, vertices.front().y);
+  EXPECT_EQ(vertices.back().z, vertices.front().z);
+}
+
+TEST(GeometryGenerators, HelixPhaseDoesNotDriftOverManyTurns) {
+  // 400 turns at 32 segments each. If the kernel accumulated the angle instead
+  // of rebuilding it from k % segments_per_turn, the last turn's vertices would
+  // no longer sit exactly on top of the first turn's.
+  const Vec3 axis{Real{0}, Real{0}, Real{1}};
+  const Real R = Real{0.2};
+  const int turns = 400;
+  const int per_turn = 32;
+
+  const Filament fil = helix({0, 0, 0}, axis, R, Real{0.01}, turns, per_turn,
+                             Real{1});
+  const std::vector<Vec3> vertices = fil.points.to_host();
+  ASSERT_EQ(vertices.size(),
+            static_cast<std::size_t>(turns) * per_turn + 1u);
+
+  for (int k = 0; k < per_turn; ++k) {
+    const std::size_t first = static_cast<std::size_t>(k);
+    const std::size_t last =
+        static_cast<std::size_t>((turns - 1) * per_turn + k);
+    // Same phase, different axial station: the transverse coordinates must be
+    // bit-identical, because both were built from the same reduced index.
+    EXPECT_EQ(vertices[first].x, vertices[last].x) << "phase " << k;
+    EXPECT_EQ(vertices[first].y, vertices[last].y) << "phase " << k;
+  }
 }

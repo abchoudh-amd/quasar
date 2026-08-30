@@ -4,6 +4,7 @@
 #include "quasar/physics/magnetostatics/conductor.hpp"
 #include "quasar/physics/magnetostatics/observation.hpp"
 
+#include "filament_fixture.hpp"
 #include "host_evaluate.hpp"
 
 #include <gtest/gtest.h>
@@ -27,15 +28,15 @@ namespace {
 // Build a closed regular-N-polygon loop of radius R in the z=0 plane, current
 // I, traversed in the +phi direction so that the on-axis field at +z is in +z.
 Filament make_polygon_loop(Real R, int N, Real I) {
-  Filament f;
-  f.name      = "loop";
-  f.current_A = I;
-  f.points.reserve(static_cast<std::size_t>(N) + 1u);
+  // Built on the host on purpose: this is the reference polygon the device
+  // generator is compared against, so it must not share the generator's code.
+  std::vector<Vec3> vertices;
+  vertices.reserve(static_cast<std::size_t>(N) + 1u);
   for (int k = 0; k <= N; ++k) {
     const Real theta = (Real{2} * pi * static_cast<Real>(k)) / static_cast<Real>(N);
-    f.points.push_back(Vec3{R * std::cos(theta), R * std::sin(theta), Real{0}});
+    vertices.push_back(Vec3{R * std::cos(theta), R * std::sin(theta), Real{0}});
   }
-  return f;
+  return quasar::test::filament("loop", I, vertices);
 }
 
 // On-axis B_z for an exact circular loop of radius R, current I, observed at

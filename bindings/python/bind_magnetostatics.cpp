@@ -47,6 +47,7 @@ using ::quasar::magnetostatics::LineProbe;
 using ::quasar::magnetostatics::ObservationGrid;
 using ::quasar::magnetostatics::PlaneSlice;
 using ::quasar::core::DevicePointCloud;
+using ::quasar::magnetostatics::FilamentPoints;
 using ::quasar::magnetostatics::PointCloud;
 using ::quasar::magnetostatics::polygon;
 using ::quasar::magnetostatics::racetrack;
@@ -134,21 +135,34 @@ PYBIND11_MODULE(_core, m) {
   py::module_ ms = m.def_submodule("magnetostatics",
       "Field-evaluator surface (Biot-Savart + analytic fields) on HIP.");
 
+  // Filament owns device buffers and is therefore move-only. Python holds it
+  // by shared_ptr so `cs.add(circular_loop(...))` still reads naturally; `add`
+  // moves out of the holder, which leaves the Python object empty rather than
+  // silently duplicating device allocations.
   py::class_<Filament>(ms, "Filament")
       .def(py::init<>())
       .def(py::init([](std::string name, Real current_A,
-                        std::vector<Vec3> points) {
+                        const std::vector<Vec3>& points) {
         Filament f;
         f.name      = std::move(name);
         f.current_A = current_A;
-        f.points    = std::move(points);
+        f.points    = FilamentPoints::upload(points);
         return f;
       }),
            py::arg("name") = std::string{}, py::arg("current_A") = Real{0},
            py::arg("points") = std::vector<Vec3>{})
       .def_readwrite("name",      &Filament::name)
       .def_readwrite("current_A", &Filament::current_A)
-      .def_readwrite("points",    &Filament::points);
+      // The vertices live on the device; reading them back is an output
+      // boundary, so this is a property returning a copy rather than a
+      // reference into the object.
+      .def_property_readonly(
+          "points",
+          [](const Filament& self) { return self.points.to_host(); },
+          "Vertices as a list of Vec3, downloaded from the device.")
+      .def_property_readonly(
+          "n_points",
+          [](const Filament& self) { return self.points.size(); });
 
   // Axis-neutral field-source base so the IFieldEvaluator surface can accept any
   // source polymorphically (the evaluator contract is on core::IFieldSource).
@@ -157,7 +171,13 @@ PYBIND11_MODULE(_core, m) {
 
   py::class_<ConductorSystem, ::quasar::core::IFieldSource>(ms, "ConductorSystem")
       .def(py::init<>())
-      .def("add",   &ConductorSystem::add, py::arg("filament"))
+      .def("add",
+           [](ConductorSystem& self, Filament& filament) {
+             self.add(std::move(filament));
+           },
+           py::arg("filament"),
+           "Take ownership of a filament. The argument is moved from: its "
+           "device vertices belong to the system afterwards.")
       .def("size",  &ConductorSystem::size)
       .def("empty", &ConductorSystem::empty)
       .def("__len__", &ConductorSystem::size);
@@ -178,6 +198,22 @@ PYBIND11_MODULE(_core, m) {
       .def("empty",  &PointCloud::empty)
       .def("__len__", &PointCloud::size);
 
+  // Device-resident observation points, the shape the field evaluators consume.
+  // Opaque from Python: it exists to be handed straight back to evaluate_*
+  // without a host round trip. Construct one from a structured observation set
+  // via `to_device_point_cloud()`, or upload an explicit PointCloud.
+  py::class_<DevicePointCloud>(ms, "DevicePointCloud")
+      .def(py::init<>())
+      .def_static("upload",
+                  [](const PointCloud& points) {
+                    return DevicePointCloud::upload(points);
+                  },
+                  py::arg("points"),
+                  "Upload a host PointCloud to the device.")
+      .def("size",    &DevicePointCloud::size)
+      .def("empty",   &DevicePointCloud::empty)
+      .def("__len__", &DevicePointCloud::size);
+
   py::class_<ObservationGrid>(ms, "ObservationGrid")
       .def(py::init<>())
       .def_readwrite("origin",  &ObservationGrid::origin)
@@ -187,7 +223,11 @@ PYBIND11_MODULE(_core, m) {
       .def("__len__",         &ObservationGrid::size)
       .def("point_at",        &ObservationGrid::point_at,
            py::arg("i"), py::arg("j"), py::arg("k"))
-      .def("to_point_cloud",  &ObservationGrid::to_point_cloud);
+      .def("to_point_cloud",  &ObservationGrid::to_point_cloud)
+      .def("to_device_point_cloud", &ObservationGrid::to_device_point_cloud,
+           "Expand straight into device SoA planes. Agrees with "
+           "point_at() bit for bit and skips the host round trip "
+           "that to_point_cloud() + evaluate_* would pay.");
 
   py::class_<PlaneSlice>(ms, "PlaneSlice")
       .def(py::init<>())
@@ -200,7 +240,11 @@ PYBIND11_MODULE(_core, m) {
       .def("__len__",        &PlaneSlice::size)
       .def("point_at",       &PlaneSlice::point_at,
            py::arg("i"), py::arg("j"))
-      .def("to_point_cloud", &PlaneSlice::to_point_cloud);
+      .def("to_point_cloud", &PlaneSlice::to_point_cloud)
+      .def("to_device_point_cloud", &PlaneSlice::to_device_point_cloud,
+           "Expand straight into device SoA planes. Agrees with "
+           "point_at() bit for bit and skips the host round trip "
+           "that to_point_cloud() + evaluate_* would pay.");
 
   py::class_<LineProbe>(ms, "LineProbe")
       .def(py::init<>())
@@ -210,7 +254,11 @@ PYBIND11_MODULE(_core, m) {
       .def("size",           &LineProbe::size)
       .def("__len__",        &LineProbe::size)
       .def("point_at",       &LineProbe::point_at, py::arg("i"))
-      .def("to_point_cloud", &LineProbe::to_point_cloud);
+      .def("to_point_cloud", &LineProbe::to_point_cloud)
+      .def("to_device_point_cloud", &LineProbe::to_device_point_cloud,
+           "Expand straight into device SoA planes. Agrees with "
+           "point_at() bit for bit and skips the host round trip "
+           "that to_point_cloud() + evaluate_* would pay.");
 
   // Kernel tiling is compile-time (per-gfx, via cmake/QuasarLaunchParams.cmake);
   // BiotSavartConfig carries only the device stream, which Python does not set.
@@ -270,7 +318,40 @@ PYBIND11_MODULE(_core, m) {
            },
            py::arg("source"), py::arg("observations"),
            "Magnetic vector potential A (B = curl A), NumPy (N, 3). Raises if "
-           "the evaluator does not model A.");
+           "the evaluator does not model A.")
+      // Overloads taking points that are already on the device. A deck that
+      // built its observation set with to_device_point_cloud() passes it
+      // straight through, so the coordinates are generated on the device,
+      // consumed on the device, and only the field comes back.
+      .def("evaluate_B",
+           [](const IFieldEvaluator& self,
+              const ::quasar::core::IFieldSource& src,
+              const DevicePointCloud& obs) {
+             return field_to_numpy(self.evaluate_B(src, obs).to_host());
+           },
+           py::arg("source"), py::arg("observations"))
+      .def("evaluate_E",
+           [](const IFieldEvaluator& self,
+              const ::quasar::core::IFieldSource& src,
+              const DevicePointCloud& obs) {
+             return field_to_numpy(self.evaluate_E(src, obs).to_host());
+           },
+           py::arg("source"), py::arg("observations"))
+      .def("evaluate_grad_B",
+           [](const IFieldEvaluator& self,
+              const ::quasar::core::IFieldSource& src,
+              const DevicePointCloud& obs) {
+             return grad_field_to_numpy(
+                 self.evaluate_grad_B(src, obs).to_host());
+           },
+           py::arg("source"), py::arg("observations"))
+      .def("evaluate_A",
+           [](const IFieldEvaluator& self,
+              const ::quasar::core::IFieldSource& src,
+              const DevicePointCloud& obs) {
+             return field_to_numpy(self.evaluate_A(src, obs).to_host());
+           },
+           py::arg("source"), py::arg("observations"));
 
   py::class_<BiotSavartEvaluator, IFieldEvaluator>(ms, "BiotSavartEvaluator")
       .def(py::init<>())

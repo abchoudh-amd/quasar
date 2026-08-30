@@ -21,6 +21,7 @@ set(_quasar_pic_hip_sources
   deposit_cyl_hip.hip
   boundary_axis_hip.hip
   diagnostics_hip.hip
+  external_field_hip.hip
 )
 
 quasar_add_hip_module(pic_hip SOURCES ${_quasar_pic_hip_sources})
@@ -42,7 +43,13 @@ quasar_add_backend_src_include(pic_hip)
 #
 # Applied per-source rather than to the whole module because the PIC hot-path
 # kernels (FDTD, gather/push, deposit) legitimately want contraction.
-set_source_files_properties(diagnostics_hip.hip
+#
+# external_field_hip.hip needs the same treatment for the same reason: its
+# continuous-solenoidality check reduces trace(grad B) through the exact
+# expansions in numerics/scaled_arithmetic.hpp, and the whole point of that
+# reduction is that an identically vanishing trace collapses to exactly zero
+# rather than to one ulp of an intermediate. Contraction would put the ulp back.
+set_source_files_properties(diagnostics_hip.hip external_field_hip.hip
   TARGET_DIRECTORY quasar_pic_hip
   PROPERTIES COMPILE_OPTIONS
     "$<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>")

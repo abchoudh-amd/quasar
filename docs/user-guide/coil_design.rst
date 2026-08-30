@@ -283,6 +283,26 @@ set, evaluate on the device, and download once into the NumPy array. A C++
 caller that feeds the result to another device stage keeps the planes and never
 makes that round trip. See :doc:`../dev-guide/adding_a_field_evaluator`.
 
+Two consequences worth knowing:
+
+* A structured observation set expands on the device.
+  ``ObservationGrid``/``PlaneSlice``/``LineProbe`` gain
+  ``to_device_point_cloud()`` alongside ``to_point_cloud()``, and
+  ``evaluate_*`` accepts the result directly, so the coordinates are generated
+  where they are consumed. The expansion agrees with ``point_at()`` bit for bit.
+  The deck loader uses this path; ``to_point_cloud()`` remains for a caller that
+  genuinely wants host coordinates.
+
+* Filament vertices live on the device. The geometry generators
+  (``circular_loop``, ``helix``, ``solenoid``, ``racetrack``, ``polygon``) write
+  them with a kernel, and ``ConductorSystem`` flattens them into per-segment
+  planes with another, so a coil is never assembled in host memory.
+  ``Filament.points`` is therefore a read-only property that downloads, and
+  ``Filament.n_points`` reports the count without downloading. ``Filament`` is
+  move-only in C++ and ``ConductorSystem.add`` moves from its argument.
+  ``generic_polyline`` still takes a host vertex list: those coordinates come
+  from a deck rather than a calculation, so they are validated and uploaded.
+
 The C++ ``BiotSavartConfig`` carries an opaque
 ``quasar::backend::stream_t`` slot for chaining evaluation onto a pre-existing
 device stream. Python deliberately exposes only the default configuration; it

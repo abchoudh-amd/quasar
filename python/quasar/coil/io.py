@@ -46,6 +46,7 @@ from .._deck import unique_alias as _unique_alias
 from .._deck import validate_evaluator_type as _validate_evaluator_type
 from . import (
     ConductorSystem,
+    DevicePointCloud,
     Filament,
     LineProbe,
     ObservationGrid,
@@ -245,7 +246,11 @@ def build_conductor_system(conductors: Sequence[dict]) -> ConductorSystem:
 class _ObservationResult:
     """Internal: handles for the materialized observation set."""
 
-    points: PointCloud
+    # Device-resident. The structured kinds expand their description with a
+    # kernel; the explicit ``points`` kind uploads the coordinates the deck
+    # literally listed, which are data rather than the result of a calculation.
+    # Either way the evaluator receives points that are already on the device.
+    points: DevicePointCloud
     dims: list[int]
     kind: str
     detail: Any  # the source object (ObservationGrid, PlaneSlice, LineProbe, ...)
@@ -319,7 +324,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
             for (lower, upper), count in zip(
                 parsed_bounds, (nx, ny, nz))))
         g.dims = [nx, ny, nz]
-        return _ObservationResult(points=g.to_point_cloud(),
+        return _ObservationResult(points=g.to_device_point_cloud(),
                                    dims=[nx, ny, nz], kind="grid", detail=g)
 
     if ot == "plane":
@@ -362,7 +367,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
                         v.y * v_extent / max(1, nv - 1),
                         v.z * v_extent / max(1, nv - 1))
         s.nu, s.nv = nu, nv
-        return _ObservationResult(points=s.to_point_cloud(),
+        return _ObservationResult(points=s.to_device_point_cloud(),
                                    dims=[nu, nv], kind="plane", detail=s)
 
     if ot == "line":
@@ -376,7 +381,7 @@ def _build_observation(spec: dict) -> _ObservationResult:
         _check_point_count("line", n)
         lp = LineProbe()
         lp.start, lp.end, lp.n_points = start, end, n
-        return _ObservationResult(points=lp.to_point_cloud(),
+        return _ObservationResult(points=lp.to_device_point_cloud(),
                                    dims=[n], kind="line", detail=lp)
 
     if ot == "points":
@@ -389,7 +394,8 @@ def _build_observation(spec: dict) -> _ObservationResult:
         pc = PointCloud()
         for p in raw_pts:
             pc.add(_vec3(p))
-        return _ObservationResult(points=pc, dims=[len(raw_pts)],
+        return _ObservationResult(points=DevicePointCloud.upload(pc),
+                                   dims=[len(raw_pts)],
                                    kind="points", detail=None)
 
     raise ValueError(f"observation.type {ot!r} is not recognized")

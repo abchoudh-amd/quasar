@@ -70,14 +70,14 @@ class BiotSavartEvaluatorF final {
   BiotSavartEvaluatorF();
   explicit BiotSavartEvaluatorF(BiotSavartConfig cfg);
 
-  Field<Vec3f>   evaluate_B     (const ConductorSystem& conductors,
-                                 const PointCloud&      observations) const;
+  Field<Vec3f>   evaluate_B     (const ConductorSystem&        conductors,
+                                 const core::DevicePointCloud& observations) const;
 
-  Field<Mat3x3f> evaluate_grad_B(const ConductorSystem& conductors,
-                                 const PointCloud&      observations) const;
+  Field<Mat3x3f> evaluate_grad_B(const ConductorSystem&        conductors,
+                                 const core::DevicePointCloud& observations) const;
 
-  Field<Vec3f>   evaluate_A     (const ConductorSystem& conductors,
-                                 const PointCloud&      observations) const;
+  Field<Vec3f>   evaluate_A     (const ConductorSystem&        conductors,
+                                 const core::DevicePointCloud& observations) const;
 
   const BiotSavartConfig& config() const noexcept { return cfg_; }
 

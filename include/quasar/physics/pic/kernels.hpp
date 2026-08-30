@@ -478,4 +478,91 @@ std::size_t launch_pic_particle_departure_count(
     const quasar::pic::ParticleSpecies&, int include_x_high,
     int include_y_high, quasar_stream_t);
 
+// -- Prescribed external-field sampling --------------------------------------
+//
+// Backing kernels for pic::sample_external_field, in
+// src/backend/hip/pic/external_field_hip.hip. Sample points, evaluator answers
+// and materialized components are all indexed in Grid2D::index(i, j) order over
+// the padded extent, so the mapping stage is a flat elementwise map.
+//
+// The checking entry points cannot throw, so each ORs bits into a zeroed `int*`
+// with an integer atomic -- exact and order-independent, hence independent of
+// the launch geometry -- and the host raises the matching exception. Each bit
+// set is documented on its own launcher.
+
+// Builds one component's Yee-lattice sample points over the whole padded
+// lattice, already scaled from internal length units to SI. Offsets are in
+// cells from the domain origin (0 = face/node, 1/2 = centre).
+//
+// The padded extent is evaluated, not just the physical subset: a wall-adjacent
+// finite-size gather legitimately reads the boundary-filled ghosts of the
+// evolved field, so the prescribed field must supply values at those same
+// coordinates. Edge replication would reduce a nonuniform analytic or file
+// field to a first-order constant continuation.
+//
+// Status bits: 1 = a scaled sample coordinate is not finite;
+//              2 = a nonzero coordinate underflowed under length scaling.
+void launch_pic_yee_points(const quasar::Grid2D& g, quasar::Real offset_x,
+                           quasar::Real offset_y, quasar::Real length_scale,
+                           int plane_is_xz, quasar::Real* px, quasar::Real* py,
+                           quasar::Real* pz, int* status, quasar_stream_t);
+
+// Rotates a sample-point set about the configured symmetry axis, for the
+// cylindrical covariance probes. Status bit 1 = a rotated coordinate is not
+// finite.
+void launch_pic_rotate_points(int plane_is_xz, quasar::Real cosine,
+                              quasar::Real sine, int exact_quarter_turn,
+                              const quasar::Real* px, const quasar::Real* py,
+                              const quasar::Real* pz, int M,
+                              quasar::Real* ox, quasar::Real* oy,
+                              quasar::Real* oz, int* status, quasar_stream_t);
+
+// Checks that the field sampled on the rotated points equals the rotation of
+// the field sampled on the meridional points. Status bits:
+//   1 = the evaluator returned a non-finite field;
+//   2 = the field is not rotationally covariant about the symmetry axis.
+void launch_pic_check_rotational_covariance(
+    int plane_is_xz, quasar::Real cosine, quasar::Real sine,
+    int exact_quarter_turn,
+    const quasar::Real* mx, const quasar::Real* my, const quasar::Real* mz,
+    const quasar::Real* rx, const quasar::Real* ry, const quasar::Real* rz,
+    int M, quasar::Real relative_tolerance, quasar::Real absolute_floor,
+    int* status, quasar_stream_t);
+
+// Maps one PIC-frame component out of the evaluator's lab-frame planes: reads
+// lab axis `axis` (0=x, 1=y, 2=z) and scales by `sign` and 1/field_scale.
+// Status bits: 1 = the evaluator returned a non-finite field;
+//              2 = the scaled value is not finite;
+//              4 = a nonzero field value underflowed solver units.
+void launch_pic_materialize_external_component(
+    const quasar::Real* vx, const quasar::Real* vy, const quasar::Real* vz,
+    int total, int axis, quasar::Real sign, quasar::Real field_scale,
+    quasar::Real* out, int* status, quasar_stream_t);
+
+// Verifies and then enforces radial parity on one materialized component of a
+// cylindrical prescribed field. `face_odd` selects odd parity with an exact
+// zero on the axis face; otherwise even parity about the first cell centre.
+// Ghosts are overwritten with the exact mirrored value after the check, so the
+// prescribed halo is bit-for-bit consistent with the closure the evolved field
+// uses. Status bits: 1 = the axis face does not vanish;
+//                    2 = the radial parity is violated.
+void launch_pic_enforce_axis_parity(const quasar::Grid2D& g,
+                                    quasar::Real* plane, int face_odd,
+                                    quasar::Real relative_tolerance,
+                                    int* status, quasar_stream_t);
+
+// Checks trace(grad B) = 0 pointwise on a component-major 9*M Jacobian. This is
+// Maxwell's continuous constraint on a prescribed force-only field, deliberately
+// not a discrete Yee divergence: a smooth divergence-free field must not be
+// rejected merely because samples of it carry the stencil's truncation error.
+// Status bits: 1 = a non-finite gradient entry; 2 = the trace does not vanish.
+void launch_pic_check_continuous_solenoidality(
+    const quasar::Real* G, int M, quasar::Real relative_tolerance, int* status,
+    quasar_stream_t);
+
+// Sets `*flag` to 1 if any component of the sampled field is nonzero.
+void launch_pic_field_has_nonzero(const quasar::Real* x, const quasar::Real* y,
+                                  const quasar::Real* z, int M, int* flag,
+                                  quasar_stream_t);
+
 }  // extern "C"

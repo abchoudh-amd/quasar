@@ -72,6 +72,19 @@ Key conventions:
 
 - **Backend isolation** — all HIP `.hip` / device code lives under `src/backend/hip/`. Code outside that directory must go through abstractions in `include/quasar/backend/` (`device.hpp`, `memory.hpp`).
 - **Plugin registry** — concrete schemes/BCs/physics self-register via `core/registry.hpp` so the YAML/Python input deck selects implementations by string name. Drivers in `apps/` should not contain `if/else` chains over physics types.
+- **Device-resident evaluator axis** — `numerics::IFieldEvaluator` takes a
+  `core::DevicePointCloud` and returns `core::DeviceVectorField` /
+  `core::DeviceTensorField` (SoA planes), never host `Field<Vec3>`. Chained
+  consumers — the PIC external-field sampler, the MHD background builder — keep
+  the planes on the device; `.to_host()` belongs only at an output boundary (a
+  CLI, a Python binding, a test). Host-side convenience wrappers live under
+  `tests/unit/support/` precisely so production code cannot reach them. See
+  `docs/dev-guide/adding_a_field_evaluator.rst`. The structured observation sets
+  (`ObservationGrid`, `PlaneSlice`, `LineProbe`) expand straight into a
+  `DevicePointCloud` via `to_device_point_cloud()`, backed by kernels in
+  `src/backend/hip/core/`; that expansion agrees with the host `point_at()`
+  accessors bit for bit, which is why the module is compiled
+  `-ffp-contract=off`.
 - **Public vs private** — headers under `include/quasar/` are the supported
   public include surface. Anything in `src/` (including `src/**/detail/`) is
   implementation-private; do not include from `src/` outside its own module.
@@ -87,7 +100,7 @@ Key conventions:
 
 Concrete physics modules currently present:
 
-- `physics/magnetostatics` — Biot–Savart field evaluator over conductor geometries with observation point sets. Exposed to Python as `quasar.coil` with a CLI at `python -m quasar.coil.cli run <input.yaml>` that writes `out.npz`.
+- `physics/magnetostatics` — Biot–Savart field evaluator over conductor geometries with observation point sets. Exposed to Python as `quasar.coil` with a CLI at `python -m quasar.coil.cli run <input.yaml>` that writes `out.npz`. **Fully GPU-resident**: the geometry generators write filament vertices with kernels in `src/backend/hip/magnetostatics/geometry_hip.hip`, `ConductorSystem` flattens them into cached per-segment device planes, and the fp64 evaluator implements the device-resident `IFieldEvaluator`, so nothing is uploaded at evaluation time. Two things to know before extending it: `Filament` and `ConductorSystem` are move-only because the vertices are `DeviceBuffer`s, and copying a `ConductorSystem` duplicates device allocations; and `BiotSavartEvaluatorF`, the fp32 sibling, deliberately stays off the evaluator interface and keeps host `Field<Vec3f>` results for the precision-comparison test, though its narrowing is itself a kernel. Host arithmetic that remains is scalar and does not scale with the vertex count: the orthonormal basis per generator call, and a racetrack's frame points and corners.
 - `physics/pic` — EM-PIC vertical slice (`EmPicConfig`, Cartesian and axisymmetric-cylindrical FDTD, particle shapes, charge-conserving deposition, particle and field boundaries, and diagnostics). Driven from Python at `python -m quasar.pic.cli run <input.yaml>`; no C++ app exists. Deck I/O is under `quasar.pic`.
 - `physics/mhd` — high-order ideal-MHD vertical slice (MP5/MP7 characteristic reconstruction with Cartesian or radius-weighted cylindrical finite-volume moments, HLLD Riemann solver, FD constrained transport, SSP-RK3, conservative troubled-cell positivity control). Driven from Python at `python -m quasar.mhd.cli run <input.yaml>`. The numerics live under `numerics/` (the second consumer of that axis after PIC); deck I/O is under `quasar.mhd`.
 - `physics/equilibrium` — free-boundary Grad–Shafranov solver (sixth-order compact operator, defect-corrected geometric multigrid, Green's-function boundary coupling, critical-point location, flux surfaces and `q(ψ)`), plus projection onto the staggered MHD mesh. **Fully GPU-resident**: all arithmetic runs through the launch ABI in `physics/equilibrium/kernels.hpp` with kernels under `src/backend/hip/equilibrium/`; `GsSolver` retains only control flow. Two consequences worth knowing before extending it: profiles are lowered to a `ProfileCoefficients` POD at construction because a vtable cannot cross to the device, so only `PolynomialProfile` works today; and the module is compiled with `-ffp-contract=off`, which is load-bearing for both the Padé line solve and the compensated current integral (see `src/backend/hip/equilibrium/CMakeLists.txt`). No Python bindings or CLI yet.
@@ -105,8 +118,19 @@ Concrete physics modules currently present:
   than approximated; and the shift-invert path in `spectral_blocks.hpp` is
   exercised and cross-checked but does not yet replace the dense solve. No
   Python bindings or CLI yet.
-- `physics/analytic_fields` — analytic and rectilinear file-backed fields used
-  by simulations, tests, and examples.
+- `physics/analytic_fields` — analytic and rectilinear file-backed fields
+  (`uniform`, `gradient`, `dipole`, `file_grid`) used by simulations, tests, and
+  examples. **Fully GPU-resident**: the classes in `src/physics/analytic_fields/`
+  hold only parameter validation, a launch, and a status check, with the
+  arithmetic in `src/backend/hip/analytic_fields/` behind the launch ABI in
+  `physics/analytic_fields/kernels.hpp`, compiled `-ffp-contract=off`. Two things
+  to know before extending it: `FileGridEvaluator` keeps its node values on the
+  device from `configure()` onward and runs its finiteness and solenoidality
+  admissibility sweeps there, so the host holds the map only while parsing it;
+  and the extended exponent range these evaluators used to get from host
+  `long double` is now carried explicitly through `numerics::ScaledValue`
+  (`include/quasar/numerics/scaled_arithmetic.hpp`), which is what the
+  `-ffp-contract=off` requirement protects.
 
 CMake module helpers live in `cmake/`: `QuasarAddModule.cmake` (per-axis target
 creation, including `DETACHED` modules such as distributed),

@@ -14,6 +14,8 @@
 
 #include "host_evaluate.hpp"
 
+#include "filament_fixture.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -39,8 +41,9 @@ ConductorSystem make_straight_wire() {
   Filament f;
   f.name = "wire";
   f.current_A = Real{1};
-  f.points = {Vec3{-1, 0, 0}, Vec3{1, 0, 0}};
-  cs.add(f);
+  f.points = quasar::magnetostatics::FilamentPoints::upload(
+      {Vec3{-1, 0, 0}, Vec3{1, 0, 0}});
+  cs.add(std::move(f));
   return cs;
 }
 
@@ -48,10 +51,10 @@ ConductorSystem repeated_segment(Vec3 a, Vec3 b, Real current,
                                  int positive_count, int negative_count) {
   ConductorSystem cs;
   for (int i = 0; i < positive_count; ++i) {
-    cs.add(Filament{"positive", current, {a, b}});
+    cs.add(quasar::test::filament("positive", current, {a, b}));
   }
   for (int i = 0; i < negative_count; ++i) {
-    cs.add(Filament{"negative", -current, {a, b}});
+    cs.add(quasar::test::filament("negative", -current, {a, b}));
   }
   return cs;
 }
@@ -61,7 +64,7 @@ ConductorSystem ordered_segment_currents(
   ConductorSystem cs;
   int index = 0;
   for (const Real current : currents) {
-    cs.add(Filament{"ordered_" + std::to_string(index++), current, {a, b}});
+    cs.add(quasar::test::filament("ordered_" + std::to_string(index++), current, {a, b}));
   }
   return cs;
 }
@@ -90,8 +93,8 @@ TEST(BiotSavartSingular, DiagonalSegmentMidpointThrowsInBothPrecisions) {
     GTEST_SKIP() << "no HIP runtime";
   }
   ConductorSystem cs;
-  cs.add(Filament{"diagonal", Real{1},
-                  {Vec3{0, 0, 0}, Vec3{2, 4, 6}}});
+  cs.add(quasar::test::filament("diagonal", Real{1},
+                  {Vec3{0, 0, 0}, Vec3{2, 4, 6}}));
   PointCloud pc;
   pc.add(Vec3{1, 2, 3});
 
@@ -113,8 +116,8 @@ TEST(BiotSavartSingular, NonRepresentableSegmentFractionStillThrows) {
   // rounded quotient produces 63.00000000000001 in fp64 and misses the true
   // ideal-filament singularity.
   ConductorSystem cs;
-  cs.add(Filament{"fractional_diagonal", Real{1},
-                  {Vec3{0, 0, 0}, Vec3{33, 77, 0}}});
+  cs.add(quasar::test::filament("fractional_diagonal", Real{1},
+                  {Vec3{0, 0, 0}, Vec3{33, 77, 0}}));
   PointCloud pc;
   pc.add(Vec3{27, 63, 0});
 
@@ -132,8 +135,8 @@ TEST(BiotSavartSingular, DistinctNearDiagonalPointRemainsFinite) {
     GTEST_SKIP() << "no HIP runtime";
   }
   ConductorSystem cs;
-  cs.add(Filament{"diagonal", Real{1},
-                  {Vec3{0, 0, 0}, Vec3{2, 4, 6}}});
+  cs.add(quasar::test::filament("diagonal", Real{1},
+                  {Vec3{0, 0, 0}, Vec3{2, 4, 6}}));
   PointCloud pc;
   pc.add(Vec3{1, 2, Real{3.0001}});
 
@@ -160,7 +163,7 @@ TEST(BiotSavartSingular, ZeroCurrentHasNoFilamentSingularity) {
     GTEST_SKIP() << "no HIP runtime";
   }
   ConductorSystem cs;
-  cs.add(Filament{"zero", Real{0}, {Vec3{-1, 0, 0}, Vec3{1, 0, 0}}});
+  cs.add(quasar::test::filament("zero", Real{0}, {Vec3{-1, 0, 0}, Vec3{1, 0, 0}}));
   PointCloud pc;
   pc.add(Vec3{0, 0, 0});
   const auto B = quasar::test::host_evaluate_B(BiotSavartEvaluator{}, cs, pc);
@@ -175,8 +178,8 @@ TEST(BiotSavartNumerics, UnrepresentableResultThrowsInsteadOfReturningInfinity) 
     GTEST_SKIP() << "no HIP runtime";
   }
   ConductorSystem cs;
-  cs.add(Filament{"extreme", std::numeric_limits<Real>::max(),
-                  {Vec3{-1, 0, 0}, Vec3{1, 0, 0}}});
+  cs.add(quasar::test::filament("extreme", std::numeric_limits<Real>::max(),
+                  {Vec3{-1, 0, 0}, Vec3{1, 0, 0}}));
   PointCloud pc;
   pc.add(Vec3{0, Real{1e-100}, 0});
   const BiotSavartEvaluator eval;
@@ -190,8 +193,8 @@ TEST(BiotSavartNumerics, OppositeSignObservationDifferenceDoesNotFalseSingular) 
   }
   const Real largest = std::numeric_limits<Real>::max();
   ConductorSystem cs;
-  cs.add(Filament{"extreme_coordinates", Real{1},
-                  {Vec3{-largest, 0, 0}, Vec3{0, 0, 0}}});
+  cs.add(quasar::test::filament("extreme_coordinates", Real{1},
+                  {Vec3{-largest, 0, 0}, Vec3{0, 0, 0}}));
   PointCloud pc;
   pc.add(Vec3{largest, 0, 0});  // collinear but strictly beyond the endpoint
 
@@ -217,7 +220,7 @@ TEST(BiotSavartNumerics,
 
   const auto expect_finite_exterior = [](Vec3 a, Vec3 b, Real point_x) {
     ConductorSystem conductors;
-    conductors.add(Filament{"endpoint_exterior", Real{1}, {a, b}});
+    conductors.add(quasar::test::filament("endpoint_exterior", Real{1}, {a, b}));
     PointCloud point;
     point.add(Vec3{point_x, 0, 0});
 
@@ -256,8 +259,8 @@ TEST(BiotSavartNumerics, UnderflowedTransverseOffsetIsNotFalseSingular) {
   }
   constexpr Real half_length = Real{5e307};
   ConductorSystem cs;
-  cs.add(Filament{"extreme_scale", std::numeric_limits<Real>::min(),
-                  {Vec3{-half_length, 0, 0}, Vec3{half_length, 0, 0}}});
+  cs.add(quasar::test::filament("extreme_scale", std::numeric_limits<Real>::min(),
+                  {Vec3{-half_length, 0, 0}, Vec3{half_length, 0, 0}}));
   PointCloud pc;
   pc.add(Vec3{0, std::numeric_limits<Real>::denorm_min(), 0});
 
@@ -276,8 +279,8 @@ TEST(BiotSavartNumerics, FarFieldProductsDoNotOverflowBeforeFiniteFp64Result) {
   constexpr Real distance = Real{1e200};
   const Real current = std::numeric_limits<Real>::max();
   ConductorSystem cs;
-  cs.add(Filament{"far_field", current,
-                  {Vec3{0, 0, -1}, Vec3{0, 0, 1}}});
+  cs.add(quasar::test::filament("far_field", current,
+                  {Vec3{0, 0, -1}, Vec3{0, 0, 1}}));
   PointCloud pc;
   pc.add(Vec3{distance, 0, 0});
 
@@ -313,8 +316,8 @@ TEST(BiotSavartNumerics, TinySegmentFarObserverKeepsFiniteCompensatedResults) {
   constexpr Real distance = Real{1e100};
   const Real current = std::numeric_limits<Real>::max();
   ConductorSystem cs;
-  cs.add(Filament{"tiny_far", current,
-                  {Vec3{0, 0, -half_length}, Vec3{0, 0, half_length}}});
+  cs.add(quasar::test::filament("tiny_far", current,
+                  {Vec3{0, 0, -half_length}, Vec3{0, 0, half_length}}));
   PointCloud pc;
   pc.add(Vec3{distance, 0, 0});
 
@@ -349,8 +352,8 @@ TEST(BiotSavartNumerics, FarFieldProductsDoNotOverflowBeforeFiniteFp32Result) {
   constexpr Real distance = Real{1e20};
   const Real current = static_cast<Real>(std::numeric_limits<float>::max());
   ConductorSystem cs;
-  cs.add(Filament{"far_field_f32", current,
-                  {Vec3{0, 0, -1}, Vec3{0, 0, 1}}});
+  cs.add(quasar::test::filament("far_field_f32", current,
+                  {Vec3{0, 0, -1}, Vec3{0, 0, 1}}));
   PointCloud pc;
   pc.add(Vec3{distance, 0, 0});
 
@@ -532,7 +535,7 @@ TEST(BiotSavartNumerics, LargeToroidReductionDoesNotExhaustExpansion) {
         Vec3{0, 0, height}, Vec3{0, 0, 1}, outer_radius, loop_segments,
         -current, "outer_" + std::to_string(k)));
   }
-  ASSERT_EQ(conductors.segments_soa().n_segments(), 262144u);
+  ASSERT_EQ(conductors.device_segments().n_segments(), 262144u);
 
   PointCloud point;
   point.add(Vec3{Real{0.085}, 0, Real{-0.015}});
@@ -551,8 +554,8 @@ TEST(BiotSavartNumerics, ExteriorCollinearDiagonalHasExactlyZeroField) {
     GTEST_SKIP() << "no HIP runtime";
   }
   ConductorSystem conductors;
-  conductors.add(Filament{"diagonal", Real{1e300},
-                          {Vec3{0, 0, 0}, Vec3{1, 5, 0}}});
+  conductors.add(quasar::test::filament("diagonal", Real{1e300},
+                          {Vec3{0, 0, 0}, Vec3{1, 5, 0}}));
   PointCloud point;
   point.add(Vec3{2, 10, 0});
 
@@ -571,8 +574,8 @@ TEST(BiotSavartNumerics, ExtremeFiniteSegmentGradientAvoidsReciprocalOverflow) {
   constexpr Real distance = Real{1e-15};
   constexpr Real current = Real{1e-300};
   ConductorSystem conductors;
-  conductors.add(Filament{"extreme", current,
-                          {Vec3{0, 0, 0}, Vec3{length, 0, 0}}});
+  conductors.add(quasar::test::filament("extreme", current,
+                          {Vec3{0, 0, 0}, Vec3{length, 0, 0}}));
   PointCloud point;
   point.add(Vec3{0, distance, 0});
 

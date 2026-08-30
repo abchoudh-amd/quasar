@@ -477,11 +477,78 @@ interfaces may still change between entries.
   a naive `double` evaluation of the same closed form where that formula
   cancels, and asserts bitwise reproducibility across repeated launches.
 
+  `pic::sample_external_field` follows the evaluator onto the device. It used to
+  build the Yee sample coordinates, validate the evaluator's answers, and map
+  them into solver units in host loops over the full padded grid, six components
+  deep, and up to three times per component for the cylindrical covariance
+  probes. All of that is now kernels in
+  `src/backend/hip/pic/external_field_hip.hip`: point construction, the rotated
+  covariance probes, the trace(grad B) solenoidality check, the component
+  mapping, and the radial-parity verify-and-enforce pass. The prescribed field
+  is published device-to-device and never touches host memory. The host keeps
+  the scalar tolerance configuration and the choice of which exception to raise,
+  so the messages are unchanged with one exception: the solenoidality failure no
+  longer names the offending sample index, because an OR-reduced predicate does
+  not carry one and recovering it would mean a second pass purely for
+  diagnostics.
+
   One deliberate non-change: `BiotSavartEvaluatorF`, the fp32 sibling, is not on
   `IFieldEvaluator` and keeps its host `Field<Vec3f>` returns. Its only consumer
   is the precision-comparison test, which is an output boundary; a float
   `DeviceVectorField` for one test caller would be abstraction without a second
   user.
+- Core/magnetostatics: **coil geometry and observation-point generation moved to
+  the device**, which removes the last per-point host arithmetic in front of the
+  now device-resident field evaluators.
+
+  A structured observation set is a description, not data: `ObservationGrid`,
+  `PlaneSlice` and `LineProbe` expand to one point per lattice site through a
+  short affine formula. They gain `to_device_point_cloud()`, backed by kernels in
+  the new `src/backend/hip/core/`, and the deck loader and the Python bindings
+  use it, so the coordinates are generated where they are consumed. The
+  expansion agrees with the host `point_at()` accessors **bit for bit** — which
+  is why the line-probe kernel transcribes the C++20 `std::lerp` algorithm rather
+  than the obvious `a + t * (b - a)`. `std::lerp` is specified to be exact at
+  both endpoints and monotonic; the naive form is neither, and a probe whose last
+  point drifted off `end` by an ulp would silently disagree with the accessor a
+  deck echoes. That module is compiled `-ffp-contract=off` to keep the guarantee.
+
+  Filament vertices now live on the device too. The generators write them with a
+  kernel in `src/backend/hip/magnetostatics/geometry_hip.hip`, and
+  `ConductorSystem` flattens them into per-segment planes with another and caches
+  the result, so `evaluate_B` has nothing left to upload — both operands are
+  already resident. The generator kernels are not one line each because they
+  carry the resolvability checks the host loops did: a displacement requested at
+  a large centre can lose an entire local dimension to rounding while the
+  surviving coordinates still form non-zero segments, so every material
+  component of every vertex's offset must survive both the scaling and the
+  translation with at least one useful binary digit.
+
+  The angle is rebuilt from the integer index at every vertex rather than
+  accumulated, and for a helix the index is reduced modulo the segments per turn
+  first. That is what keeps a 400-turn coil free of argument-reduction drift, and
+  there is now a test asserting the last turn's transverse coordinates are
+  bit-identical to the first's.
+
+  `BiotSavartEvaluatorF` keeps its host `Field<Vec3f>` results, but its fp32
+  narrowing is a kernel now: both operands arrive as fp64 device planes and the
+  shared origin is subtracted before the cast, so a rigid translation stays
+  invisible to the narrowing.
+
+  **Breaking:** `Filament::points` is a `FilamentPoints` device SoA rather than a
+  `std::vector<Vec3>`, which makes `Filament` and `ConductorSystem` move-only
+  and `ConductorSystem` copy-construction an explicit device allocation.
+  `ConductorSystem::segments_soa()` is replaced by `device_segments()`;
+  `to_segments_soa()` remains as its host staging view. In Python,
+  `Filament.points` is a read-only property that downloads, `Filament.n_points`
+  reports the count without downloading, and `ConductorSystem.add` moves from its
+  argument. `generic_polyline` is unchanged: its coordinates come from a deck
+  rather than a calculation, so they are validated on the host and uploaded.
+
+  What deliberately stayed on the host is scalar and does not scale with the
+  point count: the orthonormal basis built once per generator call from one axis
+  vector, a racetrack's four frame points and two corners, and the linear
+  independence check on a plane slice's two step vectors.
 - PIC: the diagnostics no longer round-trip through the host. `alive_count` was
   already a device reduction; `total_kinetic_energy`, `total_em_energy` and
   `gauss_residual` each used to download all six field components and every
