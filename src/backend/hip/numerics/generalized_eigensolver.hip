@@ -1,12 +1,30 @@
 #include "quasar/numerics/generalized_eigensolver.hpp"
 
+#include "backend/hip/hip_check.hpp"
 #include "backend/hip/numerics/linear_algebra_detail.hpp"
 
+#include <hip/hip_runtime.h>
+
+#include <cmath>
 #include <cstddef>
 #include <stdexcept>
 
 namespace quasar::numerics {
 namespace {
+
+__global__ void eigenvalues_are_finite_kernel(
+    const Real* __restrict__ eigenvalues, int order,
+    int* __restrict__ all_finite) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  int finite = 1;
+  for (int i = 0; i < order; ++i) {
+    if (!isfinite(eigenvalues[i])) {
+      finite = 0;
+      break;
+    }
+  }
+  *all_finite = finite;
+}
 
 void validate_problem(const backend::DeviceBuffer<Real>& a,
                       const backend::DeviceBuffer<Real>& b,
@@ -90,7 +108,14 @@ GeneralizedEigenResult solve_generalized_symmetric_eigenproblem(
 
   result.solver_info = detail::read_info(device_info, stream);
   if (result.solver_info == 0) {
-    result.status = GeneralizedEigenStatus::success;
+    hipLaunchKernelGGL(eigenvalues_are_finite_kernel, dim3{1}, dim3{1}, 0,
+                       detail::as_hip_stream(stream),
+                       result.eigenvalues.device_ptr(), order,
+                       device_info.device_ptr());
+    QUASAR_HIP_CHECK(hipGetLastError());
+    result.status = detail::read_info(device_info, stream) != 0
+                        ? GeneralizedEigenStatus::success
+                        : GeneralizedEigenStatus::nonfinite_result;
   } else if (result.solver_info < 0) {
     result.status = GeneralizedEigenStatus::invalid_solver_argument;
     result.invalid_argument_position = -result.solver_info;

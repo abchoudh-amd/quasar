@@ -22,7 +22,9 @@
 
 #include "quasar/core/types.hpp"
 
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -47,8 +49,26 @@ struct EllipticGrid {
     if (nr < 3 || nz < 3) {
       throw std::invalid_argument{"EllipticGrid: need at least 3 nodes per axis"};
     }
+    if (!std::isfinite(r_min) || !std::isfinite(r_max)
+        || !std::isfinite(z_min) || !std::isfinite(z_max)) {
+      throw std::invalid_argument{"EllipticGrid: extents must be finite"};
+    }
     if (!(r_max > r_min) || !(z_max > z_min)) {
       throw std::invalid_argument{"EllipticGrid: extents must be increasing"};
+    }
+    const Real r_span = r_max - r_min;
+    const Real z_span = z_max - z_min;
+    if (!std::isfinite(r_span) || !std::isfinite(z_span)
+        || !(r_span > Real{0}) || !(z_span > Real{0})) {
+      throw std::invalid_argument{
+          "EllipticGrid: coordinate spans must be finite and positive"};
+    }
+    const Real radial_spacing = r_span / static_cast<Real>(nr - 1);
+    const Real vertical_spacing = z_span / static_cast<Real>(nz - 1);
+    if (!std::isfinite(radial_spacing) || !std::isfinite(vertical_spacing)
+        || !(radial_spacing > Real{0}) || !(vertical_spacing > Real{0})) {
+      throw std::invalid_argument{
+          "EllipticGrid: coordinate spacing must be finite and positive"};
     }
     // The annular-domain decision: r_min > 0 removes the 1/r coordinate
     // singularity in Delta* entirely. A domain touching or crossing the axis
@@ -129,6 +149,9 @@ inline Real interior_max_norm(const EllipticGrid& g, const ScalarField& f) {
   for (int j = 1; j < g.nz - 1; ++j) {
     for (int i = 1; i < g.nr - 1; ++i) {
       const Real v = f[g.index(i, j)];
+      if (std::isnan(v)) {
+        return std::numeric_limits<Real>::quiet_NaN();
+      }
       m = std::max(m, v < Real{0} ? -v : v);
     }
   }

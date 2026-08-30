@@ -196,10 +196,13 @@ class GsMultigrid {
     ScalarField r = make_field(levels_[0]);
     gs_residual_l2(levels_[0], x, b, r);
     const Real before = interior_max_norm(levels_[0], r);
+    if (!std::isfinite(before)) return before;
+    if (before == Real{0}) return Real{0};
     v_cycle(x, b);
     gs_residual_l2(levels_[0], x, b, r);
     const Real after = interior_max_norm(levels_[0], r);
-    return before > Real{0} ? after / before : Real{0};
+    if (!std::isfinite(after)) return after;
+    return after / before;
   }
 
  private:

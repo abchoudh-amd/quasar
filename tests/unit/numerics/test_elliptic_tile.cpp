@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -127,7 +128,7 @@ TEST(EllipticTile, TiledOperatorReproducesTheSerialResultBitForBit) {
   ScalarField serial = quasar::numerics::make_field(g);
   quasar::numerics::gs_apply_l2(g, f, serial);
 
-  for (const auto shape : {std::pair{1, 1}, std::pair{2, 3}, std::pair{4, 4}}) {
+  for (const auto& shape : {std::pair{1, 1}, std::pair{2, 3}, std::pair{4, 4}}) {
     const auto tiles =
         quasar::numerics::partition(g, shape.first, shape.second);
     ScalarField tiled = quasar::numerics::make_field(g);
@@ -160,6 +161,25 @@ TEST(EllipticTile, LocalNormsCombineToTheGlobalNorm) {
     reduced = std::max(reduced, quasar::numerics::tile_interior_max_norm(t, local));
   }
   EXPECT_DOUBLE_EQ(reduced, global_norm);
+}
+
+TEST(EllipticTile, LocalNormPropagatesNonFiniteInteriorValues) {
+  const EllipticGrid g = global_grid(9);
+  const auto tile = quasar::numerics::partition(g, 1, 1).front();
+  ScalarField f = quasar::numerics::make_field(g);
+  const std::size_t center = g.index(g.nr / 2, g.nz / 2);
+
+  f[center] = std::numeric_limits<Real>::quiet_NaN();
+  auto local = quasar::numerics::scatter_to_tile(tile, f);
+  EXPECT_TRUE(std::isnan(
+      quasar::numerics::tile_interior_max_norm(tile, local)));
+
+  f[center] = -std::numeric_limits<Real>::infinity();
+  local = quasar::numerics::scatter_to_tile(tile, f);
+  const Real infinite_norm =
+      quasar::numerics::tile_interior_max_norm(tile, local);
+  EXPECT_TRUE(std::isinf(infinite_norm));
+  EXPECT_GT(infinite_norm, Real{0});
 }
 
 TEST(EllipticTile, ReportsWhenPadeCannotRunLocally) {

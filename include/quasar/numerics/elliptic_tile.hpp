@@ -49,7 +49,9 @@
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
 
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -231,6 +233,9 @@ inline Real tile_interior_max_norm(const TileGrid& t,
         continue;
       }
       const Real v = f[t.index(i, j)];
+      if (std::isnan(v)) {
+        return std::numeric_limits<Real>::quiet_NaN();
+      }
       m = std::max(m, v < Real{0} ? -v : v);
     }
   }

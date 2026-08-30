@@ -23,14 +23,16 @@ enum class MatrixTriangle {
   upper,
 };
 
-// Numerical status reported by LAPACK-compatible `info` from
-// hipsolverDnDsygvd.  Runtime/library failures still throw: these values are
-// reserved for mathematically meaningful outcomes callers may need to score.
+// Numerical status derived from LAPACK-compatible `info` from
+// hipsolverDnDsygvd plus validation of the returned spectrum. Runtime/library
+// failures still throw: these values are reserved for mathematically meaningful
+// outcomes callers may need to score.
 enum class GeneralizedEigenStatus {
   success,
   failed_to_converge,
   mass_not_positive_definite,
   invalid_solver_argument,
+  nonfinite_result,
 };
 
 struct GeneralizedEigenResult {
@@ -60,7 +62,8 @@ struct GeneralizedEigenResult {
 // returning so the numerical status and result buffers are ready to consume.
 // A and B must contain exactly order*order values, reside on the same device,
 // and be stored column-major.  Invalid shapes/ownership are programming errors
-// and throw std::invalid_argument; numerical failures are returned in `status`.
+// and throw std::invalid_argument; numerical failures, including non-finite
+// eigenvalues returned with a zero solver info code, are returned in `status`.
 [[nodiscard]] GeneralizedEigenResult solve_generalized_symmetric_eigenproblem(
     const backend::DeviceBuffer<Real>& a,
     const backend::DeviceBuffer<Real>& b,

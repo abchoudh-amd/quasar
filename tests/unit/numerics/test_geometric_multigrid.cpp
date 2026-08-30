@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -88,6 +89,18 @@ TEST(EllipticGrid, RejectsAxisTouchingDomain) {
   EXPECT_THROW((EllipticGrid{9, 9, Real{0}, Real{1}, Real{0}, Real{1}}),
                std::invalid_argument);
   EXPECT_THROW((EllipticGrid{9, 9, Real{-0.5}, Real{1}, Real{0}, Real{1}}),
+               std::invalid_argument);
+}
+
+TEST(EllipticGrid, RejectsNonFiniteSpansAndCollapsedSpacing) {
+  const Real limit = std::numeric_limits<Real>::max();
+  const Real tiny = std::numeric_limits<Real>::denorm_min();
+
+  EXPECT_THROW((EllipticGrid{9, 9, Real{1}, Real{2}, -limit, limit}),
+               std::invalid_argument);
+  EXPECT_THROW((EllipticGrid{3, 3, tiny, Real{2} * tiny, Real{-1}, Real{1}}),
+               std::invalid_argument);
+  EXPECT_THROW((EllipticGrid{3, 3, Real{1}, Real{2}, Real{0}, tiny}),
                std::invalid_argument);
 }
 
@@ -196,6 +209,22 @@ TEST(GsMultigrid, VCycleRateIsGridIndependent) {
   EXPECT_LT(rates.back(), rates.front() * Real{2.5})
       << "V-cycle rate degrades with refinement: " << rates.front() << " -> "
       << rates.back();
+}
+
+TEST(GsMultigrid, CycleReductionPropagatesNonFiniteInitialResidual) {
+  const EllipticGrid g = make_grid(9);
+  quasar::numerics::GsMultigrid mg{g};
+  const ScalarField x = seeded_boundary(g);
+  ScalarField b = exact_source(g);
+  const std::size_t center = g.index(g.nr / 2, g.nz / 2);
+
+  b[center] = std::numeric_limits<Real>::quiet_NaN();
+  EXPECT_TRUE(std::isnan(mg.cycle_reduction(x, b)));
+
+  b[center] = std::numeric_limits<Real>::infinity();
+  const Real reduction = mg.cycle_reduction(x, b);
+  EXPECT_TRUE(std::isinf(reduction));
+  EXPECT_GT(reduction, Real{0});
 }
 
 TEST(GsMultigrid, SolvesToToleranceInBoundedCycles) {

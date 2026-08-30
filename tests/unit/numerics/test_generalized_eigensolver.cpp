@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -156,6 +157,22 @@ TEST(GeneralizedEigensolver, ReportsIndefiniteMassLeadingMinor) {
   EXPECT_EQ(result.solver_info, n + 2);
   EXPECT_EQ(result.failed_leading_minor_order, 2);
   EXPECT_EQ(result.invalid_argument_position, 0);
+}
+
+TEST(GeneralizedEigensolver, RejectsNonfiniteEigenvalueFromFiniteInputs) {
+  if (!quasar::backend::has_hip_runtime()) GTEST_SKIP();
+
+  // Both inputs satisfy the finite symmetric-definite contract, but the exact
+  // generalized eigenvalue is -2*max and therefore not representable.
+  auto device_a = upload({-std::numeric_limits<Real>::max()});
+  auto device_b = upload({Real{0.5}});
+
+  const auto result =
+      quasar::numerics::solve_generalized_symmetric_eigenproblem(
+          device_a, device_b, 1);
+  EXPECT_EQ(result.solver_info, 0);
+  EXPECT_EQ(result.status, GeneralizedEigenStatus::nonfinite_result);
+  EXPECT_FALSE(result.ok());
 }
 
 TEST(GeneralizedEigensolver, SupportsUpperTriangleAndRejectsMalformedShapes) {
