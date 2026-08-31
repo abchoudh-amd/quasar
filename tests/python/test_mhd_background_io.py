@@ -36,18 +36,9 @@ from quasar.mhd.io import (
     MhdDeck,
     Numerics,
     Time,
-    _padded_grids,
     build_background_field,
     load as load_mhd_deck,
     parse,
-)
-from quasar.mhd.numerics import (
-    DISCRETE_SOLENOIDAL_TOLERANCE,
-    _scaled_quotient_sum,
-    background_curl_linf,
-    background_divergence_linf,
-    background_divergence_relative_linf,
-    validate_background_boundary_compatibility,
 )
 
 # Ghost-cell width used to size the storage buffers in these tests. The solver's
@@ -55,6 +46,112 @@ from quasar.mhd.numerics import (
 # build_background_field's buffers match (nx + 2g) * (ny + 2g) for the g passed.
 NGHOST = 3
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+
+# Test-local staggered diagnostics.
+#
+# The production divergence and curl sweeps now run on device inside
+# build_background_field, which raises before returning if a field is not
+# discretely solenoidal. These are the independent references those results are
+# checked against, and they are deliberately plain float64: the scaled
+# arithmetic the device sweeps carry exists to survive fields at the edge of the
+# exponent range, and the accuracy of that machinery is proved against a
+# long-double oracle in the C++ suite (tests/unit/physics/mhd/
+# test_mhd_background_field.cpp). Reproducing it here would only re-test the
+# same code twice.
+def _interior_divergence(b0x, b0y, nx, ny, g, dx, dy,
+                         geometry="cartesian", origin_x=0.0):
+    shape = (ny + 2 * g, nx + 2 * g)
+    bx = np.asarray(b0x, dtype=np.float64).reshape(shape)
+    by = np.asarray(b0y, dtype=np.float64).reshape(shape)
+    lo = np.s_[g:g + ny, g:g + nx]
+    hi_x = np.s_[g:g + ny, g + 1:g + nx + 1]
+    hi_y = np.s_[g + 1:g + ny + 1, g:g + nx]
+    axial = (by[hi_y] - by[lo]) / dy
+    if geometry == "cylindrical":
+        # Ring-volume divergence: (r_hi Br_hi - r_lo Br_lo) / (r_c dr), written
+        # in the factored form the curl construction telescopes against.
+        i = np.arange(nx)
+        r_lo = origin_x + i * dx
+        r_hi = r_lo + dx
+        r_c = r_lo + 0.5 * dx
+        radial = ((bx[hi_x] - bx[lo]) / dx
+                  + (0.5 * bx[hi_x] + 0.5 * bx[lo]) / r_c[None, :])
+        _ = (r_lo, r_hi)
+    else:
+        radial = (bx[hi_x] - bx[lo]) / dx
+    return radial + axial
+
+
+def _divergence_linf(b0x, b0y, nx, ny, g, dx, dy,
+                     geometry="cartesian", origin_x=0.0):
+    return float(np.max(np.abs(_interior_divergence(
+        b0x, b0y, nx, ny, g, dx, dy, geometry, origin_x))))
+
+
+def _relative_divergence_linf(b0x, b0y, nx, ny, g, dx, dy,
+                              geometry="cartesian", origin_x=0.0):
+    """||d_r + d_z||_inf / || |d_r| + |d_z| ||_inf, the scale-free form."""
+    shape = (ny + 2 * g, nx + 2 * g)
+    bx = np.asarray(b0x, dtype=np.float64).reshape(shape)
+    by = np.asarray(b0y, dtype=np.float64).reshape(shape)
+    lo = np.s_[g:g + ny, g:g + nx]
+    hi_x = np.s_[g:g + ny, g + 1:g + nx + 1]
+    hi_y = np.s_[g + 1:g + ny + 1, g:g + nx]
+    axial = (by[hi_y] - by[lo]) / dy
+    if geometry == "cylindrical":
+        r_c = origin_x + (np.arange(nx) + 0.5) * dx
+        radial = ((bx[hi_x] - bx[lo]) / dx
+                  + (0.5 * bx[hi_x] + 0.5 * bx[lo]) / r_c[None, :])
+    else:
+        radial = (bx[hi_x] - bx[lo]) / dx
+    scale = float(np.max(np.abs(radial) + np.abs(axial)))
+    if scale == 0.0:
+        return 0.0
+    return float(np.max(np.abs(radial + axial))) / scale
+
+
+def _curl_linf(b0x, b0y, nx, ny, g, dx, dy):
+    """Max |d By/dx - d Bx/dy| at interior cell corners.
+
+    Bx is x-face/y-centred and By is y-face/x-centred, so backward differences
+    collocate both derivatives at the corner, matching the CT staggering.
+    """
+    shape = (ny + 2 * g, nx + 2 * g)
+    bx = np.asarray(b0x, dtype=np.float64).reshape(shape)
+    by = np.asarray(b0y, dtype=np.float64).reshape(shape)
+    d_by_dx = (by[g:g + ny + 1, g:g + nx + 1] -
+               by[g:g + ny + 1, g - 1:g + nx]) / dx
+    d_bx_dy = (bx[g:g + ny + 1, g:g + nx + 1] -
+               bx[g - 1:g + ny, g:g + nx + 1]) / dy
+    return float(np.max(np.abs(d_by_dx - d_bx_dy)))
+
+
+# The acceptance bound the native sweeps enforce; mirrors
+# numerics::kDiscreteSolenoidalTolerance.
+DISCRETE_SOLENOIDAL_TOLERANCE = 1024.0 * np.finfo(np.float64).eps
+
+def _padded_meshes(domain, nghost):
+    """Test-local staggered coordinate meshes over the full padded storage.
+
+    Deliberately independent of the native builder rather than imported from
+    it: this is the reference an analytic profile's samples are checked
+    against, so sharing the coordinate code would let one mistake satisfy both
+    sides. The native path evaluates the same coordinates with an FMA, which
+    differs in the last bit; the comparisons below carry an absolute tolerance
+    that covers it.
+    """
+    g = int(nghost)
+    dx = domain.lx_m / domain.nx
+    dy = domain.ly_m / domain.ny
+    i_int = np.arange(domain.nx + 2 * g) - g
+    j_int = np.arange(domain.ny + 2 * g) - g
+    ii, jj = np.meshgrid(i_int, j_int)
+    return (domain.origin_x_m + (ii + 0.5) * dx,   # cell-centre x
+            domain.origin_y_m + (jj + 0.5) * dy,   # cell-centre y
+            domain.origin_x_m + ii * dx,           # left-face x
+            domain.origin_y_m + jj * dy)           # bottom-face y
 
 
 def _has_hip_runtime() -> bool:
@@ -364,7 +461,7 @@ class BackgroundValidationTests(unittest.TestCase):
         shape = (domain.ny + 2 * NGHOST, domain.nx + 2 * NGHOST)
         bx = np.asarray(bg["b0x"]).reshape(shape)
         by = np.asarray(bg["b0y"]).reshape(shape)
-        xc, yc, xf, yf, _dx, _dy = _padded_grids(domain, NGHOST)
+        xc, yc, xf, yf = _padded_meshes(domain, NGHOST)
         np.testing.assert_allclose(bx, 1.25 * xf - 0.4 * yc,
                                    rtol=0.0, atol=2.0e-15)
         np.testing.assert_allclose(by, -0.4 * xc - 1.25 * yf,
@@ -377,239 +474,21 @@ class BackgroundValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown parameter"):
             build_background_field(deck, NGHOST)
 
-    def test_divergence_reduction_cancels_extreme_finite_terms(self):
-        g = 1
-        shape = (3, 3)
-        huge = np.finfo(np.float64).max
-        bx = np.zeros(shape, dtype=np.float64)
-        by = np.zeros(shape, dtype=np.float64)
-        bx[g, g] = -huge
-        bx[g, g + 1] = huge
-        by[g, g] = huge
-        by[g + 1, g] = -huge
+    # The boundary-compatibility sweep runs on device inside every
+    # build_background_* entry point. These drive it through the explicit-array
+    # source, which is the one that lets a test hand it a deliberately
+    # incompatible field. Each field below is constructed to be discretely
+    # solenoidal, because the divergence proof runs first and would otherwise
+    # be the error reported.
 
-        # Each raw face difference overflows, but after division the two finite
-        # directional derivatives cancel exactly. The diagnostic must evaluate
-        # the mathematical expression rather than reject an intermediate inf.
-        self.assertEqual(
-            background_divergence_linf(
-                bx, by, 1, 1, g, 2.0, 2.0, geometry="cartesian"),
-            0.0)
-
-    def test_scaled_reduction_pairs_opposite_dominant_terms(self):
-        huge = np.finfo(np.float64).max
-        terms = tuple(np.array([[value]], dtype=np.float64) for value in (
-            huge, huge, -huge, -huge, 3.0))
-
-        # A same-sign-first tree can leave an ulp(huge) residue after the four
-        # dominant terms cancel. The common-exponent reducer must retain the
-        # separately representable finite survivor.
-        result = _scaled_quotient_sum(terms, 1.0)
-        self.assertEqual(float(result[0, 0]), 3.0)
-
-    def test_scaled_reduction_cancels_individually_overflowing_quotients(self):
-        huge = np.finfo(np.float64).max
-        terms = tuple(np.array([[value]], dtype=np.float64) for value in (
-            huge, -huge, 3.0))
-
-        # The first two quotients are +/-2*DBL_MAX and cannot be materialized,
-        # but their exact cancellation leaves the ordinary finite survivor.
-        result = _scaled_quotient_sum(terms, 0.5)
-        self.assertEqual(float(result[0, 0]), 6.0)
-
-    def test_scaled_reduction_recovers_subnormal_from_half_terms(self):
-        tiny = np.nextafter(0.0, 1.0)
-        terms = tuple(np.array([[tiny]], dtype=np.float64) for _ in range(2))
-
-        # Each mathematical quotient is half of the least subnormal and would
-        # round to zero if materialized before the sum; together they equal one
-        # representable least-subnormal result.
-        result = _scaled_quotient_sum(terms, 2.0)
-        self.assertEqual(float(result[0, 0]), tiny)
-
-    def test_divergence_reduction_rejects_true_overflow(self):
-        g = 1
-        shape = (3, 3)
-        huge = np.finfo(np.float64).max
-        bx = np.zeros(shape, dtype=np.float64)
-        by = np.zeros(shape, dtype=np.float64)
-        bx[g, g] = -huge
-        bx[g, g + 1] = huge
-
-        with self.assertRaisesRegex(ValueError, "not representable"):
-            background_divergence_linf(
-                bx, by, 1, 1, g, 1.0, 1.0, geometry="cartesian")
-
-    def test_staggered_diagnostics_require_a_face_and_corner_halo(self):
-        bx = np.zeros(4, dtype=np.float64)
-        by = np.zeros(4, dtype=np.float64)
-        diagnostics = (background_divergence_linf, background_curl_linf)
-        for diagnostic in diagnostics:
-            with self.subTest(diagnostic=diagnostic.__name__):
-                with self.assertRaisesRegex(ValueError, "nghost must be at least 1"):
-                    diagnostic(bx, by, 2, 2, 0, 1.0, 1.0)
-
-    def test_relative_divergence_rejects_resolved_defect(self):
-        g = 1
-        bx = np.zeros((3, 3), dtype=np.float64)
-        by = np.zeros_like(bx)
-        bx[g, g + 1] = 1.0
-        by[g + 1, g] = -1.0 + 1.0e-10
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertGreater(defect, DISCRETE_SOLENOIDAL_TOLERANCE)
-
-    def test_relative_divergence_accepts_roundoff_cancellation(self):
-        g = 1
-        bx = np.zeros((3, 3), dtype=np.float64)
-        by = np.zeros_like(bx)
-        bx[g, g + 1] = 1.0
-        by[g + 1, g] = -1.0 + np.finfo(np.float64).eps
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertEqual(defect, 0.0)
-
-    def test_relative_divergence_uses_global_directional_scale_at_null(self):
-        g = 1
-        bx = np.zeros((3, 4), dtype=np.float64)
-        by = np.zeros_like(bx)
-        # Cell zero has O(1) equal/opposite directional derivatives. Cell one
-        # is near a derivative null and carries a cancellation residual that is
-        # locally above 1024 eps but far below the global derivative scale.
-        bx[g, g + 1] = 1.0
-        amplitude = np.ldexp(1.0, -40)
-        bx[g, g + 2] = 1.0 + amplitude
-        by[g + 1, g] = -1.0
-        by[g + 1, g + 1] = -amplitude * (
-            1.0 - 4096.0 * np.finfo(np.float64).eps)
-
-        defect = background_divergence_relative_linf(
-            bx, by, 2, 1, g, 1.0, 1.0)
-        self.assertLessEqual(defect, DISCRETE_SOLENOIDAL_TOLERANCE)
-
-    def test_relative_divergence_uses_native_direct_ratio_at_threshold(self):
-        g = 1
-        bx = np.zeros((3, 4), dtype=np.float64)
-        by = np.zeros_like(bx)
-        scale = np.float64(0.6136680112335848)
-        residual = np.float64(1.3953195121611883e-13)
-        half_scale = 0.5 * scale
-        # Cell zero supplies the global residual. Cell one has exactly
-        # cancelling directional derivatives and supplies the global scale.
-        bx[g, g + 2] = half_scale
-        by[g + 1, g] = residual
-        by[g + 1, g + 1] = -half_scale
-
-        defect = background_divergence_relative_linf(
-            bx, by, 2, 1, g, 1.0, 1.0)
-        # Direct scaled division, as used by native background validation, is
-        # one ulp above the tolerance. A log2/exp2 round trip instead rounded it
-        # down to the tolerance and incorrectly accepted this field.
-        self.assertEqual(
-            defect,
-            np.nextafter(DISCRETE_SOLENOIDAL_TOLERANCE, np.inf))
-        self.assertGreater(defect, DISCRETE_SOLENOIDAL_TOLERANCE)
-
-    def test_relative_divergence_rejects_one_ulp_slope_on_large_offset(self):
-        g = 1
-        offset = np.ldexp(1.5, 900)
-        bx = np.full((3, 3), offset, dtype=np.float64)
-        by = np.zeros_like(bx)
-        bx[g, g + 1] = np.nextafter(offset, np.inf)
-
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertEqual(defect, 1.0)
-
-    def test_relative_divergence_cancels_opposite_ulps_on_large_offsets(self):
-        g = 1
-        offset = np.ldexp(1.5, 900)
-        bx = np.full((3, 3), offset, dtype=np.float64)
-        by = np.full_like(bx, offset)
-        bx[g, g + 1] = np.nextafter(offset, np.inf)
-        by[g + 1, g] = np.nextafter(offset, -np.inf)
-
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertEqual(defect, 0.0)
-
-    def test_relative_divergence_explains_unequal_opposite_storage_ulps(self):
-        g = 1
-        offset = np.ldexp(1.5, 40)
-        bx = np.full((3, 3), offset, dtype=np.float64)
-        by = np.full_like(bx, offset)
-        bx[g, g + 1] = np.nextafter(offset, np.inf)
-        by[g + 1, g] = np.nextafter(
-            np.nextafter(offset, -np.inf), -np.inf)
-
-        # The represented slopes differ by one ulp, but both are nonzero and
-        # oppose one another. Native and Python therefore classify the residual
-        # inside the 1024 metric-face-ulp storage-forward-error envelope.
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertEqual(defect, 0.0)
-
-    def test_relative_divergence_rejects_same_sign_ulps_on_large_offsets(self):
-        g = 1
-        offset = np.ldexp(1.5, 40)
-        bx = np.full((3, 3), offset, dtype=np.float64)
-        by = np.full_like(bx, offset)
-        bx[g, g + 1] = np.nextafter(offset, np.inf)
-        by[g + 1, g] = np.nextafter(offset, np.inf)
-
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0)
-        self.assertEqual(defect, 1.0)
-
-    def test_annular_relative_divergence_retains_constant_radial_curvature(self):
-        g = 1
-        bx = np.ones((3, 3), dtype=np.float64)
-        by = np.zeros_like(bx)
-
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, 1.0, 1.0,
-            geometry="cylindrical", origin_x=1.0e16)
-        self.assertEqual(defect, 1.0)
-
-    def test_annular_relative_divergence_matches_native_exact_expansion(self):
-        g = 2
-        bx = np.zeros((5, 5), dtype=np.float64)
-        by = np.zeros_like(bx)
-        dr = 0.000244140625
-        radius = 464305879.05271524
-        origin = radius - 0.5 * dr
-        bx[g, g] = 0.2162073238766361
-        bx[g, g + 1] = 0.21620732387652242
-
-        radial = _scaled_quotient_sum(
-            (bx[g:g + 1, g + 1:g + 2],
-             -bx[g:g + 1, g:g + 1],
-             bx[g:g + 1, g + 1:g + 2],
-             bx[g:g + 1, g:g + 1]),
-            np.array([dr, dr, 2.0, 2.0])[:, None, None],
-            np.array([1.0, 1.0, radius, radius])[:, None, None])
-        self.assertEqual(float(radial[0, 0]), -4.198671064805734e-15)
-
-        # Native's exact expansion gives the complete annular contribution
-        # -4.1986710648057342e-15. The matching axial slope must cancel exactly;
-        # the former greedy Python reducer lost one expansion component and
-        # reported a resolved 3.078e-12 relative defect instead.
-        by[g + 1, g] = 4.198671064805734e-15
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, dr, 1.0,
-            geometry="cylindrical", origin_x=origin)
-        self.assertEqual(defect, 0.0)
-
-        # Cancelling the old greedy reducer's rounded value leaves a genuine
-        # native residual, but it is far below the independently rounded face-
-        # storage envelope. The direct four-term assertion above pins the exact
-        # reducer result; the public validator correctly classifies this tiny
-        # remainder as representational forward error.
-        by[g + 1, g] = 4.198671064779885e-15
-        defect = background_divergence_relative_linf(
-            bx, by, 1, 1, g, dr, 1.0,
-            geometry="cylindrical", origin_x=origin)
-        self.assertEqual(defect, 0.0)
+    @staticmethod
+    def _closure_spec(nx, ny, g, modes, cylindrical=0, origin_x=0.0):
+        spec = _core.mhd.MhdBackgroundBuildSpec()
+        spec.grid = _core.mhd.Grid2D(nx, ny, 1.0, 1.0, origin_x, 0.0, g)
+        spec.cylindrical = cylindrical
+        spec.magnetic_scale = 1.0
+        spec.field_modes = modes
+        return spec
 
     def test_periodic_background_seam_must_wrap(self):
         nx = ny = 2
@@ -620,30 +499,37 @@ class BackgroundValidationTests(unittest.TestCase):
         bz = np.zeros(shape)
         # x=-1 is the low periodic target for layer one; x=nx-1 is its source.
         bz[g, g - 1] = 1.0
-        with self.assertRaisesRegex(ValueError, "periodic x boundary"):
-            validate_background_boundary_compatibility(
-                bx, by, bz, nx, ny, g, ("periodic",) * 4)
+        spec = self._closure_spec(nx, ny, g, [1, 1, 1, 1])
+        with self.assertRaisesRegex(ValueError, "not periodic across the x"):
+            _core.mhd.build_background_from_arrays(
+                spec, bx.reshape(-1), by.reshape(-1), bz.reshape(-1))
 
     def test_wall_background_requires_zero_normal_and_parity(self):
         nx = ny = 2
         g = 1
         shape = (ny + 2 * g, nx + 2 * g)
-        boundaries = ("wall", "wall", "outflow", "outflow")
+        modes = [2, 2, 0, 0]   # wall, wall, ignored, ignored
 
         bx = np.zeros(shape)
         by = np.zeros(shape)
         bz = np.zeros(shape)
-        bx[g, g] = 1.0  # Bx on the low x-wall face must be exactly zero.
-        with self.assertRaisesRegex(ValueError, "normal constraint"):
-            validate_background_boundary_compatibility(
-                bx, by, bz, nx, ny, g, boundaries)
+        # Uniform across the interior faces so the divergence stays zero, with
+        # a correctly odd low-wall ghost so the parity rule is satisfied and
+        # only the normal-component rule can fire. Bx on the wall face is
+        # nonzero, and a wall requires it to vanish exactly.
+        bx[:, :] = 1.0
+        bx[:, g - 1] = -1.0
+        spec = self._closure_spec(nx, ny, g, modes)
+        with self.assertRaisesRegex(ValueError, "normal component at an x wall"):
+            _core.mhd.build_background_from_arrays(
+                spec, bx.reshape(-1), by.reshape(-1), bz.reshape(-1))
 
         bx.fill(0.0)
-        by[g, g] = 1.0       # even tangential source at x=0
-        by[g, g - 1] = -1.0  # invalid odd low-wall ghost
-        with self.assertRaisesRegex(ValueError, "x-wall parity"):
-            validate_background_boundary_compatibility(
-                bx, by, bz, nx, ny, g, boundaries)
+        by[:, g] = 1.0       # even tangential source at x=0, constant in y
+        by[:, g - 1] = -1.0  # invalid odd low-wall ghost
+        with self.assertRaisesRegex(ValueError, "x-wall mirror parity"):
+            _core.mhd.build_background_from_arrays(
+                spec, bx.reshape(-1), by.reshape(-1), bz.reshape(-1))
 
     def test_cylindrical_axis_requires_odd_toroidal_parity(self):
         nx = ny = 2
@@ -652,16 +538,16 @@ class BackgroundValidationTests(unittest.TestCase):
         bx = np.zeros(shape)
         by = np.zeros(shape)
         bz = np.zeros(shape)
-        boundaries = ("axis", "outflow", "outflow", "outflow")
+        spec = self._closure_spec(nx, ny, g, [3, 0, 0, 0], cylindrical=1)
         bz[g, g] = 1.0
         bz[g, g - 1] = -1.0
-        validate_background_boundary_compatibility(
-            bx, by, bz, nx, ny, g, boundaries)
+        _core.mhd.build_background_from_arrays(
+            spec, bx.reshape(-1), by.reshape(-1), bz.reshape(-1))
 
         bz[g, g - 1] = 1.0
         with self.assertRaisesRegex(ValueError, "axis parity"):
-            validate_background_boundary_compatibility(
-                bx, by, bz, nx, ny, g, boundaries)
+            _core.mhd.build_background_from_arrays(
+                spec, bx.reshape(-1), by.reshape(-1), bz.reshape(-1))
 
 
 class BackgroundFileModeTests(unittest.TestCase):
@@ -883,7 +769,7 @@ class InlineConductorBackgroundTests(unittest.TestCase):
         background = build_background_field(deck, nghost)
         domain = deck.domain
 
-        defect = background_divergence_relative_linf(
+        defect = _relative_divergence_linf(
             background["b0x"],
             background["b0y"],
             domain.nx,
@@ -975,7 +861,7 @@ class CylindricalVectorPotentialTests(unittest.TestCase):
             deck = self._deck_for(domain, path, project=False)
             deck.validate()
             bg = build_background_field(deck, g)
-        divb = background_divergence_linf(
+        divb = _divergence_linf(
             bg["b0x"], bg["b0y"], domain.nx, domain.ny, g, dx,
             domain.ly_m / domain.ny, geometry="cylindrical",
             origin_x=domain.origin_x_m)
@@ -1022,12 +908,12 @@ class CylindricalVectorPotentialTests(unittest.TestCase):
             projected.validate()
             bg = build_background_field(projected, g)
 
-        divb = background_divergence_linf(
+        divb = _divergence_linf(
             bg["b0x"], bg["b0y"], domain.nx, domain.ny, g, dx, dy,
             geometry="cylindrical", origin_x=domain.origin_x_m)
-        curlb = background_curl_linf(
+        curlb = _curl_linf(
             bg["b0x"], bg["b0y"], domain.nx, domain.ny, g, dx, dy)
-        raw_curlb = background_curl_linf(
+        raw_curlb = _curl_linf(
             raw_bg["b0x"], raw_bg["b0y"], domain.nx, domain.ny, g, dx, dy)
         scale = max(1.0, (np.max(np.abs(bg["b0x"])) +
                           np.max(np.abs(bg["b0y"]))) / min(dx, dy))

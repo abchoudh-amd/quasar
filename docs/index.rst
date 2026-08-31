@@ -56,6 +56,7 @@ solver:
    dev-guide/adding_a_filter
    dev-guide/adding_a_background_field
    dev-guide/adding_an_mhd_scheme
+   dev-guide/adding_an_initial_condition
    dev-guide/adding_an_equilibrium_profile
    dev-guide/extending_stability
    dev-guide/adding_distributed_physics

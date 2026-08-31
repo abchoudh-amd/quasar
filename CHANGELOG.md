@@ -431,6 +431,66 @@ interfaces may still change between entries.
   like the grid/plane/line observation kinds.
 
 ### Changed
+- MHD: **the seeded initial state is built on the device.** The six benchmark
+  generators behind `initial.type` were NumPy expressions over the padded grid
+  in `quasar.mhd.io`; they are now one kernel dispatching on an enumerator
+  (`physics/mhd/initial_conditions.hpp`), with the deck layer reduced to parsing,
+  validation and an O(1) scalar parameter block. The deck still selects a
+  generator by string, and `_core.mhd.registered_initial_conditions()` is the
+  list the validator checks against.
+
+  The primitive-to-conserved assembly, the face-to-cell magnetic recollocation
+  and the positivity preflight moved with them. The recollocation now calls the
+  solver's own `mhd_staggering.hpp` quadrature instead of a NumPy mirror of it,
+  so the seeded energy and the EOS read the same B by construction rather than
+  by two implementations agreeing.
+
+  One behavioural change to expect: cell coordinates come from
+  `Grid2D::x_at_cell_center`/`y_at_cell_center`, which are FMAs, where the NumPy
+  used `origin + (i + 0.5) * d`. Seeded states move by an ulp. This is the
+  better of the two — it is the coordinate mapping the solver already uses for
+  every geometric factor, so the seed is now consistent with the mesh instead of
+  merely close to it. No example reference needed re-baselining.
+- MHD: **the static background field B0 is built and proved on the device.**
+  All five deck sources — uniform, named analytic profile, explicit `file`,
+  `a_file` corner potential, and inline `conductors` — assemble B0 in device
+  memory and run the WP2 solenoidality and boundary-closure sweeps there before
+  anything is downloaded. The `conductors` path no longer round-trips: the
+  padded corner grid expands into a device point cloud, the Biot–Savart
+  evaluator writes device planes, and the lab-Y plane feeds the curl directly.
+  Reading an npz is still host work, because loading a file is not calculation.
+
+  Analytic profiles are lowered to an affine POD, because a vtable cannot cross
+  to the device. The lowering is derived by probing the registered profile
+  rather than by re-listing the profiles, so the registry stays the single
+  definition of what a name means — and a profile that is not affine is refused
+  by name instead of being silently linearized. Both built-ins are affine, which
+  is exactly the condition `IMhdBackgroundProfile::sample` already requires for
+  its returned value to be the element's finite-volume moment.
+
+  The opt-in cylindrical vacuum projection is the same preconditioned conjugate
+  gradient as before, on the device: same operator, same Jacobi preconditioner,
+  same `5e-11` relative stopping contract against the same characteristic
+  field-derivative scale. Its inner products now use the deterministic
+  double-double tree, so the result is bitwise reproducible across block counts,
+  which NumPy's pairwise sum was not obliged to be. One deliberate one-ulp
+  difference: the boundary ring is Dirichlet data and is returned exactly as
+  supplied, where the NumPy divided the whole array back through `psi = r*A`.
+
+  The plan for this work called for reusing the equilibrium defect-corrected
+  multigrid here, on the correct observation that the projection operator is
+  `Delta*` up to a positive row scaling by `r`. That is not taken:
+  `GsDeviceMultigrid` is declared in `physics/equilibrium/kernels.hpp`, so
+  calling it would create an mhd -> equilibrium physics edge. Its host twin
+  already lives on the numerics axis, so the right fix is to move the device
+  class down to numerics as well — a refactor that touches equilibrium and
+  stability and does not belong here. See the note at the top of
+  `src/backend/hip/mhd/mhd_background_build.hip`.
+- MHD: `MhdSolver2D::state_component_to_host` collocates `bx`/`by` to cells on
+  the device before the download rather than after it. The bytes cross the bus
+  either way; the last per-cell arithmetic in the solver no longer runs on the
+  host.
+
 - Distributed PIC: **particle migration routing runs on the device.** Deciding
   where a departing particle goes is arithmetic — a periodic coordinate is
   wrapped back into the global domain, divided by the cell width and floored to
@@ -835,6 +895,16 @@ interfaces may still change between entries.
   in the solver step.
 
 ### Removed
+- MHD: `python/quasar/mhd/numerics.py` is gone. It was the host mirror of the
+  face-to-cell collocation, the EOS, and the background solenoidality/boundary
+  sweeps; every one of those now runs on the device, and the standing rule for
+  this port is that displaced host code is deleted rather than kept as an
+  oracle. The three tests that consumed it either moved to the device path
+  (`build_background_from_arrays` for the boundary-closure rules) or carry a
+  small, explicitly test-local reference. `tests/python/test_mhd_numerics.py`
+  went with it: it tested the mirror against the C++ goldens, and
+  `tests/unit/numerics/test_mhd_cylindrical_collocation.cpp` already proves the
+  surviving side against polynomial exactness directly.
 - MHD: the `reflecting` boundary name has been removed; it is renamed to `wall`
   (same perfectly-conducting semantics), so decks must now select `wall` and
   `reflecting` is rejected at validation.

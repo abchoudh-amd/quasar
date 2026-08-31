@@ -4,6 +4,8 @@ endif()
 
 set(_quasar_mhd_sources
   mhd_solver.cpp
+  initial_conditions.cpp
+  background_builder.cpp
   mhd_geometric_source.cpp
   mhd_boundary.cpp
 )

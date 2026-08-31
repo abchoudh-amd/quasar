@@ -30,6 +30,7 @@
 #include "quasar/numerics/interface_states.hpp"
 #include "quasar/numerics/mhd_state.hpp"
 #include "quasar/numerics/radial_tables.hpp"
+#include "quasar/physics/mhd/initial_conditions.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_field.hpp"
 
@@ -583,5 +584,104 @@ MhdBackgroundCurlFreeResult launch_mhd_validate_background_curl_free(
 
 void launch_mhd_fill_ghosts_background(MhdBackgroundField<Real>& b0, int side,
                                        int mode, stream_t stream);
+
+// -- Seeded initial state ----------------------------------------------------
+//
+// Evaluate one of the six benchmark initial conditions over the whole padded
+// grid and assemble the conserved state, then re-form the magnetic energy from
+// the face-to-cell collocated field and run the positivity preflight. See
+// physics/mhd/initial_conditions.hpp for the parameter block and for what the
+// two passes are for.
+//
+// `raw_magnetic` is caller-owned scratch of grid.storage_size() Reals carrying
+// the deck-unit magnetic half-norm between the passes; `status` is a single
+// device int the caller must zero first. Bits accumulate with atomicOr and are
+// translated to exceptions on the host, because a kernel cannot throw and a
+// bare pass/fail would not say which of the five rejections fired.
+inline constexpr int kMhdSeedDensityNotPositive = 1;
+inline constexpr int kMhdSeedPressureNotPositive = 2;
+inline constexpr int kMhdSeedMomentumNotRepresentable = 4;
+inline constexpr int kMhdSeedEnergyNotRepresentable = 8;
+inline constexpr int kMhdSeedCollocationNotRepresentable = 16;
+inline constexpr int kMhdSeedCoordinateNotRepresentable = 32;
+
+void launch_mhd_seed_initial_state(
+    const MhdInitialConditionSpec& spec, MhdField2D<Real>& out,
+    backend::DeviceBuffer<Real>& raw_magnetic,
+    quasar::numerics::RadialTablesView radial_tables, int* status,
+    stream_t stream);
+
+// -- Background construction --------------------------------------------------
+//
+// Assembling a prescribed B0 from a deck: sample an affine analytic profile on
+// the staggered mesh, or curl a corner vector potential (optionally after the
+// annular vacuum projection). See physics/mhd/background_builder.hpp for what
+// each source means and for why the profile is lowered to an affine POD.
+//
+// Same status-word contract as the seeded initial state above: the caller zeroes
+// one device int and the host turns the accumulated bits into an exception.
+inline constexpr int kMhdBackgroundCoordinateNotRepresentable = 1;
+inline constexpr int kMhdBackgroundSampleNotFinite = 2;
+inline constexpr int kMhdBackgroundPotentialNotRepresentable = 4;
+inline constexpr int kMhdBackgroundRadialMeasureInvalid = 8;
+inline constexpr int kMhdBackgroundVacuumCoefficientsInvalid = 16;
+
+void launch_mhd_sample_background_profile(
+    Grid2D grid, const MhdBackgroundAffineProfile& profile,
+    Real magnetic_scale, MhdBackgroundField<Real>& out, int* status,
+    stream_t stream);
+
+void launch_mhd_scale_background(MhdBackgroundField<Real>& b0,
+                                 Real magnetic_scale, int* status,
+                                 stream_t stream);
+
+void launch_mhd_scale_corner_potential(backend::DeviceBuffer<Real>& a_corners,
+                                       Real factor, int* status,
+                                       stream_t stream);
+
+// Move one component plane of an evaluated vector potential into the corner
+// buffer, sweeping it for finiteness. `plane` must hold at least out.size()
+// values; the caller owns it.
+void launch_mhd_extract_corner_potential(const Real* plane,
+                                         backend::DeviceBuffer<Real>& out,
+                                         int* status, stream_t stream);
+
+// Iteration counts and residuals are reported rather than judged here: the
+// three failure modes (a lost positive-definite operator, a non-finite
+// residual, and plain non-convergence) carry different diagnoses, and the
+// numbers belong in the message.
+struct MhdVacuumProjectionReport {
+  bool converged{false};
+  int iterations{0};
+  int max_iterations{0};
+  Real residual{Real{0}};
+  Real target{Real{0}};
+  Real field_scale{Real{0}};
+  int field_scale_not_representable{0};
+  int lost_definiteness{0};
+  int nonfinite_residual{0};
+};
+
+// Replace the interior of `a_corners` by the unique discrete-vacuum harmonic
+// continuation of its own outer ring, in place. The boundary values are fixed
+// data and are never touched.
+MhdVacuumProjectionReport launch_mhd_project_vacuum_potential(
+    Grid2D grid, backend::DeviceBuffer<Real>& a_corners,
+    Real relative_tolerance, int* status, stream_t stream);
+
+void launch_mhd_curl_corner_potential(
+    Grid2D grid, int cylindrical, const backend::DeviceBuffer<Real>& a_corners,
+    Real magnetic_scale, Real bz0, MhdBackgroundField<Real>& out, int* status,
+    stream_t stream);
+
+// -- Face-to-cell magnetic collocation ---------------------------------------
+// Write the finite-volume cell average of a staggered face component over the
+// whole padded grid: `axis` 0 collocates bx_face across x, 1 collocates by_face
+// across y. Same quadrature the EOS uses, including the cylindrical
+// radius-weighted moments when the view is active. `cell` may not alias `face`.
+void launch_mhd_collocate_face_to_cell(
+    Grid2D grid, int axis, const backend::DeviceBuffer<Real>& face,
+    quasar::numerics::RadialTablesView radial_tables,
+    backend::DeviceBuffer<Real>& cell, stream_t stream);
 
 }  // namespace quasar::mhd

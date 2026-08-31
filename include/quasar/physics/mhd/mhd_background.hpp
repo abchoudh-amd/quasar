@@ -10,6 +10,25 @@
 
 namespace quasar::mhd {
 
+// Device-side lowering of an analytic background profile.
+//
+// numerics::IMhdBackgroundProfile is a host interface with a virtual sample(),
+// and a vtable cannot cross to the device. Both registered profiles are affine
+// over an element -- which is exactly the condition sample()'s own contract
+// requires for the returned value to BE the element's finite-volume moment --
+// so an affine parameter block reproduces them exactly. See
+// physics/mhd/background_builder.hpp for how one is derived from a registered
+// profile, and why a nonlinear profile is refused rather than linearized.
+//
+//   B_comp(x, y) = constant[comp] + slope_x[comp]*x + slope_y[comp]*y
+//
+// evaluated at the centre of the staggered element that owns the component.
+struct MhdBackgroundAffineProfile {
+  Real constant[3]{};
+  Real slope_x[3]{};
+  Real slope_y[3]{};
+};
+
 // Solver-owned static background magnetic field B0. The components use the same
 // staggering as the evolved state's B in MhdField2D: the in-plane B0x/B0y live on
 // cell faces (CT primary storage) and the out-of-plane toroidal B0z is

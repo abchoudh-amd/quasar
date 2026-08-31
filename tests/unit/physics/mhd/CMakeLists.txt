@@ -4,6 +4,8 @@ set(_quasar_mhd_tests
   test_mhd_cylindrical_source
   test_mhd_scheme_registry_linkage
   test_mhd_background_field
+  test_mhd_background_builder
+  test_mhd_initial_conditions
   test_mhd_onesided_boundary
   test_mhd_boundary
   test_mhd_device_compute

@@ -94,7 +94,6 @@ set(_quasar_py_sources
   pic/_distributed_runner.py
   mhd/__init__.py
   mhd/io.py
-  mhd/numerics.py
   mhd/_units.py
   mhd/_distributed_runner.py
   mhd/cli.py

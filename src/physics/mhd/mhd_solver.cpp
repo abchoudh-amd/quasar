@@ -601,31 +601,19 @@ std::vector<Real> MhdSolver2D::state_component_to_host(std::string_view componen
   auto& self = const_cast<MhdSolver2D&>(*this);
   const auto& buf = component_buffer(self.rk_[0], component);
   std::vector<Real> out(buf.size());
-  buf.copy_to_host(out.data(), out.size());
   if (component == "bx" || component == "by") {
-    const std::vector<Real> face = out;
-    const numerics::RadialTablesView radial_tables =
-        radial_tables_.host_view();
-    const int ilo = -grid_.nghost;
-    const int ihi = grid_.nx + grid_.nghost;
-    const int jlo = -grid_.nghost;
-    const int jhi = grid_.ny + grid_.nghost;
-    if (component == "bx") {
-      for (int j = jlo; j < jhi; ++j) {
-        for (int i = ilo; i < ihi; ++i) {
-          out[grid_.index(i, j)] =
-              cell_bx(grid_, face.data(), i, j, radial_tables);
-        }
-      }
-    } else {
-      for (int j = jlo; j < jhi; ++j) {
-        for (int i = ilo; i < ihi; ++i) {
-          out[grid_.index(i, j)] =
-              cell_by(grid_, face.data(), i, j, radial_tables);
-        }
-      }
-    }
+    // Collocate first, download second. The bytes have to cross the bus
+    // either way; doing the quadrature on the side that already owns the field
+    // keeps the last per-cell arithmetic in the solver off the host.
+    backend::DeviceBuffer<Real> collocated(buf.size());
+    launch_mhd_collocate_face_to_cell(
+        grid_, component == "bx" ? 0 : 1, buf, radial_tables_.view(),
+        collocated, nullptr);
+    collocated.copy_to_host(out.data(), out.size());
+    backend::device_synchronize(nullptr);
+    return out;
   }
+  buf.copy_to_host(out.data(), out.size());
   return out;
 }
 

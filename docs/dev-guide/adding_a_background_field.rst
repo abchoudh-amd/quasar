@@ -143,18 +143,19 @@ the wall face while tangential components are even, and the cylindrical axis
 also makes ``B_phi`` odd. This prevents a background that is solenoidal only in
 the deep interior from injecting a seam or boundary divergence.
 
-This contract is enforced at both public construction paths. The native solver
-samples analytic profiles and validates their padded staggered field. For
-``file``, ``a_file``, and inline ``conductors`` input, the Python loader
-assembles and checks the buffers at build/seed time
-(``background_divergence_linf`` in
-``python/quasar/mhd/numerics.py``, called from ``build_background_field`` in
-``python/quasar/mhd/io.py``), and the native solver validates them again. A
-later ``seed_background`` call invalidates the prior validation, and the
-complete three-component field is revalidated immediately before the next CFL,
-residual, stepping, or divergence operation consumes it. Thus a direct
-C++/binding caller cannot bypass the solenoidal requirement by overwriting
-constructor-populated buffers.
+This contract is enforced at both public construction paths, and both run it on
+the device. The native solver samples analytic profiles and validates their
+padded staggered field. For ``file``, ``a_file``, and inline ``conductors``
+input, ``build_background_field`` in ``python/quasar/mhd/io.py`` calls into
+``quasar/physics/mhd/background_builder.hpp``, which assembles the field in
+device memory and runs ``launch_mhd_validate_background_solenoidal`` and
+``launch_mhd_validate_background_boundaries`` on it before anything is
+downloaded; the native solver then validates it again. A later
+``seed_background`` call invalidates the prior validation, and the complete
+three-component field is revalidated immediately before the next CFL, residual,
+stepping, or divergence operation consumes it. Thus a direct C++/binding caller
+cannot bypass the solenoidal requirement by overwriting constructor-populated
+buffers.
 
 The deck block
 --------------
@@ -190,37 +191,45 @@ exclusive with ``file`` and ``a_file``.
 How the profile reaches the device
 ----------------------------------
 
-The background ``B0`` is assembled **host-side**. A native ``MhdConfig`` resolves
-the registry profile, applies ``background.params`` (followed by the legacy
-uniform ``bx0/by0/bz0`` values), samples the padded staggered mesh, applies the
-constant ``profile_scale``, and copies the result into the solver. A frontend may
-replace those values through
-``seed_background(component, buf)`` for file/vector-potential input. Device
-kernels only consume the resulting buffers, so no ``.hip`` translation unit
-depends on the profile class and a new profile is a pure host/numerics addition.
+A native ``MhdConfig`` resolves the registry profile, applies
+``background.params`` (followed by the legacy uniform ``bx0/by0/bz0`` values),
+samples the padded staggered mesh, applies the constant ``profile_scale``, and
+copies the result into the solver. A frontend may replace those values through
+``seed_background(component, buf)`` for file/vector-potential input.
+
+Your profile class is never called from a kernel. ``sample()`` is a host virtual
+and a vtable cannot cross to the device, so the deck path **lowers** the
+configured profile to an affine parameter block --
+``mhd::MhdBackgroundAffineProfile``, three constants and six slopes -- and the
+kernel evaluates that. The lowering is derived by probing your object
+(``lower_affine_background_profile``), not by re-listing profiles in a second
+place, so the registered class stays the single definition of what its name
+means.
+
+.. important::
+
+   The lowering is only valid because both built-in profiles are **affine over
+   an element**, which is exactly the condition ``sample()``'s own contract
+   already requires for the returned value to BE the element's finite-volume
+   moment. A profile with curvature is detected by two off-axis probes and
+   **refused by name**; it is not linearized and it is not silently accepted.
+
+   If you are adding a nonlinear profile, that refusal is the design telling you
+   the truth: returning a bare midpoint value would inject an ``O(h^2)``
+   projection error that caps the scheme's order. Supplying the element average
+   from an analytic integral makes the profile's ``sample()`` correct, but it
+   does *not* give it a device path -- a nonlinear profile needs its own kernel
+   branch, not a wider POD.
 
 .. note::
 
    ``IMhdBackgroundProfile`` is a different interface from
-   ``numerics::IFieldEvaluator`` and is still sampled on the host, as described
-   above. Only the evaluator axis moved to device SoA buffers (see
-   :doc:`adding_a_field_evaluator`). The inline-``conductors`` background path
-   is the one place the two meet: it obtains ``A`` from the Biot-Savart
-   evaluator, which now computes entirely on the device and is downloaded once
-   at the Python binding boundary before the discrete curl. Moving that
-   assembly, and the profile sampling itself, onto the device is separate work.
-
-.. note::
-
-   The Python CLI leaves analytic ``uniform`` and ``linear_vacuum`` profiles in
-   the native path above; ``profile_scale`` performs their SI conversion without
-   destroying registry capability metadata. The standalone
-   ``build_background_field`` helper can still sample any registered profile
-   through ``_core.mhd.sample_mhd_background_profile`` for validation and tests.
-   The serial CLI uses that helper to assemble explicit ``file``/``a_file`` or
-   inline-conductor buffers before calling ``seed_background``. Distributed MHD
-   currently rejects inline conductors because its canonical background
-   interchange cannot preserve their solver-derived physical halo.
+   ``numerics::IFieldEvaluator``. The inline-``conductors`` background path is
+   where the two meet: it obtains ``A`` from the Biot-Savart evaluator on the
+   padded corner grid and feeds the lab-Y plane straight into the discrete curl,
+   with no host round trip in between. Distributed MHD currently rejects inline
+   conductors because its canonical background interchange cannot preserve their
+   solver-derived physical halo.
 
 .. important::
 
@@ -250,7 +259,7 @@ depends on the profile class and a new profile is a pure host/numerics addition.
    exponent. It therefore does not rely on a continuum product rule that the
    discrete CT and flux-divergence operators need not satisfy, and it avoids
    forming an ``O(B0^2)`` intermediate. Nonzero curl is permitted;
-   ``background_curl_linf`` is a diagnostic, not an acceptance gate. A constant
+   the staggered curl is a diagnostic, not an acceptance gate. A constant
    cylindrical toroidal ``B0_phi`` is current-carrying because
    :math:`(\nabla\times B_0)_z=B_{0\phi}/r`, but it is supported when the
    staggered divergence criterion passes.

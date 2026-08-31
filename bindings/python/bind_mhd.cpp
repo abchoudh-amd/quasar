@@ -20,20 +20,25 @@
 #include "numpy_utils.hpp"
 
 #include "quasar/boundary/mhd_boundary.hpp"
+#include "quasar/core/field_source.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/registry.hpp"
 #include "quasar/numerics/ct_scheme.hpp"
+#include "quasar/numerics/field_evaluator.hpp"
 #include "quasar/numerics/flux_reconstruction.hpp"
 #include "quasar/numerics/mhd_background_profile.hpp"
 #include "quasar/numerics/positivity_limiter.hpp"
 #include "quasar/numerics/riemann_solver.hpp"
 #include "quasar/numerics/ssprk_integrator.hpp"
+#include "quasar/physics/mhd/background_builder.hpp"
+#include "quasar/physics/mhd/initial_conditions.hpp"
 #include "quasar/physics/mhd/mhd_background.hpp"
 #include "quasar/physics/mhd/mhd_solver.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -45,6 +50,29 @@ namespace {
 using ::quasar::Real;
 using ::quasar::python_detail::numpy_to_real_vector;
 using ::quasar::python_detail::require_real_array;
+
+// Fixed-size C arrays inside a bound struct cannot use def_readwrite: pybind
+// would hand out a pointer with no length. Expose each as a list property of
+// exactly the declared arity instead, so a wrong-length deck value is a
+// ValueError at the binding rather than a silent partial write.
+template <std::size_t N>
+py::list array_to_list(const Real (&values)[N]) {
+  py::list out;
+  for (std::size_t k = 0; k < N; ++k) out.append(values[k]);
+  return out;
+}
+
+template <std::size_t N>
+void list_to_array(Real (&values)[N], const py::sequence& source,
+                   const char* what) {
+  if (static_cast<std::size_t>(py::len(source)) != N) {
+    throw std::invalid_argument{std::string{what} + " requires exactly " +
+                                std::to_string(N) + " components"};
+  }
+  for (std::size_t k = 0; k < N; ++k) {
+    values[k] = py::cast<Real>(source[k]);
+  }
+}
 
 template <typename T>
 py::array_t<T> vector_to_numpy(const std::vector<T>& v) {
@@ -160,6 +188,11 @@ void bind_mhd(py::module_& m) {
                 quasar::Registry<quasar::numerics::IMhdBackgroundProfile>::instance().names());
           },
           "Names of registered static background-field (B0) profiles.");
+  // Registry introspection, not a deck path. The deck's background builder
+  // lowers a profile to an affine POD and samples it in a kernel
+  // (physics/mhd/background_builder.hpp); this entry point exists so a test or
+  // a notebook can ask a registered profile what it returns, which is exactly
+  // the host virtual the lowering probes.
   mhd.def(
       "sample_mhd_background_profile",
       [](const std::string& name, int comp, const py::object& x_input,
@@ -210,6 +243,262 @@ void bind_mhd(py::module_& m) {
       py::arg("name"), py::arg("component"), py::arg("x"), py::arg("y"),
       py::arg("params") = py::dict{},
       "Sample a registered analytic MHD background profile on matching arrays.");
+
+  // -- Seeded initial state --------------------------------------------------
+  // The deck still selects a generator by string; `kind` accepts and returns
+  // that name, and registered_initial_conditions() is the list the Python deck
+  // validator checks against rather than mirroring it.
+  mhd.def("registered_initial_conditions",
+          &quasar::mhd::registered_mhd_initial_conditions,
+          "Names of the built-in MHD initial-condition generators.");
+
+  using quasar::mhd::MhdInitialConditionSpec;
+  py::class_<MhdInitialConditionSpec>(mhd, "MhdInitialConditionSpec")
+      .def(py::init<>())
+      .def_property(
+          "kind",
+          [](const MhdInitialConditionSpec& s) {
+            return quasar::mhd::registered_mhd_initial_conditions()
+                .at(static_cast<std::size_t>(s.kind));
+          },
+          [](MhdInitialConditionSpec& s, const std::string& name) {
+            s.kind = quasar::mhd::initial_condition_kind(name);
+          })
+      .def_readwrite("grid", &MhdInitialConditionSpec::grid)
+      .def_readwrite("gamma", &MhdInitialConditionSpec::gamma)
+      .def_readwrite("cylindrical", &MhdInitialConditionSpec::cylindrical)
+      .def_readwrite("scheme_order", &MhdInitialConditionSpec::scheme_order)
+      .def_readwrite("magnetic_scale", &MhdInitialConditionSpec::magnetic_scale)
+      .def_readwrite("interface", &MhdInitialConditionSpec::interface)
+      .def_property(
+          "left",
+          [](const MhdInitialConditionSpec& s) { return array_to_list(s.left); },
+          [](MhdInitialConditionSpec& s, const py::sequence& v) {
+            list_to_array(s.left, v, "left state");
+          })
+      .def_property(
+          "right",
+          [](const MhdInitialConditionSpec& s) { return array_to_list(s.right); },
+          [](MhdInitialConditionSpec& s, const py::sequence& v) {
+            list_to_array(s.right, v, "right state");
+          })
+      .def_readwrite("rho", &MhdInitialConditionSpec::rho)
+      .def_readwrite("pressure", &MhdInitialConditionSpec::pressure)
+      .def_readwrite("b0", &MhdInitialConditionSpec::b0)
+      .def_readwrite("total_b0", &MhdInitialConditionSpec::total_b0)
+      .def_readwrite("amplitude", &MhdInitialConditionSpec::amplitude)
+      .def_readwrite("wavenumber", &MhdInitialConditionSpec::wavenumber)
+      .def_readwrite("magnetic_velocity_scale",
+                     &MhdInitialConditionSpec::magnetic_velocity_scale)
+      .def_property(
+          "b_uniform",
+          [](const MhdInitialConditionSpec& s) {
+            return array_to_list(s.b_uniform);
+          },
+          [](MhdInitialConditionSpec& s, const py::sequence& v) {
+            list_to_array(s.b_uniform, v, "uniform background field");
+          })
+      .def_property(
+          "center",
+          [](const MhdInitialConditionSpec& s) {
+            return array_to_list(s.center);
+          },
+          [](MhdInitialConditionSpec& s, const py::sequence& v) {
+            list_to_array(s.center, v, "center");
+          })
+      .def_readwrite("r_in", &MhdInitialConditionSpec::r_in)
+      .def_readwrite("r0", &MhdInitialConditionSpec::r0)
+      .def_readwrite("r1", &MhdInitialConditionSpec::r1)
+      .def_readwrite("rho_in", &MhdInitialConditionSpec::rho_in)
+      .def_readwrite("rho_out", &MhdInitialConditionSpec::rho_out)
+      .def_readwrite("p_in", &MhdInitialConditionSpec::p_in)
+      .def_readwrite("p_out", &MhdInitialConditionSpec::p_out)
+      .def_readwrite("p_core", &MhdInitialConditionSpec::p_core)
+      .def_readwrite("p_ambient", &MhdInitialConditionSpec::p_ambient)
+      .def_readwrite("rho_ambient", &MhdInitialConditionSpec::rho_ambient)
+      .def_readwrite("u0", &MhdInitialConditionSpec::u0)
+      .def_readwrite("blob_half", &MhdInitialConditionSpec::blob_half);
+
+  mhd.def(
+      "build_initial_state",
+      [](const MhdInitialConditionSpec& spec) {
+        quasar::mhd::MhdField2D<Real> state{spec.grid};
+        quasar::mhd::build_initial_state(spec, state);
+        // Download at the output boundary and nowhere earlier. The distributed
+        // runner slices these padded arrays per tile and the deck tests compare
+        // them to closed-form references, so a host copy is the product here --
+        // but every value in it was computed on device.
+        py::dict out;
+        auto emit = [&](const char* name,
+                        const quasar::backend::DeviceBuffer<Real>& buffer) {
+          std::vector<Real> host(buffer.size());
+          buffer.copy_to_host(host.data(), host.size());
+          out[name] = vector_to_numpy(host);
+        };
+        emit("rho", state.rho);
+        emit("mx", state.mx);
+        emit("my", state.my);
+        emit("mz", state.mz);
+        emit("energy", state.energy);
+        emit("bx", state.bx_face);
+        emit("by", state.by_face);
+        emit("bz", state.bz_cell);
+        return out;
+      },
+      py::arg("spec"),
+      "Build the ghost-padded conserved initial state on device and return it "
+      "as one flat host array per STATE_COMPONENT, in solver-internal units.");
+
+  // -- Background construction -----------------------------------------------
+  // Four deck sources, one validated product. Every one of them assembles B0 in
+  // device memory, proves it discretely solenoidal and boundary-compatible
+  // there, and only then downloads -- the host arrays returned are the output
+  // boundary, not an intermediate.
+  using quasar::mhd::MhdBackgroundBuildSpec;
+  py::class_<MhdBackgroundBuildSpec>(mhd, "MhdBackgroundBuildSpec")
+      .def(py::init<>())
+      .def_readwrite("grid", &MhdBackgroundBuildSpec::grid)
+      .def_readwrite("cylindrical", &MhdBackgroundBuildSpec::cylindrical)
+      .def_readwrite("magnetic_scale", &MhdBackgroundBuildSpec::magnetic_scale)
+      .def_readwrite("b_scale", &MhdBackgroundBuildSpec::b_scale)
+      .def_readwrite("bz0", &MhdBackgroundBuildSpec::bz0)
+      .def_readwrite("vacuum_project", &MhdBackgroundBuildSpec::vacuum_project)
+      .def_property(
+          "field_modes",
+          [](const MhdBackgroundBuildSpec& s) {
+            py::list out;
+            for (int k = 0; k < 4; ++k) out.append(s.field_modes[k]);
+            return out;
+          },
+          [](MhdBackgroundBuildSpec& s, const py::sequence& v) {
+            if (py::len(v) != 4) {
+              throw std::invalid_argument{
+                  "field_modes requires exactly four side codes"};
+            }
+            for (int k = 0; k < 4; ++k) {
+              s.field_modes[k] = py::cast<int>(v[k]);
+            }
+          })
+      .def(
+          "set_profile",
+          [](MhdBackgroundBuildSpec& self, const std::string& name,
+             const py::dict& params) {
+            // Configure the registered profile, then lower it. The registry
+            // object stays the single definition of what the name means; see
+            // physics/mhd/background_builder.hpp for why the lowering is affine
+            // and why a nonlinear profile is refused rather than approximated.
+            std::unique_ptr<quasar::numerics::IMhdBackgroundProfile> profile;
+            try {
+              profile = quasar::Registry<
+                  quasar::numerics::IMhdBackgroundProfile>::instance()
+                  .create(name);
+            } catch (const std::out_of_range&) {
+              throw std::invalid_argument{
+                  "unknown MHD background profile '" + name + "'"};
+            }
+            for (const auto& item : params) {
+              const std::string key = py::cast<std::string>(item.first);
+              const Real value = py::cast<Real>(item.second);
+              if (!std::isfinite(value)) {
+                throw std::invalid_argument{"background parameter " + key +
+                                            " must be finite"};
+              }
+              if (!profile->set_parameter(key, value)) {
+                throw std::invalid_argument{
+                    "unknown parameter " + key + " for background profile " +
+                    name};
+              }
+            }
+            self.profile =
+                quasar::mhd::lower_affine_background_profile(*profile, name);
+          },
+          py::arg("name"), py::arg("params") = py::dict{});
+
+  auto download_background =
+      [](const quasar::mhd::MhdBackgroundField<Real>& b0) {
+        py::dict out;
+        auto emit = [&](const char* name,
+                        const quasar::backend::DeviceBuffer<Real>& buffer) {
+          std::vector<Real> host(buffer.size());
+          buffer.copy_to_host(host.data(), host.size());
+          out[name] = vector_to_numpy(host);
+        };
+        emit("b0x", b0.b0x_face);
+        emit("b0y", b0.b0y_face);
+        emit("b0z", b0.b0z_cell);
+        return out;
+      };
+
+  mhd.def(
+      "build_background_from_profile",
+      [download_background](const MhdBackgroundBuildSpec& spec) {
+        quasar::mhd::MhdBackgroundField<Real> b0{spec.grid};
+        quasar::mhd::build_background_from_profile(spec, b0);
+        quasar::mhd::validate_deck_background(spec, b0);
+        return download_background(b0);
+      },
+      py::arg("spec"),
+      "Sample the configured analytic profile on the staggered padded mesh.");
+
+  mhd.def(
+      "build_background_from_corner_potential",
+      [download_background](const MhdBackgroundBuildSpec& spec,
+                            const py::object& values) {
+        // The npz is read in Python because loading a file is not calculation.
+        // From this upload onward nothing leaves the device until the result is
+        // validated.
+        const auto host = numpy_to_real_vector(values, "corner potential");
+        quasar::backend::DeviceBuffer<Real> a_corners(host.size());
+        a_corners.copy_from_host(host.data(), host.size());
+        quasar::mhd::MhdBackgroundField<Real> b0{spec.grid};
+        quasar::mhd::build_background_from_corner_potential(spec, a_corners, b0);
+        quasar::mhd::validate_deck_background(spec, b0);
+        return download_background(b0);
+      },
+      py::arg("spec"), py::arg("a_corners"),
+      "Curl a lab-Y corner vector potential, flattened row-major over the "
+      "padded (height+1) x (pitch+1) corner grid.");
+
+  mhd.def(
+      "build_background_from_conductors",
+      [download_background](const MhdBackgroundBuildSpec& spec,
+                            const quasar::core::IFieldSource& conductors,
+                            const quasar::numerics::IFieldEvaluator& evaluator) {
+        quasar::mhd::MhdBackgroundField<Real> b0{spec.grid};
+        quasar::mhd::build_background_from_conductors(spec, conductors,
+                                                      evaluator, b0);
+        quasar::mhd::validate_deck_background(spec, b0);
+        return download_background(b0);
+      },
+      py::arg("spec"), py::arg("conductors"), py::arg("evaluator"),
+      "Evaluate the inline coil geometry on the padded corner grid and curl "
+      "the result, with no host round trip between the two.");
+
+  mhd.def(
+      "build_background_from_arrays",
+      [download_background](const MhdBackgroundBuildSpec& spec,
+                            const py::object& b0x, const py::object& b0y,
+                            const py::object& b0z) {
+        quasar::mhd::MhdBackgroundField<Real> b0{spec.grid};
+        auto stage = [&](const py::object& values, const char* what,
+                         quasar::backend::DeviceBuffer<Real>& buffer) {
+          const auto host = numpy_to_real_vector(values, what);
+          if (host.size() != buffer.size()) {
+            throw std::invalid_argument{
+                std::string{what} +
+                " does not match the padded background storage size"};
+          }
+          buffer.copy_from_host(host.data(), host.size());
+        };
+        stage(b0x, "b0x", b0.b0x_face);
+        stage(b0y, "b0y", b0.b0y_face);
+        stage(b0z, "b0z", b0.b0z_cell);
+        quasar::mhd::scale_explicit_background(spec, b0);
+        quasar::mhd::validate_deck_background(spec, b0);
+        return download_background(b0);
+      },
+      py::arg("spec"), py::arg("b0x"), py::arg("b0y"), py::arg("b0z"),
+      "Unit-convert and validate an explicit deck-supplied background field.");
 
   // -- Boundary spec --------------------------------------------------------
   // Per-side fluid/field boundary kinds (order: x_lo, x_hi, y_lo, y_hi). Names

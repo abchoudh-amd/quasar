@@ -33,7 +33,6 @@ from quasar.mhd.io import (
     parse,
 )
 from quasar.mhd import _units as mhd_units
-from quasar.mhd import numerics as mhd_num
 
 
 def _domain(**overrides) -> Domain:
@@ -325,33 +324,6 @@ class GammaValidationTests(unittest.TestCase):
     def test_nonfinite_gamma_rejected(self):
         with self.assertRaises(ValueError):
             _deck(numerics=_numerics(gamma=float("nan"))).validate()
-
-    def test_fast_magnetosonic_helper_matches_ideal_gas_gamma_domain(self):
-        for bad in (0.5, 1.0, float("nan")):
-            with self.subTest(gamma=bad):
-                with self.assertRaisesRegex(ValueError, "greater than one"):
-                    mhd_num.fast_magnetosonic_speed(
-                        1.0, 1.0, 0.0, 0.0, 0.0, bad)
-
-    def test_numerical_helpers_reject_non_real_array_dtypes(self):
-        invalid = (
-            np.array([1.0 + 2.0j], dtype=np.complex128),
-            np.array([True], dtype=np.bool_),
-            np.array([1.0], dtype=object),
-            np.array(["1.0"]),
-        )
-        for rho in invalid:
-            with self.subTest(dtype=rho.dtype):
-                with self.assertRaisesRegex(
-                        ValueError, "real floating-point or integer"):
-                    mhd_num.fast_magnetosonic_speed(
-                        rho, 1.0, 0.0, 0.0, 0.0, 5.0 / 3.0)
-
-    def test_numerical_helpers_accept_real_integer_arrays(self):
-        speed = mhd_num.fast_magnetosonic_speed(
-            np.array([1], dtype=np.int64), np.array([1], dtype=np.uint8),
-            0, 0, 0, 5.0 / 3.0)
-        np.testing.assert_allclose(speed, np.sqrt(5.0 / 3.0))
 
 
 class DomainValidationTests(unittest.TestCase):
