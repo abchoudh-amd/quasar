@@ -3,11 +3,19 @@
 //
 // Both quantities are a MAX over all interior cells. HIP has no native
 // atomicMax for double, so each launcher uses a TWO-PASS block reduction: a
-// kernel computes the per-cell value, reduces it within each block via a
-// shared-memory tree to one partial max per block (written to a scratch
-// DeviceBuffer), and the host finishes the reduction over the (small)
-// block-partials array. The final scalar is then written to the caller's host
+// kernel computes the per-cell value and reduces it within each block via a
+// shared-memory tree to one partial per block (written to a scratch
+// DeviceBuffer), then a single 256-thread block folds those partials to one
+// scalar in the slot past them. The final scalar is copied to the caller's host
 // pointer before the launcher returns (device_synchronize'd).
+//
+// The second pass used to run on the host. It was the only floating-point work
+// left in this tree that both scaled with the mesh and ran several times per
+// accepted step -- admissible_fraction alone is called after every SSP-RK stage
+// and twice more per positivity substep. The device_synchronize is NOT what
+// moved: dt, theta and the div(B) defect all gate host control flow (a throw, a
+// substep accept/retry, a loop bound), so the launcher still blocks. What went
+// away is the O(n_blocks) device-to-host copy and the host loop over it.
 
 #include "quasar/backend/memory.hpp"
 #include "quasar/core/grid.hpp"
@@ -691,91 +699,201 @@ __global__ void QUASAR_LAUNCH_BOUNDS_256 ct_divb_relative_linf_kernel(
   }
 }
 
-// Finish a block-partials max on the host. Copies the partials to host and folds
-// them into a single scalar. n_blocks is the number of 16x16 tiles over the grid
-// (small), so a per-call host vector is negligible next to the device reduction.
-inline Real finish_host_max(const quasar::backend::DeviceBuffer<Real>& partials,
-                            std::size_t n_blocks) {
-  std::vector<Real> host(n_blocks);
-  partials.copy_to_host(host.data(), n_blocks);
-  Real m = Real{0};
-  for (std::size_t b = 0; b < n_blocks; ++b) {
-    if (!std::isfinite(host[b])) {
-      return std::numeric_limits<Real>::infinity();
-    }
-    if (host[b] > m) m = host[b];
+// -- Second-stage folds -------------------------------------------------------
+//
+// Each kernel is launched as ONE block of kThreadsPerBlock threads and folds the
+// per-block partials to a single scalar written to `out`. `blocks` is the number
+// of 16x16 tiles over the grid, so a single block striding over it is ample.
+
+// Fold a partials array to its maximum, with any non-finite partial poisoning
+// the result to +inf.
+//
+// The host loop this replaces returned +inf on the first non-finite entry.
+// Mapping every non-finite input to +inf up front reaches the same answer in a
+// tree, because +inf compares greater than every finite partial and the fold is
+// seeded at 0 exactly as the host was. Comparison-only, so the result is
+// bit-identical to the loop it replaces.
+__global__ void max_finish_kernel(unsigned blocks,
+                                  const double* __restrict__ partials,
+                                  double* __restrict__ out) {
+  __shared__ double sdata[kThreadsPerBlock];
+  const unsigned tid = threadIdx.x;
+  double best = 0.0;
+  for (unsigned k = tid; k < blocks; k += kThreadsPerBlock) {
+    const double value = partials[k];
+    const double mapped = std::isfinite(value)
+        ? value
+        : std::numeric_limits<double>::infinity();
+    if (mapped > best) best = mapped;
   }
-  return m;
+  sdata[tid] = best;
+  __syncthreads();
+  block_max_reduce(sdata, tid);
+  if (tid == 0) out[0] = sdata[0];
 }
 
-inline Real finish_host_scaled_norm_ratio(
-    const quasar::backend::DeviceBuffer<Real>& partials,
-    std::size_t n_blocks) {
-  std::vector<Real> host(4 * n_blocks);
-  partials.copy_to_host(host.data(), host.size());
-  quasar::numerics::ScaledValue residual_max{};
-  quasar::numerics::ScaledValue scale_max{};
-  const auto retain_max = [](Real mantissa, Real exponent_value,
-                             quasar::numerics::ScaledValue& maximum) {
-    if (!std::isfinite(mantissa) || !std::isfinite(exponent_value)) {
-      maximum = quasar::numerics::ScaledValue{
-          std::numeric_limits<Real>::infinity(), 0};
-      return;
+// Fold a partials array to its minimum, clamped to [0,1], with any non-finite
+// partial forcing 0.
+//
+// Same argument as above in the other direction: 0 is both the host loop's early
+// return and the lower clamp bound, so mapping non-finite to 0 survives the
+// min-fold and the clamp unchanged. Comparison-only, hence bit-identical.
+__global__ void min_finish_clamped_kernel(unsigned blocks,
+                                          const double* __restrict__ partials,
+                                          double* __restrict__ out) {
+  __shared__ double sdata[kThreadsPerBlock];
+  const unsigned tid = threadIdx.x;
+  double best = 1.0;
+  for (unsigned k = tid; k < blocks; k += kThreadsPerBlock) {
+    const double value = partials[k];
+    const double mapped = std::isfinite(value) ? value : 0.0;
+    if (mapped < best) best = mapped;
+  }
+  sdata[tid] = best;
+  __syncthreads();
+  block_min_reduce(sdata, tid);
+  if (tid == 0) {
+    const double folded = sdata[0];
+    out[0] = fmax(0.0, fmin(1.0, folded));
+  }
+}
+
+// One step of the scaled-maximum fold, in the exact form the host loop used.
+//
+// This is deliberately NOT block_scaled_abs_max_reduce: that helper keeps the
+// raw mantissa where this one keeps its magnitude, and it does not screen a
+// non-finite EXPONENT. The relative div(B) acceptance threshold is measured
+// against this value, so the rule has to be the one the threshold was
+// calibrated against.
+//
+// The rule is a commutative monoid -- identity {0,0}, absorbing {inf,0}, and
+// otherwise a lexicographic max on (exponent, |mantissa|) -- which is why
+// folding it as a tree lands on the same value as the sequential host loop.
+__device__ inline void retain_scaled_max(Real mantissa, Real exponent_value,
+                                         Real& best_mantissa,
+                                         int& best_exponent) {
+  if (!std::isfinite(mantissa) || !std::isfinite(exponent_value)) {
+    best_mantissa = std::numeric_limits<Real>::infinity();
+    best_exponent = 0;
+    return;
+  }
+  if (!std::isfinite(best_mantissa) || mantissa == Real{0}) return;
+  const int exponent = static_cast<int>(exponent_value);
+  if (best_mantissa == Real{0} || exponent > best_exponent ||
+      (exponent == best_exponent && fabs(mantissa) > fabs(best_mantissa))) {
+    best_mantissa = fabs(mantissa);
+    best_exponent = exponent;
+  }
+}
+
+// Fold the four residual/scale mantissa+exponent planes and form the relative
+// defect. `partials` is laid out as [residual mantissa | residual exponent |
+// scale mantissa | scale exponent], each `blocks` long.
+//
+// The two scalbn calls and the division are the only arithmetic here, and
+// neither is a multiply-add, so this kernel does not need -ffp-contract=off to
+// reproduce the host result exactly.
+__global__ void scaled_ratio_finish_kernel(unsigned blocks,
+                                           const double* __restrict__ partials,
+                                           double* __restrict__ out) {
+  __shared__ Real residual_mantissa[kThreadsPerBlock];
+  __shared__ int residual_exponent[kThreadsPerBlock];
+  __shared__ Real scale_mantissa[kThreadsPerBlock];
+  __shared__ int scale_exponent[kThreadsPerBlock];
+  const unsigned tid = threadIdx.x;
+
+  Real res_m = Real{0};
+  int res_e = 0;
+  Real scl_m = Real{0};
+  int scl_e = 0;
+  for (unsigned k = tid; k < blocks; k += kThreadsPerBlock) {
+    retain_scaled_max(partials[k], partials[blocks + k], res_m, res_e);
+    retain_scaled_max(partials[2 * blocks + k], partials[3 * blocks + k],
+                      scl_m, scl_e);
+  }
+  residual_mantissa[tid] = res_m;
+  residual_exponent[tid] = res_e;
+  scale_mantissa[tid] = scl_m;
+  scale_exponent[tid] = scl_e;
+  __syncthreads();
+
+  for (unsigned stride = kThreadsPerBlock / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      retain_scaled_max(residual_mantissa[tid + stride],
+                        static_cast<Real>(residual_exponent[tid + stride]),
+                        residual_mantissa[tid], residual_exponent[tid]);
+      retain_scaled_max(scale_mantissa[tid + stride],
+                        static_cast<Real>(scale_exponent[tid + stride]),
+                        scale_mantissa[tid], scale_exponent[tid]);
     }
-    if (!std::isfinite(maximum.mantissa) || mantissa == Real{0}) return;
-    const int exponent = static_cast<int>(exponent_value);
-    if (maximum.mantissa == Real{0} || exponent > maximum.exponent ||
-        (exponent == maximum.exponent &&
-         std::abs(mantissa) > std::abs(maximum.mantissa))) {
-      maximum = quasar::numerics::ScaledValue{
-          std::abs(mantissa), exponent};
-    }
-  };
-  for (std::size_t b = 0; b < n_blocks; ++b) {
-    retain_max(host[b], host[n_blocks + b], residual_max);
-    retain_max(host[2 * n_blocks + b], host[3 * n_blocks + b], scale_max);
+    __syncthreads();
   }
-  if (!(std::isfinite(residual_max.mantissa) &&
-        std::isfinite(scale_max.mantissa))) {
-    return std::numeric_limits<Real>::infinity();
+  if (tid != 0) return;
+
+  const Real folded_residual = residual_mantissa[0];
+  const Real folded_scale = scale_mantissa[0];
+  const int folded_residual_exponent = residual_exponent[0];
+  const int folded_scale_exponent = scale_exponent[0];
+  const Real infinity = std::numeric_limits<Real>::infinity();
+
+  if (!(std::isfinite(folded_residual) && std::isfinite(folded_scale))) {
+    out[0] = infinity;
+    return;
   }
-  if (residual_max.mantissa == Real{0}) return Real{0};
-  if (!(scale_max.mantissa > Real{0})) {
-    return std::numeric_limits<Real>::infinity();
+  if (folded_residual == Real{0}) {
+    out[0] = Real{0};
+    return;
   }
-  const int common_exponent = std::max(
-      residual_max.exponent, scale_max.exponent);
-  const Real numerator = std::abs(scalbn(
-      residual_max.mantissa, residual_max.exponent - common_exponent));
-  const Real denominator = std::abs(scalbn(
-      scale_max.mantissa, scale_max.exponent - common_exponent));
+  if (!(folded_scale > Real{0})) {
+    out[0] = infinity;
+    return;
+  }
+  const int common_exponent = folded_residual_exponent > folded_scale_exponent
+      ? folded_residual_exponent
+      : folded_scale_exponent;
+  const Real numerator = fabs(
+      ::scalbn(folded_residual, folded_residual_exponent - common_exponent));
+  const Real denominator = fabs(
+      ::scalbn(folded_scale, folded_scale_exponent - common_exponent));
   if (!(denominator > Real{0}) || !std::isfinite(numerator) ||
       !std::isfinite(denominator)) {
-    return std::numeric_limits<Real>::infinity();
+    out[0] = infinity;
+    return;
   }
-  return numerator / denominator;
-}
-
-inline Real finish_host_min(const quasar::backend::DeviceBuffer<Real>& partials,
-                            std::size_t n_blocks) {
-  std::vector<Real> host(n_blocks);
-  partials.copy_to_host(host.data(), n_blocks);
-  Real m = Real{1};
-  for (std::size_t b = 0; b < n_blocks; ++b) {
-    if (!std::isfinite(host[b])) return Real{0};
-    if (host[b] < m) m = host[b];
-  }
-  return std::max(Real{0}, std::min(Real{1}, m));
+  out[0] = numerator / denominator;
 }
 
 // Ensure `scratch` holds at least n_blocks elements; (re)allocate only when it is
 // too small. The reduction kernels write every slot before reading, so an
 // uninitialized (possibly larger) buffer is safe to reuse across calls.
+//
+// Callers size this to the partials PLUS one trailing slot, which the finish
+// kernel above writes its single scalar into. Folding in place into partial 0
+// would work too, but the extra slot keeps the partials readable for a failing
+// test to inspect.
 inline void ensure_scratch(quasar::backend::DeviceBuffer<Real>& scratch,
                            std::size_t n_blocks) {
   if (scratch.size() < n_blocks) {
     scratch = quasar::backend::DeviceBuffer<Real>{n_blocks, quasar::backend::uninitialized};
   }
+}
+
+// Launch one of the finish kernels above over `n_blocks` partials and return the
+// folded scalar. `result_slot` is the element just past the partials.
+template <typename Kernel>
+inline Real finish_on_device(Kernel kernel,
+                             quasar::backend::DeviceBuffer<Real>& scratch,
+                             std::size_t n_blocks, std::size_t result_slot,
+                             hipStream_t stream) {
+  Real* const base = scratch.device_ptr();
+  hipLaunchKernelGGL(kernel, dim3(1), dim3(kThreadsPerBlock), 0, stream,
+                     static_cast<unsigned>(n_blocks), base, base + result_slot);
+  QUASAR_HIP_CHECK(::hipGetLastError());
+  Real host = Real{0};
+  QUASAR_HIP_CHECK(::hipMemcpyAsync(&host, base + result_slot, sizeof(Real),
+                                    hipMemcpyDeviceToHost, stream));
+  QUASAR_HIP_CHECK(::hipStreamSynchronize(stream));
+  return host;
 }
 
 }  // namespace
@@ -797,7 +915,8 @@ void launch_mhd_cfl_max_rate(
 
   // Caller-owned scratch reused across calls (the auto-dt loop calls this every
   // step): grow it only when too small so there is no per-step hipMalloc/hipFree.
-  ensure_scratch(scratch, n_blocks);
+  // One slot past the partials holds the folded scalar.
+  ensure_scratch(scratch, n_blocks + 1);
 
   const Real dx = g.dx();
   const Real dy = g.dy();
@@ -838,7 +957,9 @@ void launch_mhd_cfl_max_rate(
   backend::device_synchronize(stream);
 
   Real rate_scale = Real{1};
-  Real scaled_max_rate = finish_host_max(scratch, n_blocks);
+  Real scaled_max_rate = finish_on_device(
+      max_finish_kernel, scratch, n_blocks, n_blocks,
+      static_cast<hipStream_t>(stream));
   if (!std::isfinite(scaled_max_rate)) {
     // Every valid physical face alpha is finite before its mesh factor is
     // applied. An infinite first reduction can therefore be either a genuine
@@ -854,7 +975,9 @@ void launch_mhd_cfl_max_rate(
         x_view, y_view, b0x, b0y, b0z, scratch.device_ptr());
     QUASAR_HIP_CHECK(::hipGetLastError());
     backend::device_synchronize(stream);
-    scaled_max_rate = finish_host_max(scratch, n_blocks);
+    scaled_max_rate = finish_on_device(
+        max_finish_kernel, scratch, n_blocks, n_blocks,
+        static_cast<hipStream_t>(stream));
   }
   *host_rate = ScaledCflRate{scaled_max_rate, rate_scale};
 }
@@ -869,8 +992,8 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
 
   // Caller-owned scratch reused across calls (same rationale as the CFL
-  // reduction); grow it only when too small.
-  ensure_scratch(scratch, n_blocks);
+  // reduction); grow it only when too small, plus the folded-scalar slot.
+  ensure_scratch(scratch, n_blocks + 1);
 
   hipLaunchKernelGGL(ct_divb_linf_kernel, grid, block, 0, static_cast<hipStream_t>(stream),
                      g, cylindrical ? 1 : 0,
@@ -879,7 +1002,8 @@ void launch_mhd_ct_divb_linf(const MhdField2D<Real>& u,
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_linf = finish_host_max(scratch, n_blocks);
+  *host_linf = finish_on_device(max_finish_kernel, scratch, n_blocks, n_blocks,
+                                static_cast<hipStream_t>(stream));
 }
 
 void launch_mhd_ct_divb_relative_linf(
@@ -890,7 +1014,7 @@ void launch_mhd_ct_divb_relative_linf(
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
-  ensure_scratch(scratch, 4 * n_blocks);
+  ensure_scratch(scratch, 4 * n_blocks + 1);
 
   hipLaunchKernelGGL(
       ct_divb_relative_linf_kernel, grid, block, 0,
@@ -900,7 +1024,9 @@ void launch_mhd_ct_divb_relative_linf(
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
 
-  *host_linf = finish_host_scaled_norm_ratio(scratch, n_blocks);
+  *host_linf = finish_on_device(scaled_ratio_finish_kernel, scratch, n_blocks,
+                                4 * n_blocks,
+                                static_cast<hipStream_t>(stream));
 }
 
 void launch_mhd_admissible_fraction(
@@ -913,7 +1039,7 @@ void launch_mhd_admissible_fraction(
   const dim3 block(kBlock2D, kBlock2D);
   const dim3 grid = mhd_grid_2d(g, block);
   const std::size_t n_blocks = static_cast<std::size_t>(grid.x) * grid.y;
-  ensure_scratch(scratch, n_blocks);
+  ensure_scratch(scratch, n_blocks + 1);
 
   const Real q_floor = p_floor / (gamma - Real{1});
   hipLaunchKernelGGL(
@@ -930,7 +1056,8 @@ void launch_mhd_admissible_fraction(
       scratch.device_ptr());
   QUASAR_HIP_CHECK(::hipGetLastError());
   backend::device_synchronize(stream);
-  *host_theta = finish_host_min(scratch, n_blocks);
+  *host_theta = finish_on_device(min_finish_clamped_kernel, scratch, n_blocks,
+                                 n_blocks, static_cast<hipStream_t>(stream));
 }
 
 }  // namespace quasar::mhd
