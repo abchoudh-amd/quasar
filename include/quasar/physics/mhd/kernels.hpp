@@ -365,6 +365,54 @@ void launch_mhd_admissible_fraction(
     int collocation_order = 0,
     quasar::numerics::RadialTablesView radial_tables = {});
 
+// -- Conserved cell totals ----------------------------------------------------
+//
+// Integrated mass and energy over the OWNED (interior) cells, with the
+// axisymmetric cell volume applied on device when `cylindrical` is set. These
+// are the deck-facing conserved invariants: a run reports them at t=0 and a
+// benchmark compares the final totals against them.
+//
+// Two properties are deliberate.
+//
+//   * The volume weight belongs HERE, not at either call site. The serial CLI
+//     and the distributed runtime both consume this launcher, so an axisymmetric
+//     deck cannot report an unweighted plain cell count on one path and a true
+//     volume integral on the other -- which is exactly what it used to do.
+//   * The accumulation is compensated and anchored on a shared exponent, like
+//     the PIC charge and energy totals, rather than a naive running sum. A naive
+//     fp64 sweep over a large mesh loses low-order bits at a rate that depends on
+//     the traversal order, so a one-tile serial run and an N-tile distributed run
+//     would not agree to a meaningful tolerance even with identical weighting.
+//
+// The final conversion to a Real stays on the host, for the same reason the PIC
+// diagnostics keep theirs there: the extended exponent range of the normalizing
+// epilogue is not reproducible on gfx942/gfx950.
+//
+// MhdScaledSum duplicates the shape of pic::PicScaledSum. That is not an
+// oversight: consuming the PIC type here would create an mhd -> pic dependency
+// across two physics modules that are otherwise independent. The real fix is to
+// move the accumulator down to the numerics axis, where its device half
+// (backend/hip/scaled_reduction_detail.hpp) effectively already lives; that is
+// left for whichever module needs it third.
+struct MhdScaledSum {
+  // Running sum and its Kahan compensation, both in units of 2^exponent.
+  Real sum{Real{0}};
+  Real correction{Real{0}};
+  int exponent{0};
+  bool initialized{false};
+  // A term was non-finite: the total is meaningless.
+  bool invalid{false};
+};
+
+struct MhdConservedSums {
+  MhdScaledSum mass;
+  MhdScaledSum energy;
+};
+
+MhdConservedSums launch_mhd_conserved_cell_sums(const MhdField2D<Real>& u,
+                                                int cylindrical,
+                                                stream_t stream);
+
 // -- Cylindrical geometric source --------------------------------------------
 // Accumulate the axisymmetric (r,z) geometric source into `dudt`:
 //   dudt += S(u, r)
@@ -626,10 +674,15 @@ inline constexpr int kMhdBackgroundPotentialNotRepresentable = 4;
 inline constexpr int kMhdBackgroundRadialMeasureInvalid = 8;
 inline constexpr int kMhdBackgroundVacuumCoefficientsInvalid = 16;
 
+// `cylindrical` selects the radial collocation: the in-plane components are
+// sampled at Grid2D::r_at_edge / r_at_cell_center instead of the Cartesian
+// x_at_cell_center and the face FMA. Both radial helpers already carry the
+// partitioned-grid global mapping, so a tile samples the same profile a whole
+// grid would.
 void launch_mhd_sample_background_profile(
     Grid2D grid, const MhdBackgroundAffineProfile& profile,
-    Real magnetic_scale, MhdBackgroundField<Real>& out, int* status,
-    stream_t stream);
+    Real magnetic_scale, int cylindrical, MhdBackgroundField<Real>& out,
+    int* status, stream_t stream);
 
 void launch_mhd_scale_background(MhdBackgroundField<Real>& b0,
                                  Real magnetic_scale, int* status,

@@ -599,6 +599,17 @@ void bind_mhd(py::module_& m) {
            py::return_value_policy::reference_internal)
       .def("cfl_limit", &quasar::mhd::MhdSolver2D::cfl_limit)
       .def("divergence_b_max", &quasar::mhd::MhdSolver2D::divergence_b_max)
+      // Returned as a plain (mass, energy) tuple rather than a bound struct:
+      // the CLI's only use is to write two floats into the output npz, and a
+      // one-field-per-attribute wrapper class would be pure ceremony. Note this
+      // is NOT an output-boundary conversion the caller may redo -- the
+      // cylindrical volume weight is applied inside the reduction, so summing
+      // the downloaded planes in NumPy instead would give a different number.
+      .def("conserved_cell_totals",
+           [](const quasar::mhd::MhdSolver2D& self) {
+             const auto totals = self.conserved_cell_totals();
+             return pybind11::make_tuple(totals.mass, totals.energy);
+           })
       .def("seed_state",
            [](quasar::mhd::MhdSolver2D& self, const std::string& component,
               const py::object& values) {

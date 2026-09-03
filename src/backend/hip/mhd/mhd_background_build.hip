@@ -73,15 +73,21 @@ __host__ __device__ inline Real node_coordinate(int n, int nghost, Real spacing,
 
 __global__ void QUASAR_LAUNCH_BOUNDS_256 profile_sample_kernel(
     Grid2D g, MhdBackgroundAffineProfile profile, Real magnetic_scale,
-    double* __restrict__ b0x, double* __restrict__ b0y,
+    int cylindrical, double* __restrict__ b0x, double* __restrict__ b0y,
     double* __restrict__ b0z, int* __restrict__ status) {
   const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x) - g.nghost;
   const int j = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y) - g.nghost;
   if (i >= g.nx + g.nghost || j >= g.ny + g.nghost) return;
 
-  const Real xc = g.x_at_cell_center(i);
+  // On an axisymmetric grid the in-plane abscissa is the radius, taken from the
+  // grid's own r_at_* helpers so the background is collocated on exactly the
+  // coordinates the solver's geometric factors use.
+  const Real xc = cylindrical != 0 ? g.r_at_cell_center(i)
+                                   : g.x_at_cell_center(i);
   const Real yc = g.y_at_cell_center(j);
-  const Real xf = ::fma(static_cast<Real>(i), g.dx(), g.origin_x);
+  const Real xf = cylindrical != 0
+      ? g.r_at_edge(i)
+      : ::fma(static_cast<Real>(i), g.dx(), g.origin_x);
   const Real yf = ::fma(static_cast<Real>(j), g.dy(), g.origin_y);
   if (!(::isfinite(xc) && ::isfinite(yc) && ::isfinite(xf) &&
         ::isfinite(yf))) {
@@ -561,12 +567,12 @@ namespace quasar::mhd {
 
 void launch_mhd_sample_background_profile(
     Grid2D grid, const MhdBackgroundAffineProfile& profile,
-    Real magnetic_scale, MhdBackgroundField<Real>& out, int* status,
-    stream_t stream) {
+    Real magnetic_scale, int cylindrical, MhdBackgroundField<Real>& out,
+    int* status, stream_t stream) {
   const dim3 block(kBlock2D, kBlock2D);
   hipLaunchKernelGGL(profile_sample_kernel, padded_grid(grid, block), block, 0,
                      static_cast<hipStream_t>(stream), grid, profile,
-                     magnetic_scale, out.b0x_face.device_ptr(),
+                     magnetic_scale, cylindrical, out.b0x_face.device_ptr(),
                      out.b0y_face.device_ptr(), out.b0z_cell.device_ptr(),
                      status);
   QUASAR_HIP_CHECK(::hipGetLastError());

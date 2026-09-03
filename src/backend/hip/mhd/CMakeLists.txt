@@ -16,6 +16,7 @@ set(_quasar_mhd_hip_sources
   mhd_split_energy.hip
   mhd_update.hip
   mhd_reduce.hip
+  mhd_cell_sums.hip
   mhd_boundary_hip.hip
 )
 
@@ -41,9 +42,15 @@ quasar_add_backend_src_include(mhd_hip)
 # uses compensated inner products, and contraction there degrades the
 # compensation exactly as it does in a reduction.
 #
+# The conserved cell totals are on the list for a fourth variant: their Kahan
+# compensation recovers exactly the bits a fused multiply-add would keep or drop
+# silently, so contraction does not merely perturb the correction term, it makes
+# it meaningless. This is the requirement scaled_reduction_detail.hpp states for
+# every consumer of ScaledAcc.
+#
 # Scoped per-source: the MHD hot-path kernels in this module want contraction.
 set_source_files_properties(mhd_background_validate.hip mhd_initial_conditions.hip
-  mhd_background_build.hip mhd_collocation.hip
+  mhd_background_build.hip mhd_collocation.hip mhd_cell_sums.hip
   TARGET_DIRECTORY quasar_mhd_hip
   PROPERTIES COMPILE_OPTIONS
     "$<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>")

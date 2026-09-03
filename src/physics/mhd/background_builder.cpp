@@ -131,8 +131,8 @@ void build_background_from_profile(const MhdBackgroundBuildSpec& spec,
                                    backend::stream_t stream) {
   StatusWord status;
   launch_mhd_sample_background_profile(spec.grid, spec.profile,
-                                       spec.magnetic_scale, out,
-                                       status.device.device_ptr(), stream);
+                                       spec.magnetic_scale, spec.cylindrical,
+                                       out, status.device.device_ptr(), stream);
   throw_on_background_status(status.read(stream));
 }
 

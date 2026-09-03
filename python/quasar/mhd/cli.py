@@ -178,16 +178,20 @@ def _component_2d(solver, deck: mhd_io.MhdDeck, component: str) -> np.ndarray:
 
 
 def _orszag_tang_invariants(solver, deck: mhd_io.MhdDeck) -> dict:
-    """Sum of rho and energy over the interior at the current time.
+    """Integrated mass and energy over the interior at the current time.
 
     Emitted as mass_initial / energy_initial for the orszag_tang token (a sibling
     example/test compares the final conserved totals to these).
+
+    This delegates to the solver's device reduction rather than summing the
+    downloaded planes here, and the difference is not cosmetic. Summing in NumPy
+    applied no geometric weight, so on a cylindrical deck it reported a plain
+    cell sum while the distributed runtime reported a true volume integral of
+    the same state -- two different numbers for one deck. The reduction owns the
+    axisymmetric weight now, so both paths agree by construction.
     """
-    nx, ny, nghost = deck.domain.nx, deck.domain.ny, solver.grid().nghost
-    rho = _interior_slice(_component_2d(solver, deck, "rho"), nx, ny, nghost)
-    energy = _interior_slice(_component_2d(solver, deck, "energy"), nx, ny, nghost)
-    return {"mass_initial": float(rho.sum()),
-            "energy_initial": float(energy.sum())}
+    mass, energy = solver.conserved_cell_totals()
+    return {"mass_initial": float(mass), "energy_initial": float(energy)}
 
 
 def _serial_run(input_deck: mhd_io.MhdDeck | str | Path, *,

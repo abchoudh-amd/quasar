@@ -11,6 +11,7 @@
 #include "quasar/numerics/mhd_background_profile.hpp"
 #include "quasar/numerics/mhd_state.hpp"
 #include "quasar/numerics/riemann_solver.hpp"
+#include "quasar/physics/mhd/background_builder.hpp"
 #include "quasar/physics/mhd/kernels.hpp"
 #include "quasar/physics/mhd/mhd_staggering.hpp"
 
@@ -419,46 +420,46 @@ MhdSolver2D::MhdSolver2D(MhdConfig cfg)
     }
 
     const bool cylindrical = is_cylindrical();
-    const std::size_t n = grid_.storage_size();
-    std::vector<Real> b0x(n), b0y(n), b0z(n);
-    for (int j = -grid_.nghost; j < grid_.ny + grid_.nghost; ++j) {
-      for (int i = -grid_.nghost; i < grid_.nx + grid_.nghost; ++i) {
-        const Real xc = cylindrical
-            ? grid_.r_at_cell_center(i)
-            : grid_.x_at_cell_center(i);
-        const Real yc = grid_.y_at_cell_center(j);
-        const Real xf = cylindrical
-            ? grid_.r_at_edge(i)
-            : grid_.origin_x + static_cast<Real>(i) * grid_.dx();
-        const Real yf = grid_.origin_y + static_cast<Real>(j) * grid_.dy();
-        if (!(std::isfinite(xc) && std::isfinite(yc) &&
-              std::isfinite(xf) && std::isfinite(yf))) {
-          throw std::overflow_error{
-              "MhdSolver2D: padded background coordinates are not representable"};
-        }
-        const std::size_t k = grid_.index(i, j);
-        b0x[k] = cfg_.background.profile_scale * profile->sample(0, xf, yc);
-        b0y[k] = cfg_.background.profile_scale * profile->sample(1, xc, yf);
-        b0z[k] = cfg_.background.profile_scale * profile->sample(2, xc, yc);
-        if (!(std::isfinite(b0x[k]) && std::isfinite(b0y[k]) &&
-              std::isfinite(b0z[k]))) {
-          throw std::invalid_argument{
-              "MhdSolver2D: background profile produced a non-finite sample"};
-        }
-      }
-    }
 
-    // Upload first, then validate the device buffers. The checks used to run on
-    // these host vectors before the seed; running them after means the sweep
-    // reads exactly the bytes the solver will use, so a defect introduced by
-    // the upload path itself cannot slip past.
-    seed_background("b0x", b0x);
-    seed_background("b0y", b0y);
-    seed_background("b0z", b0z);
+    // Sample the profile on device. This used to be a host double loop over
+    // every padded cell with three virtual sample() calls per cell -- the
+    // largest host floating-point loop left in this module, and a second
+    // definition of arithmetic the deck path already ran as a kernel.
+    //
+    // The registry object stays on the host and is probed, not shipped: a
+    // vtable cannot cross to the device, so lower_affine_background_profile
+    // reduces it to an affine POD and refuses a profile with curvature by name
+    // rather than silently linearizing it. That refusal costs no coverage --
+    // both registered profiles are affine, which is exactly the condition
+    // IMhdBackgroundProfile::sample already requires for the centre value to BE
+    // the element moment.
+    //
+    // The coordinates now come from the same FMA helpers the kernel and the
+    // solver's own geometric factors use, where the host loop wrote
+    // `origin + i*d`. The two differ in the last bit; this is the consistent
+    // one, for the reason recorded in initial_conditions.hpp.
+    const MhdBackgroundAffineProfile affine =
+        lower_affine_background_profile(*profile, cfg_.background.profile);
 
-    validate_background_field(b0_, grid_, cylindrical, cfg_.boundary);
+    // Capability query on the registry object, before the profile goes out of
+    // scope: it is a property of the analytic form, not of the affine POD, and
+    // the device path has no way to rediscover it.
     const bool profile_curl_free =
         !cylindrical && profile->globally_curl_free();
+
+    MhdBackgroundBuildSpec spec{};
+    spec.grid = grid_;
+    spec.cylindrical = cylindrical ? 1 : 0;
+    spec.magnetic_scale = cfg_.background.profile_scale;
+    spec.profile = affine;
+    build_background_from_profile(spec, b0_);
+
+    // Writing b0_ directly bypasses seed_background, which is the point -- but
+    // it also bypasses that method's cache invalidation, so do it here.
+    // Reconstruction consumes B0.
+    invalidate_interface_cache();
+
+    validate_background_field(b0_, grid_, cylindrical, cfg_.boundary);
     const bool globally_curl_free =
         cfg_.background.curl_free || profile_curl_free;
     if (globally_curl_free) {
@@ -1335,6 +1336,49 @@ Real MhdSolver2D::divergence_b_max() const {
   launch_mhd_ct_divb_linf(self.rk_[0], divb_scratch_, &linf, nullptr,
                           is_cylindrical());
   return linf;
+}
+
+namespace {
+
+// Collapse a device accumulator into a Real.
+//
+// The sum and its Kahan correction are added in `long double` so the
+// compensation the kernel accumulated is not thrown away at the boundary --
+// the same reason pic/diagnostics.cpp keeps its epilogue on the host, and the
+// same reason the epilogue cannot move to the device.
+//
+// Unlike the PIC sums this one is SIGNED: a conserved total is expected to be
+// positive, but a diverged run can carry a negative energy and the diagnostic
+// should report it rather than silently collapse it to zero.
+Real conserved_total_to_real(const MhdScaledSum& sum, const char* what) {
+  if (sum.invalid) {
+    throw std::overflow_error{
+        std::string{"MhdSolver2D::conserved_cell_totals: "} + what +
+        " is not representable"};
+  }
+  if (!sum.initialized) return Real{0};
+  const long double total = static_cast<long double>(sum.sum)
+                          + static_cast<long double>(sum.correction);
+  if (total == 0.0L) return Real{0};
+  const long double result = std::scalbn(total, sum.exponent);
+  if (!std::isfinite(result)
+      || std::fabs(result)
+             > static_cast<long double>(std::numeric_limits<Real>::max())) {
+    throw std::overflow_error{
+        std::string{"MhdSolver2D::conserved_cell_totals: "} + what +
+        " overflows the solver precision"};
+  }
+  return static_cast<Real>(result);
+}
+
+}  // namespace
+
+MhdSolver2D::ConservedTotals MhdSolver2D::conserved_cell_totals() const {
+  const MhdConservedSums sums = launch_mhd_conserved_cell_sums(
+      rk_[0], is_cylindrical() ? 1 : 0, nullptr);
+  return ConservedTotals{
+      conserved_total_to_real(sums.mass, "mass"),
+      conserved_total_to_real(sums.energy, "energy")};
 }
 
 void MhdSolver2D::check_cfl(Real dt) const {

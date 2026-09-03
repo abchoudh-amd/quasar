@@ -139,6 +139,21 @@ class MhdSolver2D {
   // Max |div B| over the interior; delegates to the CT scheme diagnostic.
   Real divergence_b_max() const;
 
+  // Integrated mass and energy over the interior cells.
+  //
+  // On a cylindrical deck these are true volume integrals: the axisymmetric
+  // cell volume is applied inside the reduction. That weighting is not the
+  // caller's to choose, which is the point of putting it here -- the serial CLI
+  // and the distributed runtime previously each decided for themselves and
+  // reached different answers on the same deck. The reduction is compensated,
+  // so a value from this method and one folded across tiles agree to a
+  // meaningful tolerance rather than to whatever a traversal order allows.
+  struct ConservedTotals {
+    Real mass{Real{0}};
+    Real energy{Real{0}};
+  };
+  ConservedTotals conserved_cell_totals() const;
+
   // Read a state component back to host (sized grid.storage_size()). The "bx"/
   // "by" spellings use the same face-to-cell collocation as the EOS: Cartesian
   // and axial rows are selected from the working halo, while cylindrical

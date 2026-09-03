@@ -2893,40 +2893,38 @@ std::vector<MhdOwnedShard> MhdTileRuntime::local_owned_shards() {
 
 MhdGlobalCellSums MhdTileRuntime::global_cell_sums() {
   require_open_seeded();
-  const bool cylindrical = global_config_.geometry == "cylindrical";
-  std::vector<Real> rho(solvers_.size(), Real{0});
+  // Each tile reduces on device and returns two scalars; only those cross the
+  // bus. This used to download the whole rho and energy planes of every tile
+  // and fold them in an uncompensated host loop -- the one place in this
+  // runtime that rematerialized a full field to compute a number, where every
+  // sibling (cfl_limit, divergence_b_max) already took the device-reduction
+  // route. The axisymmetric volume weight moved into the kernel with it, which
+  // is what makes this agree with the serial CLI on a cylindrical deck.
+  std::vector<Real> mass(solvers_.size(), Real{0});
   std::vector<Real> energy(solvers_.size(), Real{0});
   auto tasks = mhd_worker_tasks(*runtime_, worker_epoch_,
-      solvers_.size(), [this, cylindrical, &rho, &energy]
+      solvers_.size(), [this, &mass, &energy]
       (std::size_t local, WorkerContext&) {
-        const auto& solver = *solvers_[local];
-        const Grid2D grid = solver.grid();
-        const std::vector<Real> local_rho =
-            solver.state_component_to_host("rho");
-        const std::vector<Real> local_energy =
-            solver.state_component_to_host("energy");
-        Real rho_sum = Real{0};
-        Real energy_sum = Real{0};
-        for (int j = 0; j < grid.ny; ++j) {
-          for (int i = 0; i < grid.nx; ++i) {
-            const Real weight =
-                cylindrical ? grid.cell_volume(i) : Real{1};
-            rho_sum += weight * local_rho[grid.index(i, j)];
-            energy_sum += weight * local_energy[grid.index(i, j)];
-          }
-        }
-        rho[local] = rho_sum;
-        energy[local] = energy_sum;
+        const auto totals = solvers_[local]->conserved_cell_totals();
+        mass[local] = totals.mass;
+        energy[local] = totals.energy;
       });
   require_worker_success(*workers_, *runtime_, worker_epoch_,
                          "mhd-global-cell-sums", tasks);
-  const Real local_rho =
-      std::accumulate(rho.begin(), rho.end(), Real{0});
-  const Real local_energy =
-      std::accumulate(energy.begin(), energy.end(), Real{0});
+  // Fold devices_per_rank values in long double before the cross-rank sum, the
+  // same shape the PIC energy totals use: the per-tile values already carry
+  // their own compensation, so the only thing left to protect is the handful of
+  // additions between them.
+  long double local_mass = 0.0L;
+  long double local_energy = 0.0L;
+  for (std::size_t k = 0; k < mass.size(); ++k) {
+    local_mass += static_cast<long double>(mass[k]);
+    local_energy += static_cast<long double>(energy[k]);
+  }
   return MhdGlobalCellSums{
-      static_cast<Real>(runtime_->allreduce_sum(local_rho)),
-      static_cast<Real>(runtime_->allreduce_sum(local_energy))};
+      static_cast<Real>(runtime_->allreduce_sum(static_cast<Real>(local_mass))),
+      static_cast<Real>(
+          runtime_->allreduce_sum(static_cast<Real>(local_energy)))};
 }
 
 CheckpointMetadata MhdTileRuntime::checkpoint_metadata(
