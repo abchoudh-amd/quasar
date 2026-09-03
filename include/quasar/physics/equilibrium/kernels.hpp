@@ -36,6 +36,7 @@
 
 #include "quasar/backend/device.hpp"
 #include "quasar/backend/memory.hpp"
+#include "quasar/core/grid.hpp"
 #include "quasar/core/types.hpp"
 #include "quasar/numerics/elliptic_grid.hpp"
 #include "quasar/physics/equilibrium/critical_points.hpp"
@@ -501,6 +502,64 @@ void launch_gs_build_current(const EllipticGrid& g, const Real* d_psi,
                              Real psi_boundary, const int* d_plasma_mask,
                              Real* d_j_phi,
                              stream_t stream);
+
+// -- Projection onto the staggered MHD mesh -----------------------------------
+//
+// The device form of physics/equilibrium/mhd_seeding.hpp. See
+// src/backend/hip/equilibrium/gs_mhd_seeding.hip for why the profiles arrive as
+// a POD and why the plasma mask is an input rather than recomputed.
+//
+// The host forms remain, and remain correct; they are the reference these are
+// checked against, in the same relationship free_boundary.hpp and
+// flux_surfaces.hpp already have with their launch_gs_* twins.
+struct GsProjectionSpec {
+  // Source: the GS node grid the flux lives on.
+  EllipticGrid source{};
+  // Target: the MHD grid, interpreted cylindrically (x is the major radius r,
+  // y is the axial coordinate z). Needs at least one ghost cell, because the
+  // same storage array holds cell values and the two physical high faces the
+  // last interior cell's divergence consumes.
+  Grid2D target{};
+  Real psi_axis{Real{0}};
+  Real psi_boundary{Real{0}};
+  // Carries both the F coefficients (read by the field projection) and the
+  // pressure coefficients (read by the fluid projection).
+  ProfileCoefficients profile{};
+};
+
+// Status bits. The caller zeroes one device int and turns the accumulated bits
+// into the exception the host form threw for that condition.
+inline constexpr int kGsProjectionCornerFluxNotFinite = 1;
+inline constexpr int kGsProjectionRadialMeasureInvalid = 2;
+inline constexpr int kGsProjectionAnnularMeasureInvalid = 4;
+inline constexpr int kGsProjectionPoloidalNotFinite = 8;
+inline constexpr int kGsProjectionProfileNotFinite = 16;
+inline constexpr int kGsProjectionToroidalNotFinite = 32;
+inline constexpr int kGsProjectionDensityInvalid = 64;
+
+// B_r on x-low faces, B_z on y-low faces, B_phi cell-centred, in the layout
+// MhdSolver2D::seed_background expects. Each buffer must hold
+// target.storage_size() values.
+void launch_gs_project_to_mhd(const GsProjectionSpec& spec, const Real* d_psi,
+                              const int* d_plasma_mask,
+                              backend::DeviceBuffer<Real>& b0x_face,
+                              backend::DeviceBuffer<Real>& b0y_face,
+                              backend::DeviceBuffer<Real>& b0z_cell,
+                              int* status, stream_t stream);
+
+// Pressure from the profile and a density linear in psi_N between the axis and
+// edge values.
+void launch_gs_project_fluid(const GsProjectionSpec& spec, const Real* d_psi,
+                             const int* d_plasma_mask, Real rho_axis,
+                             Real rho_edge, backend::DeviceBuffer<Real>& rho,
+                             backend::DeviceBuffer<Real>& pressure,
+                             int* status, stream_t stream);
+
+// Max |div B| over interior cells, in the annular form the MHD CT scheme uses.
+// This is the acceptance criterion for a background the MHD solver will take.
+Real launch_gs_projection_max_divergence(
+    Grid2D target, const backend::DeviceBuffer<Real>& b0x_face,
+    const backend::DeviceBuffer<Real>& b0y_face, stream_t stream);
 
 // In-place scalar multiply over the whole field. Used to apply the I_p
 // normalization to j_phi once the raw current is known.
