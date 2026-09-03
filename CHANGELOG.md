@@ -6,6 +6,99 @@ interfaces may still change between entries.
 
 ## [Unreleased]
 
+### Changed
+- GPU residency: removed the remaining host-side floating-point *computation*
+  from the production paths. An audit found seven places where the CPU still did
+  numerical work; six are now kernels and the seventh is documented as belonging
+  where it is. The motivation was only secondarily throughput. Five of the seven
+  were a *second host definition* of arithmetic that already existed as a kernel,
+  kept in agreement by hand-maintained comments — the failure mode the PIC
+  particle sampler was ported to eliminate.
+
+  - **MHD reduction second passes** (`src/backend/hip/mhd/mhd_reduce.hip`). The
+    CFL max signal rate, both div(B) diagnostics and the positivity admissible
+    fraction copied O(N_cells/256) per-block partials back and folded them in a
+    host loop, several times per accepted timestep — the only host arithmetic in
+    the tree that both scaled with the mesh and ran per step. Now three
+    single-block finish kernels. The `device_synchronize` is unchanged and not
+    removable: `dt`, `theta` and the div(B) defect gate host control flow. The
+    max and min folds are comparison-only and therefore bit-identical; the
+    relative-div(B) scaled ratio reproduces the `ScaledValue` fold and its two
+    `scalbn` calls exactly, and needs no `-ffp-contract=off` because it contains
+    no multiply-add.
+  - **MHD background sampling** (`src/physics/mhd/mhd_solver.cpp`). The
+    constructor sampled the analytic profile cell by cell on the host with three
+    virtual `sample()` calls per padded cell. It now goes through
+    `lower_affine_background_profile` and `launch_mhd_sample_background_profile`,
+    which gained a cylindrical branch. **Behavioral change:** face coordinates
+    move from `origin + i*dx` to `fma(i, dx, origin)`, so a seeded background
+    differs in the last bit; this is the coordinate form the solver's own metric
+    uses, the same trade recorded in `initial_conditions.hpp`. **Also a
+    tightening:** a background profile that is not affine over an element is now
+    refused by name at construction rather than sampled pointwise. Both
+    registered profiles are affine, so no configuration loses support.
+  - **PIC initial field seeding** (`include/quasar/physics/pic/initial_fields.hpp`,
+    `src/backend/hip/pic/pic_seed_fields.hip`). All three deck generators
+    (`seed_perturbation`, `seed_tm_cavity`, `seed_em_wave`) were NumPy in the CLI,
+    pushed through a bare `copy_from_host`. They are now one dispatching kernel
+    selected by enumerator, following the `initial_conditions.hpp` model. The
+    deck layer keeps parsing, the unit conversion, the validity refusals and the
+    O(1) scalars those refusals compute.
+
+    The cylindrical standing mode is the substantive fix: the host code ran an
+    *interpreted* per-face loop over a helper that hand-reimplemented the
+    axis-even / outer-PEC-odd parity continuation, asserting in a comment that it
+    matched the live boundary kernel with nothing enforcing it. The magnetic half
+    step is now taken off the **ghost-filled** electric component, so the parity
+    is whatever the configured closure actually says it is. The distributed
+    runner no longer reaches the seed through a host adapter either.
+
+    **This one changes cylindrical seeded fields by far more than a rounding
+    step, and in a good direction.** The host path evaluated `J0` through a
+    dependency-free Abramowitz & Stegun polynomial whose documented accuracy is
+    ~1.5e-8 absolute; the kernel calls the device `j0`. On an 8-cell radial
+    mode the seeded `Ez` moves by **3.1e-8**, and the new value is the correctly
+    rounded one — it agrees with a series reference to 1.1e-16, where the old
+    value disagreed with it by 3.1e-8. A `seed_perturbation` cylindrical deck is
+    therefore now seeded to full double precision rather than to eight digits.
+    Any golden for such a deck moves at the 1e-8 scale, and that is the expected
+    magnitude, not evidence of a port defect. The zero of `J0` is still located
+    host-side (`j0_zero`), because it depends on the mode number rather than on
+    position.
+
+    The Cartesian generators move only at ulp scale (device trig and a different
+    association in what were `np.multiply.outer` products).
+  - **Conserved cell totals** (`src/backend/hip/mhd/mhd_cell_sums.hip`). This
+    fixes a real inconsistency: the distributed runtime applied the cylindrical
+    `cell_volume` weight and the serial CLI did not, so one axisymmetric deck
+    reported two different `mass_initial` values depending on how it was run. One
+    compensated device reduction now owns the weight and both paths call it. The
+    weighted form is canonical; golden values for cylindrical decks move.
+  - **PIC species admissibility** (`src/physics/pic/pic_solver.cpp`).
+    `add_species` downloaded all eleven particle planes to look at two of them
+    and a flag; it now runs a device predicate.
+  - **Equilibrium → MHD projection**
+    (`src/backend/hip/equilibrium/gs_mhd_seeding.hip`). `project_to_mhd`,
+    `project_fluid` and `max_divergence` were the last grid-scale host loops in a
+    module documented as fully GPU-resident. The F and pressure profiles are
+    lowered to `ProfileCoefficients` for the usual reason (a vtable cannot cross
+    to the device), and the axis-connected plasma mask is taken as an input from
+    the existing `launch_gs_build_plasma_mask` rather than recomputed, so there
+    is no second flood fill. The host forms remain as the oracle and the
+    equivalence test asserts an **equality**, not a tolerance.
+  - **Stability q-probe targets** (`src/backend/hip/stability/radial_domains.hip`).
+    A small fill kernel replaces a host `linspace` staged through a vector.
+    Negligible cost; done for consistency with the Chebyshev node construction
+    that already feeds the same trace launch.
+
+  Deliberately **not** moved: `ParticleSpecies::validate_snapshot`. Its data
+  arrives on the host (a caller's vectors, an HDF5 checkpoint, a migration
+  gather) and must be copied to the device regardless, so validating after the
+  upload would remove no transfer, would add a launch and a synchronize, and
+  would cost the documented guarantee that a rejected snapshot leaves the
+  existing device state untouched — which the distributed seed and the
+  checkpoint restore both rely on. The reasoning is recorded at the function.
+
 ### Added
 - Stability: new fixed-boundary ideal-MHD stability vertical slice under
   `physics/stability` — the framework's first eigenvalue problem, and the first

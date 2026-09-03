@@ -1,9 +1,16 @@
-Adding an MHD initial condition
-===============================
+Adding an initial condition
+===========================
 
-The deck's ``initial.type`` selects one of six benchmark generators. They are
-**device kernels**, not host code and not registry objects, and this page is the
-source of truth for adding a seventh.
+The MHD deck's ``initial.type`` selects one of six benchmark generators, and the
+PIC deck's ``fields.initial.type`` selects one of three initial-field
+generators. Both families are **device kernels**, not host code and not registry
+objects, and this page is the source of truth for adding to either.
+
+Most of this page is written against the MHD family, which came first. The PIC
+field seed follows the same four steps in
+``include/quasar/physics/pic/initial_fields.hpp`` and
+``src/backend/hip/pic/pic_seed_fields.hip``; see `The PIC field seed`_ at the
+end for the two things that differ.
 
 Why there is no registry here
 -----------------------------
@@ -127,3 +134,35 @@ reconstruct ``origin + (i + 0.5) * dx`` by hand.
 Ghost cells are seeded too. Every generator is an analytic profile of the
 coordinate, so a ghost cell carries the value the interior would, and the halo
 is consistent before the first boundary fill rather than after it.
+
+
+.. _The PIC field seed:
+
+The PIC field seed
+------------------
+
+``PicInitialFieldKind`` / ``registered_pic_initial_fields`` /
+``pic_initial_field_kind`` / ``PicInitialFieldSpec`` mirror their MHD
+counterparts exactly, and the four steps above apply unchanged. Two things are
+specific to it.
+
+**Lattice extents are per component.** A generator writes all six Yee
+components; each has its own half-cell offsets, and the offsets are a *different
+table* for cartesian and cylindrical geometry, not a relabelling. A component
+located on a face along an axis owns one extra independent sample -- the high
+face at index ``nx``/``ny`` -- which a nonperiodic run needs and a periodic fill
+later makes duplicate. Slots outside a component's own lattice are written as
+zero rather than left indeterminate.
+
+**The cylindrical magnetic half step reads filled ghosts.** The solver stores B
+at ``t = -dt/2`` while E is at ``t = 0``, so a standing cavity mode needs
+``Bphi = -(dt/2) D_r Ez`` rather than zero. That radial derivative is taken in a
+*second* pass, after ``fill_field_ghosts()`` has run, so the stencil reads the
+ghost columns the configured axis/PEC closure wrote.
+
+This ordering is the point, not an implementation detail. The host code this
+replaced formed the same derivative through a helper that reimplemented the
+axis-even / outer-PEC-odd parity continuation by hand, and asserted in a comment
+that it matched the live boundary kernel with nothing enforcing it. If you add a
+generator that needs a derivative of a seeded component near a boundary, seed,
+fill, then differentiate -- do not restate the closure.
