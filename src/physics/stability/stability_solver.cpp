@@ -231,17 +231,12 @@ PreparedEquilibrium prepare_equilibrium(const GsDeviceResult& gs,
       config.f_profile_samples, gs.critical.psi_axis,
       gs.critical.psi_boundary, prepared.field, stream);
 
-  std::vector<Real> targets(static_cast<std::size_t>(config.q_probe_count));
-  for (int i = 0; i < config.q_probe_count; ++i) {
-    const Real fraction = static_cast<Real>(i)
-                        / static_cast<Real>(config.q_probe_count - 1);
-    targets[static_cast<std::size_t>(i)] =
-        config.lambda_inner
-        + fraction * (config.lambda_outer - config.lambda_inner);
-  }
   DeviceBuffer<Real> device_targets{
-      targets.size(), backend::uninitialized, backend::on_device(owner)};
-  device_targets.copy_from_host_async(targets.data(), targets.size(), stream);
+      static_cast<std::size_t>(config.q_probe_count), backend::uninitialized,
+      backend::on_device(owner)};
+  launch_build_probe_targets(config.lambda_inner, config.lambda_outer,
+                             config.q_probe_count, device_targets.device_ptr(),
+                             stream);
 
   GsFluxSurfaces probe_surfaces{config.q_probe_count, config.contour_points};
   equilibrium::launch_gs_trace_surfaces_at(

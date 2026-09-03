@@ -203,6 +203,22 @@ void launch_build_radial_domains(const RationalSurfaces* d_rational,
                                  Real min_width, RadialDomains* d_out,
                                  stream_t stream);
 
+// Evenly spaced q-probe targets across [lambda_inner, lambda_outer], written
+// straight into the buffer `launch_gs_trace_surfaces_at` consumes.
+//
+// This is a small fill, not a hot loop -- `count` is q_probe_count, default 32.
+// It is a kernel for consistency rather than for speed: the Chebyshev node
+// construction that feeds the SAME trace launch is already one, and this module
+// otherwise never stages a computed array through host memory. The affine map
+// is written in the host form it replaces (`lo + fraction * (hi - lo)`, not an
+// FMA) and this module is compiled -ffp-contract=off, so the targets are
+// unchanged bit for bit.
+//
+// `count >= 2` is the caller's precondition; StabilityConfig validation already
+// rejects a smaller probe count, which is what makes the count-1 divisor safe.
+void launch_build_probe_targets(Real lambda_inner, Real lambda_outer,
+                                int count, Real* d_targets, stream_t stream);
+
 // -- Chebyshev spectral basis ---------------------------------------------------
 //
 // Each radial subinterval from RadialDomains carries a Chebyshev expansion.

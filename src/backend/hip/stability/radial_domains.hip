@@ -330,6 +330,19 @@ __global__ void build_domains_kernel(const RationalSurfaces* __restrict__ ration
   *out = d;
 }
 
+// Evenly spaced probe targets. Deliberately written as `lo + fraction*(hi-lo)`
+// rather than an FMA: this reproduces the host loop it replaces exactly, and
+// the module's -ffp-contract=off keeps the compiler from fusing it back.
+__global__ void build_probe_targets_kernel(Real lambda_inner,
+                                           Real lambda_outer, int count,
+                                           Real* __restrict__ targets) {
+  const int i = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (i >= count) return;
+  const Real fraction =
+      static_cast<Real>(i) / static_cast<Real>(count - 1);
+  targets[i] = lambda_inner + fraction * (lambda_outer - lambda_inner);
+}
+
 }  // namespace
 
 void launch_locate_rational_surfaces(const FluxCoordinateGrid& coords,
@@ -353,6 +366,25 @@ void launch_build_radial_domains(const RationalSurfaces* d_rational,
   hipLaunchKernelGGL(build_domains_kernel, dim3{1}, dim3{1}, 0,
                      static_cast<hipStream_t>(stream), d_rational, psi_lo,
                      psi_hi, min_domains, min_width, d_out);
+  QUASAR_HIP_CHECK(hipGetLastError());
+}
+
+void launch_build_probe_targets(Real lambda_inner, Real lambda_outer, int count,
+                                Real* d_targets, stream_t stream) {
+  if (count < 2) {
+    throw std::invalid_argument{
+        "launch_build_probe_targets: count must be at least 2"};
+  }
+  if (d_targets == nullptr) {
+    throw std::invalid_argument{
+        "launch_build_probe_targets: target buffer must not be null"};
+  }
+  constexpr unsigned kBlock = 256;
+  const unsigned blocks =
+      (static_cast<unsigned>(count) + kBlock - 1) / kBlock;
+  hipLaunchKernelGGL(build_probe_targets_kernel, dim3{blocks}, dim3{kBlock}, 0,
+                     static_cast<hipStream_t>(stream), lambda_inner,
+                     lambda_outer, count, d_targets);
   QUASAR_HIP_CHECK(hipGetLastError());
 }
 
