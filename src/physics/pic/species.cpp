@@ -57,6 +57,27 @@ void validate_snapshot_layout(const ParticleSpecies::HostSnapshot& snapshot,
   }
 }
 
+// Admissibility of a snapshot that arrived on the HOST -- from a caller's
+// vectors, an HDF5 checkpoint, or a migration gather.
+//
+// This deliberately stays on the host, unlike the sampled path, whose identical
+// |v| < c test runs as subluminal_kernel. The two are not gratuitous
+// duplication: they guard the same predicate at two places where the data
+// genuinely lives differently. A sampled population is born on the device, so
+// checking it there avoids a download. A restored population is born on the
+// host, and checking it there buys the property the callers below depend on --
+// every value is screened BEFORE the first copy_from_host, so a rejected
+// snapshot leaves the existing device state untouched.
+//
+// Moving this check after the upload would not remove a transfer (the H2D
+// happens either way), would add a kernel launch and a synchronize, and would
+// cost that transactional guarantee on the two paths that need it most: the
+// distributed seed and the checkpoint restore. Staging into a scratch device
+// buffer to keep the guarantee would double the residency of exactly the
+// population size that motivates worrying about this in the first place.
+//
+// What the two DO share is a formula that must not drift, hence the nested
+// hypot in both and the note in subluminal_kernel naming this function.
 void validate_snapshot(const ParticleSpecies::HostSnapshot& snapshot,
                        std::string_view operation) {
   validate_snapshot_layout(snapshot, operation);

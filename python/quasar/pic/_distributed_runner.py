@@ -109,36 +109,43 @@ def _rebuild_periodic_duplicates(
         fields[name] = np.ascontiguousarray(values)
 
 
-class _CanonicalFieldSink:
-    """Adapter that lets the established field seeder target host lattices."""
-
-    def __init__(self, deck: pic_io.PicDeck, nghost: int) -> None:
-        self.deck = deck
-        self._nghost = nghost
-        self.fields = _empty_fields(deck)
-
-    def nghost(self) -> int:
-        return self._nghost
-
-    def seed_field(self, component: str, values: Any) -> None:
-        nx, ny, g = self.deck.domain.nx, self.deck.domain.ny, self._nghost
-        padded = np.asarray(values, dtype=np.float64).reshape(
-            ny + 2 * g, nx + 2 * g)
-        rows, columns, _, _ = _field_extents(
-            nx, ny, self.deck.geometry)[component]
-        self.fields[component] = np.ascontiguousarray(
-            padded[g:g + rows, g:g + columns])
-
-
 def _canonical_initial_fields(
         deck: pic_io.PicDeck, units: Units, first_dt: float,
         nghost: int) -> dict[str, Any]:
-    from .cli import _seed_fields
+    """Canonical global initial field lattices, evaluated on device.
 
-    sink = _CanonicalFieldSink(deck, nghost)
-    _seed_fields(sink, deck, first_dt, units)
-    _rebuild_periodic_duplicates(sink.fields, deck)
-    return sink.fields
+    Every rank needs the same answer here, so this constructs one solver on the
+    GLOBAL grid, runs the same ``launch_pic_seed_initial_fields`` the serial CLI
+    runs, and reads the interior lattices back. That is the point of routing
+    through a solver rather than a host adapter: there is one definition of the
+    seed, and the cylindrical magnetic half step gets its axis/PEC parity from
+    the configured boundary closure via the solver's ghost fill, rather than
+    from a hand-written continuation that only this package knew about.
+
+    What this does NOT yet fix is the shape of the distribution: the global
+    lattices are still materialized in full on every rank before being sliced.
+    Removing that needs the seed to run per tile inside the distributed runtime,
+    which is a change to how the runtime seeds rather than to how the field is
+    computed; the kernel is already parameterized by a tile grid and origin, so
+    the remaining work is on the caller side.
+    """
+    from .cli import _make_config, _seed_fields
+
+    global_config = _make_config(deck, units)
+    solver = _core.pic.EmPic2D3V(global_config)
+    _seed_fields(solver, deck, first_dt, units)
+
+    nx, ny = deck.domain.nx, deck.domain.ny
+    g = solver.nghost()
+    extents = _field_extents(nx, ny, deck.geometry)
+    result: dict[str, Any] = {"global_nx": nx, "global_ny": ny}
+    for name, (rows, columns, _, _) in extents.items():
+        padded = np.asarray(
+            solver.field_component_to_host(name), dtype=np.float64).reshape(
+                ny + 2 * g, nx + 2 * g)
+        result[name] = np.ascontiguousarray(padded[g:g + rows, g:g + columns])
+    _rebuild_periodic_duplicates(result, deck)
+    return result
 
 
 def _species_states(

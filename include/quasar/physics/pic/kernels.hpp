@@ -12,6 +12,7 @@
 #include "quasar/backend/device.hpp"
 #include "quasar/core/grid.hpp"
 #include "quasar/core/yee_field.hpp"
+#include "quasar/physics/pic/initial_fields.hpp"
 #include "quasar/physics/pic/species.hpp"
 
 #include <cstddef>
@@ -342,6 +343,27 @@ struct PicVelocityPerturbationSpec {
   Real origin_x{0}, origin_y{0}, lx{1}, ly{1};
 };
 
+// -- Seeded initial field -----------------------------------------------------
+//
+// Status bit from the field-seeding kernels. Separate from the particle
+// sampling word below because the two report different objects and the callers
+// raise different exceptions.
+inline constexpr int kPicSeedFieldNotFinite = 1;
+
+// Evaluate one deck generator over the padded Yee lattices. Writes every one of
+// the six components: the generator's own get their profile, the rest are
+// zeroed, matching the host path's fresh-zero-buffer-per-component behaviour.
+void launch_pic_seed_initial_fields(const PicInitialFieldSpec& spec,
+                                    YeeField2D<Real>& fields, int* status,
+                                    backend::stream_t stream);
+
+// Cylindrical standing-mode magnetic half step. MUST run after the caller has
+// filled the field ghosts: the radial stencil reads them, which is what makes
+// the boundary parity the configured closure's rather than a private copy.
+void launch_pic_seed_radial_half_step(const PicRadialHalfStepSpec& spec,
+                                      YeeField2D<Real>& fields, int* status,
+                                      backend::stream_t stream);
+
 // Status bits from the sampling kernels.
 inline constexpr int kPicSampleNonFinitePosition = 1;
 inline constexpr int kPicSampleNonFiniteVelocity = 2;
@@ -367,6 +389,24 @@ void launch_pic_velocity_perturbation(std::uint64_t count,
 void launch_pic_check_subluminal(std::uint64_t count, const Real* vx,
                                  const Real* vy, const Real* vz, int* status,
                                  backend::stream_t stream);
+
+// Every LIVE particle must have a finite position inside the closed physical
+// domain [x_lo,x_hi] x [y_lo,y_hi]. Dead slots are skipped.
+//
+// This is the admissibility gate a species must pass before its initial charge
+// is deposited: a live centre outside the domain would have its shape tail
+// silently clipped or folded by a boundary it has not actually crossed.
+// Boundary points themselves are admissible -- periodic high faces alias low,
+// and wall faces are physical -- so the comparisons are inclusive.
+//
+// It exists so the check can read the resident planes instead of downloading
+// all eleven of them to look at two, which is what the host predicate it
+// replaces did.
+void launch_pic_check_initial_domain(std::uint64_t count, const Real* x,
+                                     const Real* y,
+                                     const std::uint8_t* alive, Real x_lo,
+                                     Real x_hi, Real y_lo, Real y_hi,
+                                     int* status, backend::stream_t stream);
 
 // Fill the planes a seeded species needs beyond position and velocity:
 // previous positions equal to the initial ones, vphi_deposit equal to vz, a

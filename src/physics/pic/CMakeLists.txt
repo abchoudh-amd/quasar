@@ -8,6 +8,7 @@ set(_quasar_pic_sources
   external_field_sampler.cpp
   diagnostics.cpp
   particle_sampling.cpp
+  initial_fields.cpp
 )
 
 set_source_files_properties(${_quasar_pic_sources}

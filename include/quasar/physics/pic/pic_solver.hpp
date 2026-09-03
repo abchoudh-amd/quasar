@@ -9,6 +9,7 @@
 #include "quasar/numerics/field_solver.hpp"
 #include "quasar/numerics/filter.hpp"
 #include "quasar/numerics/particle_pusher.hpp"
+#include "quasar/physics/pic/initial_fields.hpp"
 #include "quasar/physics/pic/particle_sampling.hpp"
 #include "quasar/physics/pic/species.hpp"
 
@@ -122,10 +123,22 @@ class EmPic2D3V {
   // finiteness gate; finalize() remains a defensive public drain.
   void finalize();
 
+  // Evaluate a deck initial-field generator directly into the resident Yee
+  // lattices.
+  //
+  // For the cylindrical standing mode this is a three-step sequence and the
+  // order is load-bearing: seed the electric component, fill the ghosts with
+  // the CONFIGURED boundary closure, then take the radial derivative off those
+  // ghosts to form the magnetic half step. Doing it this way is what lets the
+  // axis/wall parity come from the registered boundary rather than from a
+  // second, hand-written copy of it in the deck layer.
+  void seed_initial_fields(const PicInitialFieldSpec& spec, Real dt);
+
   const EmPicConfig& config() const noexcept { return cfg_; }
 
  private:
   friend class ::quasar::distributed::PicTileAccess;
+
 
   void fill_field_ghosts();
   void correct_field_boundaries_b(Real dt);

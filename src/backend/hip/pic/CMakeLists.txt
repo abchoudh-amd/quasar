@@ -24,6 +24,7 @@ set(_quasar_pic_hip_sources
   boundary_axis_hip.hip
   diagnostics_hip.hip
   external_field_hip.hip
+  pic_seed_fields.hip
 )
 
 quasar_add_hip_module(pic_hip SOURCES ${_quasar_pic_hip_sources})

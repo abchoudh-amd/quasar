@@ -796,16 +796,25 @@ void EmPic2D3V::add_species(ParticleSpecies s) {
   // otherwise its shape tail would be silently clipped or folded according to
   // a boundary it has not actually crossed. Boundary points themselves are
   // admissible (periodic high faces alias low; wall faces are physical).
-  const auto initial = s.to_host();
+  //
+  // Read on device. This used to call s.to_host(), pulling ALL ELEVEN particle
+  // planes across the bus to look at two of them and a flag -- and the species
+  // is already resident, so there was nothing to gain by it.
   const Real x_lo = grid_.origin_x;
   const Real x_hi = grid_.origin_x + grid_.lx;
   const Real y_lo = grid_.origin_y;
   const Real y_hi = grid_.origin_y + grid_.ly;
-  for (std::size_t p = 0; p < initial.x.size(); ++p) {
-    if (initial.alive[p] == 0) continue;
-    if (!(std::isfinite(initial.x[p]) && std::isfinite(initial.y[p])
-          && initial.x[p] >= x_lo && initial.x[p] <= x_hi
-          && initial.y[p] >= y_lo && initial.y[p] <= y_hi)) {
+  if (s.size() > 0) {
+    backend::DeviceBuffer<int> status{1};
+    const int zero = 0;
+    status.copy_from_host(&zero, 1);
+    launch_pic_check_initial_domain(
+        static_cast<std::uint64_t>(s.size()), s.x(), s.y(), s.alive(), x_lo,
+        x_hi, y_lo, y_hi, status.device_ptr(), nullptr);
+    int host_status = 0;
+    status.copy_to_host(&host_status, 1);
+    backend::device_synchronize(nullptr);
+    if (host_status != 0) {
       throw std::invalid_argument{
           "EmPic2D3V::add_species: every live initial particle must lie "
           "inside the physical domain"};
@@ -1016,6 +1025,63 @@ bool EmPic2D3V::has_absorbing_boundary() const noexcept {
     }
   }
   return false;
+}
+
+void EmPic2D3V::seed_initial_fields(const PicInitialFieldSpec& spec, Real dt) {
+  if (evolution_started_) {
+    throw std::logic_error{
+        "EmPic2D3V::seed_initial_fields: fields cannot be seeded after "
+        "evolution begins"};
+  }
+  PicInitialFieldSpec resolved = spec;
+  // The solver's grid is authoritative: the ctor may have widened the halo
+  // beyond what the deck asked for (order-two TSC needs more than the curl
+  // does), and the seed has to be laid out on the halo the solver actually has.
+  resolved.grid = grid_;
+
+  backend::DeviceBuffer<int> status{1};
+  const int zero = 0;
+  status.copy_from_host(&zero, 1);
+
+  launch_pic_seed_initial_fields(resolved, fields_, status.device_ptr(),
+                                 nullptr);
+
+  const bool cylindrical_standing_mode =
+      resolved.cylindrical != 0
+      && resolved.kind == PicInitialFieldKind::seed_perturbation;
+  if (cylindrical_standing_mode) {
+    if (!(std::isfinite(dt) && dt > Real{0})) {
+      throw std::invalid_argument{
+          "EmPic2D3V::seed_initial_fields: the cylindrical standing mode needs "
+          "the positive solver timestep so Bphi can be initialized at t=-dt/2"};
+    }
+    // Order matters: the derivative below reads the ghost columns, so the
+    // configured closure has to have written them first. That is the whole
+    // mechanism by which the axis-even / wall-odd parity stops being restated
+    // in the deck layer.
+    backend::device_synchronize(nullptr);
+    fill_field_ghosts();
+    backend::device_synchronize(nullptr);
+
+    PicRadialHalfStepSpec half{};
+    half.grid = grid_;
+    half.fdtd_order = cfg_.fdtd_order;
+    half.half_dt = Real{-0.5} * dt;
+    half.dr = grid_.dx();
+    half.source_component = resolved.component;
+    half.target_component = static_cast<int>(PicFieldComponent::bz);
+    launch_pic_seed_radial_half_step(half, fields_, status.device_ptr(),
+                                     nullptr);
+  }
+
+  int host_status = 0;
+  status.copy_to_host(&host_status, 1);
+  backend::device_synchronize(nullptr);
+  if ((host_status & kPicSeedFieldNotFinite) != 0) {
+    throw std::overflow_error{
+        "EmPic2D3V::seed_initial_fields: the seeded field is not representable "
+        "in the solver normalization"};
+  }
 }
 
 void EmPic2D3V::fill_field_ghosts() {

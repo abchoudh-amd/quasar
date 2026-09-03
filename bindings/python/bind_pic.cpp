@@ -441,6 +441,44 @@ void bind_pic(py::module_& m) {
            py::arg("evaluator"), py::arg("conductors"),
            py::arg("length_scale") = 1.0, py::arg("e_field_scale") = 1.0,
            py::arg("b_field_scale") = 1.0, py::arg("plane") = "xy")
+      // Deck-driven initial-field seeding. The deck layer supplies only O(1)
+      // scalars -- the converted amplitude, the mode numbers, and whatever
+      // transcendentals of THOSE the validity refusals already had to compute
+      // (omega*dt, the direction ratios, the Bessel root). Every per-lattice
+      // value is evaluated on device.
+      //
+      // Kept as a keyword-argument builder rather than a bound spec class: the
+      // caller is the CLI, which assembles the block once and never inspects
+      // it, so an attribute-per-field wrapper would be pure ceremony.
+      .def("seed_initial_fields",
+           [](quasar::pic::EmPic2D3V& self, const std::string& type,
+              int component, int magnetic_component, int cylindrical,
+              int mode_x, int mode_y, Real amplitude, Real bessel_root,
+              Real half_time, Real direction_x, Real direction_y,
+              Real magnetic_phase, Real magnetic_sign, Real dt) {
+             quasar::pic::PicInitialFieldSpec spec{};
+             spec.kind = quasar::pic::pic_initial_field_kind(type);
+             spec.cylindrical = cylindrical;
+             spec.component = component;
+             spec.magnetic_component = magnetic_component;
+             spec.mode_x = mode_x;
+             spec.mode_y = mode_y;
+             spec.amplitude = amplitude;
+             spec.bessel_root = bessel_root;
+             spec.half_time = half_time;
+             spec.direction_x = direction_x;
+             spec.direction_y = direction_y;
+             spec.magnetic_phase = magnetic_phase;
+             spec.magnetic_sign = magnetic_sign;
+             self.seed_initial_fields(spec, dt);
+           },
+           py::arg("type"), py::arg("component"),
+           py::arg("magnetic_component") = -1, py::arg("cylindrical") = 0,
+           py::arg("mode_x") = 1, py::arg("mode_y") = 0,
+           py::arg("amplitude") = 0.0, py::arg("bessel_root") = 0.0,
+           py::arg("half_time") = 0.0, py::arg("direction_x") = 0.0,
+           py::arg("direction_y") = 0.0, py::arg("magnetic_phase") = 0.0,
+           py::arg("magnetic_sign") = 1.0, py::arg("dt") = 0.0)
       .def("seed_field",
            [](quasar::pic::EmPic2D3V& self, const std::string& component,
               const py::object& values) {

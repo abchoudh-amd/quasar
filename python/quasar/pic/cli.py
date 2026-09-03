@@ -27,7 +27,7 @@ from ..coil.io import build_conductor_system
 from . import io as pic_io
 from ._units import QE as EV_TO_J  # elementary charge in C == eV->J factor
 from ._units import Units
-from .numerics import (besselj0, cfl_dt, cfl_limit, cyl_cfl_dt, cyl_cfl_limit,
+from .numerics import (cfl_dt, cfl_limit, cyl_cfl_dt, cyl_cfl_limit,
                        j0_zero)
 
 
@@ -263,56 +263,41 @@ def _apply_external_field(solver, deck: pic_io.PicDeck, units: Units) -> None:
         plane=deck.plane)
 
 
+# Storage-component indices, matching quasar::pic::PicFieldComponent and hence
+# YeeField2D's declaration order. The C++ side owns the Yee staggering that goes
+# with each; this table is only the name -> index map the deck needs.
+_COMPONENT_INDEX = {"ex": 0, "ey": 1, "ez": 2, "bx": 3, "by": 4, "bz": 5}
+
+
 def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
                  units: Units | None = None) -> None:
     """Apply an optional initial field seed.
 
-    The interior is written on a ghost-padded buffer matching the solver storage
-    (pitch = nx + 2*nghost). SI amplitudes are interpreted as V/m for an E
-    component and tesla for a B component, then converted to the solver's natural
-    units. Normalized-deck amplitudes pass through unchanged."""
+    Everything per-lattice-point is evaluated by ``launch_pic_seed_initial_fields``
+    on the device. What stays here is what is genuinely O(1) in the deck: the SI
+    amplitude conversion and its representability check, the validity refusals,
+    and the handful of scalars those refusals already had to compute (the
+    discrete dispersion relation, the direction ratios, the Bessel root).
+
+    This used to build the whole ghost-padded state in NumPy and push it through
+    ``seed_field``. Two things came with that and are gone: the distributed
+    runner reused this function against a sink, so every rank materialized the
+    full GLOBAL lattices before slicing out its tile; and the cylindrical branch
+    re-derived the axis/PEC parity continuation by hand to form the magnetic half
+    step. The parity now comes from the configured boundary closure, because the
+    solver fills the ghosts between the two seeding passes.
+    """
     init = deck.fields.initial
     if init is None:
         return
     if units is None:
         units = Units(deck)
     nx, ny = deck.domain.nx, deck.domain.ny
-    # The constructed grid is authoritative: shape support can require a wider
-    # halo than the curl alone (notably order-two TSC).
-    g = _solver_nghost(solver, deck)
-    pitch = nx + 2 * g
-    height = ny + 2 * g
-
-    if deck.geometry == "cylindrical":
-        offsets = {
-            "ex": (0.0, 0.5), "ey": (0.5, 0.0), "ez": (0.0, 0.5),
-            "bx": (0.0, 0.0), "by": (0.5, 0.5), "bz": (0.0, 0.0),
-        }
-    else:
-        offsets = {
-            "ex": (0.0, 0.5), "ey": (0.5, 0.0), "ez": (0.5, 0.5),
-            "bx": (0.5, 0.0), "by": (0.0, 0.5), "bz": (0.0, 0.0),
-        }
-
-    def _lattice_shape(component: str) -> tuple[int, int, float, float]:
-        ox, oy = offsets[component]
-        return nx + (ox == 0.0), ny + (oy == 0.0), ox, oy
-
-    def _seed(component: str, interior: np.ndarray) -> None:
-        # Write every physical degree of freedom on the component's own Yee
-        # lattice. Face-located nonperiodic components include their independent
-        # high face at index nx/ny; periodic fills later make that face duplicate.
-        x_count, y_count, _, _ = _lattice_shape(component)
-        interior = np.asarray(interior, dtype=np.float64)
-        if interior.shape != (y_count, x_count):
-            raise ValueError(
-                f"seed profile for {component} has shape {interior.shape}; "
-                f"expected {(y_count, x_count)}")
-        buf = np.zeros((height, pitch), dtype=np.float64)
-        buf[g:g + y_count, g:g + x_count] = interior
-        solver.seed_field(component, buf.reshape(-1))
 
     comp = init.component.lower()
+    if comp not in _COMPONENT_INDEX:
+        raise ValueError(f"fields.initial.component {init.component!r} is not a "
+                         "Yee storage component")
     seed_amplitude = (units.e_field(init.amplitude)
                       if comp.startswith("e")
                       else units.b_field(init.amplitude))
@@ -323,12 +308,7 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
             f"fields.initial.amplitude in {unit_name} is not representable in "
             "the solver normalization")
 
-    def _sinusoid(component: str, phase_shift: float = 0.0) -> np.ndarray:
-        x_count, y_count, ox, _ = _lattice_shape(component)
-        x_index = np.arange(x_count, dtype=float) + ox
-        row = seed_amplitude * np.sin(
-            2.0 * np.pi * init.mode[0] * x_index / nx + phase_shift)
-        return np.broadcast_to(row, (y_count, x_count)).copy()
+    cylindrical = 1 if deck.geometry == "cylindrical" else 0
 
     def _staggered_numerator(half_cell_phase: float) -> float:
         """Dimensionless numerator of the centre/face Yee derivative symbol."""
@@ -337,8 +317,13 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
                     - (1.0 / 12.0) * math.sin(3.0 * half_cell_phase))
         return 2.0 * math.sin(half_cell_phase)
 
+    kwargs = {"type": init.type, "component": _COMPONENT_INDEX[comp],
+              "cylindrical": cylindrical, "mode_x": init.mode[0],
+              "mode_y": init.mode[1], "amplitude": seed_amplitude, "dt": dt}
+
     if init.type == "seed_perturbation":
         mx = max(1, init.mode[0])
+        kwargs["mode_x"] = mx
         if deck.geometry == "cylindrical":
             if comp != "ey" or deck.domain.origin_x_m != 0.0:
                 raise ValueError(
@@ -358,52 +343,14 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
             # so the cavity would ring at the wrong line. Seed the physically
             # appropriate axisymmetric radial eigenmode J0(j_{0,mx} r/R) instead,
             # which excites the TM0,mx,0 mode cleanly (mx=1 -> TM010). Uniform in z.
-            # j0_zero / besselj0 are dependency-free (numpy only) so a cylindrical
-            # deck does not pull in scipy.
-            j0n = j0_zero(mx)
-            x_count, y_count, ox, _ = _lattice_shape(comp)
-            r_over_R = (np.arange(x_count, dtype=float) + ox) / nx
-            row = seed_amplitude * besselj0(j0n * r_over_R)
-
-            # The solver stores B at t=-dt/2 while E is at t=0.  A standing
-            # cavity mode is time-symmetric about t=0, so Faraday requires
-            # Bphi^- = -(dt/2) D_r^- Ez.  Leaving Bphi at zero instead gives a
-            # half-step phase lead and an O((omega*dt)^2) amplitude error.
+            # Only the ROOT is computed here -- it depends on the mode number, not
+            # on position -- so j0_zero stays a dependency-free host helper and the
+            # per-cell J0 evaluation happens in the kernel.
             if not (math.isfinite(dt) and dt > 0.0):
                 raise ValueError(
                     "cylindrical seed_perturbation requires the positive "
                     "solver timestep so Bphi can be initialized at t=-dt/2")
-            dr, _ = _internal_spacing(deck.domain, units)
-
-            def radial_ez(cell: int) -> float:
-                # Axis regularity is even for Ez.  The J0 root lies at the
-                # outer PEC wall, where tangential cell-centred Ez has the odd
-                # continuation used by the live boundary kernel.
-                sign = 1.0
-                while cell < 0 or cell >= nx:
-                    if cell < 0:
-                        cell = -cell - 1
-                    else:
-                        cell = 2 * nx - cell - 1
-                        sign = -sign
-                return sign * float(row[cell])
-
-            derivative = np.empty(nx + 1, dtype=np.float64)
-            for face in range(nx + 1):
-                if deck.numerics.fdtd_order == 4:
-                    derivative[face] = (
-                        (9.0 / 8.0)
-                        * (radial_ez(face) - radial_ez(face - 1))
-                        - (1.0 / 24.0)
-                        * (radial_ez(face + 1) - radial_ez(face - 2))) / dr
-                else:
-                    derivative[face] = (
-                        radial_ez(face) - radial_ez(face - 1)) / dr
-            bphi_row = -0.5 * dt * derivative
-            bx_count, by_count, _, _ = _lattice_shape("bz")
-            _seed(comp, np.broadcast_to(row, (y_count, x_count)).copy())
-            _seed("bz", np.broadcast_to(
-                bphi_row, (by_count, bx_count)).copy())
+            kwargs["bessel_root"] = float(j0_zero(mx))
         else:
             if comp in ("ex", "bx"):
                 raise ValueError(
@@ -411,7 +358,6 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
                     "Ex or Bx because that would violate Gauss's law or div(B)=0")
             if 2 * mx > nx:
                 raise ValueError("seed mode exceeds the resolved x Nyquist mode")
-            _seed(comp, _sinusoid(comp))
     elif init.type == "seed_tm_cavity":
         if deck.geometry != "cartesian":
             raise ValueError(
@@ -453,22 +399,10 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
         direction_x = numerator_x * (h_min / dx)
         direction_y = numerator_y * (h_min / dy)
         direction_norm = math.hypot(direction_x, direction_y)
-
-        # TM_mn on the exact Cartesian Yee lattices.  Odd continuation of the
-        # cell-centred Ez sine at all four walls makes its wall interpolation
-        # exactly zero.  Bx (x-centred/y-face) and By (x-face/y-centred) have the
-        # matching sine/cosine parity, hence discrete div(B)=0 at every Yee node.
-        sx = np.sin(math.pi * mx * (np.arange(nx, dtype=float) + 0.5) / nx)
-        sy = np.sin(math.pi * my * (np.arange(ny, dtype=float) + 0.5) / ny)
-        cx = np.cos(math.pi * mx * np.arange(nx + 1, dtype=float) / nx)
-        cy = np.cos(math.pi * my * np.arange(ny + 1, dtype=float) / ny)
-        half_time = math.sin(0.5 * omega_dt)
-
-        _seed("ez", seed_amplitude * np.multiply.outer(sy, sx))
-        _seed("bx", (seed_amplitude * (direction_y / direction_norm) * half_time
-                     * np.multiply.outer(cy, sx)))
-        _seed("by", (-seed_amplitude * (direction_x / direction_norm) * half_time
-                     * np.multiply.outer(sy, cx)))
+        # Normalize here so the kernel does no division.
+        kwargs["half_time"] = math.sin(0.5 * omega_dt)
+        kwargs["direction_x"] = direction_x / direction_norm
+        kwargs["direction_y"] = direction_y / direction_norm
     elif init.type == "seed_em_wave":
         mx, my = init.mode
         # Only +x propagation is implemented; a non-zero my would request a +y /
@@ -500,16 +434,19 @@ def _seed_fields(solver, deck: pic_io.PicDeck, dt: float = 0.0,
         if abs(dispersion_arg) > 1.0 + 64.0 * np.finfo(float).eps:
             raise ValueError("seed_em_wave dt is outside the discrete CFL branch")
         omega_dt = 2.0 * np.arcsin(np.clip(dispersion_arg, -1.0, 1.0))
+        kwargs["magnetic_phase"] = float(0.5 * omega_dt)
         if comp == "ez":
-            _seed("ez", _sinusoid("ez"))
-            _seed("by", -_sinusoid("by", 0.5 * omega_dt))
+            kwargs["magnetic_component"] = _COMPONENT_INDEX["by"]
+            kwargs["magnetic_sign"] = -1.0
         elif comp == "ey":
-            _seed("ey", _sinusoid("ey"))
-            _seed("bz", _sinusoid("bz", 0.5 * omega_dt))
+            kwargs["magnetic_component"] = _COMPONENT_INDEX["bz"]
+            kwargs["magnetic_sign"] = 1.0
         else:
             raise ValueError(f"seed_em_wave: unsupported component {init.component!r}")
     else:
         raise ValueError(f"fields.initial.type {init.type!r} is not supported")
+
+    solver.seed_initial_fields(**kwargs)
 
 
 def _species_to_si(host: dict, units: Units) -> dict:

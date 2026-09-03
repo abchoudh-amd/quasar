@@ -265,6 +265,30 @@ __global__ void subluminal_kernel(std::uint64_t count,
   }
 }
 
+// Live-particle domain admissibility. Inclusive bounds: a particle sitting
+// exactly on a face is physical, and on a periodic side the high face aliases
+// the low one.
+__global__ void initial_domain_kernel(std::uint64_t count,
+                                      const double* __restrict__ x,
+                                      const double* __restrict__ y,
+                                      const std::uint8_t* __restrict__ alive,
+                                      double x_lo, double x_hi, double y_lo,
+                                      double y_hi, int* __restrict__ status) {
+  const std::uint64_t p =
+      static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (p >= count) return;
+  if (alive[p] == 0) return;
+  const double px = x[p];
+  const double py = y[p];
+  if (!(::isfinite(px) && ::isfinite(py))) {
+    atomicOr(status, kPicSampleNonFinitePosition);
+    return;
+  }
+  if (!(px >= x_lo && px <= x_hi && py >= y_lo && py <= y_hi)) {
+    atomicOr(status, kPicSampleOutsideDomain);
+  }
+}
+
 // The remaining planes a freshly seeded species needs. Previous positions are
 // seeded to the initial positions so the first deposit sees zero displacement
 // and no startup current; vphi_deposit is seeded to vz for the same reason on
@@ -336,6 +360,20 @@ void launch_pic_check_subluminal(std::uint64_t count, const Real* vx,
   const auto stream = static_cast<hipStream_t>(stream_in);
   hipLaunchKernelGGL(subluminal_kernel, blocks_for(count), dim3(kBlock), 0,
                      stream, count, vx, vy, vz, status);
+  QUASAR_HIP_CHECK(::hipGetLastError());
+}
+
+void launch_pic_check_initial_domain(std::uint64_t count, const Real* x,
+                                     const Real* y,
+                                     const std::uint8_t* alive, Real x_lo,
+                                     Real x_hi, Real y_lo, Real y_hi,
+                                     int* status,
+                                     backend::stream_t stream_in) {
+  if (count == 0) return;
+  const auto stream = static_cast<hipStream_t>(stream_in);
+  hipLaunchKernelGGL(initial_domain_kernel, blocks_for(count), dim3(kBlock), 0,
+                     stream, count, x, y, alive, x_lo, x_hi, y_lo, y_hi,
+                     status);
   QUASAR_HIP_CHECK(::hipGetLastError());
 }
 

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,14 +37,47 @@ from quasar.pic.io import (
 )
 
 
+def has_hip_runtime() -> bool:
+    return os.environ.get("QUASAR_HAS_HIP_RUNTIME", "0") == "1"
+
+
+_COMPONENT_ORDER = ("ex", "ey", "ez", "bx", "by", "bz")
+
+
 class _RecordingSolver:
-    """Captures seed_field(component, values) calls without a GPU."""
+    """Drives the real device seeder and exposes what it wrote.
 
-    def __init__(self):
-        self.calls = []
+    This used to be a host stub capturing seed_field(component, values) calls,
+    because the seeding itself was host NumPy. The generators are kernels now,
+    so the stub would test nothing. It wraps a real solver instead and
+    reconstructs `calls` from the components the generator left nonzero, which
+    carries the same information the old call list did.
+    """
 
-    def seed_field(self, component, values):
-        self.calls.append((component, np.asarray(values)))
+    def __init__(self, deck, units=None):
+        from quasar.pic.cli import _make_solver
+        self._deck = deck
+        self._solver = _make_solver(deck, units if units is not None
+                                    else Units(deck))
+
+    def __getattr__(self, name):
+        return getattr(self._solver, name)
+
+    def component(self, name):
+        """One ghost-padded component as a (height, pitch) array."""
+        g = self._solver.nghost()
+        nx, ny = self._deck.domain.nx, self._deck.domain.ny
+        return np.asarray(
+            self._solver.field_component_to_host(name),
+            dtype=np.float64).reshape(ny + 2 * g, nx + 2 * g)
+
+    @property
+    def calls(self):
+        return [(name, np.asarray(self._solver.field_component_to_host(name),
+                                  dtype=np.float64))
+                for name in _COMPONENT_ORDER
+                if np.any(np.asarray(
+                    self._solver.field_component_to_host(name)) != 0.0)]
 
 
 def _fields_deck(initial: FieldsInitial) -> PicDeck:
@@ -57,6 +91,7 @@ def _fields_deck(initial: FieldsInitial) -> PicDeck:
     )
 
 
+@unittest.skipUnless(has_hip_runtime(), "no HIP runtime visible")
 class SeedFieldsTests(unittest.TestCase):
 
     def test_cylindrical_bessel_seed_initializes_matching_bphi_half_step(self):
@@ -75,35 +110,34 @@ class SeedFieldsTests(unittest.TestCase):
                 deck.validate()
 
                 dt = 0.0125
-                solver = _RecordingSolver()
+                solver = _RecordingSolver(deck)
                 _seed_fields(solver, deck, dt=dt, units=Units(deck))
                 seeded = dict(solver.calls)
                 self.assertEqual(seeded.keys(), {"ey", "bz"})
 
                 nx, ny = deck.domain.nx, deck.domain.ny
-                g = _core.pic.required_nghost(order)
-                pitch, height = nx + 2 * g, ny + 2 * g
-                ey = seeded["ey"].reshape(height, pitch)[
-                    g:g + ny + 1, g:g + nx]
-                bphi_minus = seeded["bz"].reshape(height, pitch)[
-                    g:g + ny + 1, g:g + nx + 1]
+                g = solver.nghost()
+                ey = solver.component("ey")[g:g + ny + 1, g:g + nx]
+                bphi_minus = solver.component("bz")[g:g + ny + 1, g:g + nx + 1]
                 np.testing.assert_allclose(
                     ey, np.broadcast_to(ey[0], ey.shape), rtol=0.0, atol=0.0)
                 np.testing.assert_allclose(
                     bphi_minus, np.broadcast_to(bphi_minus[0], bphi_minus.shape),
                     rtol=0.0, atol=0.0)
 
-                row = ey[0]
+                # The radial derivative is taken from the GHOST-FILLED Ez,
+                # not from a parity rule restated here. That is the whole point
+                # of the seeding order: the solver fills the ghosts with the
+                # configured axis/PEC closure between the two seeding passes, so
+                # this test reads the same columns the kernel read. It used to
+                # reimplement the axis-even / wall-odd continuation by hand,
+                # which made it a third copy of a rule that already existed
+                # twice.
+                padded_ey = solver.component("ey")
+                row = padded_ey[g, :]  # ghost columns included
 
                 def sample(cell):
-                    sign = 1.0
-                    while cell < 0 or cell >= nx:
-                        if cell < 0:
-                            cell = -cell - 1
-                        else:
-                            cell = 2 * nx - cell - 1
-                            sign = -sign
-                    return sign * row[cell]
+                    return row[g + cell]
 
                 derivative = np.empty(nx + 1)
                 for face in range(nx + 1):
@@ -115,6 +149,19 @@ class SeedFieldsTests(unittest.TestCase):
                     else:
                         derivative[face] = (
                             sample(face) - sample(face - 1)) / 0.25
+
+                # Independently, the closure the solver applied must actually BE
+                # the axis-even / outer-PEC-odd one this mode assumes. Asserted
+                # directly on the filled ghosts rather than assumed.
+                interior = row[g:g + nx]
+                for depth in range(1, min(g, 2) + 1):
+                    self.assertAlmostEqual(
+                        row[g - depth], interior[depth - 1], places=13,
+                        msg="axis ghost is not the even continuation")
+                    self.assertAlmostEqual(
+                        row[g + nx + depth - 1], -interior[nx - depth],
+                        places=13,
+                        msg="outer PEC ghost is not the odd continuation")
 
                 # One Faraday update takes Bphi^{-1/2} to Bphi^{+1/2}; a
                 # standing mode at its E maximum has exact half-step antisymmetry.
@@ -136,7 +183,7 @@ class SeedFieldsTests(unittest.TestCase):
         dt = 0.025
         deck.validate()
 
-        solver = _RecordingSolver()
+        solver = _RecordingSolver(deck)
         _seed_fields(solver, deck, dt=dt, units=Units(deck))
         seeded = {component: values for component, values in solver.calls}
         self.assertEqual(seeded.keys(), {"ez", "bx", "by"})
@@ -192,7 +239,7 @@ class SeedFieldsTests(unittest.TestCase):
         deck.boundary = BoundaryConfig(
             particle=("specular",) * 4, field=("pec",) * 4)
         dt = 0.04
-        solver = _RecordingSolver()
+        solver = _RecordingSolver(deck)
         _seed_fields(solver, deck, dt=dt, units=Units(deck))
         seeded = dict(solver.calls)
 
@@ -215,23 +262,23 @@ class SeedFieldsTests(unittest.TestCase):
         deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Ez",
                                           mode=(1, 1)))
         with self.assertRaises(ValueError):
-            _seed_fields(_RecordingSolver(), deck)
+            _seed_fields(_RecordingSolver(deck), deck)
 
     def test_seed_em_wave_rejects_unsupported_component(self):
         deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Bz",
                                           mode=(1, 0)))
         with self.assertRaises(ValueError):
-            _seed_fields(_RecordingSolver(), deck)
+            _seed_fields(_RecordingSolver(deck), deck)
 
     def test_unsupported_initial_type_raises(self):
         deck = _fields_deck(FieldsInitial(type="seed_blastwave", component="Ex"))
         with self.assertRaises(ValueError):
-            _seed_fields(_RecordingSolver(), deck)
+            _seed_fields(_RecordingSolver(deck), deck)
 
     def test_seed_em_wave_ez_seeds_ez_and_by(self):
         deck = _fields_deck(FieldsInitial(type="seed_em_wave", component="Ez",
                                           mode=(1, 0)))
-        solver = _RecordingSolver()
+        solver = _RecordingSolver(deck)
         _seed_fields(solver, deck)
         seeded = {c for c, _ in solver.calls}
         self.assertEqual(seeded, {"ez", "by"})
@@ -259,8 +306,8 @@ class SeedFieldsTests(unittest.TestCase):
         # Both calls receive the solver-internal timestep.  Their E and
         # half-time B seeds must therefore be identical after unit conversion.
         dt_internal = 0.1 * (lx_internal / si_deck.domain.nx)
-        si_solver = _RecordingSolver()
-        normalized_solver = _RecordingSolver()
+        si_solver = _RecordingSolver(si_deck, si_units)
+        normalized_solver = _RecordingSolver(normalized_deck)
         _seed_fields(si_solver, si_deck, dt_internal, si_units)
         _seed_fields(normalized_solver, normalized_deck, dt_internal,
                      Units(normalized_deck))
@@ -301,8 +348,8 @@ class SeedFieldsTests(unittest.TestCase):
 
         dt_internal = 0.1 * (
             si_units.length(si_deck.domain.lx_m) / si_deck.domain.nx)
-        si_solver = _RecordingSolver()
-        normalized_solver = _RecordingSolver()
+        si_solver = _RecordingSolver(si_deck, si_units)
+        normalized_solver = _RecordingSolver(normalized_deck)
         _seed_fields(si_solver, si_deck, dt_internal, si_units)
         _seed_fields(normalized_solver, normalized_deck, dt_internal,
                      Units(normalized_deck))
@@ -318,7 +365,7 @@ class SeedFieldsTests(unittest.TestCase):
         amp, mx = 3.0e-3, 2
         deck = _fields_deck(FieldsInitial(type="seed_perturbation", component="By",
                                           amplitude=amp, mode=(mx, 0)))
-        solver = _RecordingSolver()
+        solver = _RecordingSolver(deck)
         _seed_fields(solver, deck)
 
         # Exactly one divergence-free transverse component is seeded.
@@ -350,7 +397,7 @@ class SeedFieldsTests(unittest.TestCase):
                     type="seed_perturbation", component=component,
                     mode=(1, 0)))
                 with self.assertRaisesRegex(ValueError, "Gauss|div\\(B\\)"):
-                    _seed_fields(_RecordingSolver(), deck)
+                    _seed_fields(_RecordingSolver(deck), deck)
 
     def test_si_seed_amplitude_is_converted_by_component_units(self):
         amp_si = 2.5
@@ -359,7 +406,7 @@ class SeedFieldsTests(unittest.TestCase):
             mode=(1, 0)))
         deck.units = "SI"
         units = Units(deck)
-        solver = _RecordingSolver()
+        solver = _RecordingSolver(deck)
         _seed_fields(solver, deck, units=units)
 
         _, values = solver.calls[0]
@@ -493,13 +540,19 @@ class ExactEndTimeTests(unittest.TestCase):
         self.assertTrue(solver.finalized)
 
     def test_first_clipped_step_uses_matching_field_half_step_seed(self):
+        # Wraps the real seeder so the run-loop stub still records what the
+        # generator produced; the seeding itself is a kernel now.
         class _SeededSolver(self._Solver):
-            def __init__(self):
+            def __init__(self, deck):
                 super().__init__()
-                self.seed_calls = []
+                self._recorder = _RecordingSolver(deck)
 
-            def seed_field(self, component, values):
-                self.seed_calls.append((component, np.asarray(values)))
+            def seed_initial_fields(self, **kwargs):
+                self._recorder.seed_initial_fields(**kwargs)
+
+            @property
+            def seed_calls(self):
+                return self._recorder.calls
 
         deck = PicDeck(
             domain=Domain(nx=8, ny=8, lx_m=1.0, ly_m=1.0),
@@ -512,14 +565,18 @@ class ExactEndTimeTests(unittest.TestCase):
             units="normalized")
         deck.validate()
         units = Units(deck)
-        solver = _SeededSolver()
+        # _SeededSolver now wraps a real solver because the field seed is a
+        # kernel; the rest of this test is host-side run-loop bookkeeping.
+        if not has_hip_runtime():
+            self.skipTest("no HIP runtime visible")
+        solver = _SeededSolver(deck)
         with patch("quasar.pic.cli._make_solver", return_value=solver):
             got_solver, indices, dt, dt_si = prepare_run(deck, units)
         self.assertIs(got_solver, solver)
         self.assertEqual(indices, [])
         self.assertEqual(dt, 0.08)  # nominal cadence remains unchanged
 
-        expected = _RecordingSolver()
+        expected = _RecordingSolver(deck)
         _seed_fields(expected, deck, dt=0.02, units=units)
         self.assertEqual(
             [name for name, _ in solver.seed_calls],
