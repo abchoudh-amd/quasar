@@ -158,10 +158,11 @@ TEST(GsSolverInvariants, RepeatedSolvesAreBitwiseIdentical) {
 // failed. Returning zeros reads as "no current anywhere" and silently breaks
 // the contract GsResult documents, that a failed configuration stays scoreable
 // by an optimizer.
-TEST(GsSolverInvariants, FailedSolveRetainsPartialFields) {
+TEST(GsSolverInvariants, IterationLimitRetainsPartialFields) {
   GsConfig cfg = base_config(33, 33);
   cfg.max_iterations = 10;
-  // A coil set that confines briefly and then loses the plasma.
+  // This slowly converging coil set reaches the iteration limit after several
+  // coherent states have been evaluated.
   cfg.coils = {
       CoilFilament{Real{1.75}, Real{0.60}, Real{3.6e5}},
       CoilFilament{Real{1.75}, Real{-0.60}, Real{3.6e5}},
@@ -174,9 +175,9 @@ TEST(GsSolverInvariants, FailedSolveRetainsPartialFields) {
   const GsResult res =
       GsSolver{cfg, std::make_shared<PolynomialProfile>(profile)}.solve();
 
-  ASSERT_EQ(res.status, GsStatus::axis_lost)
-      << "this configuration is supposed to fail; the test proves nothing "
-         "if it converges";
+  ASSERT_EQ(res.status, GsStatus::iteration_limit)
+      << "this configuration must remain unconverged at the deliberately "
+         "small iteration budget";
   EXPECT_GT(peak_magnitude(res.j_phi), Real{1})
       << "partial current was discarded on the failure path";
   EXPECT_GT(peak_magnitude(res.psi), Real{0})

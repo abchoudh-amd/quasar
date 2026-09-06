@@ -306,10 +306,23 @@ TEST(SpectralBlockExtraction, ShiftInvertReproducesTheDenseSpectrum) {
   quasar::numerics::ShiftInvertLanczosConfig config;
   config.wanted = 3;
   config.shift = shift;
+  // The clustered spectrum of this assembled-pencil surrogate needs more
+  // Krylov vectors than the small-problem default before all three Ritz
+  // residuals reach 1e-10. This test checks the converged spectrum rather than
+  // the default iteration-budget heuristic.
+  config.maximum_iterations = 80;
   const auto result = quasar::numerics::solve_shift_invert_lanczos(
       factors, permuted_mass, config);
 
-  ASSERT_EQ(result.status, quasar::numerics::ShiftInvertStatus::success);
+  ASSERT_EQ(result.status, quasar::numerics::ShiftInvertStatus::success)
+      << "iterations=" << result.iterations
+      << ", converged=" << result.converged
+      << ", residuals="
+      << (result.residuals.empty() ? Real{-1} : result.residuals.front())
+      << ","
+      << (result.residuals.size() < 2 ? Real{-1} : result.residuals[1])
+      << ","
+      << (result.residuals.size() < 3 ? Real{-1} : result.residuals[2]);
   ASSERT_EQ(result.eigenvalues.size(), 3u);
   for (std::size_t index = 0; index < result.eigenvalues.size(); ++index) {
     EXPECT_NEAR(result.eigenvalues[index], reference[index], 1e-8)
